@@ -109,11 +109,10 @@ public static class ModelExtractor
                 while (filled < node.Size)
                 {
                     int want = (int)Math.Min(chunkSize, node.Size - filled);
-                    byte[] part = stream.Read(want);
-                    if (part.Length == 0)
+                    int got = stream.Read(buffer, (int)filled, want); // straight into buffer, no chunk copy
+                    if (got == 0)
                         break;
-                    Array.Copy(part, 0, buffer, filled, part.Length);
-                    filled += part.Length;
+                    filled += got;
                     while (next < pending.Count &&
                         pending[next].tex.StreamOffset + pending[next].tex.StreamSize <= filled)
                     {

@@ -134,18 +134,26 @@ public sealed class MasterBundleStream : IDisposable
     public byte[] Read(int count)
     {
         var buffer = new byte[count];
+        int read = Read(buffer, 0, count);
+        if (read != count)
+            Array.Resize(ref buffer, read);
+        return buffer;
+    }
+
+    // Reads up to count decompressed bytes straight into dest at offset (fewer at end of stream), returning
+    // how many were read — so a caller can accumulate into one buffer without an intermediate copy.
+    public int Read(byte[] dest, int offset, int count)
+    {
         int read = 0;
         while (read < count)
         {
-            int n = _decompressor.Read(buffer, read, count - read);
+            int n = _decompressor.Read(dest, offset + read, count - read);
             if (n <= 0)
                 break;
             read += n;
         }
         _cursor += read;
-        if (read != count)
-            Array.Resize(ref buffer, read);
-        return buffer;
+        return read;
     }
 
     public void Dispose()
