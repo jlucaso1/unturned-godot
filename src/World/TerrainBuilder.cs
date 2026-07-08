@@ -82,8 +82,12 @@ public static class TerrainBuilder
         // instead of SurfaceTool's per-element AddVertex/SetColor/AddIndex + GenerateNormals. The profiler
         // showed that path was ~44% of world-build time (GenerateNormals alone 34%), almost all of it
         // marshaling ~400k managed→native calls per tile. Vertex (x, y) lands at index x * res + y.
+        // The splat shader derives ALBEDO from the layer textures via UV2 and never samples COLOR, so on
+        // the textured (normal) path skip the per-vertex TerrainPalette.Blend and the uploaded color
+        // attribute; keep them only for the flat-color fallback material (VertexColorUseAsAlbedo).
+        bool textured = layerTextures != null && splat != null;
         var positions = new Vector3[vertexCount];
-        var colors = new Color[vertexCount];
+        Color[]? colors = textured ? null : new Color[vertexCount];
         var uv2 = new Vector2[vertexCount];
         float invRes = 1f / (res - 1);
         for (int x = 0; x < res; x++)
@@ -94,7 +98,8 @@ public static class TerrainBuilder
                 float h01 = tile.Heights[x, y];
                 Vector3 unity = Landscape.GetWorldPosition(tile.CoordX, tile.CoordY, x, y, h01);
                 positions[idx] = Landscape.UnityToGodot(unity);
-                colors[idx] = TerrainColor.ForVertex(splat, x, y, unity.Y);
+                if (colors != null)
+                    colors[idx] = TerrainColor.ForVertex(splat, x, y, unity.Y);
                 uv2[idx] = new Vector2(x * invRes, y * invRes); // tile-normalized, for the splat control lookup
             }
         }
@@ -166,7 +171,8 @@ public static class TerrainBuilder
         arrays.Resize((int)Mesh.ArrayType.Max);
         arrays[(int)Mesh.ArrayType.Vertex] = positions;
         arrays[(int)Mesh.ArrayType.Normal] = normals;
-        arrays[(int)Mesh.ArrayType.Color] = colors;
+        if (colors != null)
+            arrays[(int)Mesh.ArrayType.Color] = colors;
         arrays[(int)Mesh.ArrayType.TexUV2] = uv2;
         arrays[(int)Mesh.ArrayType.Index] = indices;
 
