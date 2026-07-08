@@ -47,14 +47,16 @@ public static class ModelExtractor
     // two-decode path if the bundle is not the expected single-LZMA-block shape.
     public static void StreamExtract(string bundlePath, string objectBundlesDir, string treeBundlesDir,
         string assetsDir, HashSet<Guid> neededGuids, string cacheDir, string textureCacheDir,
-        Action onMeshesReady, Action<string> onTextureWritten)
+        Action onMeshesReady, Action<string> onTextureWritten,
+        IReadOnlyList<FoliageAsset>? foliageAssets = null)
     {
         byte[] bundle = File.ReadAllBytes(bundlePath);
         using MasterBundleStream? stream = MasterBundleStream.Open(bundle);
         if (stream == null)
         {
             GD.Print("[extract] bundle not single-block; falling back to two-pass decode.");
-            ExtractMeshes(bundlePath, objectBundlesDir, treeBundlesDir, assetsDir, neededGuids, cacheDir);
+            ExtractMeshes(bundlePath, objectBundlesDir, treeBundlesDir, assetsDir, neededGuids, cacheDir,
+                foliageAssets);
             onMeshesReady();
             ExtractTextures(bundlePath, cacheDir, textureCacheDir, onTextureWritten);
             return;
@@ -76,7 +78,7 @@ public static class ModelExtractor
             {
                 byte[] sfBytes = stream.Read((int)node.Size);
                 ExtractMeshesFromSerializedFile(sfBytes, objectBundlesDir, treeBundlesDir, assetsDir,
-                    neededGuids, cacheDir, neededTextures);
+                    neededGuids, cacheDir, neededTextures, foliageAssets);
                 GD.Print($"[extract] meshes={CachedMeshCountLoose(cacheDir)} (streamed); {neededTextures.Count} textures pending");
                 onMeshesReady();
             }
