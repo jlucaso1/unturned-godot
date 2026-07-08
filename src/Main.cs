@@ -56,7 +56,19 @@ public partial class Main : Node3D
                 GetTree().Quit();
                 return;
             }
-            _ = CaptureAndQuit(shot);
+
+            // A screenshot uses the free camera + SHOT_CAM by default; PLAYER=1 spawns the character and
+            // shoots from its (third-person) camera instead.
+            if (OS.GetEnvironment("PLAYER") == "1")
+            {
+                SpawnPlayer(world.Terrain, thirdPerson: true);
+                _ = CaptureAndQuit(shot, settleFrames: 40);
+            }
+            else
+            {
+                AddFreeCamera();
+                _ = CaptureAndQuit(shot, settleFrames: 5);
+            }
             return;
         }
 
@@ -70,6 +82,13 @@ public partial class Main : Node3D
         AddChild(NodesBuilder.Build(environmentDir));
         SetupEnvironment(lighting);
 
+        // Feature flag: FREECAM=1 keeps the fly-through camera; otherwise the player character spawns and
+        // walks the map (terrain collision is added on demand so free-cam runs don't pay for it).
+        if (OS.GetEnvironment("FREECAM") == "1")
+            AddFreeCamera();
+        else
+            SpawnPlayer(terrain, thirdPerson: false);
+
         var streamer = new ObjectStreamer { Name = "ObjectStreamer" };
         var overlay = new LoadingOverlay { Name = "LoadingOverlay" };
         AddChild(streamer);
@@ -78,22 +97,51 @@ public partial class Main : Node3D
         streamer.Begin(unturnedPath, level);
     }
 
-    // Render a few frames before grabbing the framebuffer so meshes are actually drawn.
-    private async System.Threading.Tasks.Task CaptureAndQuit(string path)
-    {
-        var cam = GetNode<FreeCamera>("FreeCamera");
-        cam.Position = new Vector3(-256, 900, 700);
-        cam.RotationDegrees = new Vector3(-55, -20, 0);
+    // Spawns the character over a town and gives the terrain trimesh collision so it can stand on the
+    // ground. Objects stay non-colliding for now (the player clips buildings), which is fine for movement.
+    private static readonly Vector3 PlayerSpawn = new(300, 60, 84); // above land near the central town
 
-        string camEnv = OS.GetEnvironment("SHOT_CAM"); // "px,py,pz,rx,ry" to override
-        if (!string.IsNullOrEmpty(camEnv))
+    private void SpawnPlayer(Node3D terrain, bool thirdPerson)
+    {
+        foreach (Node child in terrain.GetChildren())
+            if (child is MeshInstance3D tile)
+                tile.CreateTrimeshCollision();
+
+        AddChild(new PlayerController
         {
-            string[] p = camEnv.Split(',');
-            cam.Position = new Vector3(p[0].ToFloat(), p[1].ToFloat(), p[2].ToFloat());
-            cam.RotationDegrees = new Vector3(p[3].ToFloat(), p[4].ToFloat(), 0);
+            Name = "Player",
+            Position = PlayerSpawn,
+            StartThirdPerson = thirdPerson,
+        });
+    }
+
+    private void AddFreeCamera()
+    {
+        var camera = new FreeCamera { Name = "FreeCamera" };
+        AddChild(camera);
+        camera.Position = new Vector3(0, 300, 0); // above map center, looking down
+        camera.RotationDegrees = new Vector3(-60, 0, 0);
+    }
+
+    // Render a few frames before grabbing the framebuffer so meshes are drawn (and, in player mode, so the
+    // character settles onto the terrain). SHOT_CAM only applies to the free camera.
+    private async System.Threading.Tasks.Task CaptureAndQuit(string path, int settleFrames)
+    {
+        if (GetNodeOrNull<FreeCamera>("FreeCamera") is { } cam)
+        {
+            cam.Position = new Vector3(-256, 900, 700);
+            cam.RotationDegrees = new Vector3(-55, -20, 0);
+
+            string camEnv = OS.GetEnvironment("SHOT_CAM"); // "px,py,pz,rx,ry" to override
+            if (!string.IsNullOrEmpty(camEnv))
+            {
+                string[] p = camEnv.Split(',');
+                cam.Position = new Vector3(p[0].ToFloat(), p[1].ToFloat(), p[2].ToFloat());
+                cam.RotationDegrees = new Vector3(p[3].ToFloat(), p[4].ToFloat(), 0);
+            }
         }
 
-        for (int i = 0; i < 5; i++)
+        for (int i = 0; i < settleFrames; i++)
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
 
         Image img = GetViewport().GetTexture().GetImage();
@@ -102,17 +150,13 @@ public partial class Main : Node3D
         GetTree().Quit();
     }
 
-    // Sun + sky/ambient from the map lighting, then the free camera and (windowed only) the debug overlay.
+    // Sun + sky/ambient from the map lighting, plus the debug overlay (windowed only). The camera/player is
+    // added separately by the caller so the free-cam and character paths can differ.
     private void SetupEnvironment(LevelLighting? lighting)
     {
         (DirectionalLight3D sun, WorldEnvironment world) = SceneEnvironment.Build(lighting);
         AddChild(sun);
         AddChild(world);
-
-        var camera = new FreeCamera { Name = "FreeCamera" };
-        AddChild(camera);
-        camera.Position = new Vector3(0, 300, 0); // above map center, looking down
-        camera.RotationDegrees = new Vector3(-60, 0, 0);
 
         if (DisplayServer.GetName() != "headless")
             AddChild(new DebugOverlay { Name = "DebugOverlay" });
