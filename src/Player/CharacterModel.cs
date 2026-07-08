@@ -6,19 +6,19 @@ using UnturnedGodot.Unity;
 
 namespace UnturnedGodot;
 
-// Extracts Unturned's real player character body mesh from the game's resources.assets (a SerializedFile;
-// pixels live in resources.assets.resS) and builds a Godot MeshInstance3D. The base body is authored in a
-// T-pose (bind pose), so rendered as a static mesh it stands in that pose — natural posing needs the
-// 16-bone skeleton + an idle animation, a follow-up stage. Reuses the object mesh/texture pipeline.
+// Extracts Unturned's real player character from the game's resources.assets (a SerializedFile; pixels live
+// in resources.assets.resS): the Player_Client body mesh, skinned to its 16-bone skeleton, built as a Godot
+// Skeleton3D + skinned MeshInstance3D. Bone rest poses and vertices convert Unity->Godot by the same Z-mirror
+// reflection, so the skinning stays consistent. Reuses the object mesh/texture pipeline.
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class CharacterModel
 {
     private const int ClassSkinnedMeshRenderer = 137;
     private const int ClassTransform = 4;
 
-    // Builds the body mesh under the "Player_Client" prefab root, or null when the game data is absent or
-    // can't be parsed (the caller then falls back to the placeholder figure).
-    public static MeshInstance3D? Build(string unturnedPath)
+    // Builds the skinned Player_Client character, or null when the game data is absent or can't be parsed
+    // (the caller then falls back to the placeholder figure).
+    public static Node3D? Build(string unturnedPath)
     {
         try
         {
@@ -31,7 +31,7 @@ public static class CharacterModel
         }
     }
 
-    private static MeshInstance3D? BuildInternal(string unturnedPath)
+    private static Node3D? BuildInternal(string unturnedPath)
     {
         string assetsPath = Path.Combine(unturnedPath, "Unturned_Data", "resources.assets");
         string bundlePath = Path.Combine(unturnedPath, "Bundles", "core_linux.masterbundle");
@@ -62,12 +62,73 @@ public static class CharacterModel
                 return null;
 
             ImageTexture? texture = MainTexture(file, byId, (List<object>)smr["m_Materials"], assetsPath + ".resS");
-            var instance = new MeshInstance3D { Mesh = BuildMesh(mesh, texture), Name = "CharacterBody" };
-            GD.Print("[unturned-godot] Character: real Player_Client body mesh loaded (T-pose)");
-            return instance;
+            if (mesh.BoneIndices.Length == mesh.Vertices.Length * UnityMesh.BonesPerVertex && mesh.BindPoses.Count > 0)
+                return BuildSkinnedCharacter(file, byId, smr, mesh, texture);
+
+            // Fallback: no skinning data -> static bind-pose mesh.
+            return new MeshInstance3D { Mesh = BuildMesh(mesh, texture, skinned: false), Name = "CharacterBody" };
         }
         return null;
     }
+
+    // Builds a Skeleton3D from the renderer's bones (rest poses converted Unity->Godot) with the skinned
+    // body mesh as its child. Uses Godot's CreateSkinFromRestTransforms so the bind matrices derive from the
+    // rest hierarchy — the mesh is authored in that same bind pose, so this is exact.
+    private static Node3D BuildSkinnedCharacter(SerializedFile file, Dictionary<long, SerializedObject> byId,
+        Dictionary<string, object> smr, UnityMesh mesh, ImageTexture? texture)
+    {
+        var boneRefs = (List<object>)smr["m_Bones"];
+        int boneCount = boneRefs.Count;
+        var boneIds = new long[boneCount];
+        var boneIndex = new Dictionary<long, int>(boneCount);
+        for (int i = 0; i < boneCount; i++)
+        {
+            boneIds[i] = Id(boneRefs[i]);
+            boneIndex[boneIds[i]] = i;
+        }
+
+        var skeleton = new Skeleton3D { Name = "Skeleton" };
+        var rests = new Transform3D[boneCount];
+        var parents = new int[boneCount];
+        for (int i = 0; i < boneCount; i++)
+        {
+            Dictionary<string, object> t = Read(file, byId, boneIds[i]);
+            skeleton.AddBone((string)Read(file, byId, Id(t["m_GameObject"]))["m_Name"]);
+            rests[i] = LocalTransformOf(t);
+            parents[i] = boneIndex.TryGetValue(Id(t["m_Father"]), out int p) ? p : -1;
+        }
+        for (int i = 0; i < boneCount; i++)
+        {
+            if (parents[i] >= 0)
+                skeleton.SetBoneParent(i, parents[i]);
+            skeleton.SetBoneRest(i, rests[i]);
+        }
+        skeleton.ResetBonePoses(); // pose = rest, i.e. the bind pose
+
+        var body = new MeshInstance3D
+        {
+            Mesh = BuildMesh(mesh, texture, skinned: true),
+            Skin = skeleton.CreateSkinFromRestTransforms(),
+            Name = "CharacterBody",
+        };
+        skeleton.AddChild(body);
+        body.Skeleton = body.GetPathTo(skeleton);
+        GD.Print($"[unturned-godot] Character: real Player_Client skinned body loaded ({boneCount} bones).");
+        return skeleton;
+    }
+
+    private static Transform3D LocalTransformOf(Dictionary<string, object> t)
+    {
+        var p = (Dictionary<string, object>)t["m_LocalPosition"];
+        var r = (Dictionary<string, object>)t["m_LocalRotation"];
+        var s = (Dictionary<string, object>)t["m_LocalScale"];
+        return UnityMath.LocalToGodot(
+            new Vector3(F(p["x"]), F(p["y"]), F(p["z"])),
+            new Quaternion(F(r["x"]), F(r["y"]), F(r["z"]), F(r["w"])),
+            new Vector3(F(s["x"]), F(s["y"]), F(s["z"])));
+    }
+
+    private static float F(object value) => System.Convert.ToSingle(value);
 
     // Walks the mesh's GameObject up to its prefab root and returns the root GameObject's name.
     private static string RootName(SerializedFile file, Dictionary<long, SerializedObject> byId, long goId)
@@ -126,8 +187,9 @@ public static class CharacterModel
     }
 
     // Mirrors ModelLibrary: convert vertices Unity->Godot (negate Z), reverse the mirrored winding, derive
-    // smooth normals from the flipped triangles, flip UV V. One submesh (the body).
-    private static ArrayMesh BuildMesh(UnityMesh mesh, ImageTexture? texture)
+    // smooth normals from the flipped triangles, flip UV V. When skinned, also carry the per-vertex bone
+    // indices + normalized weights (unaffected by the winding flip, which only reorders indices).
+    private static ArrayMesh BuildMesh(UnityMesh mesh, ImageTexture? texture, bool skinned)
     {
         var verts = new Vector3[mesh.Vertices.Length];
         for (int i = 0; i < verts.Length; i++)
@@ -164,6 +226,11 @@ public static class CharacterModel
         arrays[(int)Mesh.ArrayType.Vertex] = verts;
         arrays[(int)Mesh.ArrayType.Normal] = normals;
         arrays[(int)Mesh.ArrayType.TexUV] = uvs;
+        if (skinned)
+        {
+            arrays[(int)Mesh.ArrayType.Bones] = mesh.BoneIndices;
+            arrays[(int)Mesh.ArrayType.Weights] = NormalizeWeights(mesh.BoneWeights);
+        }
         arrays[(int)Mesh.ArrayType.Index] = index;
 
         var arrayMesh = new ArrayMesh();
@@ -175,6 +242,22 @@ public static class CharacterModel
             SpecularMode = BaseMaterial3D.SpecularModeEnum.Disabled,
         });
         return arrayMesh;
+    }
+
+    // Godot expects each vertex's 4 bone weights to sum to 1.
+    private static float[] NormalizeWeights(float[] weights)
+    {
+        var result = new float[weights.Length];
+        for (int v = 0; v + 3 < weights.Length; v += 4)
+        {
+            float sum = weights[v] + weights[v + 1] + weights[v + 2] + weights[v + 3];
+            if (sum > 0f)
+                for (int c = 0; c < 4; c++)
+                    result[v + c] = weights[v + c] / sum;
+            else
+                result[v] = 1f; // degenerate: bind fully to the first bone
+        }
+        return result;
     }
 
     private static Dictionary<string, object> Read(SerializedFile file, Dictionary<long, SerializedObject> byId, long id) =>

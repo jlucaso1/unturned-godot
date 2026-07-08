@@ -24,6 +24,26 @@ public class UnityMathTests
         AssertQuat(new Quaternion(0, 0, 0, 1), UnityMath.EulerToUnityQuaternion(Vector3.Zero));
     }
 
+    [Fact]
+    public void LocalToGodot_NegatesPositionZ_AndConjugatesRotation()
+    {
+        var pos = new Vector3(1, 2, 3);
+        var rot = new Quaternion(0.1f, 0.2f, 0.3f, 0.9273f).Normalized();
+        Transform3D t = UnityMath.LocalToGodot(pos, rot, Vector3.One);
+        Assert.Equal(new Vector3(1, 2, -3), t.Origin);
+        AssertQuat(UnityMath.UnityToGodotRotation(rot), t.Basis.GetRotationQuaternion());
+    }
+
+    [Fact]
+    public void LocalToGodot_ScalesRotatedColumns()
+    {
+        // Identity rotation: the basis columns are the axes scaled per component (R*S order).
+        Transform3D t = UnityMath.LocalToGodot(Vector3.Zero, new Quaternion(0, 0, 0, 1), new Vector3(2, 3, 4));
+        Assert.Equal(new Vector3(2, 0, 0), t.Basis.X);
+        Assert.Equal(new Vector3(0, 3, 0), t.Basis.Y);
+        Assert.Equal(new Vector3(0, 0, 4), t.Basis.Z);
+    }
+
     [Theory]
     [InlineData(90, 0, 0, 0.70710677f, 0, 0, 0.70710677f)]
     [InlineData(0, 90, 0, 0, 0.70710677f, 0, 0.70710677f)]
