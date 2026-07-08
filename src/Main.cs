@@ -61,7 +61,7 @@ public partial class Main : Node3D
             // shoots from its (third-person) camera instead.
             if (OS.GetEnvironment("PLAYER") == "1")
             {
-                SpawnPlayer(world.Terrain, thirdPerson: true);
+                SpawnPlayer(world.Terrain, thirdPerson: true, unturnedPath);
                 _ = CaptureAndQuit(shot, settleFrames: 40);
             }
             else
@@ -87,7 +87,7 @@ public partial class Main : Node3D
         if (OS.GetEnvironment("FREECAM") == "1")
             AddFreeCamera();
         else
-            SpawnPlayer(terrain, thirdPerson: false);
+            SpawnPlayer(terrain, thirdPerson: false, unturnedPath);
 
         var streamer = new ObjectStreamer { Name = "ObjectStreamer" };
         var overlay = new LoadingOverlay { Name = "LoadingOverlay" };
@@ -101,7 +101,7 @@ public partial class Main : Node3D
     // ground. Objects stay non-colliding for now (the player clips buildings), which is fine for movement.
     private static readonly Vector3 PlayerSpawn = new(300, 60, 84); // above land near the central town
 
-    private void SpawnPlayer(Node3D terrain, bool thirdPerson)
+    private void SpawnPlayer(Node3D terrain, bool thirdPerson, string unturnedPath)
     {
         foreach (Node child in terrain.GetChildren())
             if (child is MeshInstance3D tile)
@@ -112,6 +112,7 @@ public partial class Main : Node3D
             Name = "Player",
             Position = PlayerSpawn,
             StartThirdPerson = thirdPerson,
+            BodyModel = CharacterModel.Build(unturnedPath), // real Unturned body, or null -> placeholder
         });
     }
 

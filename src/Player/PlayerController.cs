@@ -30,6 +30,9 @@ public partial class PlayerController : CharacterBody3D
     // Set before adding to the tree to choose the initial perspective (e.g. third person for a screenshot).
     public bool StartThirdPerson { get; set; }
 
+    // The third-person body model; when null a simple placeholder figure is used instead.
+    public Node3D? BodyModel { get; set; }
+
     private Node3D _head = null!;
     private Camera3D _camera = null!;
     private CollisionShape3D _collider = null!;
@@ -46,7 +49,7 @@ public partial class PlayerController : CharacterBody3D
         _collider = new CollisionShape3D { Shape = _capsule, Position = new Vector3(0, HeightStand * 0.5f, 0) };
         AddChild(_collider);
 
-        _model = BuildPlaceholderModel();
+        _model = BodyModel ?? BuildPlaceholderModel();
         AddChild(_model);
 
         _head = new Node3D { Position = new Vector3(0, HeightStand - EyeDrop, 0) };
