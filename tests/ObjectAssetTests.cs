@@ -40,6 +40,23 @@ public class ObjectAssetTests
     }
 
     [Fact]
+    public void ParsesBundleOverridePath()
+    {
+        DatDictionary root = DatParser.Parse(
+            "GUID 2e698a7b85e94c019b3f91ec8796a961\nType Medium\nID 1\nBundle_Override_Path /Objects/Medium/Furniture/Grave_0\n");
+        Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset asset));
+        Assert.Equal("/Objects/Medium/Furniture/Grave_0", asset.BundleOverridePath);
+    }
+
+    [Fact]
+    public void WithoutOverridePath_IsNull()
+    {
+        DatDictionary root = DatParser.Parse("GUID 2e698a7b85e94c019b3f91ec8796a961\nType Small\nID 1\n");
+        Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset asset));
+        Assert.Null(asset.BundleOverridePath);
+    }
+
+    [Fact]
     public void MissingGuid_ReturnsFalse()
     {
         DatDictionary root = DatParser.Parse("Type Small\nID 5\n"); // localization-style file

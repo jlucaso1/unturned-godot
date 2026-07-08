@@ -14,16 +14,21 @@ public sealed class ObjectAsset
     public string RawType { get; }
     public string? Name { get; }
 
+    // Holiday/variant objects reuse a base object's mesh via this path (e.g. "/Objects/.../Grave_0").
+    public string? BundleOverridePath { get; }
+
     // Folder holding the .dat, used to match the object to its prefab path in the bundle.
     public string Directory { get; set; } = string.Empty;
 
-    private ObjectAsset(Guid guid, ushort id, EObjectType type, string rawType, string? name)
+    private ObjectAsset(Guid guid, ushort id, EObjectType type, string rawType, string? name,
+        string? bundleOverridePath)
     {
         Guid = guid;
         Id = id;
         Type = type;
         RawType = rawType;
         Name = name;
+        BundleOverridePath = bundleOverridePath;
     }
 
     // A v2 file wraps identity in a "Metadata" block; v1 keeps it at the root (optionally under "Asset").
@@ -41,8 +46,9 @@ public sealed class ObjectAsset
         data.TryGetUInt16("ID", out ushort id);
         string rawType = data.GetString("Type") ?? string.Empty;
         string? name = localizedName ?? data.GetString("Name");
+        string? overridePath = data.GetString("Bundle_Override_Path");
 
-        asset = new ObjectAsset(guid, id, ClassifyType(rawType), rawType, name);
+        asset = new ObjectAsset(guid, id, ClassifyType(rawType), rawType, name, overridePath);
         return true;
     }
 

@@ -38,10 +38,10 @@ git-ignored.
 ## Real object models
 
 The masterbundle is a single 1.4 GB LZMA block, so it is parsed **once** (`ModelExtractor`): the
-graph walk maps each placed object's GUID to its `Model_0` mesh, which is decoded and cached as a
-compact `user://model_cache/<guid>.mesh`. Runtime loads only those small meshes. On PEI this yields
-~4056/4329 objects with real geometry (the rest use stream-data/compressed meshes and fall back to
-placeholder boxes). Meshes are currently untextured.
+graph walk maps each placed object's GUID to its highest-detail `Model_0` LOD mesh, which is decoded
+and cached as a compact `user://model_cache/<guid>.mesh`. Runtime loads only those small meshes.
+`Bundle_Override_Path` (holiday/variant objects reusing a base mesh) and external/built-in mesh
+references are handled, so **all 4329 PEI objects render with real geometry**. Meshes are untextured.
 
 ## Run
 
@@ -90,7 +90,8 @@ Style and analyzers are enforced via `.editorconfig` + `Directory.Build.props`
 
 - **Textures/materials** — meshes render untextured; terrain colors are a stand-in palette blended
   from real splatmap weights, not the game textures.
-- **Stream-data / compressed meshes** (~6% of PEI objects) still fall back to placeholder boxes.
+- **Stream-data / compressed meshes** — not needed for PEI (none of its objects use them), so the
+  `.resS` and `m_CompressedMesh` paths are not decoded yet; such meshes fall back to boxes.
 
 Coverage note: `core/` is 100% line + branch covered by the hermetic (synthetic-input) tests alone;
 the real-data tests under `tests/` are extra end-to-end validation and self-skip without the game.
