@@ -32,10 +32,6 @@ public partial class FreeCamera : Camera3D
             _captured = false;
             Input.MouseMode = Input.MouseModeEnum.Visible;
         }
-        else if (@event is InputEventKey { Keycode: Key.F4, Pressed: true })
-        {
-            CopyShotCamToClipboard();
-        }
         else if (@event is InputEventMouseMotion motion && _captured)
         {
             _yaw -= motion.Relative.X * MouseSensitivity;
@@ -61,16 +57,5 @@ public partial class FreeCamera : Camera3D
 
         float speed = Speed * (Input.IsKeyPressed(Key.Shift) ? BoostMultiplier : 1f);
         Position += dir.Normalized() * speed * (float)delta;
-    }
-
-    // Copies the camera as a SHOT_CAM value ("px,py,pz,pitch,yaw") so a spot can be re-captured with
-    // `SHOT_CAM=... godot --headless --resolution ...`. Invariant format keeps '.' decimals for the split.
-    private void CopyShotCamToClipboard()
-    {
-        var c = System.Globalization.CultureInfo.InvariantCulture;
-        string shotCam = string.Format(c, "{0:0.##},{1:0.##},{2:0.##},{3:0.##},{4:0.##}",
-            Position.X, Position.Y, Position.Z, RotationDegrees.X, RotationDegrees.Y);
-        DisplayServer.ClipboardSet(shotCam);
-        GD.Print($"[camera] copied SHOT_CAM={shotCam}");
     }
 }

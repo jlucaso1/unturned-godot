@@ -33,8 +33,30 @@ public partial class DebugOverlay : CanvasLayer
 
     public override void _Input(InputEvent @event)
     {
-        if (@event is InputEventKey { Pressed: true } key && key.Keycode == ToggleKey)
+        if (@event is not InputEventKey { Pressed: true, Echo: false } key)
+            return;
+        if (key.Keycode == ToggleKey)
             Visible = !Visible;
+        else if (key.Keycode == Key.F4)
+            CopyCameraShotCam();
+    }
+
+    // Copies whatever camera is currently rendering (free-fly OR the player's) as a SHOT_CAM value
+    // ("px,py,pz,pitch,yaw") so any view can be reproduced headless with `SHOT_CAM=... godot ...`. Global
+    // here (not on the free camera) so it works in player mode too. Prints as well, since the Wayland
+    // clipboard is unreliable — read it from the console if paste comes up empty.
+    private void CopyCameraShotCam()
+    {
+        Camera3D? cam = GetViewport().GetCamera3D();
+        if (cam == null)
+            return;
+        Vector3 p = cam.GlobalPosition;
+        Vector3 r = cam.GlobalRotationDegrees;
+        var c = System.Globalization.CultureInfo.InvariantCulture;
+        string shotCam = string.Format(c, "{0:0.##},{1:0.##},{2:0.##},{3:0.##},{4:0.##}",
+            p.X, p.Y, p.Z, r.X, r.Y);
+        DisplayServer.ClipboardSet(shotCam);
+        GD.Print($"[camera] SHOT_CAM={shotCam}");
     }
 
     public override void _Process(double delta)
