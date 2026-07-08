@@ -44,6 +44,7 @@ public partial class Main : Node3D
             WorldBuildResult world = WorldBuilder.Build(unturnedPath, MapName);
             AddChild(world.Terrain);
             AddChild(world.Objects);
+            AddChild(world.Foliage);
             AddChild(RoadsBuilder.Build(environmentDir));
             AddChild(WaterBuilder.Build(lighting));
             SetupEnvironment(lighting);

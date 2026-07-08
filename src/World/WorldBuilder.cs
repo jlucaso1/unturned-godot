@@ -1,5 +1,7 @@
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using Godot;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Data;
@@ -13,6 +15,7 @@ namespace UnturnedGodot;
 public sealed record WorldBuildResult(
     Node3D Terrain,
     Node3D Objects,
+    Node3D Foliage,
     int TileCount,
     int PlacedObjectCount,
     int ObjectsWithMesh,
@@ -34,13 +37,13 @@ public static class WorldBuilder
         terrainSw.Stop();
 
         var objectsSw = Stopwatch.StartNew();
-        (Node3D objects, int placed, int withMesh, int unique) = BuildObjects(level,
+        (Node3D objects, Node3D foliage, int placed, int withMesh, int unique) = BuildObjects(level,
             System.IO.Path.Combine(unturnedPath, "Bundles", "Objects"),
             System.IO.Path.Combine(unturnedPath, "Bundles", "Trees"),
             System.IO.Path.Combine(unturnedPath, "Bundles", "core_linux.masterbundle"));
         objectsSw.Stop();
 
-        return new WorldBuildResult(terrain, objects, tileCount, placed, withMesh, unique,
+        return new WorldBuildResult(terrain, objects, foliage, tileCount, placed, withMesh, unique,
             terrainSw.Elapsed.TotalMilliseconds, objectsSw.Elapsed.TotalMilliseconds);
     }
 
@@ -59,7 +62,7 @@ public static class WorldBuilder
         return (terrainRoot, tiles.Count);
     }
 
-    private static (Node3D root, int placed, int withMesh, int unique) BuildObjects(
+    private static (Node3D root, Node3D foliage, int placed, int withMesh, int unique) BuildObjects(
         LevelInfo level, string objectBundlesDir, string treeBundlesDir, string bundlePath)
     {
         // Trees are Unturned "resources" placed via a separate file; render them alongside objects so
@@ -75,34 +78,46 @@ public static class WorldBuilder
         GD.Print($"[unturned-godot] Placed objects: {objects.Count} (incl. {trees.Count} trees), " +
             $"asset db entries: {db.Count}");
 
-        if (objects.Count == 0)
-            return (new Node3D { Name = "Objects" }, 0, 0, 0);
-
         string cacheDir = ProjectSettings.GlobalizePath("user://model_cache");
         string textureCacheDir = ProjectSettings.GlobalizePath("user://texture_cache");
         string assetsDir = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(bundlePath)!, "Assets");
-        var neededGuids = new HashSet<System.Guid>();
+
+        // Resolve the foliage types the map's Foliage.blob uses, so their meshes are extracted too.
+        LevelFoliage? foliageData = LevelFoliage.Load(System.IO.Path.Combine(level.Path, "Foliage.blob"));
+        var foliageAssets = foliageData != null
+            ? FoliageAsset.ScanForGuids(assetsDir, new HashSet<Guid>(foliageData.AssetGuids))
+            : new Dictionary<Guid, FoliageAsset>();
+
+        var neededGuids = new HashSet<Guid>();
         foreach (PlacedObject o in objects)
             neededGuids.Add(o.Guid);
 
         // Parse the 1.4 GB bundle once, then reuse the compact per-GUID mesh + texture cache. This is the
         // synchronous full build (used by the benchmark and the warm path); the interactive cold load
         // streams the two phases separately via ObjectStreamer.
-        if (ModelLibrary.CachedMeshCount(cacheDir) == 0 && System.IO.File.Exists(bundlePath))
+        bool foliageMissing = foliageAssets.Keys.Any(
+            g => !System.IO.File.Exists(System.IO.Path.Combine(cacheDir, g.ToString("N") + ".mesh")));
+        if ((ModelLibrary.CachedMeshCount(cacheDir) == 0 || foliageMissing) && System.IO.File.Exists(bundlePath))
         {
             GD.Print("[unturned-godot] Extracting models + textures from masterbundle (one-time)...");
             int extracted = ModelExtractor.ExtractMeshes(bundlePath, objectBundlesDir, treeBundlesDir,
-                assetsDir, neededGuids, cacheDir);
+                assetsDir, neededGuids, cacheDir, foliageAssets.Values.ToList());
             ModelExtractor.ExtractTextures(bundlePath, cacheDir, textureCacheDir);
             GD.Print($"[unturned-godot] Extracted {extracted} meshes to cache");
         }
 
         var registry = new TextureRegistry(textureCacheDir);
         var meshLibrary = ModelLibrary.Load(cacheDir, registry);
-        Node3D objectsRoot = ObjectsBuilder.Build(objects, db, meshLibrary, out int withMesh);
+
+        int withMesh = 0;
+        Node3D objectsRoot = objects.Count > 0
+            ? ObjectsBuilder.Build(objects, db, meshLibrary, out withMesh)
+            : new Node3D { Name = "Objects" };
+
+        Node3D foliageRoot = FoliageBuilder.Build(level.Path, meshLibrary);
         registry.ApplyAllAvailable();
         GD.Print($"[unturned-godot] Rendered {withMesh}/{objects.Count} objects with real meshes " +
             $"({meshLibrary.Count} unique)");
-        return (objectsRoot, objects.Count, withMesh, meshLibrary.Count);
+        return (objectsRoot, foliageRoot, objects.Count, withMesh, meshLibrary.Count);
     }
 }

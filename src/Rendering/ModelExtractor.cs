@@ -25,7 +25,8 @@ public static class ModelExtractor
     // submesh's texture key without touching the .resS pixel stream. Used by the synchronous/benchmark
     // build; the interactive cold load uses StreamExtract instead.
     public static int ExtractMeshes(string bundlePath, string objectBundlesDir, string treeBundlesDir,
-        string assetsDir, HashSet<Guid> neededGuids, string cacheDir)
+        string assetsDir, HashSet<Guid> neededGuids, string cacheDir,
+        IReadOnlyList<FoliageAsset>? foliageAssets = null)
     {
         UnityBundle bundle = UnityBundle.Read(File.ReadAllBytes(bundlePath), MeshDecodeCap); // SerializedFile only
         byte[] sfBytes = Array.Empty<byte>();
@@ -34,7 +35,7 @@ public static class ModelExtractor
                 sfBytes = f.Value;
 
         int extracted = ExtractMeshesFromSerializedFile(sfBytes, objectBundlesDir, treeBundlesDir,
-            assetsDir, neededGuids, cacheDir, neededTextures: null);
+            assetsDir, neededGuids, cacheDir, neededTextures: null, foliageAssets);
         GD.Print($"[extract] meshes={extracted}");
         return extracted;
     }
@@ -142,7 +143,7 @@ public static class ModelExtractor
     // it is filled with the metadata of every referenced texture so a caller can stream in the pixels.
     private static int ExtractMeshesFromSerializedFile(byte[] sfBytes, string objectBundlesDir,
         string treeBundlesDir, string assetsDir, HashSet<Guid> neededGuids, string cacheDir,
-        Dictionary<long, UnityTexture>? neededTextures)
+        Dictionary<long, UnityTexture>? neededTextures, IReadOnlyList<FoliageAsset>? foliageAssets = null)
     {
         SerializedFile file = SerializedFile.Read(sfBytes);
         PrefabGraph graph = PrefabGraph.Read(file);
@@ -222,7 +223,73 @@ public static class ModelExtractor
             extracted++;
         }
 
+        if (foliageAssets != null)
+            extracted += ExtractFoliageMeshes(graph, foliageAssets, cacheDir, neededTextures);
+
         return extracted;
+    }
+
+    // Extracts the foliage meshes (grass/flowers/pebbles) the Foliage.blob instances. Unlike objects,
+    // each is a bare Mesh referenced directly in the masterbundle by the .asset's container path, using a
+    // single material; cache it per foliage GUID like an object mesh so the same texture pass and
+    // ModelLibrary path pick it up. Alpha-clipped, since foliage textures are cut-out.
+    private static int ExtractFoliageMeshes(PrefabGraph graph, IReadOnlyList<FoliageAsset> foliageAssets,
+        string cacheDir, Dictionary<long, UnityTexture>? neededTextures)
+    {
+        int extracted = 0;
+        foreach (FoliageAsset fa in foliageAssets)
+        {
+            string outPath = Path.Combine(cacheDir, fa.Guid.ToString("N") + ".mesh");
+            if (File.Exists(outPath))
+                continue;
+
+            string meshKey = graph.AssetPrefix + fa.MeshPath.Replace('\\', '/').ToLowerInvariant();
+            if (!graph.ContainerByPath.TryGetValue(meshKey, out long meshId) ||
+                !graph.ObjectsByPathId.TryGetValue(meshId, out SerializedObject? meshObj))
+                continue;
+
+            UnityMesh mesh = UnityMesh.Read(TypeTreeReader.Read(meshObj.TypeTree, graph.File.ReaderFor(meshObj)));
+            if (!mesh.Usable || mesh.Submeshes.Count == 0)
+                continue;
+
+            (string texKey, _) = ResolveTextureByPath(graph, fa.MaterialPath, neededTextures);
+
+            var uvs = new Vector2[mesh.Vertices.Length];
+            for (int i = 0; i < uvs.Length; i++)
+                uvs[i] = i < mesh.Uvs.Length ? mesh.Uvs[i] : Vector2.Zero;
+            Vector3[] normals = mesh.Normals.Length == mesh.Vertices.Length ? mesh.Normals : Array.Empty<Vector3>();
+
+            var submeshes = new List<CachedSubmesh>();
+            foreach (int[] src in mesh.Submeshes)
+                submeshes.Add(new CachedSubmesh((int[])src.Clone(), Colors.White, texKey, UnityMaterial.Blend.Cutout));
+
+            using var stream = File.Create(outPath);
+            MeshCache.Write(stream, mesh.Vertices, normals, uvs, submeshes);
+            extracted++;
+        }
+        return extracted;
+    }
+
+    // Resolves the _MainTex path id (hex key) of a material named by its masterbundle container path, and
+    // records its metadata for the texture-streaming pass. Mirrors MaterialResolver's per-submesh lookup.
+    private static (string texKey, long texId) ResolveTextureByPath(PrefabGraph graph, string materialPath,
+        Dictionary<long, UnityTexture>? neededTextures)
+    {
+        if (materialPath.Length == 0)
+            return (string.Empty, 0);
+        string matKey = graph.AssetPrefix + materialPath.Replace('\\', '/').ToLowerInvariant();
+        if (!graph.ContainerByPath.TryGetValue(matKey, out long matId) ||
+            !graph.ObjectsByPathId.TryGetValue(matId, out SerializedObject? matObj))
+            return (string.Empty, 0);
+
+        Dictionary<string, object> matDict = TypeTreeReader.Read(matObj.TypeTree, graph.File.ReaderFor(matObj));
+        (int fileId, long texId) = UnityMaterial.GetTexture(matDict, "_MainTex");
+        if (fileId != 0 || texId == 0 || !graph.ObjectsByPathId.TryGetValue(texId, out SerializedObject? texObj))
+            return (string.Empty, 0);
+
+        if (neededTextures != null && !neededTextures.ContainsKey(texId))
+            neededTextures[texId] = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, graph.File.ReaderFor(texObj)));
+        return (texId.ToString("x"), texId);
     }
 
     // Phase 2: decode the full bundle (now including the ~1.18 GB .resS pixel stream) and write the
