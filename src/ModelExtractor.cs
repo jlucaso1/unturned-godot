@@ -179,10 +179,8 @@ public static class ModelExtractor
 
             palettes.TryGetValue(asset.MaterialPaletteGuid, out MaterialPalette? palette);
             var verts = new List<Vector3>();
-            var normals = new List<Vector3>();
             var uvs = new List<Vector2>();
             var submeshes = new List<CachedSubmesh>();
-            bool allNormals = true;
 
             // A prefab's renderable geometry can span several child GameObjects (a tree is a trunk plus a
             // separate foliage mesh, each with its own material and local pose). Bake each part's
@@ -196,13 +194,9 @@ public static class ModelExtractor
                     continue;
 
                 int baseVertex = verts.Count;
-                Basis basis = part.LocalToRoot.Basis;
                 for (int i = 0; i < mesh.Vertices.Length; i++)
                 {
                     verts.Add(part.LocalToRoot * mesh.Vertices[i]);
-                    bool hasNormal = i < mesh.Normals.Length;
-                    allNormals &= hasNormal;
-                    normals.Add(hasNormal ? (basis * mesh.Normals[i]).Normalized() : Vector3.Zero);
                     uvs.Add(i < mesh.Uvs.Length ? mesh.Uvs[i] : Vector2.Zero);
                 }
 
@@ -226,9 +220,10 @@ public static class ModelExtractor
             if (submeshes.Count == 0)
                 continue;
 
-            Vector3[] normalArray = allNormals ? normals.ToArray() : Array.Empty<Vector3>();
+            // Runtime derives smooth normals from the winding-corrected geometry (ModelLibrary.SmoothNormals),
+            // so the extracted per-vertex normals are never read — don't compute or store them.
             using var stream = File.Create(Path.Combine(cacheDir, asset.Guid.ToString("N") + ".mesh"));
-            MeshCache.Write(stream, verts.ToArray(), normalArray, uvs.ToArray(), submeshes);
+            MeshCache.Write(stream, verts.ToArray(), Array.Empty<Vector3>(), uvs.ToArray(), submeshes);
             extracted++;
         }
 
