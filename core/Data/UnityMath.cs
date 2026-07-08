@@ -27,4 +27,15 @@ public static class UnityMath
     // Mirroring Z (Unity->Godot) conjugates the rotation by diag(1,1,-1): (x,y,z,w) -> (-x,-y,z,w).
     public static Quaternion UnityToGodotRotation(Quaternion unity) =>
         new(-unity.X, -unity.Y, unity.Z, unity.W);
+
+    // A Unity local transform (position/rotation/scale) converted to Godot space by the Z-mirror F: the
+    // position's Z flips, the rotation is conjugated by F, and scale is unchanged. Scale multiplies the
+    // rotated columns (Unity's R*S order). This is the F*M*F reflection expressed via TRS, and is how bone
+    // rest poses convert so a whole skeleton hierarchy composes consistently.
+    public static Transform3D LocalToGodot(Vector3 position, Quaternion rotation, Vector3 scale)
+    {
+        var r = new Basis(UnityToGodotRotation(rotation));
+        var basis = new Basis(r.X * scale.X, r.Y * scale.Y, r.Z * scale.Z);
+        return new Transform3D(basis, new Vector3(position.X, position.Y, -position.Z));
+    }
 }
