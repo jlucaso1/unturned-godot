@@ -12,7 +12,16 @@ public sealed class ObjectAsset
     public ushort Id { get; }
     public EObjectType Type { get; }
     public string RawType { get; }
-    public string? Name { get; }
+
+    private readonly string? _explicitName; // localized name passed at parse time, if any
+    private readonly string? _dataName;     // the .dat's own "Name" field
+
+    // No production code reads Name, so the localized name is resolved lazily: the folder's English.dat is
+    // read only if Name is actually accessed (tests), not eagerly for all ~2500 assets during a scan.
+    public string? Name =>
+        _explicitName
+        ?? (Directory.Length > 0 ? ObjectAssetDatabase.ReadLocalizedName(Directory) : null)
+        ?? _dataName;
 
     // Holiday/variant objects reuse a base object's mesh via this path (e.g. "/Objects/.../Grave_0").
     public string? BundleOverridePath { get; }
@@ -23,14 +32,15 @@ public sealed class ObjectAsset
     // Folder holding the .dat, used to match the object to its prefab path in the bundle.
     public string Directory { get; set; } = string.Empty;
 
-    private ObjectAsset(Guid guid, ushort id, EObjectType type, string rawType, string? name,
-        string? bundleOverridePath, Guid materialPaletteGuid)
+    private ObjectAsset(Guid guid, ushort id, EObjectType type, string rawType, string? explicitName,
+        string? dataName, string? bundleOverridePath, Guid materialPaletteGuid)
     {
         Guid = guid;
         Id = id;
         Type = type;
         RawType = rawType;
-        Name = name;
+        _explicitName = explicitName;
+        _dataName = dataName;
         BundleOverridePath = bundleOverridePath;
         MaterialPaletteGuid = materialPaletteGuid;
     }
@@ -49,11 +59,11 @@ public sealed class ObjectAsset
 
         data.TryGetUInt16("ID", out ushort id);
         string rawType = data.GetString("Type") ?? string.Empty;
-        string? name = localizedName ?? data.GetString("Name");
         string? overridePath = data.GetString("Bundle_Override_Path");
         data.TryGetGuid("Material_Palette", out Guid paletteGuid);
 
-        asset = new ObjectAsset(guid, id, ClassifyType(rawType), rawType, name, overridePath, paletteGuid);
+        asset = new ObjectAsset(guid, id, ClassifyType(rawType), rawType, localizedName,
+            data.GetString("Name"), overridePath, paletteGuid);
         return true;
     }
 

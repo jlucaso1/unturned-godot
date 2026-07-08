@@ -51,11 +51,12 @@ public sealed class ObjectAssetDatabase
                 continue;
             }
 
-            string? directory = Path.GetDirectoryName(file);
-            string? name = ReadLocalizedName(directory);
-            if (ObjectAsset.TryParse(parsed, name, out ObjectAsset asset))
+            // The localized name isn't read here — no production code uses ObjectAsset.Name, so its
+            // English.dat is read lazily only if Name is ever accessed, saving a File.Exists +
+            // ReadAllText + parse per asset across every scan.
+            if (ObjectAsset.TryParse(parsed, null, out ObjectAsset asset))
             {
-                asset.Directory = directory!; // never null for an enumerated file path
+                asset.Directory = Path.GetDirectoryName(file)!; // never null for an enumerated file path
                 db.Add(asset);
             }
         }
