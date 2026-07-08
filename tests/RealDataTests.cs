@@ -43,6 +43,30 @@ public class RealDataTests
     }
 
     [Fact]
+    public void RealLighting_ParsesPeiMiddayValues()
+    {
+        string? root = UnturnedPath();
+        if (root == null) return;
+
+        string path = Path.Combine(root, "Maps", "PEI", "Environment", "Lighting.dat");
+        LevelLighting? lighting = LevelLighting.Load(path);
+        if (lighting == null) return;
+
+        Assert.Equal(12, lighting.Version);
+        Assert.Equal(4, lighting.Times.Count);
+
+        // PEI's shipped midday: full-strength warm sunlight and a bright warm ambient.
+        LightingKeyframe day = lighting.Midday;
+        Assert.Equal(1f, day.Intensity);
+        Assert.Equal(1f, day.Shadows);
+        Assert.Equal(0.933f, day.Sun.R, 0.01f);
+        Assert.Equal(0.863f, day.Sun.G, 0.01f);
+        Assert.Equal(0.757f, day.Sun.B, 0.01f);
+        Assert.Equal(0.8f, day.AmbientSky.R, 0.01f);
+        Assert.InRange(day.AmbientEquator.R, 0.5f, 1f);
+    }
+
+    [Fact]
     public void RealObjects_ParseAndResolveAgainstBundles()
     {
         LevelInfo? level = Pei();
