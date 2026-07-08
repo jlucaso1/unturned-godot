@@ -127,7 +127,15 @@ public static class RoadsBuilder
             st.AddIndex(r); st.AddIndex(rn); st.AddIndex(ln);
         }
 
-        return new MeshInstance3D { Name = name, Mesh = st.Commit(), MaterialOverride = material };
+        // Flat ribbons ~0.3 m above the terrain cast an essentially invisible shadow, yet are re-drawn
+        // into every directional cascade — skip it.
+        return new MeshInstance3D
+        {
+            Name = name,
+            Mesh = st.Commit(),
+            MaterialOverride = material,
+            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+        };
     }
 
     private static Vector3 Direction(List<Vector3> points, int i, bool loop)

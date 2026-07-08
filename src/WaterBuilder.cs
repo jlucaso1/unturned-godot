@@ -38,6 +38,9 @@ public static class WaterBuilder
             Mesh = new PlaneMesh { Size = new Vector2(PlaneSize, PlaneSize) },
             MaterialOverride = material,
             Position = new Vector3(0, seaLevel * TerrainHeight, 0),
+            // Transparent caster: it produces a bogus opaque shadow on the seabed and is re-drawn into
+            // every directional cascade for no visible benefit. Don't cast.
+            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
         };
     }
 }
