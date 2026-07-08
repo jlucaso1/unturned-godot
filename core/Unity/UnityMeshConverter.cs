@@ -7,12 +7,16 @@ namespace UnturnedGodot.Unity;
 // The single Unity->Godot mesh translation. Unity is left-handed (+Z forward); Godot is right-handed, so
 // world space is the reflection F = diag(1, 1, -1) (negate Z — exactly what Landscape.UnityToGodot does to
 // positions). Under a reflection:
-//   - positions map by F      -> negate Z,
-//   - normals map by (F^-1)^T = F (F is symmetric orthogonal) -> negate Z, same as positions,
-//   - a reflection flips triangle orientation, so the winding must be reversed to stay front-facing.
-// Translating the authored normals (rather than re-deriving smooth ones) preserves the mesh's hard edges
-// and can never disagree with the geometry. Every skinned/static mesh built from Unity data should go
-// through here so this class of normal/winding bug cannot recur per-feature.
+//   - positions map by F -> negate Z;
+//   - normals map by the cofactor det(F)*(F^-1)^T = -F -> negate X and Y (KEEP Z). This -F, not F, is the
+//     subtlety: a plain reflection points the translated normal inward (the det(F) = -1 sign is what makes
+//     it outward again). Godot lights by this explicit normal.
+//   - Godot's front face is counter-clockwise, and the reflection already turns Unity's clockwise winding
+//     counter-clockwise, so the winding is kept as-is; the -F normal then agrees with it, so cull_back
+//     shows the outward faces lit correctly.
+// Translating the authored normals (rather than re-deriving smooth ones) preserves the mesh's hard edges.
+// Every skinned/static mesh built from Unity data should go through here so this class of normal/winding
+// bug cannot recur per-feature.
 public static class UnityMeshConverter
 {
     public readonly struct GodotMesh
@@ -20,7 +24,7 @@ public static class UnityMeshConverter
         public readonly Vector3[] Vertices;
         public readonly Vector3[] Normals; // empty when the source has none
         public readonly Vector2[] Uvs;
-        public readonly int[] Indices;      // all submeshes flattened, winding reversed
+        public readonly int[] Indices;      // all submeshes flattened
 
         public GodotMesh(Vector3[] vertices, Vector3[] normals, Vector2[] uvs, int[] indices)
         {
@@ -37,13 +41,13 @@ public static class UnityMeshConverter
 
         var verts = new Vector3[n];
         for (int i = 0; i < n; i++)
-            verts[i] = ReflectZ(mesh.Vertices[i]);
+            verts[i] = ReflectPosition(mesh.Vertices[i]);
 
-        // Translate the authored normals by the same reflection; re-deriving them would smooth hard edges
-        // and risk sign mismatches. Empty stays empty (caller may derive its own).
+        // Translate the authored normals by the cofactor -F; re-deriving them would smooth hard edges.
+        // Empty stays empty (caller may derive its own).
         var normals = new Vector3[mesh.Normals.Length == n ? n : 0];
         for (int i = 0; i < normals.Length; i++)
-            normals[i] = ReflectZ(mesh.Normals[i]);
+            normals[i] = ReflectNormal(mesh.Normals[i]);
 
         var uvs = new Vector2[n];
         for (int i = 0; i < n; i++)
@@ -54,15 +58,17 @@ public static class UnityMeshConverter
             for (int i = 0; i + 2 < submesh.Length; i += 3)
             {
                 indices.Add(submesh[i]);
-                indices.Add(submesh[i + 2]); // reversed: the reflection flips orientation
                 indices.Add(submesh[i + 1]);
+                indices.Add(submesh[i + 2]); // kept: the reflection already makes Unity CW into Godot CCW
             }
 
         return new GodotMesh(verts, normals, uvs, indices.ToArray());
     }
 
-    // The normal transform under F: for a reflection, normals use (F^-1)^T = F, so negate Z — identical to
-    // the position map. This is the geometric face normal of the reversed-winding triangle, so the normal
-    // and the winding always agree.
-    public static Vector3 ReflectZ(Vector3 v) => new(v.X, v.Y, -v.Z);
+    // Position under F: negate Z.
+    public static Vector3 ReflectPosition(Vector3 v) => new(v.X, v.Y, -v.Z);
+
+    // Normal under the reflection's cofactor -F: negate X and Y, keep Z. This is the outward normal, and it
+    // is the geometric face normal of the (kept-order) reflected triangle, so normal and winding agree.
+    public static Vector3 ReflectNormal(Vector3 v) => new(-v.X, -v.Y, v.Z);
 }

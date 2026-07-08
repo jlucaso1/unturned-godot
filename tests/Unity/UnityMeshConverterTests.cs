@@ -10,7 +10,7 @@ public class UnityMeshConverterTests
     private static Vector3 V(float x, float y, float z) => new(x, y, z);
 
     [Fact]
-    public void ToGodot_ReflectsPositionsAndNormalsThroughZ()
+    public void ToGodot_ReflectsPositionByF_AndNormalByCofactor()
     {
         var mesh = new UnityMesh
         {
@@ -21,27 +21,28 @@ public class UnityMeshConverterTests
 
         UnityMeshConverter.GodotMesh g = UnityMeshConverter.ToGodot(mesh);
 
-        Assert.Equal(V(1, 2, -3), g.Vertices[0]);          // position: negate Z
-        Assert.Equal(V(0.6f, 0f, -0.8f), g.Normals[0]);    // normal: same reflection (F), NOT recomputed
+        Assert.Equal(V(1, 2, -3), g.Vertices[0]);           // position: F -> negate Z
+        Assert.Equal(V(-0.6f, 0f, 0.8f), g.Normals[0]);     // normal: cofactor -F -> negate X,Y; keep Z
     }
 
     [Fact]
-    public void ToGodot_ReversesWinding()
+    public void ToGodot_KeepsWinding()
     {
+        // The reflection already turns Unity's CW winding into Godot's CCW front-face order, so it is kept.
         var mesh = new UnityMesh
         {
             Vertices = new[] { V(0, 0, 0), V(0, 0, 0), V(0, 0, 0) },
             Submeshes = new List<int[]> { new[] { 0, 1, 2 } },
         };
-        Assert.Equal(new[] { 0, 2, 1 }, UnityMeshConverter.ToGodot(mesh).Indices);
+        Assert.Equal(new[] { 0, 1, 2 }, UnityMeshConverter.ToGodot(mesh).Indices);
     }
 
-    // The regression guard: after translation, the per-vertex normal must point the SAME way as the
-    // geometric normal of its (reversed) Godot triangle. The old character path re-derived normals as
-    // Cross(c-a, b-a) — the negative of the winding's normal — which is exactly this test failing, and is
-    // why the skinned body looked lit inside-out. Any future feature that mistranslates a mesh trips here.
+    // The regression guard: the translated normal must point the SAME way as the geometric normal of its
+    // Godot triangle. Translating normals as +F (negate Z, like a position) instead of the cofactor -F is
+    // exactly this test failing, and is why the skinned body first rendered lit inside-out (normals pointing
+    // in, front faces culled). Any future feature that mistranslates a mesh trips here.
     [Fact]
-    public void ToGodot_NormalAgreesWithReversedWinding()
+    public void ToGodot_NormalAgreesWithWinding()
     {
         // A triangle with a Z-facing authored normal, so the reflection is actually exercised. The authored
         // normal is the triangle's own outward geometric normal in Unity.
@@ -59,7 +60,7 @@ public class UnityMeshConverterTests
         Vector3 ga = g.Vertices[g.Indices[0]], gb = g.Vertices[g.Indices[1]], gc = g.Vertices[g.Indices[2]];
         Vector3 geometric = (gb - ga).Cross(gc - ga); // Godot triangle's own outward normal
         Assert.True(g.Normals[0].Dot(geometric) > 0f,
-            $"translated normal {g.Normals[0]} must agree with the reversed-winding geometry {geometric}");
+            $"translated normal {g.Normals[0]} must agree with the winding geometry {geometric}");
     }
 
     [Fact]
