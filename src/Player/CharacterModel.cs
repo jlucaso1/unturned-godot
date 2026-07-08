@@ -118,7 +118,7 @@ public static class CharacterModel
             boneIndex[boneIds[i]] = i;
         }
 
-        var skeleton = new Skeleton3D { Name = "Skeleton" };
+        var skeleton = new CharacterSkeleton { Name = "Skeleton" };
         var rests = new Transform3D[boneCount];
         var parents = new int[boneCount];
         var boneByName = new Dictionary<string, int>(boneCount);
@@ -148,18 +148,44 @@ public static class CharacterModel
         skeleton.AddChild(body);
         body.Skeleton = body.GetPathTo(skeleton);
 
-        long clipId = DefaultClipOf(file, byId, Id(smr["m_GameObject"]));
-        bool posed = clipId != 0 && ApplyClipPose(file, byId, skeleton, boneByName, clipId);
+        StoreStancePoses(file, byId, skeleton, boneByName, Id(smr["m_GameObject"]));
+        skeleton.ApplyStance(UnturnedGodot.Player.EPlayerStance.Stand);
 
         GD.Print($"[unturned-godot] Character: real {EntityRoot} skinned body loaded ({boneCount} bones, " +
-            (posed ? "default pose" : "bind pose") + ").");
+            (skeleton.HasAnyPose ? "posed" : "bind pose") + ").");
         return skeleton;
     }
 
-    // Follows the entity's own "decision tree": walks up from the mesh to the GameObject carrying a legacy
-    // Animation component and returns its default clip (m_Animation). Data-driven, so any skinned entity
-    // (zombie, NPC, ...) resolves its resting animation the same way — nothing is keyed to a clip name.
-    private static long DefaultClipOf(SerializedFile file, Dictionary<long, SerializedObject> byId, long goId)
+    // Precomputes the per-stance resting poses. Unturned's PlayerAnimator names them Idle_Stand/Crouch/Prone;
+    // they live in the entity's legacy Animation component (m_Animations). If Idle_Stand is missing we fall
+    // back to the component's default clip (m_Animation), so a generic entity still gets its resting pose.
+    private static void StoreStancePoses(SerializedFile file, Dictionary<long, SerializedObject> byId,
+        CharacterSkeleton skeleton, Dictionary<string, int> boneByName, long goId)
+    {
+        long animComp = AnimationComponentOf(file, byId, goId);
+        if (animComp == 0)
+            return;
+        Dictionary<string, object> anim = Read(file, byId, animComp);
+
+        var clips = new Dictionary<string, long>();
+        foreach (object cp in (List<object>)anim["m_Animations"])
+        {
+            long cid = Id(cp);
+            if (cid != 0 && byId.TryGetValue(cid, out SerializedObject? co))
+                clips[(string)Read(file, byId, co.PathId)["m_Name"]] = cid;
+        }
+
+        foreach (string name in new[] { "Idle_Stand", "Idle_Crouch", "Idle_Prone" })
+            if (clips.TryGetValue(name, out long cid))
+                skeleton.StorePose(name, ReadClipPose(file, byId, boneByName, cid));
+
+        if (!clips.ContainsKey("Idle_Stand") && Id(anim["m_Animation"]) is var def && def != 0)
+            skeleton.StorePose("Idle_Stand", ReadClipPose(file, byId, boneByName, def));
+    }
+
+    // Walks up from the mesh's GameObject to the one carrying a legacy Animation component (data-driven; not
+    // keyed to a name), returning that component's PathId, or 0 if none.
+    private static long AnimationComponentOf(SerializedFile file, Dictionary<long, SerializedObject> byId, long goId)
     {
         long go = goId;
         while (go != 0)
@@ -168,7 +194,7 @@ public static class CharacterModel
             {
                 long compId = Id(((Dictionary<string, object>)component)["component"]);
                 if (byId.TryGetValue(compId, out SerializedObject? comp) && comp.ClassId == ClassAnimation)
-                    return Id(Read(file, byId, compId)["m_Animation"]);
+                    return compId;
             }
             long transformId = TransformOf(file, byId, go);
             long father = transformId == 0 ? 0 : Id(Read(file, byId, transformId)["m_Father"]);
@@ -177,29 +203,38 @@ public static class CharacterModel
         return 0;
     }
 
-    // Poses the skeleton to frame 0 of a legacy AnimationClip: per-bone rotation/position/scale curves keyed
-    // by the bone's hierarchy path, converted Unity->Godot.
-    private static bool ApplyClipPose(SerializedFile file, Dictionary<long, SerializedObject> byId,
-        Skeleton3D skeleton, Dictionary<string, int> boneByName, long clipId)
+    // Reads frame 0 of a legacy AnimationClip into per-bone pose overrides (rotation/position/scale curves
+    // keyed by the bone's hierarchy path), converted Unity->Godot.
+    private static List<CharacterSkeleton.BonePose> ReadClipPose(SerializedFile file,
+        Dictionary<long, SerializedObject> byId, Dictionary<string, int> boneByName, long clipId)
     {
+        var byBone = new Dictionary<int, (Quaternion? R, Vector3? P, Vector3? S)>();
         if (!byId.TryGetValue(clipId, out SerializedObject? clipObj))
-            return false;
+            return new List<CharacterSkeleton.BonePose>();
         Dictionary<string, object> clip = Read(file, byId, clipObj.PathId);
 
         foreach (object c in (List<object>)clip["m_RotationCurves"])
             if (BoneOf(c, boneByName, out int bone, out Dictionary<string, object> v))
-                skeleton.SetBonePoseRotation(bone,
-                    UnityMath.UnityToGodotRotation(new Quaternion(F(v["x"]), F(v["y"]), F(v["z"]), F(v["w"]))));
+                byBone[bone] = (UnityMath.UnityToGodotRotation(
+                    new Quaternion(F(v["x"]), F(v["y"]), F(v["z"]), F(v["w"]))), Get(byBone, bone).P, Get(byBone, bone).S);
 
         foreach (object c in (List<object>)clip["m_PositionCurves"])
             if (BoneOf(c, boneByName, out int bone, out Dictionary<string, object> v))
-                skeleton.SetBonePosePosition(bone, new Vector3(F(v["x"]), F(v["y"]), -F(v["z"])));
+                byBone[bone] = (Get(byBone, bone).R, new Vector3(F(v["x"]), F(v["y"]), -F(v["z"])), Get(byBone, bone).S);
 
         foreach (object c in (List<object>)clip["m_ScaleCurves"])
             if (BoneOf(c, boneByName, out int bone, out Dictionary<string, object> v))
-                skeleton.SetBonePoseScale(bone, new Vector3(F(v["x"]), F(v["y"]), F(v["z"])));
-        return true;
+                byBone[bone] = (Get(byBone, bone).R, Get(byBone, bone).P, new Vector3(F(v["x"]), F(v["y"]), F(v["z"])));
+
+        var poses = new List<CharacterSkeleton.BonePose>(byBone.Count);
+        foreach (KeyValuePair<int, (Quaternion? R, Vector3? P, Vector3? S)> kv in byBone)
+            poses.Add(new CharacterSkeleton.BonePose(kv.Key, kv.Value.R, kv.Value.P, kv.Value.S));
+        return poses;
     }
+
+    private static (Quaternion? R, Vector3? P, Vector3? S) Get(
+        Dictionary<int, (Quaternion? R, Vector3? P, Vector3? S)> byBone, int bone)
+        => byBone.TryGetValue(bone, out (Quaternion? R, Vector3? P, Vector3? S) v) ? v : default;
 
     // Resolves a curve to its target bone and first-keyframe value; false if the bone isn't in the skeleton.
     private static bool BoneOf(object curveEntry, Dictionary<string, int> boneByName, out int bone,

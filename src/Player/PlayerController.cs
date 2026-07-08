@@ -29,6 +29,7 @@ public partial class PlayerController : CharacterBody3D
     private CollisionShape3D _collider = null!;
     private CapsuleShape3D _capsule = null!;
     private Node3D _model = null!;
+    private CharacterSkeleton? _rig; // the real body, when present, so stance changes repose it
 
     private EPlayerStance _stance = EPlayerStance.Stand;
     private bool _wantCrouch;
@@ -50,6 +51,7 @@ public partial class PlayerController : CharacterBody3D
         AddChild(_collider);
 
         _model = BodyModel ?? BuildPlaceholderModel();
+        _rig = BodyModel as CharacterSkeleton;
         AddChild(_model);
 
         _head = new Node3D { Position = Vector3.Up * _eyeHeight };
@@ -132,6 +134,7 @@ public partial class PlayerController : CharacterBody3D
             return;
 
         _stance = next;
+        _rig?.ApplyStance(next); // repose the real body to match the stance (Idle_Stand/Crouch/Prone)
         float height = PlayerConfig.HeightFor(next);
         _capsule.Height = height;
         _collider.Position = Vector3.Up * (height * 0.5f);
