@@ -25,12 +25,41 @@ public static class ModelExtractor
     // Unity version, these decode the game's resources.assets (which ships with its type trees stripped).
     public static IReadOnlyDictionary<int, List<TypeTreeNode>> ReadClassTypeTrees(string bundlePath)
     {
+        // Cache the tiny per-class type trees so entity imports don't re-read + re-decode the whole
+        // masterbundle SerializedFile (~111 MB read + ~171 MB LZMA, ~3 s). Invalidate when the
+        // masterbundle's mtime or size changes.
+        string cachePath = ProjectSettings.GlobalizePath("user://type_trees.cache");
+        var info = new FileInfo(bundlePath);
+        long stamp = info.LastWriteTimeUtc.Ticks ^ info.Length;
+
+        if (File.Exists(cachePath))
+        {
+            try
+            {
+                using FileStream cs = File.OpenRead(cachePath);
+                Dictionary<int, List<TypeTreeNode>>? cached = TypeTreeCache.Read(cs, stamp);
+                if (cached != null)
+                    return cached;
+            }
+            catch (IOException) { /* corrupt/locked cache -> regenerate */ }
+        }
+
         UnityBundle bundle = UnityBundle.Read(File.ReadAllBytes(bundlePath), MeshDecodeCap); // SerializedFile only
         byte[] sfBytes = Array.Empty<byte>();
         foreach (KeyValuePair<string, byte[]> f in bundle.Files)
             if (!f.Key.EndsWith(".resS") && !f.Key.EndsWith(".resource"))
                 sfBytes = f.Value;
-        return SerializedFile.Read(sfBytes).TypeTreesByClassId;
+        IReadOnlyDictionary<int, List<TypeTreeNode>> trees = SerializedFile.Read(sfBytes).TypeTreesByClassId;
+
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
+            using FileStream ws = File.Create(cachePath);
+            TypeTreeCache.Write(ws, trees, stamp);
+        }
+        catch (IOException) { /* best-effort cache; a write failure isn't fatal */ }
+
+        return trees;
     }
 
     // Phase 1 (file based): decode only the SerializedFile and build the per-GUID meshes, recording each
