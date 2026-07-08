@@ -57,12 +57,14 @@ public class LevelLightingTests
         Assert.Equal(12, lighting.Version);
         Assert.Equal(281.74f, lighting.Azimuth);
         Assert.Equal(0.32f, lighting.TimeOfDay);
+        Assert.Equal(0.5f, lighting.SeaLevel);
         Assert.Equal(4, lighting.Times.Count);
 
         // Midday is keyframe index 1 (not 0), so its encoded keyframe byte is 1.
         LightingKeyframe day = lighting.Midday;
         Assert.Equal(1f / 255f, day.Sun.R);          // color 0 (SUN), keyframe 1
         Assert.Equal(0f, day.Sun.G);                 // color index 0 -> green byte 0
+        Assert.Equal(new Color(1f / 255f, 1f / 255f, 2f / 255f), day.Sea);          // color 1
         Assert.Equal(new Color(1f / 255f, 2f / 255f, 4f / 255f), day.Fog);          // color 2
         Assert.Equal(new Color(1f / 255f, 6f / 255f, 12f / 255f), day.AmbientSky);  // color 6
         Assert.Equal(new Color(1f / 255f, 7f / 255f, 14f / 255f), day.AmbientEquator); // color 7

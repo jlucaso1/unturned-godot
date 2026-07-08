@@ -55,10 +55,14 @@ public class RealDataTests
         Assert.Equal(12, lighting.Version);
         Assert.Equal(4, lighting.Times.Count);
 
-        // PEI's shipped midday: full-strength warm sunlight and a bright warm ambient.
+        // PEI's shipped sea level places the ocean surface at 0.1 * Level.TERRAIN (256) = ~25.6m.
+        Assert.Equal(0.1f, lighting.SeaLevel, 0.001f);
+
+        // PEI's shipped midday: full-strength warm sunlight, a bright warm ambient and a blue sea.
         LightingKeyframe day = lighting.Midday;
         Assert.Equal(1f, day.Intensity);
         Assert.Equal(1f, day.Shadows);
+        Assert.True(day.Sea.B > day.Sea.R); // water is bluer than it is red
         Assert.Equal(0.933f, day.Sun.R, 0.01f);
         Assert.Equal(0.863f, day.Sun.G, 0.01f);
         Assert.Equal(0.757f, day.Sun.B, 0.01f);

@@ -20,6 +20,7 @@ public enum LightingTime
 public readonly struct LightingKeyframe
 {
     public readonly Color Sun;
+    public readonly Color Sea;
     public readonly Color Fog;
     public readonly Color AmbientSky;
     public readonly Color AmbientEquator;
@@ -30,10 +31,11 @@ public readonly struct LightingKeyframe
     public readonly float Shadows; // shadow strength
     public readonly float Rays;
 
-    public LightingKeyframe(Color sun, Color fog, Color ambientSky, Color ambientEquator, Color ambientGround,
-        float intensity, float fogDensity, float clouds, float shadows, float rays)
+    public LightingKeyframe(Color sun, Color sea, Color fog, Color ambientSky, Color ambientEquator,
+        Color ambientGround, float intensity, float fogDensity, float clouds, float shadows, float rays)
     {
         Sun = sun;
+        Sea = sea;
         Fog = fog;
         AmbientSky = ambientSky;
         AmbientEquator = ambientEquator;
@@ -59,15 +61,17 @@ public sealed class LevelLighting
     public byte Version { get; }
     public float Azimuth { get; }     // sun compass angle in degrees
     public float TimeOfDay { get; }   // 0..1 fraction of the day the map was saved at
+    public float SeaLevel { get; }    // fraction of Level.TERRAIN (256): water surface Y = SeaLevel * 256
     public IReadOnlyList<LightingKeyframe> Times { get; }
 
     public LightingKeyframe Midday => Times[(int)LightingTime.Midday];
 
-    private LevelLighting(byte version, float azimuth, float timeOfDay, LightingKeyframe[] times)
+    private LevelLighting(byte version, float azimuth, float timeOfDay, float seaLevel, LightingKeyframe[] times)
     {
         Version = version;
         Azimuth = azimuth;
         TimeOfDay = timeOfDay;
+        SeaLevel = seaLevel;
         Times = times;
     }
 
@@ -93,7 +97,7 @@ public sealed class LevelLighting
         r.ReadSingle();               // fade (unused)
         float timeOfDay = r.ReadSingle();
         r.ReadByte();                 // moon phase (unused)
-        r.ReadSingle();               // sea level (unused)
+        float seaLevel = r.ReadSingle();
         r.ReadSingle();               // snow level (unused)
         if (version > 6)
             r.ReadBoolean();          // canRain
@@ -117,7 +121,7 @@ public sealed class LevelLighting
         for (int i = 0; i < TimeCount; i++)
             times[i] = ReadKeyframe(r);
 
-        return new LevelLighting(version, azimuth, timeOfDay, times);
+        return new LevelLighting(version, azimuth, timeOfDay, seaLevel, times);
     }
 
     // A keyframe is the 12 ELightingColor entries (RGB) followed by the 5 ELightingSingle scalars.
@@ -134,7 +138,7 @@ public sealed class LevelLighting
         float rays = r.ReadSingle();
 
         return new LightingKeyframe(
-            sun: colors[0], fog: colors[2],
+            sun: colors[0], sea: colors[1], fog: colors[2],
             ambientSky: colors[6], ambientEquator: colors[7], ambientGround: colors[8],
             intensity, fogDensity, clouds, shadows, rays);
     }
