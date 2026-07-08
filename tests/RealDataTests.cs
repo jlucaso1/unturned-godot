@@ -68,6 +68,10 @@ public class RealDataTests
         Assert.Equal(0.757f, day.Sun.B, 0.01f);
         Assert.Equal(0.8f, day.AmbientSky.R, 0.01f);
         Assert.InRange(day.AmbientEquator.R, 0.5f, 1f);
+
+        // Sky gradient: a blue zenith fading to a hazy (near-grey) horizon.
+        Assert.True(day.SkyTop.B > day.SkyTop.R);                     // zenith is blue
+        Assert.True(day.SkyHorizon.R > day.SkyTop.R);                 // horizon is hazier/greyer than zenith
     }
 
     [Fact]

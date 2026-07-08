@@ -14,6 +14,9 @@ public static class SceneEnvironment
         sun: new Color(0.933f, 0.863f, 0.757f),
         sea: new Color(0.482f, 0.608f, 0.792f),
         fog: new Color(0.784f, 0.784f, 0.784f),
+        skyTop: new Color(0.4f, 0.627f, 0.808f),
+        skyHorizon: new Color(0.784f, 0.784f, 0.784f),
+        skyGround: new Color(0.329f, 0.518f, 0.78f),
         ambientSky: new Color(0.8f, 0.627f, 0.388f),
         ambientEquator: new Color(0.722f, 0.62f, 0.467f),
         ambientGround: new Color(0.682f, 0.627f, 0.545f),
@@ -38,18 +41,39 @@ public static class SceneEnvironment
             DirectionalShadowMode = DirectionalLight3D.ShadowMode.Parallel2Splits,
         };
 
+        // Sky gradient from Unturned's real SKY colors: a blue zenith fading to the hazy grey horizon.
+        var skyMaterial = new ProceduralSkyMaterial
+        {
+            SkyTopColor = day.SkyTop,
+            SkyHorizonColor = day.SkyHorizon,
+            GroundHorizonColor = day.SkyHorizon,
+            GroundBottomColor = day.SkyGround,
+        };
+
         var env = new Godot.Environment
         {
             BackgroundMode = Godot.Environment.BGMode.Sky,
-            Sky = new Sky { SkyMaterial = new ProceduralSkyMaterial() },
+            Sky = new Sky { SkyMaterial = skyMaterial },
             AmbientLightSource = Godot.Environment.AmbientSource.Color,
             // Godot has no trilight ambient, so average Unturned's sky/equator/ground into one flat color.
             AmbientLightColor = AverageAmbient(day),
             AmbientLightEnergy = 1.0f,
+
+            // Fog fades the distance into the hazy horizon color. Unturned uses fogDensity = FOG^3 * 0.025
+            // (exponential); scaled up for Godot's per-metre density so it reads across the ~4 km map.
+            FogEnabled = true,
+            FogMode = Godot.Environment.FogModeEnum.Exponential,
+            FogLightColor = day.Fog,
+            FogDensity = Mathf.Pow(day.FogDensity, 3f) * 0.025f * FogDensityScale,
+            FogSkyAffect = 0.3f, // keep the sky mostly readable; fog mainly grounds the terrain
         };
 
         return (sun, new WorldEnvironment { Environment = env, Name = "WorldEnvironment" });
     }
+
+    // Unturned's exponential-squared fog is far lighter than Godot's per-metre exponential fog reads at
+    // the same coefficient; this factor matches the on-screen haze depth to Unturned across the map.
+    private const float FogDensityScale = 2f;
 
     private static Color AverageAmbient(LightingKeyframe day) => new(
         (day.AmbientSky.R + day.AmbientEquator.R + day.AmbientGround.R) / 3f,
