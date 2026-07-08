@@ -53,29 +53,48 @@ public static class RoadsBuilder
         var dirt = new ShaderMaterial { Shader = RoadShader };
         dirt.SetShaderParameter("paved", false);
 
-        int built = 0;
+        // Roads use exactly two materials (paved / dirt), so merge all their geometry into one mesh per
+        // material — two draw calls total instead of one per road.
+        var pavedTool = new SurfaceTool();
+        pavedTool.Begin(Mesh.PrimitiveType.Triangles);
+        var dirtTool = new SurfaceTool();
+        dirtTool.Begin(Mesh.PrimitiveType.Triangles);
+        int pavedVerts = 0, dirtVerts = 0, built = 0;
+
         for (int i = 0; i < roads.Count; i++)
         {
             RoadMaterialConfig config = roads[i].Material < materials.Count
                 ? materials[roads[i].Material]
                 : new RoadMaterialConfig(8f, 4f, 0.2f, 0f, true);
 
-            MeshInstance3D? mesh = BuildRoad(roads[i], config, config.IsConcrete ? paved : dirt, $"Road_{i}");
-            if (mesh != null)
-            {
-                root.AddChild(mesh);
-                built++;
-            }
+            SurfaceTool tool = config.IsConcrete ? pavedTool : dirtTool;
+            int baseVertex = config.IsConcrete ? pavedVerts : dirtVerts;
+            int added = AppendRoad(tool, baseVertex, roads[i], config);
+            if (added == 0)
+                continue;
+            if (config.IsConcrete)
+                pavedVerts += added;
+            else
+                dirtVerts += added;
+            built++;
         }
-        GD.Print($"[unturned-godot] Roads: {built}/{roads.Count} built");
+
+        if (pavedVerts > 0)
+            root.AddChild(CommitRoads(pavedTool, paved, "RoadsPaved"));
+        if (dirtVerts > 0)
+            root.AddChild(CommitRoads(dirtTool, dirt, "RoadsDirt"));
+
+        int meshes = (pavedVerts > 0 ? 1 : 0) + (dirtVerts > 0 ? 1 : 0);
+        GD.Print($"[unturned-godot] Roads: {built}/{roads.Count} built into {meshes} meshes");
         return root;
     }
 
-    private static MeshInstance3D? BuildRoad(PlacedRoad road, RoadMaterialConfig config, Material material,
-        string name)
+    // Appends one road's ribbon geometry to a shared SurfaceTool, offsetting its indices past the vertices
+    // already added. Returns the number of vertices contributed (0 if the road is too short to loft).
+    private static int AppendRoad(SurfaceTool st, int baseVertex, PlacedRoad road, RoadMaterialConfig config)
     {
         if (road.Joints.Count < 2)
-            return null;
+            return 0;
 
         // Sample the whole spline into Godot-space centreline points with accumulated distance.
         var points = new List<Vector3>();
@@ -99,13 +118,11 @@ public static class RoadsBuilder
             }
         }
         if (points.Count < 2)
-            return null;
+            return 0;
 
         float halfWidth = config.Width * 0.5f;
         const float repeat = 24f; // metres per UV-length unit, sets the dashed-line spacing
 
-        var st = new SurfaceTool();
-        st.Begin(Mesh.PrimitiveType.Triangles);
         for (int i = 0; i < points.Count; i++)
         {
             Vector3 forward = Direction(points, i, road.IsLoop);
@@ -122,21 +139,27 @@ public static class RoadsBuilder
         }
         for (int i = 0; i + 1 < points.Count; i++)
         {
-            int l = i * 2, r = i * 2 + 1, ln = (i + 1) * 2, rn = (i + 1) * 2 + 1;
+            int l = baseVertex + (i * 2);
+            int r = baseVertex + (i * 2) + 1;
+            int ln = baseVertex + ((i + 1) * 2);
+            int rn = baseVertex + ((i + 1) * 2) + 1;
             st.AddIndex(l); st.AddIndex(r); st.AddIndex(ln);
             st.AddIndex(r); st.AddIndex(rn); st.AddIndex(ln);
         }
 
-        // Flat ribbons ~0.3 m above the terrain cast an essentially invisible shadow, yet are re-drawn
-        // into every directional cascade — skip it.
-        return new MeshInstance3D
+        return points.Count * 2;
+    }
+
+    // Flat ribbons ~0.3 m above the terrain cast an essentially invisible shadow, yet are re-drawn into
+    // every directional cascade — skip it. All roads of one material are already merged into st here.
+    private static MeshInstance3D CommitRoads(SurfaceTool st, Material material, string name) =>
+        new()
         {
             Name = name,
             Mesh = st.Commit(),
             MaterialOverride = material,
             CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
         };
-    }
 
     private static Vector3 Direction(List<Vector3> points, int i, bool loop)
     {
