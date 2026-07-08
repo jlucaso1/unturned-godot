@@ -25,6 +25,10 @@ coverage/
 coverage.opencover.xml
 coverage.json
 
+# Profiling traces (dotnet-trace / GPU benchmark output)
+*.nettrace
+*.speedscope.json
+
 # Rider / VS / editors
 .idea/
 .vs/
