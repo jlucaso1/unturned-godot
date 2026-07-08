@@ -103,6 +103,13 @@ Two benchmark tiers print a JSON report and diff it against the previous run:
   call stacks don't symbolicate — read `/proc/<pid>/smaps_rollup` (RSS, `Private_Dirty`) for a live
   breakdown, and attribute per-subsystem by differencing runs rather than by stack.
 - **CPU** (.NET): `dotnet-trace collect -- "$GODOT" -- --benchmark`.
+- **No window** (Wayland/X): wrap a GPU run in a headless nested compositor so nothing shows on your
+  desktop — `gamescope --backend headless -W 1152 -H 648 -- "$GODOT" -- --benchmark --gpu`. Real Vulkan,
+  screenshots and VRAM all work; frame time is vsync-capped under it, so use a normal window for
+  uncapped `gpu.frameMs`.
+
+`ObjectStreamer` prints a `post-load reclaim: RSS x -> y MB` line (Linux, from `/proc/self/status`) after
+the one-time load's transient heap is compacted back to the OS — a quick steady-state RSS check.
 
 Profiling output (`*.nettrace`, `heaptrack.*.zst`, `massif.out.*`, `perf.data`, `*.rgp`) is git-ignored.
 
