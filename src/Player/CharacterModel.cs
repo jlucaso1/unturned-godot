@@ -20,6 +20,9 @@ public static class CharacterModel
     // animation) is read from the data, so other skinned entities import the same way with a different name.
     private const string EntityRoot = "Player_Client";
 
+    // Customization.SKINS[0] — the default light skin tone the character's skin regions are filled with.
+    private static readonly Color DefaultSkin = new(244f / 255f, 230f / 255f, 210f / 255f);
+
     // Builds the skinned Player_Client character, or null when the game data is absent or can't be parsed
     // (the caller then falls back to the placeholder figure).
     public static Node3D? Build(string unturnedPath)
@@ -65,12 +68,11 @@ public static class CharacterModel
             if (!mesh.Usable)
                 return null;
 
-            ImageTexture? texture = MainTexture(file, byId, (List<object>)smr["m_Materials"], assetsPath + ".resS");
             if (mesh.BoneIndices.Length == mesh.Vertices.Length * UnityMesh.BonesPerVertex && mesh.BindPoses.Count > 0)
-                return BuildSkinnedCharacter(file, byId, smr, mesh, texture);
+                return BuildSkinnedCharacter(file, byId, smr, mesh);
 
             // Fallback: no skinning data -> static bind-pose mesh.
-            return new MeshInstance3D { Mesh = BuildMesh(mesh, texture, skinned: false), Name = "CharacterBody" };
+            return new MeshInstance3D { Mesh = BuildMesh(mesh, skinned: false), Name = "CharacterBody" };
         }
         return null;
     }
@@ -79,7 +81,7 @@ public static class CharacterModel
     // body mesh as its child. Uses Godot's CreateSkinFromRestTransforms so the bind matrices derive from the
     // rest hierarchy — the mesh is authored in that same bind pose, so this is exact.
     private static Node3D BuildSkinnedCharacter(SerializedFile file, Dictionary<long, SerializedObject> byId,
-        Dictionary<string, object> smr, UnityMesh mesh, ImageTexture? texture)
+        Dictionary<string, object> smr, UnityMesh mesh)
     {
         var boneRefs = (List<object>)smr["m_Bones"];
         int boneCount = boneRefs.Count;
@@ -114,7 +116,7 @@ public static class CharacterModel
 
         var body = new MeshInstance3D
         {
-            Mesh = BuildMesh(mesh, texture, skinned: true),
+            Mesh = BuildMesh(mesh, skinned: true),
             Skin = skeleton.CreateSkinFromRestTransforms(), // bind matrices from the rest hierarchy
             Name = "CharacterBody",
         };
@@ -230,87 +232,34 @@ public static class CharacterModel
         return 0;
     }
 
-    private static ImageTexture? MainTexture(SerializedFile file, Dictionary<long, SerializedObject> byId,
-        List<object> materials, string resSPath)
+    // Builds the Godot mesh via the single Unity->Godot translation (UnityMeshConverter): reflected
+    // positions AND normals plus reversed winding, so the character keeps its authored hard-edge normals
+    // and can't be lit inside-out. When skinned, also carry the per-vertex bone indices + normalized weights
+    // (unaffected by the winding flip, which only reorders indices).
+    private static ArrayMesh BuildMesh(UnityMesh mesh, bool skinned)
     {
-        if (materials.Count == 0 || !byId.TryGetValue(Id(materials[0]), out SerializedObject? matObj))
-            return null;
-        (int fileId, long texId) = UnityMaterial.GetTexture(Read(file, byId, matObj.PathId), "_MainTex");
-        if (fileId != 0 || !byId.TryGetValue(texId, out SerializedObject? texObj))
-            return null;
-
-        UnityTexture tex = UnityTexture.Read(Read(file, byId, texObj.PathId));
-        byte[]? pixels = ReadStreamSlice(resSPath, tex);
-        return pixels == null
-            ? null
-            : ModelLibrary.BuildTexture(new CachedTexture(tex.Format, tex.Width, tex.Height, tex.MipCount, pixels));
-    }
-
-    // Reads the texture's pixel slice straight out of the .resS file (it is large, so seek to the range).
-    private static byte[]? ReadStreamSlice(string resSPath, UnityTexture tex)
-    {
-        if (tex.StreamPath.Length == 0)
-            return tex.InlineData.Length > 0 ? tex.InlineData : null;
-        if (!File.Exists(resSPath))
-            return null;
-        using FileStream fs = File.OpenRead(resSPath);
-        fs.Seek(tex.StreamOffset, SeekOrigin.Begin);
-        var buffer = new byte[tex.StreamSize];
-        return fs.Read(buffer, 0, buffer.Length) == buffer.Length ? buffer : null;
-    }
-
-    // Mirrors ModelLibrary: convert vertices Unity->Godot (negate Z), reverse the mirrored winding, derive
-    // smooth normals from the flipped triangles, flip UV V. When skinned, also carry the per-vertex bone
-    // indices + normalized weights (unaffected by the winding flip, which only reorders indices).
-    private static ArrayMesh BuildMesh(UnityMesh mesh, ImageTexture? texture, bool skinned)
-    {
-        var verts = new Vector3[mesh.Vertices.Length];
-        for (int i = 0; i < verts.Length; i++)
-            verts[i] = Landscape.UnityToGodot(mesh.Vertices[i]);
-
-        var uvs = new Vector2[mesh.Vertices.Length];
-        for (int i = 0; i < uvs.Length; i++)
-            uvs[i] = i < mesh.Uvs.Length ? new Vector2(mesh.Uvs[i].X, 1f - mesh.Uvs[i].Y) : Vector2.Zero;
-
-        var indices = new List<int>();
-        foreach (int[] submesh in mesh.Submeshes)
-            for (int i = 0; i + 2 < submesh.Length; i += 3)
-            {
-                indices.Add(submesh[i]);
-                indices.Add(submesh[i + 2]); // reversed
-                indices.Add(submesh[i + 1]);
-            }
-        int[] index = indices.ToArray();
-
-        var normals = new Vector3[verts.Length];
-        for (int i = 0; i + 2 < index.Length; i += 3)
-        {
-            int a = index[i], b = index[i + 1], c = index[i + 2];
-            Vector3 face = (verts[c] - verts[a]).Cross(verts[b] - verts[a]);
-            normals[a] += face;
-            normals[b] += face;
-            normals[c] += face;
-        }
-        for (int i = 0; i < normals.Length; i++)
-            normals[i] = normals[i].LengthSquared() > 0f ? normals[i].Normalized() : Vector3.Up;
+        UnityMeshConverter.GodotMesh g = UnityMeshConverter.ToGodot(mesh);
 
         var arrays = new Godot.Collections.Array();
         arrays.Resize((int)Mesh.ArrayType.Max);
-        arrays[(int)Mesh.ArrayType.Vertex] = verts;
-        arrays[(int)Mesh.ArrayType.Normal] = normals;
-        arrays[(int)Mesh.ArrayType.TexUV] = uvs;
+        arrays[(int)Mesh.ArrayType.Vertex] = g.Vertices;
+        arrays[(int)Mesh.ArrayType.Normal] = g.Normals;
+        arrays[(int)Mesh.ArrayType.TexUV] = g.Uvs;
         if (skinned)
         {
             arrays[(int)Mesh.ArrayType.Bones] = mesh.BoneIndices;
             arrays[(int)Mesh.ArrayType.Weights] = NormalizeWeights(mesh.BoneWeights);
         }
-        arrays[(int)Mesh.ArrayType.Index] = index;
+        arrays[(int)Mesh.ArrayType.Index] = g.Indices;
 
         var arrayMesh = new ArrayMesh();
         arrayMesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+        // The body's _MainTex is only a UV-region reference atlas; the game composites the character in a
+        // custom shader that fills skin regions with the customization skin colour. Reproduce the dominant
+        // part of that look with a flat skin tone (Customization.SKINS default) instead of the atlas.
         arrayMesh.SurfaceSetMaterial(0, new StandardMaterial3D
         {
-            AlbedoTexture = texture,
+            AlbedoColor = DefaultSkin,
             Roughness = 1f,
             SpecularMode = BaseMaterial3D.SpecularModeEnum.Disabled,
         });
