@@ -106,6 +106,13 @@ public partial class ObjectStreamer : Node
         _totalTextureKeys = _registry.PendingKeyCount;
         GD.Print($"[stream] built {withMesh}/{_objects.Count} objects ({meshLibrary.Count} meshes), " +
             $"{_totalTextureKeys} texture keys pending");
+
+        // These parsed inputs are consumed only up to here — the MultiMesh buffers now hold their own
+        // copies and the streaming worker already captured _db by value. Drop them so the ~32 MB foliage
+        // transform graph and the placement/asset lists don't live on this node for the whole session.
+        _foliage = null;
+        _objects = null!;
+        _db = null!;
     }
 
     private void StartStreaming()
