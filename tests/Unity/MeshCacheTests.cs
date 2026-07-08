@@ -61,4 +61,20 @@ public class MeshCacheTests
         using var stream = new MemoryStream(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
         Assert.Throws<InvalidDataException>(() => MeshCache.Read(stream));
     }
+
+    [Fact]
+    public void RoundTrip_LongTextureKey_MultiByteLengthPrefix()
+    {
+        // A >127-char key forces the 7-bit-encoded string length to span two bytes on read.
+        string key = new string('k', 200);
+        var verts = new[] { new Vector3(1, 1, 1) };
+        var submeshes = new List<CachedSubmesh> { new(new[] { 0 }, Colors.Red, key, UnityMaterial.Blend.Opaque) };
+
+        using var stream = new MemoryStream();
+        MeshCache.Write(stream, verts, System.Array.Empty<Vector3>(), System.Array.Empty<Vector2>(), submeshes);
+        stream.Position = 0;
+        var (_, _, _, sm) = MeshCache.Read(stream);
+
+        Assert.Equal(key, sm[0].TextureKey);
+    }
 }
