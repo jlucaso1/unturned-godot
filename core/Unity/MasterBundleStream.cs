@@ -8,8 +8,8 @@ namespace UnturnedGodot.Unity;
 // Streams a UnityFS bundle's decompressed blob so a caller can pull the SerializedFile prefix, build the
 // scene, then keep pulling the .resS texture stream from the SAME LZMA pass — no re-decompressing the
 // ~171 MB SerializedFile, and textures can be extracted progressively as their bytes arrive. Only the
-// masterbundle's shape (a single LZMA data block) is supported; Open returns null for anything else so
-// the caller can fall back to the whole-blob decode.
+// masterbundle's shape (a single LZMA data block) is supported; Open returns null for anything else (and
+// for any malformed input) so the caller can fall back to the whole-blob decode.
 public sealed class MasterBundleStream : IDisposable
 {
     public readonly struct Node
@@ -42,8 +42,21 @@ public sealed class MasterBundleStream : IDisposable
     }
 
     // Parses the header/block table and opens the LZMA decoder over the single data block. Returns null if
-    // the bundle is not a single LZMA block (the caller then decodes the whole blob the ordinary way).
+    // the bundle is not a single LZMA block or is malformed (the caller then decodes the whole blob the
+    // ordinary way).
     public static MasterBundleStream? Open(byte[] bundle)
+    {
+        try
+        {
+            return TryOpen(bundle);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static MasterBundleStream? TryOpen(byte[] bundle)
     {
         var r = new UnityBinaryReader(bundle, bigEndian: true);
         if (r.ReadCString() != "UnityFS")
@@ -75,9 +88,9 @@ public sealed class MasterBundleStream : IDisposable
             compressedBlocksInfo = r.ReadBytes(compressedBlocksInfoSize);
         }
 
-        byte[] blocksInfo = DecodeBlocksInfo(compressedBlocksInfo, compressionType, uncompressedBlocksInfoSize);
-        if (blocksInfo.Length == 0)
-            return null;
+        // Reuse the (fully tested) bundle blocks-info decoder; unsupported compression throws and is
+        // caught by Open, falling the caller back to the whole-blob path.
+        byte[] blocksInfo = UnityBundle.Decompress(compressedBlocksInfo, compressionType, uncompressedBlocksInfoSize);
 
         if ((flags & 0x200) != 0)
             r.Align(16);
@@ -131,14 +144,6 @@ public sealed class MasterBundleStream : IDisposable
             Array.Resize(ref buffer, read);
         return buffer;
     }
-
-    private static byte[] DecodeBlocksInfo(byte[] data, int compressionType, int uncompressedSize) => compressionType switch
-    {
-        0 => data,
-        1 => Lzma.Decompress(data, uncompressedSize, uncompressedSize),
-        2 or 3 => Lz4.Decompress(data, uncompressedSize),
-        _ => Array.Empty<byte>(),
-    };
 
     public void Dispose()
     {

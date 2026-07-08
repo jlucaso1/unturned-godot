@@ -128,7 +128,7 @@ public sealed class UnityBundle
         return new UnityBundle(files);
     }
 
-    private static byte[] Decompress(byte[] data, int compressionType, int uncompressedSize) => compressionType switch
+    internal static byte[] Decompress(byte[] data, int compressionType, int uncompressedSize) => compressionType switch
     {
         0 => data,
         2 or 3 => Lz4.Decompress(data, uncompressedSize), // LZ4 / LZ4HC

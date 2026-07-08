@@ -35,6 +35,7 @@ public sealed record BenchmarkReport
 
 // Source-generated serialization: AOT/trim-safe (the game project publishes with PublishAot=true) and
 // zero external dependencies.
+[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage] // source-generated serialization plumbing
 [JsonSourceGenerationOptions(WriteIndented = true, PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(BenchmarkReport))]
 public partial class BenchmarkJson : JsonSerializerContext
