@@ -10,12 +10,16 @@ public readonly struct RoadJoint
     public readonly Vector3 Vertex;   // Unity world space
     public readonly Vector3 Tangent0; // incoming handle (relative to Vertex)
     public readonly Vector3 Tangent1; // outgoing handle (relative to Vertex)
+    public readonly float Offset;     // vertical offset added on top of the conformed/spline height
+    public readonly bool IgnoreTerrain; // true for bridges: keep the spline height instead of conforming
 
-    public RoadJoint(Vector3 vertex, Vector3 tangent0, Vector3 tangent1)
+    public RoadJoint(Vector3 vertex, Vector3 tangent0, Vector3 tangent1, float offset = 0f, bool ignoreTerrain = false)
     {
         Vertex = vertex;
         Tangent0 = tangent0;
         Tangent1 = tangent1;
+        Offset = offset;
+        IgnoreTerrain = ignoreTerrain;
     }
 }
 
@@ -116,11 +120,9 @@ public static class LevelRoads
                     tangent1 = river.ReadSingleVector3();
                     river.ReadByte(); // ERoadMode (unused)
                 }
-                if (version > 4)
-                    river.ReadSingle(); // per-joint offset (unused)
-                if (version > 3)
-                    river.ReadBoolean(); // ignoreTerrain (unused)
-                joints[step] = new RoadJoint(vertex, tangent0, tangent1);
+                float offset = version > 4 ? river.ReadSingle() : 0f;
+                bool ignoreTerrain = version > 3 && river.ReadBoolean();
+                joints[step] = new RoadJoint(vertex, tangent0, tangent1, offset, ignoreTerrain);
             }
             result.Add(new PlacedRoad(material, isLoop, joints));
         }

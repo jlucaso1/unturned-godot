@@ -15,7 +15,6 @@ namespace UnturnedGodot;
 public static class RoadsBuilder
 {
     private const float SampleSpacing = 3f;   // metres between spline samples
-    private const float HeightOffset = 0.3f;  // raise above terrain to avoid z-fighting
     private const float FallbackRepeat = 24f; // metres per texture tile when drawing procedurally
 
     private static readonly Shader RoadShader = new()
@@ -42,7 +41,7 @@ public static class RoadsBuilder
         """,
     };
 
-    public static Node3D Build(string environmentDir)
+    public static Node3D Build(string environmentDir, HeightmapSampler heights)
     {
         var root = new Node3D { Name = "Roads" };
         List<PlacedRoad> roads = LevelRoads.LoadPaths(Path.Combine(environmentDir, "Paths.dat"));
@@ -86,7 +85,10 @@ public static class RoadsBuilder
             }
             // Unturned's RoadMaterial.HalfWidth returns the width field as-is (it is the half-width), so
             // the full road is 2 * config.Width.
-            int added = AppendRoad(acc.tool, acc.verts, roads[i], shared.repeat, config.Width);
+            // config.Depth is Unturned's HalfVerticalSize (road-bed half-thickness) and config.Offset its
+            // VerticalOffset — the data-driven cross-section, replacing the old hand-picked lift.
+            int added = AppendRoad(acc.tool, acc.verts, roads[i], shared.repeat, config.Width, heights,
+                config.Depth, config.Offset);
             if (added > 0)
             {
                 merged[mat] = (acc.tool, acc.material, acc.verts + added);
@@ -126,18 +128,22 @@ public static class RoadsBuilder
         return (material, repeat);
     }
 
-    // Appends one road's ribbon to the shared SurfaceTool, offsetting its indices past the vertices already
-    // added. Returns the vertex count contributed (0 if the road is too short to loft).
-    private static int AppendRoad(SurfaceTool st, int baseVertex, PlacedRoad road, float repeat, float halfWidth)
+    // Appends one road to the shared SurfaceTool with Unturned's cross-section (Road.buildMesh): four
+    // vertices per sample — a flat top of width 2*halfWidth raised by halfDepth+verticalOffset, and a shoulder
+    // on each side sloping down-and-out to halfDepth below the conformed centre. The shoulders dig into the
+    // terrain so the edges meet the ground seamlessly instead of leaving a lip. Returns the vertex count added.
+    private static int AppendRoad(SurfaceTool st, int baseVertex, PlacedRoad road, float repeat, float halfWidth,
+        HeightmapSampler heights, float halfDepth, float verticalOffset)
     {
         if (road.Joints.Count < 2)
             return 0;
 
-        // Sample the whole spline into Godot-space centreline points with accumulated distance.
+        // Sample the spline into Godot-space centreline points (height conformed to the terrain, per
+        // ConformedPoint) with accumulated distance for the texture V.
         var points = new List<Vector3>();
         var distances = new List<float>();
         float distance = 0f;
-        Vector3 previous = Landscape.UnityToGodot(road.Joints[0].Vertex);
+        Vector3 previous = ConformedPoint(road.Joints[0], road.Joints[0], 0f, heights);
         int segments = road.IsLoop ? road.Joints.Count : road.Joints.Count - 1;
         for (int s = 0; s < segments; s++)
         {
@@ -147,7 +153,7 @@ public static class RoadsBuilder
             int steps = Mathf.Max(2, Mathf.CeilToInt(segLength / SampleSpacing));
             for (int step = s == 0 ? 0 : 1; step <= steps; step++)
             {
-                Vector3 p = Landscape.UnityToGodot(LevelRoads.BezierPoint(a, b, step / (float)steps));
+                Vector3 p = ConformedPoint(a, b, step / (float)steps, heights);
                 distance += (p - previous).Length();
                 points.Add(p);
                 distances.Add(distance);
@@ -157,31 +163,51 @@ public static class RoadsBuilder
         if (points.Count < 2)
             return 0;
 
+        float verticalSize = halfDepth * 2f;
+        Vector3 top = Vector3.Up * (halfDepth + verticalOffset);       // road surface lift
+        Vector3 bottom = Vector3.Up * (-halfDepth + verticalOffset);   // shoulder foot, below the centre
         for (int i = 0; i < points.Count; i++)
         {
             Vector3 forward = Direction(points, i, road.IsLoop);
             Vector3 side = forward.Cross(Vector3.Up).Normalized();
-            Vector3 up = Vector3.Up * HeightOffset;
             float v = distances[i] / repeat;
-
-            st.SetNormal(Vector3.Up);
-            st.SetUV(new Vector2(0f, v));
-            st.AddVertex(points[i] + (side * halfWidth) + up);
-            st.SetNormal(Vector3.Up);
-            st.SetUV(new Vector2(1f, v));
-            st.AddVertex(points[i] - (side * halfWidth) + up);
+            // v0 outer-left (low, U0), v1 inner-left (high, U0), v2 inner-right (high, U1), v3 outer-right (low, U1).
+            AddVertex(st, points[i] + (side * (halfWidth + verticalSize)) + bottom, 0f, v);
+            AddVertex(st, points[i] + (side * halfWidth) + top, 0f, v);
+            AddVertex(st, points[i] - (side * halfWidth) + top, 1f, v);
+            AddVertex(st, points[i] - (side * (halfWidth + verticalSize)) + bottom, 1f, v);
         }
         for (int i = 0; i + 1 < points.Count; i++)
-        {
-            int l = baseVertex + (i * 2);
-            int r = baseVertex + (i * 2) + 1;
-            int ln = baseVertex + ((i + 1) * 2);
-            int rn = baseVertex + ((i + 1) * 2) + 1;
-            st.AddIndex(l); st.AddIndex(r); st.AddIndex(ln);
-            st.AddIndex(r); st.AddIndex(rn); st.AddIndex(ln);
-        }
+            for (int e = 0; e < 3; e++) // left shoulder, top, right shoulder
+            {
+                int a = baseVertex + (i * 4) + e;
+                int b = a + 1;
+                int a2 = baseVertex + ((i + 1) * 4) + e;
+                int b2 = a2 + 1;
+                st.AddIndex(a); st.AddIndex(b); st.AddIndex(a2);
+                st.AddIndex(b); st.AddIndex(b2); st.AddIndex(a2);
+            }
 
-        return points.Count * 2;
+        return points.Count * 4;
+    }
+
+    private static void AddVertex(SurfaceTool st, Vector3 position, float u, float v)
+    {
+        st.SetNormal(Vector3.Up);
+        st.SetUV(new Vector2(u, v));
+        st.AddVertex(position);
+    }
+
+    // One centreline point (Godot space) at t along the a->b segment: its XZ from the Bezier, its height
+    // conformed to the terrain (unless the start joint ignores terrain, e.g. bridges), plus the interpolated
+    // per-joint offset. The material's surface lift is applied to the vertices, not here.
+    private static Vector3 ConformedPoint(RoadJoint a, RoadJoint b, float t, HeightmapSampler heights)
+    {
+        Vector3 p = Landscape.UnityToGodot(LevelRoads.BezierPoint(a, b, t));
+        if (!a.IgnoreTerrain && heights.TrySampleHeight(p.X, -p.Z, out float ground)) // Godot Z -> Unity Z
+            p.Y = ground;
+        p.Y += Mathf.Lerp(a.Offset, b.Offset, t);
+        return p;
     }
 
     private static MeshInstance3D CommitRoad(SurfaceTool st, Material material, string name) =>
@@ -190,7 +216,7 @@ public static class RoadsBuilder
             Name = name,
             Mesh = st.Commit(),
             MaterialOverride = material,
-            // Flat ribbons ~0.3 m above the terrain: their shadow is invisible, so don't re-draw them into
+            // Flat ribbons that hug the terrain: their shadow is invisible, so don't re-draw them into
             // every directional cascade.
             CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
         };

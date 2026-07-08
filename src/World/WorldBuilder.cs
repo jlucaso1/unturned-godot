@@ -14,6 +14,7 @@ namespace UnturnedGodot;
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed record WorldBuildResult(
     Node3D Terrain,
+    HeightmapSampler Heights,
     Node3D Objects,
     Node3D Foliage,
     int TileCount,
@@ -33,7 +34,7 @@ public static class WorldBuilder
         GD.Print($"[unturned-godot] Loading map {level.Name} at {level.Path}");
 
         var terrainSw = Stopwatch.StartNew();
-        (Node3D terrain, int tileCount) = BuildTerrain(level);
+        (Node3D terrain, int tileCount, HeightmapSampler heights) = BuildTerrain(level);
         terrainSw.Stop();
 
         var objectsSw = Stopwatch.StartNew();
@@ -43,14 +44,15 @@ public static class WorldBuilder
             System.IO.Path.Combine(unturnedPath, "Bundles", "core_linux.masterbundle"));
         objectsSw.Stop();
 
-        return new WorldBuildResult(terrain, objects, foliage, tileCount, placed, withMesh, unique,
+        return new WorldBuildResult(terrain, heights, objects, foliage, tileCount, placed, withMesh, unique,
             terrainSw.Elapsed.TotalMilliseconds, objectsSw.Elapsed.TotalMilliseconds);
     }
 
-    public static (Node3D root, int tileCount) BuildTerrain(LevelInfo level)
+    public static (Node3D root, int tileCount, HeightmapSampler heights) BuildTerrain(LevelInfo level)
     {
         var tiles = level.EnumerateTiles();
         GD.Print($"[unturned-godot] Terrain tiles: {tiles.Count}");
+        var heightTiles = new HeightmapTile[tiles.Count]; // kept for the height sampler (roads conform to it)
 
         // Real per-layer terrain textures (Materials.unity3d), blended by the splatmap; null if the bundle
         // or a layer texture is missing, in which case tiles fall back to averaged layer colors.
@@ -68,6 +70,7 @@ public static class WorldBuilder
         {
             (int x, int y) = tiles[i];
             HeightmapTile tile = HeightmapTile.Read(level.HeightmapPath(x, y), x, y);
+            heightTiles[i] = tile;
             SplatmapTile? splat = SplatmapTile.TryRead(level.SplatmapPath(x, y), x, y);
             meshes[i] = TerrainBuilder.BuildTileMesh(tile, splat, textured && splat != null);
         });
@@ -75,7 +78,7 @@ public static class WorldBuilder
         var terrainRoot = new Node3D { Name = "Terrain" };
         foreach (TerrainBuilder.TileMesh tm in meshes)
             terrainRoot.AddChild(TerrainBuilder.FinishTile(tm, layers));
-        return (terrainRoot, tiles.Count);
+        return (terrainRoot, tiles.Count, new HeightmapSampler(heightTiles));
     }
 
     private static (Node3D root, Node3D foliage, int placed, int withMesh, int unique) BuildObjects(

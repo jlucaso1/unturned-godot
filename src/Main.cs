@@ -84,7 +84,7 @@ public partial class Main : Node3D
             AddChild(world.Terrain);
             AddChild(world.Objects);
             AddChild(world.Foliage);
-            AddChild(RoadsBuilder.Build(environmentDir));
+            AddChild(RoadsBuilder.Build(environmentDir, world.Heights));
             AddChild(WaterBuilder.Build(lighting));
             AddChild(NodesBuilder.Build(environmentDir));
             SetupEnvironment(lighting);
@@ -114,9 +114,9 @@ public partial class Main : Node3D
         // Interactive: terrain, roads, water and environment up front; objects stream in (mesh-first,
         // textures hot-swapped as they decode) so a cold load is playable in ~3 s instead of ~10 s.
         var level = new LevelInfo(System.IO.Path.Combine(unturnedPath, "Maps", MapName));
-        (Node3D terrain, _) = WorldBuilder.BuildTerrain(level);
+        (Node3D terrain, _, HeightmapSampler heights) = WorldBuilder.BuildTerrain(level);
         AddChild(terrain);
-        AddChild(RoadsBuilder.Build(environmentDir));
+        AddChild(RoadsBuilder.Build(environmentDir, heights));
         AddChild(WaterBuilder.Build(lighting));
         AddChild(NodesBuilder.Build(environmentDir));
         SetupEnvironment(lighting);
