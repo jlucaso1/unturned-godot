@@ -21,6 +21,13 @@ public static class TerrainPalette
         new(0.556f, 0.308f, 0.184f), // 7 Stone_01
     };
 
+    // The Materials.unity3d texture each splat layer uses, in the same layer order as LayerColors. Lets the
+    // textured terrain map each layer to its real texture (the bundle stores them in a different order).
+    public static readonly string[] LayerTextureNames =
+    {
+        "Dirt", "Farm", "Grass", "Gravel", "Road", "Sand", "Grass", "Stone",
+    };
+
     // Weighted blend of the layer colors; falls back to layer 0 when a texel has no weight.
     // The layer run for a texel is contiguous in the flat weight array, so we compute the base offset once
     // and read weights[base + layer]; the float accumulation order is unchanged, so the result is identical.
