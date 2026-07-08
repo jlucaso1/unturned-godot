@@ -36,6 +36,29 @@ public class SerializedFileTests
     }
 
     [Fact]
+    public void ParsesVersion15File()
+    {
+        // The Unity 5.x per-map bundle format: no second header block, and objects reference their type
+        // by class id (u16) rather than a type index.
+        SerializedFile file = SerializedFile.Read(new SerializedFileBuilder { Version = 15, ClassId = 28 }.Build());
+
+        SerializedObject obj = Assert.Single(file.Objects);
+        Assert.Equal(28, obj.ClassId); // Texture2D
+        Assert.Equal(100, obj.PathId);
+        Assert.Equal("Base", Assert.Single(obj.TypeTree).Type);
+        Assert.Equal(1, file.ReaderFor(obj).ReadByte()); // payload {1,2,3,4} lands at the data offset
+    }
+
+    [Fact]
+    public void Version15_NegativeTypeClassId_ReadsWithoutTypeTree()
+    {
+        // A negative pre-16 type class id (a MonoBehaviour/script type) carries an extra script hash, and
+        // its object then matches no built-in type tree; the parse must stay aligned and not crash.
+        SerializedFile file = SerializedFile.Read(new SerializedFileBuilder { Version = 15, ClassId = -1 }.Build());
+        Assert.Empty(Assert.Single(file.Objects).TypeTree);
+    }
+
+    [Fact]
     public void UnsupportedVersion_Throws()
     {
         // metadataSize, fileSize, version(=20, big-endian), dataOffset.

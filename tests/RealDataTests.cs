@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.IO;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Data;
+using UnturnedGodot.Unity;
 using Xunit;
 
 namespace UnturnedGodot.Tests;
@@ -72,6 +73,35 @@ public class RealDataTests
         // Sky gradient: a blue zenith fading to a hazy (near-grey) horizon.
         Assert.True(day.SkyTop.B > day.SkyTop.R);                     // zenith is blue
         Assert.True(day.SkyHorizon.R > day.SkyTop.R);                 // horizon is hazier/greyer than zenith
+    }
+
+    [Fact]
+    public void RealRoadTextures_ParseFromUnityRawBundle()
+    {
+        string? root = UnturnedPath();
+        if (root == null) return;
+        string path = Path.Combine(root, "Maps", "PEI", "Environment", "Roads.unity3d");
+        if (!File.Exists(path)) return;
+
+        byte[] data = File.ReadAllBytes(path);
+        Assert.True(UnityRawBundle.IsRaw(data));
+
+        UnityRawBundle raw = UnityRawBundle.Read(data);
+        byte[] sfBytes = Assert.Single(raw.Files).Value;
+
+        SerializedFile file = SerializedFile.Read(sfBytes); // version 15
+        var byName = new Dictionary<string, (int w, int h)>();
+        foreach (SerializedObject o in file.Objects)
+            if (o.ClassId == 28) // Texture2D
+            {
+                UnityTexture tex = UnityTexture.Read(TypeTreeReader.Read(o.TypeTree, file.ReaderFor(o)));
+                byName[tex.Name] = (tex.Width, tex.Height);
+            }
+
+        // PEI ships 10 road textures; the paved highway and the dirt trail are the ones roads use.
+        Assert.Equal(10, byName.Count);
+        Assert.Equal((256, 128), byName["Highway_0"]);
+        Assert.Equal((64, 64), byName["Trail"]);
     }
 
     [Fact]

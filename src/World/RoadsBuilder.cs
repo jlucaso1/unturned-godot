@@ -1,19 +1,22 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using Godot;
 using UnturnedGodot.Data;
+using UnturnedGodot.Unity;
 
 namespace UnturnedGodot;
 
-// Builds the map's roads: Bezier splines from Paths.dat lofted into ribbons at the widths from Roads.dat.
-// These are the highways and dirt roads connecting the towns, which the terrain splatmap alone only hints
-// at. The map's real road textures ship in a legacy UnityRaw bundle our reader can't open, so the asphalt
-// (dark surface, yellow centre line, dashed lane lines) and dirt are drawn procedurally from the UVs.
+// Builds the map's roads: Bezier splines from Paths.dat lofted into ribbons at the widths from Roads.dat,
+// textured with the real asphalt/dirt textures from the map's Roads.unity3d (a legacy UnityRaw bundle).
+// One material is shared per road-material index (highway, dirt, ...) so the many roads batch. If the
+// bundle can't be read, roads fall back to a procedural asphalt/dirt shader.
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class RoadsBuilder
 {
     private const float SampleSpacing = 3f;   // metres between spline samples
     private const float HeightOffset = 0.3f;  // raise above terrain to avoid z-fighting
+    private const float FallbackRepeat = 24f; // metres per texture tile when drawing procedurally
 
     private static readonly Shader RoadShader = new()
     {
@@ -46,32 +49,66 @@ public static class RoadsBuilder
         if (roads.Count == 0)
             return root;
 
-        List<RoadMaterialConfig> materials = LevelRoads.LoadMaterials(Path.Combine(environmentDir, "Roads.dat"));
+        List<RoadMaterialConfig> configs = LevelRoads.LoadMaterials(Path.Combine(environmentDir, "Roads.dat"));
+        List<ImageTexture?> textures = LoadRoadTextures(environmentDir);
 
-        var paved = new ShaderMaterial { Shader = RoadShader };
-        paved.SetShaderParameter("paved", true);
-        var dirt = new ShaderMaterial { Shader = RoadShader };
-        dirt.SetShaderParameter("paved", false);
+        var pavedFallback = new ShaderMaterial { Shader = RoadShader };
+        pavedFallback.SetShaderParameter("paved", true);
+        var dirtFallback = new ShaderMaterial { Shader = RoadShader };
+        dirtFallback.SetShaderParameter("paved", false);
+        var byMaterial = new Dictionary<int, (Material material, float repeat)>();
 
-        int built = 0;
+        int built = 0, textured = 0;
         for (int i = 0; i < roads.Count; i++)
         {
-            RoadMaterialConfig config = roads[i].Material < materials.Count
-                ? materials[roads[i].Material]
+            int mat = roads[i].Material;
+            RoadMaterialConfig config = mat < configs.Count
+                ? configs[mat]
                 : new RoadMaterialConfig(8f, 4f, 0.2f, 0f, true);
 
-            MeshInstance3D? mesh = BuildRoad(roads[i], config, config.IsConcrete ? paved : dirt, $"Road_{i}");
+            if (!byMaterial.TryGetValue(mat, out (Material material, float repeat) shared))
+            {
+                shared = SharedMaterial(mat, config, textures, pavedFallback, dirtFallback);
+                byMaterial[mat] = shared;
+                if (shared.material is StandardMaterial3D)
+                    textured++;
+            }
+
+            // Unturned's RoadMaterial.HalfWidth returns the width field as-is (it is the half-width), so
+            // the full road is 2 * config.Width.
+            MeshInstance3D? mesh = BuildRoad(roads[i], shared.material, shared.repeat,
+                config.Width, $"Road_{i}");
             if (mesh != null)
             {
                 root.AddChild(mesh);
                 built++;
             }
         }
-        GD.Print($"[unturned-godot] Roads: {built}/{roads.Count} built");
+        GD.Print($"[unturned-godot] Roads: {built}/{roads.Count} built, {textured} textured materials");
         return root;
     }
 
-    private static MeshInstance3D? BuildRoad(PlacedRoad road, RoadMaterialConfig config, Material material,
+    // One material per road-material index: the real Roads.unity3d texture (tiled by the config height),
+    // or the procedural asphalt/dirt shader when no texture is available.
+    private static (Material, float) SharedMaterial(int mat, RoadMaterialConfig config,
+        List<ImageTexture?> textures, ShaderMaterial paved, ShaderMaterial dirt)
+    {
+        ImageTexture? texture = mat < textures.Count ? textures[mat] : null;
+        if (texture == null)
+            return (config.IsConcrete ? paved : dirt, FallbackRepeat);
+
+        var material = new StandardMaterial3D
+        {
+            AlbedoTexture = texture,
+            Roughness = 1f,
+            CullMode = BaseMaterial3D.CullModeEnum.Disabled, // seen from above; winding varies with curves
+        };
+        // Unturned tiles the texture every texHeight/config.Height metres of road length.
+        float repeat = config.Height > 0f ? texture.GetHeight() / config.Height : texture.GetHeight();
+        return (material, repeat);
+    }
+
+    private static MeshInstance3D? BuildRoad(PlacedRoad road, Material material, float repeat, float halfWidth,
         string name)
     {
         if (road.Joints.Count < 2)
@@ -100,9 +137,6 @@ public static class RoadsBuilder
         }
         if (points.Count < 2)
             return null;
-
-        float halfWidth = config.Width * 0.5f;
-        const float repeat = 24f; // metres per UV-length unit, sets the dashed-line spacing
 
         var st = new SurfaceTool();
         st.Begin(Mesh.PrimitiveType.Triangles);
@@ -136,5 +170,57 @@ public static class RoadsBuilder
         Vector3 prev = i > 0 ? points[i - 1] : (loop ? points[^1] : points[i]);
         Vector3 dir = next - prev;
         return dir.LengthSquared() > 0f ? dir.Normalized() : Vector3.Forward;
+    }
+
+    // Decodes the road textures from Roads.unity3d in AssetBundle container order, which is the material
+    // index order Unturned uses (material 0 -> Highway_0, 5 -> Trail, ...). The bundle is a small (~2 MB)
+    // uncompressed UnityRaw file, so it's read each build rather than cached like the masterbundle.
+    private static List<ImageTexture?> LoadRoadTextures(string environmentDir)
+    {
+        var result = new List<ImageTexture?>();
+        string bundlePath = Path.Combine(environmentDir, "Roads.unity3d");
+        if (!File.Exists(bundlePath))
+            return result;
+
+        byte[] data = File.ReadAllBytes(bundlePath);
+        if (!UnityRawBundle.IsRaw(data))
+            return result;
+
+        UnityRawBundle raw = UnityRawBundle.Read(data);
+        byte[]? sfBytes = null;
+        foreach (KeyValuePair<string, byte[]> f in raw.Files)
+            sfBytes = f.Value; // one CAB entry: the SerializedFile
+        if (sfBytes == null)
+            return result;
+
+        SerializedFile file = SerializedFile.Read(sfBytes);
+        var byId = new Dictionary<long, SerializedObject>();
+        foreach (SerializedObject o in file.Objects)
+            byId[o.PathId] = o;
+
+        foreach (SerializedObject o in file.Objects)
+        {
+            if (o.ClassId != 142) // AssetBundle
+                continue;
+            Dictionary<string, object> ab = TypeTreeReader.Read(o.TypeTree, file.ReaderFor(o));
+            foreach (object entry in (List<object>)ab["m_Container"])
+            {
+                var pair = (Dictionary<string, object>)entry;
+                var info = (Dictionary<string, object>)pair["second"];
+                long assetId = Convert.ToInt64(((Dictionary<string, object>)info["asset"])["m_PathID"]);
+                if (byId.TryGetValue(assetId, out SerializedObject? texObj) && texObj.ClassId == 28) // Texture2D
+                    result.Add(DecodeTexture(texObj, file));
+            }
+        }
+        return result;
+    }
+
+    private static ImageTexture? DecodeTexture(SerializedObject texObj, SerializedFile file)
+    {
+        UnityTexture tex = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, file.ReaderFor(texObj)));
+        byte[]? pixels = tex.GetPixels(_ => null); // inline data (UnityRaw textures have no .resS stream)
+        if (pixels == null || pixels.Length == 0)
+            return null;
+        return ModelLibrary.BuildTexture(new CachedTexture(tex.Format, tex.Width, tex.Height, tex.MipCount, pixels));
     }
 }

@@ -39,17 +39,21 @@ public sealed class SerializedFile
         r.ReadUInt32();           // metadataSize (legacy)
         r.ReadUInt32();           // fileSize (legacy)
         int version = (int)r.ReadUInt32();
-        r.ReadUInt32();           // dataOffset (legacy)
+        long dataOffset = r.ReadUInt32(); // legacy dataOffset (kept for version < 22)
 
-        if (version < 22)
+        // v22 is Unturned's 2022.3 masterbundle; v15 is the Unity 5.x per-map bundles (Roads.unity3d).
+        if (version is not (15 or 22))
             throw new NotSupportedException($"Unsupported SerializedFile version {version}");
 
         byte endianess = r.ReadByte();
         r.ReadBytes(3);           // reserved
-        r.ReadUInt32();           // metadataSize
-        r.ReadInt64();            // fileSize
-        long dataOffset = r.ReadInt64();
-        r.ReadInt64();            // unknown
+        if (version >= 22)
+        {
+            r.ReadUInt32();       // metadataSize
+            r.ReadInt64();        // fileSize
+            dataOffset = r.ReadInt64();
+            r.ReadInt64();        // unknown
+        }
 
         bool bigEndian = endianess != 0;
         r.BigEndian = bigEndian;  // metadata and data use the file endianness
@@ -64,22 +68,44 @@ public sealed class SerializedFile
         for (int i = 0; i < typeCount; i++)
             (typeClassIds[i], typeTrees[i]) = ReadType(r, version, enableTypeTree);
 
+        // Pre-16 objects reference their type by class id, not by an index into the type table.
+        var treeByClassId = new Dictionary<int, List<TypeTreeNode>>();
+        if (version < 16)
+            for (int i = 0; i < typeCount; i++)
+                treeByClassId[typeClassIds[i]] = typeTrees[i];
+
         int objectCount = r.ReadInt32();
         var objects = new List<SerializedObject>(objectCount);
         for (int i = 0; i < objectCount; i++)
         {
             r.Align4();
             long pathId = r.ReadInt64();
-            long byteStart = r.ReadInt64() + dataOffset;
+            long byteStart = (version >= 22 ? r.ReadInt64() : r.ReadUInt32()) + dataOffset;
             int byteSize = (int)r.ReadUInt32();
             int typeId = r.ReadInt32();
+
+            int classId;
+            List<TypeTreeNode> tree;
+            if (version < 16)
+            {
+                classId = r.ReadUInt16();
+                r.ReadInt16();    // script type index
+                r.ReadByte();     // stripped (version 15/16)
+                tree = treeByClassId.TryGetValue(classId, out List<TypeTreeNode>? t) ? t : new();
+            }
+            else
+            {
+                classId = typeClassIds[typeId];
+                tree = typeTrees[typeId];
+            }
+
             objects.Add(new SerializedObject
             {
                 PathId = pathId,
-                ClassId = typeClassIds[typeId],
+                ClassId = classId,
                 ByteStart = byteStart,
                 ByteSize = byteSize,
-                TypeTree = typeTrees[typeId],
+                TypeTree = tree,
             });
         }
 
@@ -90,21 +116,27 @@ public sealed class SerializedFile
         UnityBinaryReader r, int version, bool enableTypeTree)
     {
         int classId = r.ReadInt32();
-        r.ReadBoolean();  // is stripped type
-        r.ReadInt16();    // script type index
+        if (version >= 16)
+        {
+            r.ReadBoolean();  // is stripped type
+            r.ReadInt16();    // script type index
+        }
 
-        // MonoBehaviour types carry an extra 16-byte script id.
-        if (classId == 114)
+        // MonoBehaviour types carry an extra 16-byte script id (negative class id pre-16, else class 114).
+        if ((version < 16 && classId < 0) || (version >= 16 && classId == 114))
             r.ReadBytes(16);
-        r.ReadBytes(16);  // old type hash
+        r.ReadBytes(16);      // old type hash
 
         var tree = new List<TypeTreeNode>();
         if (enableTypeTree)
         {
             tree = TypeTree.ReadBlob(r, version);
-            int dependencyCount = r.ReadInt32(); // type dependencies (version >= 21)
-            for (int i = 0; i < dependencyCount; i++)
-                r.ReadInt32();
+            if (version >= 21)
+            {
+                int dependencyCount = r.ReadInt32(); // type dependencies
+                for (int i = 0; i < dependencyCount; i++)
+                    r.ReadInt32();
+            }
         }
         return (classId, tree);
     }
