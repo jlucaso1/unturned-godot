@@ -34,8 +34,7 @@ public static class ModelLibrary
             if (!Guid.TryParseExact(Path.GetFileNameWithoutExtension(path), "N", out Guid guid))
                 continue;
 
-            using var stream = File.OpenRead(path);
-            var (verts, normals, uvs, submeshes) = MeshCache.Read(stream);
+            var (verts, normals, uvs, submeshes) = MeshCache.Read(File.ReadAllBytes(path));
             ArrayMesh? mesh = Build(verts, normals, uvs, submeshes, registry, materials);
             if (mesh != null)
                 library[guid] = mesh;

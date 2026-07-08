@@ -38,17 +38,22 @@ public sealed class ObjectAssetDatabase
         if (!Directory.Exists(root))
             return db;
 
-        foreach (string file in Directory.EnumerateFiles(root, "*.dat", SearchOption.AllDirectories))
+        // Read + parse the (typically thousands of tiny) .dat files across cores — each file is independent
+        // and the parse is pure CPU. Results are merged serially afterwards in file order, so the by-GUID /
+        // by-id last-write-wins index is identical to a sequential scan (Add is not thread-safe).
+        var files = new List<string>(Directory.EnumerateFiles(root, "*.dat", SearchOption.AllDirectories));
+        var parsedAssets = new ObjectAsset?[files.Count];
+        System.Threading.Tasks.Parallel.For(0, files.Count, i =>
         {
             // Localization files (English.dat, ...) carry no GUID/Type and are skipped by TryParse.
             DatDictionary parsed;
             try
             {
-                parsed = DatParser.Parse(File.ReadAllText(file));
+                parsed = DatParser.Parse(File.ReadAllText(files[i]));
             }
             catch (IOException)
             {
-                continue;
+                return;
             }
 
             // The localized name isn't read here — no production code uses ObjectAsset.Name, so its
@@ -56,10 +61,14 @@ public sealed class ObjectAssetDatabase
             // ReadAllText + parse per asset across every scan.
             if (ObjectAsset.TryParse(parsed, null, out ObjectAsset asset))
             {
-                asset.Directory = Path.GetDirectoryName(file)!; // never null for an enumerated file path
-                db.Add(asset);
+                asset.Directory = Path.GetDirectoryName(files[i])!; // never null for an enumerated file path
+                parsedAssets[i] = asset;
             }
-        }
+        });
+
+        foreach (ObjectAsset? asset in parsedAssets)
+            if (asset != null)
+                db.Add(asset);
         return db;
     }
 

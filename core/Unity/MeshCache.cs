@@ -68,12 +68,15 @@ public static class MeshCache
     // write), instead of millions of virtual BinaryReader.ReadSingle/ReadInt32 dispatches per warm load.
     public static (Vector3[] vertices, Vector3[] normals, Vector2[] uvs, List<CachedSubmesh> submeshes) Read(Stream stream)
     {
-        byte[] data;
-        using (var buffer = new MemoryStream())
-        {
-            stream.CopyTo(buffer);
-            data = buffer.ToArray();
-        }
+        using var buffer = new MemoryStream();
+        stream.CopyTo(buffer);
+        return Read(buffer.ToArray());
+    }
+
+    // Parses straight over an already-materialized buffer — callers that hold the bytes (e.g. from
+    // File.ReadAllBytes) skip the CopyTo + ToArray the Stream overload needs.
+    public static (Vector3[] vertices, Vector3[] normals, Vector2[] uvs, List<CachedSubmesh> submeshes) Read(byte[] data)
+    {
         int pos = 0;
 
         if (ReadUInt32(data, ref pos) != Magic)

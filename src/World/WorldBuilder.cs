@@ -88,11 +88,17 @@ public static class WorldBuilder
         foreach (PlacedTree t in trees)
             objects.Add(new PlacedObject(t.Position, t.EulerDegrees, t.Scale, 0, t.Guid));
 
-        ObjectAssetDatabase db = ObjectAssetDatabase.ScanDirectory(objectBundlesDir);
-        foreach (ObjectAsset a in ObjectAssetDatabase.ScanDirectory(treeBundlesDir).All)
-            db.Add(a);
-        GD.Print($"[unturned-godot] Placed objects: {objects.Count} (incl. {trees.Count} trees), " +
-            $"asset db entries: {db.Count}");
+        // Scan the object/tree asset DB on a worker thread: on the warm path db is only consumed after the
+        // main-thread ModelLibrary.Load below (for fallback-box coloring), so the scan overlaps that load and
+        // is effectively free. The cold extraction branch resolves it explicitly before use.
+        var dbTask = System.Threading.Tasks.Task.Run(() =>
+        {
+            ObjectAssetDatabase scanned = ObjectAssetDatabase.ScanDirectory(objectBundlesDir);
+            foreach (ObjectAsset a in ObjectAssetDatabase.ScanDirectory(treeBundlesDir).All)
+                scanned.Add(a);
+            return scanned;
+        });
+        GD.Print($"[unturned-godot] Placed objects: {objects.Count} (incl. {trees.Count} trees)");
 
         string cacheDir = ProjectSettings.GlobalizePath("user://model_cache");
         string textureCacheDir = ProjectSettings.GlobalizePath("user://texture_cache");
@@ -117,7 +123,7 @@ public static class WorldBuilder
         {
             GD.Print("[unturned-godot] Extracting models + textures from masterbundle (one-time)...");
             int extracted = ModelExtractor.ExtractMeshes(bundlePath, objectBundlesDir, treeBundlesDir,
-                assetsDir, neededGuids, cacheDir, db, foliageAssets.Values.ToList());
+                assetsDir, neededGuids, cacheDir, dbTask.Result, foliageAssets.Values.ToList());
             ModelExtractor.ExtractTextures(bundlePath, cacheDir, textureCacheDir);
             GD.Print($"[unturned-godot] Extracted {extracted} meshes to cache");
         }
@@ -125,6 +131,7 @@ public static class WorldBuilder
         var registry = new TextureRegistry(textureCacheDir);
         var meshLibrary = ModelLibrary.Load(cacheDir, registry);
 
+        ObjectAssetDatabase db = dbTask.Result; // the scan ran concurrently with ModelLibrary.Load above
         int withMesh = 0;
         Node3D objectsRoot = objects.Count > 0
             ? ObjectsBuilder.Build(objects, db, meshLibrary, out withMesh)
