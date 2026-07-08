@@ -74,6 +74,7 @@ public static class BenchmarkRunner
             ["uploadedVertices"] = m.UploadedVertices,
             ["uploadedIndices"] = m.UploadedIndices,
             ["uploadedTriangles"] = m.UploadedTriangles,
+            ["estimatedGeometryBytes"] = GeometryBytes.Estimate(m.UploadedVertices, m.UploadedIndices),
             ["uniqueMeshes"] = m.UniqueMeshes,
             ["uniqueMaterials"] = m.UniqueMaterials,
             ["tileCount"] = w.TileCount,

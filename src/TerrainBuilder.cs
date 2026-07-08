@@ -13,30 +13,39 @@ public static class TerrainBuilder
         var st = new SurfaceTool();
         st.Begin(Mesh.PrimitiveType.Triangles);
 
-        var positions = new Vector3[res, res];
-        var colors = new Color[res, res];
+        // One shared vertex per grid point, addressed by index — vs the old scheme that emitted all six
+        // corners of every quad (~6x more vertices). GenerateNormals then averages the faces meeting at
+        // each shared vertex, giving smooth terrain shading instead of a faceted look. Vertices are added
+        // row-major so vertex (x, y) lands at index x * res + y.
         for (int x = 0; x < res; x++)
         {
             for (int y = 0; y < res; y++)
             {
                 float h01 = tile.Heights[x, y];
                 Vector3 unity = Landscape.GetWorldPosition(tile.CoordX, tile.CoordY, x, y, h01);
-                positions[x, y] = Landscape.UnityToGodot(unity);
-                colors[x, y] = TerrainColor.ForVertex(splat, x, y, unity.Y);
+                st.SetColor(TerrainColor.ForVertex(splat, x, y, unity.Y));
+                st.AddVertex(Landscape.UnityToGodot(unity));
             }
         }
 
+        // Winding matches the old non-indexed build exactly (kept double-sided below), so shading is
+        // unchanged apart from becoming smooth.
         for (int x = 0; x < res - 1; x++)
         {
             for (int y = 0; y < res - 1; y++)
             {
-                AddVertex(st, positions[x, y], colors[x, y]);
-                AddVertex(st, positions[x + 1, y + 1], colors[x + 1, y + 1]);
-                AddVertex(st, positions[x + 1, y], colors[x + 1, y]);
+                int v00 = x * res + y;
+                int v01 = x * res + (y + 1);
+                int v10 = (x + 1) * res + y;
+                int v11 = (x + 1) * res + (y + 1);
 
-                AddVertex(st, positions[x, y], colors[x, y]);
-                AddVertex(st, positions[x, y + 1], colors[x, y + 1]);
-                AddVertex(st, positions[x + 1, y + 1], colors[x + 1, y + 1]);
+                st.AddIndex(v00);
+                st.AddIndex(v11);
+                st.AddIndex(v10);
+
+                st.AddIndex(v00);
+                st.AddIndex(v01);
+                st.AddIndex(v11);
             }
         }
 
@@ -55,11 +64,5 @@ public static class TerrainBuilder
             Mesh = st.Commit(),
             Name = $"Tile_{tile.CoordX}_{tile.CoordY}",
         };
-    }
-
-    private static void AddVertex(SurfaceTool st, Vector3 pos, Color color)
-    {
-        st.SetColor(color);
-        st.AddVertex(pos);
     }
 }

@@ -73,6 +73,7 @@ public partial class DebugOverlay : CanvasLayer
             $"CPU {cpuMs:0.00} ms   GPU-wait ~{gpuWaitMs:0.00} ms   Phys {physMs:0.0} ms\n" +
             $"Static memory {memMb:0.0} MB\n" +
             $"Draw calls {drawCalls:0}   Primitives {primitives:0}\n" +
-            $"Render objects {renderObjects:0}   Nodes {nodes:0}";
+            $"Render objects {renderObjects:0}   Nodes {nodes:0}\n" +
+            "F3 toggle HUD   F4 copy camera (SHOT_CAM)";
     }
 }
