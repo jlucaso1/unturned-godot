@@ -246,6 +246,90 @@ public class UnityMeshFormatTests
         Assert.Equal(new[] { 0, 1, 0 }, m.Indices);
     }
 
+    // A 1-vertex skinned mesh: position in stream 0; BlendWeight (ch12, float4) + BlendIndices (ch13, of
+    // the given format) in stream 1; plus one bind pose whose translation-x (e03) is `bindTx`.
+    private static Dictionary<string, object> SkinnedMesh(int indexFormat, float[] weights, int[] indices, float bindTx)
+    {
+        int indexSize = new[] { 4, 2, 1, 1, 2, 2, 1, 1, 2, 2, 4, 4 }[indexFormat];
+        var vd = new byte[16 + 16 + 4 * indexSize]; // stream1 starts at 16 (aligned after 12-byte stream0)
+        Buffer.BlockCopy(new[] { 1f, 2f, 3f }, 0, vd, 0, 12);
+        Buffer.BlockCopy(weights, 0, vd, 16, 16);
+        for (int i = 0; i < 4; i++)
+        {
+            byte[] enc = indexSize switch
+            {
+                1 => new[] { (byte)indices[i] },
+                2 => BitConverter.GetBytes((ushort)indices[i]),
+                _ => BitConverter.GetBytes(indices[i]),
+            };
+            Buffer.BlockCopy(enc, 0, vd, 32 + i * indexSize, indexSize);
+        }
+
+        var channels = new List<object> { Channel(0, 0, 0, 3) };
+        for (int i = 1; i < 12; i++)
+            channels.Add(Channel(0, 0, 0, 0));
+        channels.Add(Channel(1, 0, 0, 4));            // ch12 BlendWeight float4
+        channels.Add(Channel(1, 16, indexFormat, 4)); // ch13 BlendIndices
+
+        var bindPose = new Dictionary<string, object>();
+        for (int row = 0; row < 4; row++)
+            for (int col = 0; col < 4; col++)
+                bindPose[$"e{row}{col}"] = row == col ? 1f : 0f;
+        bindPose["e03"] = bindTx;
+
+        return new Dictionary<string, object>
+        {
+            ["m_Name"] = "T",
+            ["m_MeshCompression"] = (byte)0,
+            ["m_StreamData"] = new Dictionary<string, object> { ["path"] = "", ["offset"] = 0UL, ["size"] = 0u },
+            ["m_VertexData"] = new Dictionary<string, object>
+            {
+                ["m_VertexCount"] = 1u,
+                ["m_Channels"] = channels,
+                ["m_DataSize"] = vd,
+            },
+            ["m_IndexBuffer"] = Indices(0, 0, 0),
+            ["m_IndexFormat"] = 0,
+            ["m_SubMeshes"] = new List<object>
+            {
+                new Dictionary<string, object>
+                {
+                    ["firstByte"] = 0u, ["indexCount"] = 3u, ["topology"] = 0,
+                    ["firstVertex"] = 0u, ["vertexCount"] = 1u,
+                },
+            },
+            ["m_BindPose"] = new List<object> { bindPose },
+        };
+    }
+
+    [Fact]
+    public void ReadsSkinning_WeightsAndBindPose()
+    {
+        UnityMesh m = UnityMesh.Read(SkinnedMesh(10, new[] { 0.5f, 0.3f, 0.2f, 0f }, new[] { 1, 2, 3, 0 }, 7f));
+        Assert.Equal(new[] { 0.5f, 0.3f, 0.2f, 0f }, m.BoneWeights);
+        Assert.Equal(new[] { 1, 2, 3, 0 }, m.BoneIndices);
+        Assert.Equal(7f, Assert.Single(m.BindPoses)[12]); // e03 (translation x) at column-major index 12
+    }
+
+    [Theory]
+    [InlineData(6)]  // UInt8
+    [InlineData(8)]  // UInt16
+    [InlineData(10)] // UInt32
+    public void ReadsBlendIndices_AcrossFormats(int format)
+    {
+        UnityMesh m = UnityMesh.Read(SkinnedMesh(format, new[] { 1f, 0f, 0f, 0f }, new[] { 5, 6, 7, 8 }, 0f));
+        Assert.Equal(new[] { 5, 6, 7, 8 }, m.BoneIndices);
+    }
+
+    [Fact]
+    public void NonSkinnedMesh_HasNoBoneData()
+    {
+        UnityMesh m = UnityMesh.Read(Mesh(0, new byte[12], 1, Indices(0, 0, 0)));
+        Assert.Empty(m.BoneWeights);
+        Assert.Empty(m.BoneIndices);
+        Assert.Empty(m.BindPoses);
+    }
+
     private static byte[] MakeVerts(int count)
     {
         var vd = new byte[count * 12];
