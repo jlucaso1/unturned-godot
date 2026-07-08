@@ -72,10 +72,40 @@ public static class TerrainBuilder
         return layers;
     }
 
-    public static MeshInstance3D BuildTile(HeightmapTile tile, SplatmapTile? splat,
-        ImageTexture[]? layerTextures = null)
+    // Everything a tile carries between the worker-thread build (BuildTileMesh) and the main-thread finish
+    // (FinishTile): its LOD-baked geometry (an ImporterMesh, a data-only Resource) and the full-resolution
+    // heightmap for collision.
+    public readonly struct TileMesh
     {
-        const int res = Landscape.HEIGHTMAP_RESOLUTION;
+        public readonly ImporterMesh Importer;
+        public readonly float[] Heights;
+        public readonly int X;
+        public readonly int Y;
+        public readonly SplatmapTile? Splat;
+        public TileMesh(ImporterMesh importer, float[] heights, int x, int y, SplatmapTile? splat)
+        {
+            Importer = importer;
+            Heights = heights;
+            X = x;
+            Y = y;
+            Splat = splat;
+        }
+    }
+
+    // Phase 1 — safe to run on a worker thread: read + tessellate the tile at a subsampled resolution and
+    // generate its meshoptimizer LOD chain. This is pure CPU/meshopt work on an ImporterMesh (a data-only
+    // Resource); no RenderingServer object is created until FinishTile calls GetMesh() on the main thread.
+    // `textured` selects the render path (true: splat shader via UV2, skip per-vertex colors; false:
+    // averaged vertex colors for the flat fallback material).
+    public static TileMesh BuildTileMesh(HeightmapTile tile, SplatmapTile? splat, bool textured)
+    {
+        // Build the visual tile at a subsampled resolution (step must divide 256 so tile edges land on 0
+        // and 256 and adjacent tiles stay gap-free), then let Godot's meshoptimizer LODs coarsen it further
+        // with distance. In Godot 4.7 generate_lods() locks the mesh's topological border, so each tile's
+        // shared edge is preserved at full resolution across every LOD and adjacent tiles never crack. The
+        // collision keeps the full-resolution heightmap (attached below) so player movement is unaffected.
+        const int LodStep = 2;
+        int res = ((Landscape.HEIGHTMAP_RESOLUTION - 1) / LodStep) + 1;
         int vertexCount = res * res;
 
         // Build the mesh arrays in C# and hand them to the engine in a single AddSurfaceFromArrays call,
@@ -85,7 +115,6 @@ public static class TerrainBuilder
         // The splat shader derives ALBEDO from the layer textures via UV2 and never samples COLOR, so on
         // the textured (normal) path skip the per-vertex TerrainPalette.Blend and the uploaded color
         // attribute; keep them only for the flat-color fallback material (VertexColorUseAsAlbedo).
-        bool textured = layerTextures != null && splat != null;
         var positions = new Vector3[vertexCount];
         Color[]? colors = textured ? null : new Color[vertexCount];
         var uv2 = new Vector2[vertexCount];
@@ -95,11 +124,12 @@ public static class TerrainBuilder
             for (int y = 0; y < res; y++)
             {
                 int idx = x * res + y;
-                float h01 = tile.Heights[x, y];
-                Vector3 unity = Landscape.GetWorldPosition(tile.CoordX, tile.CoordY, x, y, h01);
+                int hx = x * LodStep, hy = y * LodStep; // full-res heightmap sample
+                float h01 = tile.Heights[hx, hy];
+                Vector3 unity = Landscape.GetWorldPosition(tile.CoordX, tile.CoordY, hx, hy, h01);
                 positions[idx] = Landscape.UnityToGodot(unity);
                 if (colors != null)
-                    colors[idx] = TerrainColor.ForVertex(splat, x, y, unity.Y);
+                    colors[idx] = TerrainColor.ForVertex(splat, hx, hy, unity.Y);
                 uv2[idx] = new Vector2(x * invRes, y * invRes); // tile-normalized, for the splat control lookup
             }
         }
@@ -176,39 +206,63 @@ public static class TerrainBuilder
         arrays[(int)Mesh.ArrayType.TexUV2] = uv2;
         arrays[(int)Mesh.ArrayType.Index] = indices;
 
-        var mesh = new ArrayMesh();
-        mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
-        mesh.SurfaceSetMaterial(0, layerTextures != null && splat != null
-            ? BuildSplatMaterial(layerTextures, splat)
-            : SharedMaterial);
+        // Generate meshoptimizer LODs (border-locked in 4.7 -> seam-free between tiles). No material yet:
+        // BuildSplatMaterial creates control textures (a RenderingServer/GPU op), so it runs on the main
+        // thread in FinishTile. ImporterMesh here is a plain data container — GenerateLods is CPU/meshopt.
+        var importer = new ImporterMesh();
+        importer.AddSurface(Mesh.PrimitiveType.Triangles, arrays);
+        importer.GenerateLods(25f, 60f, new Godot.Collections.Array());
 
-        return new MeshInstance3D
-        {
-            Mesh = mesh,
-            Name = $"Tile_{tile.CoordX}_{tile.CoordY}",
-        };
+        // Carry the full-resolution heightmap (row-major, normalized) so the on-demand player collision
+        // stays full-res and correct — the visual mesh is decimated/LOD'd and meshoptimizer reorders its
+        // vertices, so collision can't be reconstructed from it.
+        int fullRes = Landscape.HEIGHTMAP_RESOLUTION;
+        var flat = new float[fullRes * fullRes];
+        for (int hx = 0; hx < fullRes; hx++)
+            for (int hy = 0; hy < fullRes; hy++)
+                flat[(hx * fullRes) + hy] = tile.Heights[hx, hy];
+        return new TileMesh(importer, flat, tile.CoordX, tile.CoordY, splat);
     }
 
-    // Gives a rendered terrain tile a cheap heightfield StaticBody (a 257x257 HeightMapShape3D) instead of
-    // a ~131k-triangle concave trimesh. The height grid + placement are rebuilt from the tile's own mesh —
-    // its vertices are absolute world positions in row-major (hx*res + hy) order — so the on-demand player
-    // spawn needs no separate height data plumbed to it. The (hx=0,hy=0) corner gives the tile's world
-    // origin (worldX = tileX*TILE, worldZ = -tileY*TILE). Verified to reproduce the render surface exactly
-    // by TerrainHeightfieldTests.
+    // Phase 2 — main thread only: realise the LOD mesh (GetMesh creates the ArrayMesh RenderingServer
+    // resource) and attach the per-tile splat material (its control textures are GPU resources). The
+    // full-res heightmap rides along in metadata for AddHeightfieldCollision.
+    public static MeshInstance3D FinishTile(in TileMesh tm, ImageTexture[]? layerTextures)
+    {
+        ArrayMesh mesh = tm.Importer.GetMesh();
+        mesh.SurfaceSetMaterial(0, layerTextures != null && tm.Splat != null
+            ? BuildSplatMaterial(layerTextures, tm.Splat)
+            : SharedMaterial);
+
+        var node = new MeshInstance3D
+        {
+            Mesh = mesh,
+            Name = $"Tile_{tm.X}_{tm.Y}",
+        };
+        node.SetMeta("hf_heights", tm.Heights);
+        node.SetMeta("hf_x", tm.X);
+        node.SetMeta("hf_y", tm.Y);
+        return node;
+    }
+
+    // Gives a rendered terrain tile a cheap full-resolution heightfield StaticBody (a 257x257
+    // HeightMapShape3D) instead of a ~131k-triangle concave trimesh, from the full-res heightmap the tile
+    // carried in metadata (FinishTile) — independent of the tile's visual LOD. Verified to reproduce the
+    // render surface exactly by TerrainHeightfieldTests.
     public static void AddHeightfieldCollision(MeshInstance3D tile)
     {
-        if (tile.Mesh is not ArrayMesh mesh)
+        if (!tile.HasMeta("hf_heights"))
             return;
 
         const int res = Landscape.HEIGHTMAP_RESOLUTION;
-        var verts = (Vector3[])mesh.SurfaceGetArrays(0)[(int)Mesh.ArrayType.Vertex];
-        int tileX = Mathf.RoundToInt(verts[0].X / Landscape.TILE_SIZE);
-        int tileY = Mathf.RoundToInt(-verts[0].Z / Landscape.TILE_SIZE);
+        float[] flat = tile.GetMeta("hf_heights").AsFloat32Array();
+        int tileX = tile.GetMeta("hf_x").AsInt32();
+        int tileY = tile.GetMeta("hf_y").AsInt32();
 
         var heights = new float[res, res];
         for (int hx = 0; hx < res; hx++)
             for (int hy = 0; hy < res; hy++)
-                heights[hx, hy] = (verts[(hx * res) + hy].Y + (Landscape.TILE_HEIGHT / 2f)) / Landscape.TILE_HEIGHT;
+                heights[hx, hy] = flat[(hx * res) + hy];
 
         var body = new StaticBody3D { Name = "TerrainCollision" };
         body.AddChild(new CollisionShape3D

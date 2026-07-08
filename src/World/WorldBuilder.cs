@@ -59,13 +59,22 @@ public static class WorldBuilder
         GD.Print($"[unturned-godot] Terrain textures: {textures.Count} loaded, " +
             (layers != null ? "8 layers textured" : "flat-color fallback"));
 
-        var terrainRoot = new Node3D { Name = "Terrain" };
-        foreach (var (x, y) in tiles)
+        // Build the tiles' geometry + meshoptimizer LODs on worker threads (the LOD generation dominates
+        // terrain build time and is pure CPU/meshopt on data-only ImporterMeshes), then realise the meshes
+        // and attach materials on this (main) thread — the only steps that touch the RenderingServer.
+        bool textured = layers != null;
+        var meshes = new TerrainBuilder.TileMesh[tiles.Count];
+        System.Threading.Tasks.Parallel.For(0, tiles.Count, i =>
         {
-            var tile = HeightmapTile.Read(level.HeightmapPath(x, y), x, y);
-            var splat = SplatmapTile.TryRead(level.SplatmapPath(x, y), x, y);
-            terrainRoot.AddChild(TerrainBuilder.BuildTile(tile, splat, layers));
-        }
+            (int x, int y) = tiles[i];
+            HeightmapTile tile = HeightmapTile.Read(level.HeightmapPath(x, y), x, y);
+            SplatmapTile? splat = SplatmapTile.TryRead(level.SplatmapPath(x, y), x, y);
+            meshes[i] = TerrainBuilder.BuildTileMesh(tile, splat, textured && splat != null);
+        });
+
+        var terrainRoot = new Node3D { Name = "Terrain" };
+        foreach (TerrainBuilder.TileMesh tm in meshes)
+            terrainRoot.AddChild(TerrainBuilder.FinishTile(tm, layers));
         return (terrainRoot, tiles.Count);
     }
 
