@@ -99,6 +99,8 @@ public partial class PlayerController : CharacterBody3D
 
         bool wantSprint = Input.IsKeyPressed(_settings.Sprint);
         UpdateStance(moving, wantSprint);
+        _rig?.SetState(_stance, moving); // crossfades to Idle_/Move_<stance>
+        _rig?.SetPitch(_pitch);          // bends the upper body toward the look
 
         float speed = PlayerConfig.SpeedFor(_stance);
         Vector3 velocity = Velocity;
@@ -134,7 +136,6 @@ public partial class PlayerController : CharacterBody3D
             return;
 
         _stance = next;
-        _rig?.ApplyStance(next); // repose the real body to match the stance (Idle_Stand/Crouch/Prone)
         float height = PlayerConfig.HeightFor(next);
         _capsule.Height = height;
         _collider.Position = Vector3.Up * (height * 0.5f);
