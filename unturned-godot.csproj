@@ -1,0 +1,19 @@
+<Project Sdk="Godot.NET.Sdk/4.7.0">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>UnturnedGodot</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- core/ and tests/ are separate projects; keep the Godot SDK glob off them and their output. -->
+    <Compile Remove="core/**/*.cs" />
+    <Compile Remove="tests/**/*.cs" />
+    <Compile Remove="build/**/*.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="core/UnturnedGodot.Core.csproj" />
+  </ItemGroup>
+</Project>

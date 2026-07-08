@@ -1,0 +1,30 @@
+# Godot 4+ specific ignores
+.godot/
+/android/
+
+# .NET build output
+bin/
+obj/
+*.user
+
+# Centralized build output (core/tests binaries, debug + release, game exports)
+/build/
+
+# Godot 4.x stores export secrets (keystore/SSH passwords) here — never commit it
+export_credentials.cfg
+
+# Test / coverage artifacts
+[Tt]est[Rr]esults/
+coverage/
+*.coverage
+*.cobertura.xml
+coverage.opencover.xml
+coverage.json
+
+# Rider / VS / editors
+.idea/
+.vs/
+.vscode/
+
+# OS
+.DS_Store

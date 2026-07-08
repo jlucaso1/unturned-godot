@@ -1,0 +1,21 @@
+<Project>
+  <!-- Shared defaults so every project (game, core, tests) lints to the same bar. -->
+  <PropertyGroup>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <!--
+    Centralize non-Godot binaries under build/<project>/<config>/. The Godot game project
+    (unturned-godot) is excluded because Godot expects its assembly under .godot/mono/temp/bin.
+    Debug and Release land in separate subfolders (build/.../Debug, build/.../Release).
+  -->
+  <PropertyGroup Condition="'$(MSBuildProjectName)' != 'unturned-godot'">
+    <BaseOutputPath>$(MSBuildThisFileDirectory)build\$(MSBuildProjectName)\</BaseOutputPath>
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)build\obj\$(MSBuildProjectName)\</BaseIntermediateOutputPath>
+  </PropertyGroup>
+</Project>
