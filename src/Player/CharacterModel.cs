@@ -24,6 +24,30 @@ public static class CharacterModel
     private static readonly Color DefaultSkin = new(244f / 255f, 230f / 255f, 210f / 255f);
     private const int DefaultFace = 0; // Items/Faces/0 — the default face overlay (eyes + mouth, transparent)
 
+    // Ports Unturned's Standard/Clothes body compositing (the parts a bare survivor uses): a flat skin
+    // colour with the face overlaid where the mesh UV falls in the face patch. Unturned places the face by
+    // UV, not geometry: faceUV = uv * 8 - (6, 7), i.e. the atlas region [6/8..7/8] x [7/8..1] maps to the
+    // 0..1 face texture, masked to that patch. UVs here are already Godot's (V-flipped), so undo that to use
+    // the Unity UV the maths is written for.
+    private static readonly Shader BodyShader = new()
+    {
+        Code = """
+        shader_type spatial;
+        uniform sampler2D face_albedo : source_color, filter_nearest;
+        uniform vec3 skin_color : source_color;
+        void fragment() {
+            // Undo the Godot V-flip to recover the Unity UV the face patch maths is written against.
+            vec2 unity_uv = vec2(UV.x, 1.0 - UV.y);
+            vec2 face_uv = unity_uv * 8.0 - vec2(6.0, 7.0); // atlas region [6/8..7/8]x[7/8..1] -> 0..1
+            float mask = step(0.0, face_uv.x) * step(face_uv.x, 1.0) * step(0.0, face_uv.y) * step(face_uv.y, 1.0);
+            vec4 face = texture(face_albedo, face_uv);
+            ALBEDO = mix(skin_color, face.rgb, face.a * mask);
+            ROUGHNESS = 1.0;
+            SPECULAR = 0.0;
+        }
+        """,
+    };
+
     // Builds the skinned Player_Client character, or null when the game data is absent or can't be parsed
     // (the caller then falls back to the placeholder figure).
     public static Node3D? Build(string unturnedPath)
@@ -117,7 +141,7 @@ public static class CharacterModel
 
         var body = new MeshInstance3D
         {
-            Mesh = BuildMesh(mesh, skinned: true),
+            Mesh = BuildMesh(mesh, skinned: true, face: LoadFace(bundlePath, DefaultFace)),
             Skin = skeleton.CreateSkinFromRestTransforms(), // bind matrices from the rest hierarchy
             Name = "CharacterBody",
         };
@@ -127,7 +151,6 @@ public static class CharacterModel
         long clipId = DefaultClipOf(file, byId, Id(smr["m_GameObject"]));
         bool posed = clipId != 0 && ApplyClipPose(file, byId, skeleton, boneByName, clipId);
 
-        AddFace(skeleton, boneByName, bundlePath);
         GD.Print($"[unturned-godot] Character: real {EntityRoot} skinned body loaded ({boneCount} bones, " +
             (posed ? "default pose" : "bind pose") + ").");
         return skeleton;
@@ -207,38 +230,6 @@ public static class CharacterModel
     }
 
     private static float F(object value) => System.Convert.ToSingle(value);
-
-    // Overlays the default face (eyes + mouth) on the head-front as a small quad. The pose is static, so
-    // the quad is placed once at the Skull bone's global position with a forward/up offset; the texture is
-    // transparent apart from the features, so it reads over the skin. The character faces -Z (Unity +Z
-    // forward, reflected), so the quad is turned to face -Z.
-    private static void AddFace(Skeleton3D skeleton, Dictionary<string, int> boneByName, string bundlePath)
-    {
-        if (!boneByName.TryGetValue("Skull", out int skull))
-            return;
-        ImageTexture? face = LoadFace(bundlePath, DefaultFace);
-        if (face == null)
-            return;
-
-        Vector3 head = skeleton.GetBoneGlobalPose(skull).Origin;
-        skeleton.AddChild(new MeshInstance3D
-        {
-            Name = "Face",
-            Mesh = new QuadMesh { Size = new Vector2(0.2f, 0.2f) },
-            Position = head + new Vector3(0f, 0.16f, -0.13f),
-            RotationDegrees = new Vector3(0f, 180f, 0f), // QuadMesh faces +Z; turn it to the character's -Z front
-            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
-            MaterialOverride = new StandardMaterial3D
-            {
-                AlbedoTexture = face,
-                Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
-                TextureFilter = BaseMaterial3D.TextureFilterEnum.Nearest, // keep the 16x16 pixels crisp
-                CullMode = BaseMaterial3D.CullModeEnum.Disabled,
-                Roughness = 1f,
-                SpecularMode = BaseMaterial3D.SpecularModeEnum.Disabled,
-            },
-        });
-    }
 
     // Loads the face texture (small, stored inline in the masterbundle SerializedFile) via a tiny on-disk
     // cache so it isn't re-decoded on every spawn.
@@ -330,7 +321,7 @@ public static class CharacterModel
     // positions AND normals plus reversed winding, so the character keeps its authored hard-edge normals
     // and can't be lit inside-out. When skinned, also carry the per-vertex bone indices + normalized weights
     // (unaffected by the winding flip, which only reorders indices).
-    private static ArrayMesh BuildMesh(UnityMesh mesh, bool skinned)
+    private static ArrayMesh BuildMesh(UnityMesh mesh, bool skinned, ImageTexture? face = null)
     {
         UnityMeshConverter.GodotMesh g = UnityMeshConverter.ToGodot(mesh);
 
@@ -348,15 +339,14 @@ public static class CharacterModel
 
         var arrayMesh = new ArrayMesh();
         arrayMesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
-        // The body's _MainTex is only a UV-region reference atlas; the game composites the character in a
-        // custom shader that fills skin regions with the customization skin colour. Reproduce the dominant
-        // part of that look with a flat skin tone (Customization.SKINS default) instead of the atlas.
-        arrayMesh.SurfaceSetMaterial(0, new StandardMaterial3D
-        {
-            AlbedoColor = DefaultSkin,
-            Roughness = 1f,
-            SpecularMode = BaseMaterial3D.SpecularModeEnum.Disabled,
-        });
+
+        // The body's _MainTex is only a UV-region reference atlas; the game composites the character in the
+        // Standard/Clothes shader. Reproduce that here: skin colour with the face overlaid by UV.
+        var material = new ShaderMaterial { Shader = BodyShader };
+        material.SetShaderParameter("skin_color", DefaultSkin);
+        if (face != null) // unset -> Godot's default transparent sampler, so the face patch just shows skin
+            material.SetShaderParameter("face_albedo", face);
+        arrayMesh.SurfaceSetMaterial(0, material);
         return arrayMesh;
     }
 

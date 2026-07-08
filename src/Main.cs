@@ -18,6 +18,32 @@ public partial class Main : Node3D
         if (string.IsNullOrEmpty(unturnedPath))
             unturnedPath = DefaultUnturnedPath;
 
+        // CHAR_ONLY=1: just the character + a light + a front camera, no world build. For fast iteration on
+        // the character material/shader (renders in seconds instead of the ~2 min full-world build).
+        string shotOnly = OS.GetEnvironment("SCREENSHOT_PATH");
+        if (OS.GetEnvironment("CHAR_ONLY") == "1" && !string.IsNullOrEmpty(shotOnly))
+        {
+            if (CharacterModel.Build(unturnedPath) is { } model)
+                AddChild(model);
+            AddChild(new DirectionalLight3D { RotationDegrees = new Vector3(-50, -140, 0) });
+            AddChild(new WorldEnvironment
+            {
+                Environment = new Godot.Environment
+                {
+                    AmbientLightSource = Godot.Environment.AmbientSource.Color,
+                    AmbientLightColor = new Color(0.7f, 0.7f, 0.75f),
+                    AmbientLightEnergy = 1.0f,
+                },
+            });
+            var cam = new Camera3D { Current = true };
+            AddChild(cam);
+            float side = OS.GetEnvironment("CHAR_BACK") == "1" ? 1.0f : -1.0f; // -Z is the front
+            cam.Position = new Vector3(0, 1.8f, side); // close-up on the head
+            cam.LookAt(new Vector3(0, 1.85f, 0));
+            _ = CaptureAndQuit(shotOnly, settleFrames: 5);
+            return;
+        }
+
         string[] userArgs = OS.GetCmdlineUserArgs();
         if (System.Array.IndexOf(userArgs, "--benchmark") >= 0)
         {
