@@ -6,16 +6,19 @@ namespace UnturnedGodot.Data;
 // per-texel weights against this palette reproduces the terrain's material layout from real data.
 public static class TerrainPalette
 {
+    // Average colors of PEI's real splat-layer textures (Terrain/Materials/PEI/*), in the layer order
+    // the map's landscape stores them. Sand dominates by area (the underwater seabed); the island itself
+    // is the grass layers, which is why the terrain must read green, not sandy.
     public static readonly Color[] LayerColors =
     {
-        new(0.30f, 0.45f, 0.22f), // 0 base grass
-        new(0.83f, 0.78f, 0.55f), // 1 sand
-        new(0.45f, 0.40f, 0.32f), // 2 dirt
-        new(0.38f, 0.38f, 0.40f), // 3 rock
-        new(0.25f, 0.25f, 0.27f), // 4 road
-        new(0.52f, 0.50f, 0.30f), // 5 gravel
-        new(0.20f, 0.38f, 0.18f), // 6 forest
-        new(0.90f, 0.90f, 0.92f), // 7 snow
+        new(0.545f, 0.328f, 0.227f), // 0 Dirt_01
+        new(0.691f, 0.631f, 0.406f), // 1 Farm_Wheat_00
+        new(0.224f, 0.447f, 0.227f), // 2 Grass_00
+        new(0.494f, 0.317f, 0.249f), // 3 Gravel_00
+        new(0.290f, 0.294f, 0.290f), // 4 Road_00
+        new(0.697f, 0.549f, 0.360f), // 5 Sand_01
+        new(0.224f, 0.447f, 0.227f), // 6 Grass_00
+        new(0.556f, 0.308f, 0.184f), // 7 Stone_01
     };
 
     // Weighted blend of the layer colors; falls back to layer 0 when a texel has no weight.
