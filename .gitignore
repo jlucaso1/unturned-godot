@@ -7,8 +7,12 @@ bin/
 obj/
 *.user
 
-# Centralized build output (core/tests binaries, debug + release, game exports)
-/build/
+# Centralized build output (core/tests binaries, debug + release, game exports).
+# Keep the export dir skeleton so Godot's export (which won't create it) works on a fresh clone.
+/build/**
+!/build/export/
+!/build/export/linux/
+!/build/export/linux/.gitkeep
 
 # Godot 4.x stores export secrets (keystore/SSH passwords) here — never commit it
 export_credentials.cfg
