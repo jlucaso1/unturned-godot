@@ -39,10 +39,9 @@ public class HeightmapSamplerTests
     }
 
     [Fact]
-    public void SampleHeight_Bilinear_InterpolatesBetweenSamples()
+    public void SampleHeight_LinearAcrossAnAxisRamp()
     {
-        // A ramp along worldX (hy index): height rises from 0 at hy=0 to full at hy=256. Midway across the
-        // first cell (worldX = half a cell), the sampled height is half the two corner heights.
+        // A ramp along worldX (hy index): planar, so the triangulation reproduces the exact midpoint.
         var heights = new float[Res, Res];
         for (int x = 0; x < Res; x++)
         {
@@ -55,6 +54,28 @@ public class HeightmapSamplerTests
         Assert.True(sampler.TrySampleHeight(halfCell, 0f, out float y));
         float expected = (-Landscape.TILE_HEIGHT / 2f) + (0.4f * Landscape.TILE_HEIGHT); // midway 0.2..0.6
         Assert.Equal(expected, y, 2);
+    }
+
+    [Fact]
+    public void SampleHeight_UsesTheMeshTriangle_NotBilinear()
+    {
+        // A saddle cell (only h10 raised) is non-planar, so the triangulation and bilinear disagree. A point
+        // in the tx>=ty triangle (h00,h10,h11) must follow that plane, matching the rendered mesh.
+        var heights = new float[Res, Res];
+        heights[0, 0] = 0.5f;
+        heights[1, 0] = 0.7f; // h10 (index [hx=1, hy=0])
+        heights[0, 1] = 0.5f;
+        heights[1, 1] = 0.5f;
+        var sampler = new HeightmapSampler(new[] { HeightmapTile.FromHeights(0, 0, heights) });
+
+        float cell = Landscape.TILE_SIZE / Landscape.HEIGHTMAP_RESOLUTION_MINUS_ONE;
+        // tx = 0.6 (worldZ), ty = 0.4 (worldX) -> in the (h00,h10,h11) triangle.
+        Assert.True(sampler.TrySampleHeight(0.4f * cell, 0.6f * cell, out float y));
+        float triangle = 0.5f + (0.6f * (0.7f - 0.5f)) + (0.4f * (0.5f - 0.7f)); // = 0.54
+        float bilinear = 0.572f; // lerp(lerp(.5,.7,.6), .5, .4)
+        float expected = (-Landscape.TILE_HEIGHT / 2f) + (triangle * Landscape.TILE_HEIGHT);
+        Assert.Equal(expected, y, 1);
+        Assert.NotEqual((-Landscape.TILE_HEIGHT / 2f) + (bilinear * Landscape.TILE_HEIGHT), y, 1);
     }
 
     [Fact]
