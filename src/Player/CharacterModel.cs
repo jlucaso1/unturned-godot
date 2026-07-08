@@ -232,52 +232,25 @@ public static class CharacterModel
         return 0;
     }
 
-    // Mirrors ModelLibrary: convert vertices Unity->Godot (negate Z), reverse the mirrored winding, derive
-    // smooth normals from the flipped triangles, flip UV V. When skinned, also carry the per-vertex bone
-    // indices + normalized weights (unaffected by the winding flip, which only reorders indices).
+    // Builds the Godot mesh via the single Unity->Godot translation (UnityMeshConverter): reflected
+    // positions AND normals plus reversed winding, so the character keeps its authored hard-edge normals
+    // and can't be lit inside-out. When skinned, also carry the per-vertex bone indices + normalized weights
+    // (unaffected by the winding flip, which only reorders indices).
     private static ArrayMesh BuildMesh(UnityMesh mesh, bool skinned)
     {
-        var verts = new Vector3[mesh.Vertices.Length];
-        for (int i = 0; i < verts.Length; i++)
-            verts[i] = Landscape.UnityToGodot(mesh.Vertices[i]);
-
-        var uvs = new Vector2[mesh.Vertices.Length];
-        for (int i = 0; i < uvs.Length; i++)
-            uvs[i] = i < mesh.Uvs.Length ? new Vector2(mesh.Uvs[i].X, 1f - mesh.Uvs[i].Y) : Vector2.Zero;
-
-        var indices = new List<int>();
-        foreach (int[] submesh in mesh.Submeshes)
-            for (int i = 0; i + 2 < submesh.Length; i += 3)
-            {
-                indices.Add(submesh[i]);
-                indices.Add(submesh[i + 2]); // reversed
-                indices.Add(submesh[i + 1]);
-            }
-        int[] index = indices.ToArray();
-
-        var normals = new Vector3[verts.Length];
-        for (int i = 0; i + 2 < index.Length; i += 3)
-        {
-            int a = index[i], b = index[i + 1], c = index[i + 2];
-            Vector3 face = (verts[c] - verts[a]).Cross(verts[b] - verts[a]);
-            normals[a] += face;
-            normals[b] += face;
-            normals[c] += face;
-        }
-        for (int i = 0; i < normals.Length; i++)
-            normals[i] = normals[i].LengthSquared() > 0f ? normals[i].Normalized() : Vector3.Up;
+        UnityMeshConverter.GodotMesh g = UnityMeshConverter.ToGodot(mesh);
 
         var arrays = new Godot.Collections.Array();
         arrays.Resize((int)Mesh.ArrayType.Max);
-        arrays[(int)Mesh.ArrayType.Vertex] = verts;
-        arrays[(int)Mesh.ArrayType.Normal] = normals;
-        arrays[(int)Mesh.ArrayType.TexUV] = uvs;
+        arrays[(int)Mesh.ArrayType.Vertex] = g.Vertices;
+        arrays[(int)Mesh.ArrayType.Normal] = g.Normals;
+        arrays[(int)Mesh.ArrayType.TexUV] = g.Uvs;
         if (skinned)
         {
             arrays[(int)Mesh.ArrayType.Bones] = mesh.BoneIndices;
             arrays[(int)Mesh.ArrayType.Weights] = NormalizeWeights(mesh.BoneWeights);
         }
-        arrays[(int)Mesh.ArrayType.Index] = index;
+        arrays[(int)Mesh.ArrayType.Index] = g.Indices;
 
         var arrayMesh = new ArrayMesh();
         arrayMesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
