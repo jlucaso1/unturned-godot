@@ -88,6 +88,24 @@ dotnet test tests/UnturnedGodot.Tests.csproj --settings coverlet.runsettings
 Style and analyzers are enforced via `.editorconfig` + `Directory.Build.props`
 (`EnableNETAnalyzers`, `EnforceCodeStyleInBuild`). Builds are warning-clean.
 
+## Profiling
+
+Two benchmark tiers print a JSON report and diff it against the previous run:
+
+```sh
+"$GODOT" --headless -- --benchmark   # Tier 1: build times, mesh/material counts, static memory
+"$GODOT" -- --benchmark --gpu        # Tier 2 (windowed): frame time, draw calls, primitives, VRAM
+```
+
+- **GPU** (AMD, headless): `amdgpu_top -J -n 1` while the app runs — GPU-busy % per block and VRAM used.
+- **RAM**: `heaptrack --record-only -o /tmp/ht "$GODOT" -- --benchmark --gpu`, then
+  `heaptrack_print /tmp/ht.zst` for the peak/leaked totals. The shipped Godot binary is stripped, so
+  call stacks don't symbolicate — read `/proc/<pid>/smaps_rollup` (RSS, `Private_Dirty`) for a live
+  breakdown, and attribute per-subsystem by differencing runs rather than by stack.
+- **CPU** (.NET): `dotnet-trace collect -- "$GODOT" -- --benchmark`.
+
+Profiling output (`*.nettrace`, `heaptrack.*.zst`, `massif.out.*`, `perf.data`, `*.rgp`) is git-ignored.
+
 ## Not yet done
 
 - **Terrain textures** — terrain colors are a stand-in palette blended from real splatmap weights,
