@@ -34,6 +34,7 @@ public static class GpuBenchmark
             WorldBuildResult world = WorldBuilder.Build(unturnedPath, mapName);
             context.AddChild(world.Terrain);
             context.AddChild(world.Objects);
+            context.AddChild(world.Foliage);
             AddEnvironment(context);
 
             var camera = new Camera3D { Name = "BenchCamera", Current = true };
@@ -96,7 +97,7 @@ public static class GpuBenchmark
                 GD.Print($"[benchmark] screenshot saved: {shotPath}");
             }
 
-            SceneMetricsResult sm = SceneMetrics.Collect(new Node[] { world.Terrain, world.Objects });
+            SceneMetricsResult sm = SceneMetrics.Collect(new Node[] { world.Terrain, world.Objects, world.Foliage });
             BenchmarkReport report = BuildReport(mapName, frameMs, drawCalls, primitives, renderObjects, sm, poses.Count);
             BenchmarkRunner.Finish(report, $"{mapName}-gpu", DiffOptions(),
                 "gpu.frameMs.* are wall-clock medians — noisy, and CPU-bound when draw-call limited");
