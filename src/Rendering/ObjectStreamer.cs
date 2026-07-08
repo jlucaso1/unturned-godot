@@ -37,6 +37,7 @@ public partial class ObjectStreamer : Node
     private List<PlacedObject> _objects = new();
     private ObjectAssetDatabase _db = null!;
     private Dictionary<Guid, FoliageAsset> _foliageAssets = new();
+    private LevelFoliage? _foliage;
 
     private readonly ConcurrentQueue<string> _readyKeys = new();
     private int _totalTextureKeys;
@@ -82,9 +83,9 @@ public partial class ObjectStreamer : Node
         foreach (ObjectAsset a in ObjectAssetDatabase.ScanDirectory(_treeBundlesDir).All)
             _db.Add(a);
 
-        LevelFoliage? foliage = LevelFoliage.Load(Path.Combine(_level.Path, "Foliage.blob"));
-        if (foliage != null)
-            _foliageAssets = FoliageAsset.ScanForGuids(_assetsDir, new HashSet<Guid>(foliage.AssetGuids));
+        _foliage = LevelFoliage.Load(Path.Combine(_level.Path, "Foliage.blob"));
+        if (_foliage != null)
+            _foliageAssets = FoliageAsset.ScanForGuids(_assetsDir, new HashSet<Guid>(_foliage.AssetGuids));
     }
 
     // Warm path: meshes and textures are already cached — build synchronously and apply all textures now.
@@ -101,7 +102,7 @@ public partial class ObjectStreamer : Node
         var meshLibrary = ModelLibrary.Load(_cacheDir, _registry);
         Node3D root = ObjectsBuilder.Build(_objects, _db, meshLibrary, out int withMesh);
         AddChild(root);
-        AddChild(FoliageBuilder.Build(_level.Path, meshLibrary));
+        AddChild(FoliageBuilder.Build(_foliage, meshLibrary));
         _totalTextureKeys = _registry.PendingKeyCount;
         GD.Print($"[stream] built {withMesh}/{_objects.Count} objects ({meshLibrary.Count} meshes), " +
             $"{_totalTextureKeys} texture keys pending");

@@ -24,10 +24,11 @@ public static class FoliageBuilder
     private const float DrawDistance = 160f;
     private const float FadeMargin = 32f; // dither-fade over the last stretch so chunks don't pop
 
-    public static Node3D Build(string mapPath, IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary)
+    // Takes the already-parsed foliage (the caller loads Foliage.blob once for its asset GUIDs) rather
+    // than re-reading the 43 MB / 667k-instance blob from disk a second time.
+    public static Node3D Build(LevelFoliage? foliage, IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary)
     {
         var root = new Node3D { Name = "Foliage" };
-        LevelFoliage? foliage = LevelFoliage.Load(Path.Combine(mapPath, "Foliage.blob"));
         if (foliage == null)
             return root;
 

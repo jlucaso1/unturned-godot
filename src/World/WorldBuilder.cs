@@ -114,7 +114,7 @@ public static class WorldBuilder
             ? ObjectsBuilder.Build(objects, db, meshLibrary, out withMesh)
             : new Node3D { Name = "Objects" };
 
-        Node3D foliageRoot = FoliageBuilder.Build(level.Path, meshLibrary);
+        Node3D foliageRoot = FoliageBuilder.Build(foliageData, meshLibrary);
         registry.ApplyAllAvailable();
         GD.Print($"[unturned-godot] Rendered {withMesh}/{objects.Count} objects with real meshes " +
             $"({meshLibrary.Count} unique)");
