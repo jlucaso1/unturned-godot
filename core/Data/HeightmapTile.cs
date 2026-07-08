@@ -16,6 +16,10 @@ public sealed class HeightmapTile
         Heights = heights;
     }
 
+    // For tests and callers that already have a height grid (e.g. building a HeightmapSampler).
+    public static HeightmapTile FromHeights(int coordX, int coordY, float[,] heights)
+        => new(coordX, coordY, heights);
+
     public static HeightmapTile Read(string filePath, int coordX, int coordY)
     {
         const int res = Landscape.HEIGHTMAP_RESOLUTION;
