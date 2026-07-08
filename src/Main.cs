@@ -97,15 +97,16 @@ public partial class Main : Node3D
         streamer.Begin(unturnedPath, level);
     }
 
-    // Spawns the character over a town and gives the terrain trimesh collision so it can stand on the
-    // ground. Objects stay non-colliding for now (the player clips buildings), which is fine for movement.
+    // Spawns the character over a town and gives each terrain tile a cheap heightfield collision so it can
+    // stand on the ground (vs a 2.1M-triangle concave trimesh). Objects stay non-colliding for now (the
+    // player clips buildings), which is fine for movement.
     private static readonly Vector3 PlayerSpawn = new(300, 60, 84); // above land near the central town
 
     private void SpawnPlayer(Node3D terrain, bool thirdPerson)
     {
         foreach (Node child in terrain.GetChildren())
             if (child is MeshInstance3D tile)
-                tile.CreateTrimeshCollision();
+                TerrainBuilder.AddHeightfieldCollision(tile);
 
         AddChild(new PlayerController
         {

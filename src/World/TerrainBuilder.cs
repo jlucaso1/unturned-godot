@@ -189,6 +189,41 @@ public static class TerrainBuilder
         };
     }
 
+    // Gives a rendered terrain tile a cheap heightfield StaticBody (a 257x257 HeightMapShape3D) instead of
+    // a ~131k-triangle concave trimesh. The height grid + placement are rebuilt from the tile's own mesh —
+    // its vertices are absolute world positions in row-major (hx*res + hy) order — so the on-demand player
+    // spawn needs no separate height data plumbed to it. The (hx=0,hy=0) corner gives the tile's world
+    // origin (worldX = tileX*TILE, worldZ = -tileY*TILE). Verified to reproduce the render surface exactly
+    // by TerrainHeightfieldTests.
+    public static void AddHeightfieldCollision(MeshInstance3D tile)
+    {
+        if (tile.Mesh is not ArrayMesh mesh)
+            return;
+
+        const int res = Landscape.HEIGHTMAP_RESOLUTION;
+        var verts = (Vector3[])mesh.SurfaceGetArrays(0)[(int)Mesh.ArrayType.Vertex];
+        int tileX = Mathf.RoundToInt(verts[0].X / Landscape.TILE_SIZE);
+        int tileY = Mathf.RoundToInt(-verts[0].Z / Landscape.TILE_SIZE);
+
+        var heights = new float[res, res];
+        for (int hx = 0; hx < res; hx++)
+            for (int hy = 0; hy < res; hy++)
+                heights[hx, hy] = (verts[(hx * res) + hy].Y + (Landscape.TILE_HEIGHT / 2f)) / Landscape.TILE_HEIGHT;
+
+        var body = new StaticBody3D { Name = "TerrainCollision" };
+        body.AddChild(new CollisionShape3D
+        {
+            Shape = new HeightMapShape3D
+            {
+                MapWidth = res,
+                MapDepth = res,
+                MapData = TerrainHeightfield.MapData(heights),
+            },
+            Transform = TerrainHeightfield.CollisionTransform(tileX, tileY),
+        });
+        tile.AddChild(body);
+    }
+
     // A per-tile ShaderMaterial: the shared 8 layer textures plus this tile's two splat control textures
     // (the 8 weights packed into two RGBA8 images, sampled by UV2).
     private static ShaderMaterial BuildSplatMaterial(ImageTexture[] layers, SplatmapTile splat)
