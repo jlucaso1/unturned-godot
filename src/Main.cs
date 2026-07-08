@@ -47,6 +47,7 @@ public partial class Main : Node3D
             AddChild(world.Foliage);
             AddChild(RoadsBuilder.Build(environmentDir));
             AddChild(WaterBuilder.Build(lighting));
+            AddChild(NodesBuilder.Build(environmentDir));
             SetupEnvironment(lighting);
 
             if (headless)
@@ -66,6 +67,7 @@ public partial class Main : Node3D
         AddChild(terrain);
         AddChild(RoadsBuilder.Build(environmentDir));
         AddChild(WaterBuilder.Build(lighting));
+        AddChild(NodesBuilder.Build(environmentDir));
         SetupEnvironment(lighting);
 
         var streamer = new ObjectStreamer { Name = "ObjectStreamer" };
