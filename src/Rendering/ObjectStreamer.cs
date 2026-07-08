@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using Godot;
 using UnturnedGodot.Assets;
@@ -35,6 +36,7 @@ public partial class ObjectStreamer : Node
     private TextureRegistry _registry = null!;
     private List<PlacedObject> _objects = new();
     private ObjectAssetDatabase _db = null!;
+    private Dictionary<Guid, FoliageAsset> _foliageAssets = new();
 
     private readonly ConcurrentQueue<string> _readyKeys = new();
     private int _totalTextureKeys;
@@ -57,7 +59,11 @@ public partial class ObjectStreamer : Node
 
         LoadPlacements();
 
-        bool cold = ModelLibrary.CachedMeshCount(_cacheDir) == 0 && File.Exists(_bundlePath);
+        // Cold-load if the object meshes aren't cached, or if the foliage meshes were never extracted
+        // (e.g. an older cache from before foliage support) — both come from the same decode pass.
+        bool foliageMissing = _foliageAssets.Keys.Any(
+            g => !File.Exists(Path.Combine(_cacheDir, g.ToString("N") + ".mesh")));
+        bool cold = (ModelLibrary.CachedMeshCount(_cacheDir) == 0 || foliageMissing) && File.Exists(_bundlePath);
         SetProcess(cold);
         if (cold)
             StartStreaming();
@@ -75,6 +81,10 @@ public partial class ObjectStreamer : Node
         _db = ObjectAssetDatabase.ScanDirectory(_objectBundlesDir);
         foreach (ObjectAsset a in ObjectAssetDatabase.ScanDirectory(_treeBundlesDir).All)
             _db.Add(a);
+
+        LevelFoliage? foliage = LevelFoliage.Load(Path.Combine(_level.Path, "Foliage.blob"));
+        if (foliage != null)
+            _foliageAssets = FoliageAsset.ScanForGuids(_assetsDir, new HashSet<Guid>(foliage.AssetGuids));
     }
 
     // Warm path: meshes and textures are already cached — build synchronously and apply all textures now.
@@ -91,6 +101,7 @@ public partial class ObjectStreamer : Node
         var meshLibrary = ModelLibrary.Load(_cacheDir, _registry);
         Node3D root = ObjectsBuilder.Build(_objects, _db, meshLibrary, out int withMesh);
         AddChild(root);
+        AddChild(FoliageBuilder.Build(_level.Path, meshLibrary));
         _totalTextureKeys = _registry.PendingKeyCount;
         GD.Print($"[stream] built {withMesh}/{_objects.Count} objects ({meshLibrary.Count} meshes), " +
             $"{_totalTextureKeys} texture keys pending");
@@ -111,7 +122,8 @@ public partial class ObjectStreamer : Node
                 ModelExtractor.StreamExtract(_bundlePath, _objectBundlesDir, _treeBundlesDir, _assetsDir,
                     needed, _cacheDir, _textureCacheDir,
                     onMeshesReady: () => Callable.From(OnMeshesExtracted).CallDeferred(),
-                    onTextureWritten: key => _readyKeys.Enqueue(key));
+                    onTextureWritten: key => _readyKeys.Enqueue(key),
+                    foliageAssets: _foliageAssets.Values.ToList());
             }
             catch (Exception e)
             {
