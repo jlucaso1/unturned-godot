@@ -124,6 +124,8 @@ public static class ModelLibrary
         {
             AlbedoColor = sm.Color,
             Roughness = 1f,
+            // Fully-rough dielectric: the GGX specular term is not visible, so skip its per-fragment ALU.
+            SpecularMode = BaseMaterial3D.SpecularModeEnum.Disabled,
             // Many object meshes (rocks, foliage) are single-sided shells; render both sides so they
             // don't show culling holes up close.
             CullMode = BaseMaterial3D.CullModeEnum.Disabled,

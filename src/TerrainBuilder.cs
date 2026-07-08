@@ -14,6 +14,9 @@ public static class TerrainBuilder
         VertexColorUseAsAlbedo = true,
         CullMode = BaseMaterial3D.CullModeEnum.Back,
         Roughness = 1.0f,
+        // Fully-rough dielectric: the GGX specular lobe contributes nothing visible, so skip its
+        // per-fragment ALU over the terrain's screen-dominating fill.
+        SpecularMode = BaseMaterial3D.SpecularModeEnum.Disabled,
     };
 
     public static MeshInstance3D BuildTile(HeightmapTile tile, SplatmapTile? splat)
