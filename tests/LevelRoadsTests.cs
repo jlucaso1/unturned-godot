@@ -87,6 +87,43 @@ public class LevelRoadsTests
         Assert.Empty(LevelRoads.LoadMaterials("/no/such/Roads.dat"));
 
     [Fact]
+    public void LoadMaterials_ObsoleteVersion_ReturnsEmpty()
+    {
+        using var dir = new TempDir();
+        string path = dir.Write("Roads.dat", new RiverBytes().Byte(0).ToArray());
+        Assert.Empty(LevelRoads.LoadMaterials(path));
+    }
+
+    [Fact]
+    public void LoadMaterials_Version1_DefaultsOffset()
+    {
+        using var dir = new TempDir();
+        // Version 1 has no per-material offset field.
+        var w = new RiverBytes().Byte(1).Byte(1).Single(8f).Single(4f).Single(0.2f).Bool(true);
+        List<RoadMaterialConfig> mats = LevelRoads.LoadMaterials(dir.Write("Roads.dat", w.ToArray()));
+        Assert.Single(mats);
+        Assert.Equal(0f, mats[0].Offset);
+    }
+
+    [Fact]
+    public void LoadPaths_Version2_OmitsLoopTangentsAndAsset()
+    {
+        using var dir = new TempDir();
+        var joints = new[]
+        {
+            new Joint(new Vector3(0, 32, 0), Vector3.Zero, Vector3.Zero),
+            new Joint(new Vector3(10, 34, 0), Vector3.Zero, Vector3.Zero),
+        };
+        string path = dir.Write("Paths.dat", BuildPaths(2, ((byte)0, false, joints)));
+
+        List<PlacedRoad> roads = LevelRoads.LoadPaths(path);
+
+        Assert.Single(roads);
+        Assert.False(roads[0].IsLoop);
+        Assert.Equal(2, roads[0].Joints.Count);
+    }
+
+    [Fact]
     public void BezierPoint_EndpointsAndMidpoint()
     {
         var a = new RoadJoint(new Vector3(0, 0, 0), Vector3.Zero, new Vector3(3, 0, 0));

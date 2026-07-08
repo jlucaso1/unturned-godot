@@ -47,35 +47,58 @@ public static class ModelLibrary
         for (int i = 0; i < verts.Length; i++)
             gverts[i] = Landscape.UnityToGodot(verts[i]);
 
-        var gnormals = new Vector3[normals.Length];
-        for (int i = 0; i < normals.Length; i++)
-            gnormals[i] = Landscape.UnityToGodot(normals[i]);
-
         var guvs = new Vector2[uvs.Length];
         for (int i = 0; i < uvs.Length; i++)
             guvs[i] = new Vector2(uvs[i].X, 1f - uvs[i].Y); // Godot's texture origin is top-left
 
+        // Reverse winding first (the Unity->Godot Z flip mirrors the geometry), then derive normals from
+        // the flipped triangles. Reflecting Unity's authored normals instead points them inward for faces
+        // aligned with the Z axis — which is why flat, laid-down objects like roads rendered unlit.
+        var reversed = new int[submeshes.Count][];
+        for (int s = 0; s < submeshes.Count; s++)
+            reversed[s] = ReverseWinding(submeshes[s].Indices);
+        Vector3[] gnormals = SmoothNormals(gverts, reversed);
+
         var mesh = new ArrayMesh();
         int surfaces = 0;
-        foreach (CachedSubmesh sm in submeshes)
+        for (int s = 0; s < submeshes.Count; s++)
         {
-            if (sm.Indices.Length < 3)
+            if (submeshes[s].Indices.Length < 3)
                 continue;
 
             var arrays = new Godot.Collections.Array();
             arrays.Resize((int)Mesh.ArrayType.Max);
             arrays[(int)Mesh.ArrayType.Vertex] = gverts;
-            if (gnormals.Length == gverts.Length)
-                arrays[(int)Mesh.ArrayType.Normal] = gnormals;
+            arrays[(int)Mesh.ArrayType.Normal] = gnormals;
             if (guvs.Length == gverts.Length)
                 arrays[(int)Mesh.ArrayType.TexUV] = guvs;
-            arrays[(int)Mesh.ArrayType.Index] = ReverseWinding(sm.Indices);
+            arrays[(int)Mesh.ArrayType.Index] = reversed[s];
 
             mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
-            mesh.SurfaceSetMaterial(surfaces, MaterialFor(sm, textureCacheDir, textures));
+            mesh.SurfaceSetMaterial(surfaces, MaterialFor(submeshes[s], textureCacheDir, textures));
             surfaces++;
         }
         return surfaces > 0 ? mesh : null;
+    }
+
+    // Area-weighted smooth normals over all submeshes (CCW front faces, so the cross product points out).
+    private static Vector3[] SmoothNormals(Vector3[] verts, int[][] submeshIndices)
+    {
+        var normals = new Vector3[verts.Length];
+        foreach (int[] indices in submeshIndices)
+        {
+            for (int i = 0; i + 2 < indices.Length; i += 3)
+            {
+                int a = indices[i], b = indices[i + 1], c = indices[i + 2];
+                Vector3 face = (verts[c] - verts[a]).Cross(verts[b] - verts[a]);
+                normals[a] += face;
+                normals[b] += face;
+                normals[c] += face;
+            }
+        }
+        for (int i = 0; i < normals.Length; i++)
+            normals[i] = normals[i].LengthSquared() > 0f ? normals[i].Normalized() : Vector3.Up;
+        return normals;
     }
 
     private static int[] ReverseWinding(int[] indices)
