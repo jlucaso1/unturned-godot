@@ -37,8 +37,10 @@ public partial class Main : Node3D
         AddChild(world.Terrain);
         AddChild(world.Objects);
 
-        string lightingPath = System.IO.Path.Combine(unturnedPath, "Maps", MapName, "Environment", "Lighting.dat");
-        LevelLighting? lighting = LevelLighting.Load(lightingPath);
+        string environmentDir = System.IO.Path.Combine(unturnedPath, "Maps", MapName, "Environment");
+        AddChild(RoadsBuilder.Build(environmentDir));
+
+        LevelLighting? lighting = LevelLighting.Load(System.IO.Path.Combine(environmentDir, "Lighting.dat"));
         AddChild(WaterBuilder.Build(lighting));
         SetupEnvironment(lighting);
 

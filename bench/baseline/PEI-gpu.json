@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "1",
+  "timestamp": "2026-07-08T08:41:15",
+  "environment": {
+    "godotVersion": "4.7-stable (official)",
+    "os": "Linux",
+    "gpu": "AMD Radeon RX 6600 (RADV NAVI23)",
+    "renderingDriver": "vulkan",
+    "renderingMethod": "forward_plus",
+    "headless": false,
+    "scene": "PEI"
+  },
+  "metrics": {
+    "gpu.bufferMemBytes": 68096048,
+    "gpu.drawCalls.max": 392,
+    "gpu.drawCalls.median": 392,
+    "gpu.drawCalls.min": 16,
+    "gpu.frameMs.median": 0.988,
+    "gpu.pipelineCompilations": 17,
+    "gpu.primitives.max": 2507050,
+    "gpu.primitives.median": 2507050,
+    "gpu.primitives.min": 589268,
+    "gpu.renderObjects.max": 392,
+    "gpu.textureMemBytes": 93641248,
+    "gpu.videoMemBytes": 167316640,
+    "maxMultiMeshSpread": 1787.8770751953125,
+    "poses": 6,
+    "samplesPerPose": 40
+  }
+}

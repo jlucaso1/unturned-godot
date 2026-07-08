@@ -1,6 +1,6 @@
 {
   "schemaVersion": "1",
-  "timestamp": "2026-07-08T07:52:17",
+  "timestamp": "2026-07-08T08:14:23",
   "environment": {
     "godotVersion": "4.7-stable (official)",
     "os": "Linux",
@@ -11,9 +11,9 @@
     "scene": "PEI"
   },
   "metrics": {
-    "build.objects.ms": 199.8013,
-    "build.terrain.ms": 2366.1799,
-    "build.total.ms": 2565.9812,
+    "build.objects.ms": 212.5653,
+    "build.terrain.ms": 2341.1297,
+    "build.total.ms": 2553.695,
     "estimatedGeometryBytes": 54738984,
     "meshInstances": 16,
     "multiMeshInstances": 372,

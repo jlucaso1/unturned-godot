@@ -54,8 +54,8 @@ public class TerrainTests
         bytes[3] = 255;
 
         SplatmapTile splat = SplatmapTile.Parse(bytes, 0, 0);
-        Assert.Equal(1f, splat.Weights[0, 0, 3]);
-        Assert.Equal(0f, splat.Weights[0, 0, 0]);
+        Assert.Equal(1f, splat.WeightAt(0, 0, 3));
+        Assert.Equal(0f, splat.WeightAt(0, 0, 0));
     }
 
     [Fact]
@@ -131,5 +131,75 @@ public class TerrainTests
         const int res = Landscape.SPLATMAP_RESOLUTION;
         SplatmapTile splat = SplatmapTile.Parse(new byte[res * res * SplatmapTile.LAYERS], 0, 0);
         Assert.Equal(TerrainPalette.LayerColors[0], TerrainPalette.Blend(splat, 0, 0));
+    }
+
+    // Golden reference for Blend, computed straight from the source bytes with the exact same accumulation
+    // order. Independent of SplatmapTile's internal storage, so it stays valid while Blend is optimized —
+    // any change that is not bit-for-bit identical will fail the characterization tests below.
+    private static Color ReferenceBlend(byte[] data, int x, int y)
+    {
+        const int res = Landscape.SPLATMAP_RESOLUTION;
+        float r = 0, g = 0, b = 0, total = 0;
+        int p = (x * res + y) * SplatmapTile.LAYERS;
+        for (int layer = 0; layer < SplatmapTile.LAYERS; layer++)
+        {
+            float w = data[p + layer] / 255f;
+            Color c = TerrainPalette.LayerColors[layer];
+            r += c.R * w;
+            g += c.G * w;
+            b += c.B * w;
+            total += w;
+        }
+        if (total <= 0f)
+            return TerrainPalette.LayerColors[0];
+        return new Color(r / total, g / total, b / total);
+    }
+
+    private static void AssertBitIdentical(Color expected, Color actual, int x, int y) =>
+        Assert.True(expected.R == actual.R && expected.G == actual.G && expected.B == actual.B,
+            $"Blend not bit-identical at ({x},{y}): expected {expected}, got {actual}");
+
+    [Fact]
+    public void Palette_Blend_BitIdentical_AcrossVariedWeights()
+    {
+        const int res = Landscape.SPLATMAP_RESOLUTION;
+        var data = new byte[res * res * SplatmapTile.LAYERS];
+        // Deterministic fill so every layer contributes and the normalization path is exercised broadly.
+        for (int i = 0; i < data.Length; i++)
+            data[i] = (byte)((i * 37 + 13) % 256);
+        // A couple of all-zero texels to hit the fallback branch too.
+        int zero = (10 * res + 20) * SplatmapTile.LAYERS;
+        for (int layer = 0; layer < SplatmapTile.LAYERS; layer++)
+            data[zero + layer] = 0;
+
+        SplatmapTile splat = SplatmapTile.Parse(data, 0, 0);
+
+        var probes = new[]
+        {
+            (0, 0), (0, res - 1), (res - 1, 0), (res - 1, res - 1),
+            (1, 1), (10, 20), (128, 200), (255, 128), (200, 55), (63, 191),
+        };
+        foreach ((int x, int y) in probes)
+            AssertBitIdentical(ReferenceBlend(data, x, y), TerrainPalette.Blend(splat, x, y), x, y);
+    }
+
+    [Fact]
+    public void Palette_Blend_BitIdentical_SweepEveryLayerPair()
+    {
+        const int res = Landscape.SPLATMAP_RESOLUTION;
+        // Every ordered pair of layers mixed at 100/155 vs 200/255 weights — a broad set of two-layer
+        // normalizations where any reordering of the float accumulation would surface.
+        for (int i = 0; i < SplatmapTile.LAYERS; i++)
+        {
+            for (int j = 0; j < SplatmapTile.LAYERS; j++)
+            {
+                var data = new byte[res * res * SplatmapTile.LAYERS];
+                int p = (7 * res + 9) * SplatmapTile.LAYERS;
+                data[p + i] = 100;
+                data[p + j] = (byte)(data[p + j] + 200); // overlaps add when i==j
+                SplatmapTile splat = SplatmapTile.Parse(data, 0, 0);
+                AssertBitIdentical(ReferenceBlend(data, 7, 9), TerrainPalette.Blend(splat, 7, 9), 7, 9);
+            }
+        }
     }
 }

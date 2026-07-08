@@ -9,8 +9,16 @@ namespace UnturnedGodot;
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class ObjectsBuilder
 {
-    // Instances real meshes (grouped per GUID into one MultiMesh each) where available; placed
-    // objects without an extracted mesh fall back to colored placeholder boxes.
+    // Instances real meshes (grouped per GUID into one MultiMesh each) where available; placed objects
+    // without an extracted mesh fall back to colored placeholder boxes.
+    //
+    // We deliberately do NOT spatially partition these MultiMeshes into a grid (issue #2). It was swept
+    // empirically with the Tier-2 benchmark and is a net loss on PEI: object types are already tightly
+    // clustered, so each per-GUID MultiMesh has a compact AABB that frustum-culls well on its own — a
+    // near-ground view already drops to ~16 draw calls. Grid-partitioning only fragmented draw calls
+    // (full view 392 -> 700+, zoomed 216 -> 232) with a benefit only at extreme close-ups where the cost
+    // was already negligible. The widest type spans just ~1.8 km, so nothing "never culls" badly enough
+    // to justify it. Revisit for larger maps whose object types genuinely span the world.
     public static Node3D Build(IReadOnlyList<PlacedObject> objects, ObjectAssetDatabase db,
         IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary, out int withMesh)
     {

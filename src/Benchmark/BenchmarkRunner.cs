@@ -17,6 +17,12 @@ public static class BenchmarkRunner
 
     public static void Run(Node context, string unturnedPath, string mapName)
     {
+        if (Array.IndexOf(OS.GetCmdlineUserArgs(), "--profile-loop") >= 0)
+        {
+            ProfileLoop(unturnedPath, mapName);
+            return;
+        }
+
         GD.Print("[benchmark] Tier 1 (structural) starting...");
         WorldBuildResult world = WorldBuilder.Build(unturnedPath, mapName);
         context.AddChild(world.Terrain);
@@ -68,6 +74,32 @@ public static class BenchmarkRunner
             metrics["maxMultiMeshSpread"] = m.MaxMultiMeshSpread;
 
         return new BenchmarkReport { Timestamp = Timestamp(), Environment = env, Metrics = metrics };
+    }
+
+    // Rebuilds the world in a tight loop, keeping the process alive, so an external sampling profiler can
+    // attach and stop WHILE it runs. dotnet-trace corrupts traces when the target exits abruptly (which
+    // Godot's native Quit does), so the scenario must stay live across the profiler's stop. Usage:
+    //   godot --headless --path . -- --benchmark --profile-loop &
+    //   dotnet-trace collect -p <pid> --format speedscope --duration 00:00:08   # stops while still looping
+    private static void ProfileLoop(string unturnedPath, string mapName)
+    {
+        double seconds = double.TryParse(System.Environment.GetEnvironmentVariable("UG_PROFILE_SECS"),
+            System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture,
+            out double s) ? s : 30.0;
+        GD.Print($"[benchmark] profile-loop: rebuilding world for {seconds:0}s — attach dotnet-trace now, " +
+            "stop it BEFORE this ends (a clean trace needs the process still alive at stop).");
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        int i = 0;
+        while (sw.Elapsed.TotalSeconds < seconds)
+        {
+            WorldBuildResult w = WorldBuilder.Build(unturnedPath, mapName);
+            w.Terrain.Free();
+            w.Objects.Free();
+            i++;
+            GD.Print($"[benchmark] profile-loop: build {i} done at {sw.Elapsed.TotalSeconds:0.0}s");
+        }
+        GD.Print($"[benchmark] profile-loop: {i} builds in {sw.Elapsed.TotalSeconds:0.0}s");
     }
 
     internal static BenchmarkEnvironment BuildEnvironment(string mapName)

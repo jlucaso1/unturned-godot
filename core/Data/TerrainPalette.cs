@@ -22,20 +22,26 @@ public static class TerrainPalette
     };
 
     // Weighted blend of the layer colors; falls back to layer 0 when a texel has no weight.
+    // The layer run for a texel is contiguous in the flat weight array, so we compute the base offset once
+    // and read weights[base + layer]; the float accumulation order is unchanged, so the result is identical.
     public static Color Blend(SplatmapTile splat, int x, int y)
     {
+        float[] weights = splat.Weights;
+        Color[] palette = LayerColors;
+        int baseIndex = SplatmapTile.WeightIndex(x, y, 0);
+
         float r = 0, g = 0, b = 0, total = 0;
         for (int layer = 0; layer < SplatmapTile.LAYERS; layer++)
         {
-            float w = splat.Weights[x, y, layer];
-            Color c = LayerColors[layer];
+            float w = weights[baseIndex + layer];
+            Color c = palette[layer];
             r += c.R * w;
             g += c.G * w;
             b += c.B * w;
             total += w;
         }
         if (total <= 0f)
-            return LayerColors[0];
+            return palette[0];
         return new Color(r / total, g / total, b / total);
     }
 }
