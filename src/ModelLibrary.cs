@@ -16,13 +16,15 @@ public static class ModelLibrary
     public static int CachedMeshCount(string cacheDir) =>
         Directory.Exists(cacheDir) ? Directory.GetFiles(cacheDir, "*.mesh").Length : 0;
 
-    public static Dictionary<Guid, ArrayMesh> Load(string cacheDir, string textureCacheDir)
+    // Builds the meshes and their materials, registering each textured submesh's material under its
+    // texture key so the caller can apply textures later (registry.ApplyAllAvailable for a warm cache, or
+    // progressively as ExtractTextures streams them in on a cold load).
+    public static Dictionary<Guid, ArrayMesh> Load(string cacheDir, TextureRegistry registry)
     {
         var library = new Dictionary<Guid, ArrayMesh>();
         if (!Directory.Exists(cacheDir))
             return library;
 
-        var textures = new Dictionary<string, ImageTexture?>();
         foreach (string path in Directory.GetFiles(cacheDir, "*.mesh"))
         {
             if (!Guid.TryParseExact(Path.GetFileNameWithoutExtension(path), "N", out Guid guid))
@@ -30,7 +32,7 @@ public static class ModelLibrary
 
             using var stream = File.OpenRead(path);
             var (verts, normals, uvs, submeshes) = MeshCache.Read(stream);
-            ArrayMesh? mesh = Build(verts, normals, uvs, submeshes, textureCacheDir, textures);
+            ArrayMesh? mesh = Build(verts, normals, uvs, submeshes, registry);
             if (mesh != null)
                 library[guid] = mesh;
         }
@@ -38,7 +40,7 @@ public static class ModelLibrary
     }
 
     private static ArrayMesh? Build(Vector3[] verts, Vector3[] normals, Vector2[] uvs,
-        List<CachedSubmesh> submeshes, string textureCacheDir, Dictionary<string, ImageTexture?> textures)
+        List<CachedSubmesh> submeshes, TextureRegistry registry)
     {
         if (verts.Length == 0 || submeshes.Count == 0)
             return null;
@@ -72,7 +74,7 @@ public static class ModelLibrary
             arrays[(int)Mesh.ArrayType.Index] = ReverseWinding(sm.Indices);
 
             mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
-            mesh.SurfaceSetMaterial(surfaces, MaterialFor(sm, textureCacheDir, textures));
+            mesh.SurfaceSetMaterial(surfaces, MaterialFor(sm, registry));
             surfaces++;
         }
         return surfaces > 0 ? mesh : null;
@@ -90,10 +92,10 @@ public static class ModelLibrary
         return r;
     }
 
-    // Flat material tinted with the palette color; textured props also get their albedo texture, and
-    // glass/blended submeshes get alpha transparency.
-    private static StandardMaterial3D MaterialFor(CachedSubmesh sm, string textureCacheDir,
-        Dictionary<string, ImageTexture?> textureCache)
+    // Flat material tinted with the palette color; glass/blended submeshes get alpha transparency. A
+    // textured submesh's material starts untextured and is registered under its texture key — the texture
+    // is applied later (immediately for a warm cache, progressively while a cold load streams).
+    private static StandardMaterial3D MaterialFor(CachedSubmesh sm, TextureRegistry registry)
     {
         var material = new StandardMaterial3D
         {
@@ -103,8 +105,7 @@ public static class ModelLibrary
             // don't show culling holes up close.
             CullMode = BaseMaterial3D.CullModeEnum.Disabled,
         };
-        if (sm.TextureKey.Length > 0)
-            material.AlbedoTexture = LoadTexture(sm.TextureKey, textureCacheDir, textureCache);
+        registry.Register(sm.TextureKey, material);
         material.Transparency = sm.Blend switch
         {
             UnityMaterial.Blend.Cutout => BaseMaterial3D.TransparencyEnum.AlphaScissor, // alpha clip (garlands, foliage)
@@ -114,24 +115,7 @@ public static class ModelLibrary
         return material;
     }
 
-    private static ImageTexture? LoadTexture(string textureKey, string textureCacheDir,
-        Dictionary<string, ImageTexture?> cache)
-    {
-        if (cache.TryGetValue(textureKey, out ImageTexture? tex))
-            return tex;
-
-        tex = null;
-        string path = Path.Combine(textureCacheDir, textureKey + ".tex");
-        if (File.Exists(path))
-        {
-            using var stream = File.OpenRead(path);
-            tex = BuildTexture(TextureCache.Read(stream));
-        }
-        cache[textureKey] = tex;
-        return tex;
-    }
-
-    private static ImageTexture? BuildTexture(CachedTexture cached)
+    internal static ImageTexture? BuildTexture(CachedTexture cached)
     {
         Image.Format format = cached.Format switch
         {

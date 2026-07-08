@@ -15,15 +15,135 @@ namespace UnturnedGodot;
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class ModelExtractor
 {
-    public static int Extract(string bundlePath, string objectBundlesDir, string treeBundlesDir,
-        string assetsDir, HashSet<Guid> neededGuids, string cacheDir, string textureCacheDir)
+    // The SerializedFile (meshes + object/material metadata) sits in the first ~171 MB of the 1.4 GB
+    // decompressed blob; the .resS texture stream is the remaining ~1.18 GB. Mesh extraction only needs
+    // the SerializedFile, so we cap the LZMA decode there (~3 s instead of ~10 s) and defer the texture
+    // stream to ExtractTextures. See the cold-load streaming design.
+    private const long MeshDecodeCap = 200L * 1024 * 1024;
+
+    // Phase 1 (file based): decode only the SerializedFile and build the per-GUID meshes, recording each
+    // submesh's texture key without touching the .resS pixel stream. Used by the synchronous/benchmark
+    // build; the interactive cold load uses StreamExtract instead.
+    public static int ExtractMeshes(string bundlePath, string objectBundlesDir, string treeBundlesDir,
+        string assetsDir, HashSet<Guid> neededGuids, string cacheDir)
     {
-        UnityBundle bundle = UnityBundle.Read(File.ReadAllBytes(bundlePath)); // full decode (.resS needed)
+        UnityBundle bundle = UnityBundle.Read(File.ReadAllBytes(bundlePath), MeshDecodeCap); // SerializedFile only
         byte[] sfBytes = Array.Empty<byte>();
         foreach (KeyValuePair<string, byte[]> f in bundle.Files)
             if (!f.Key.EndsWith(".resS") && !f.Key.EndsWith(".resource"))
                 sfBytes = f.Value;
 
+        int extracted = ExtractMeshesFromSerializedFile(sfBytes, objectBundlesDir, treeBundlesDir,
+            assetsDir, neededGuids, cacheDir, neededTextures: null);
+        GD.Print($"[extract] meshes={extracted}");
+        return extracted;
+    }
+
+    // Cold-load streaming: decode the single LZMA block once, reading the SerializedFile (meshes) first,
+    // signalling the scene can be built, then continuing the SAME pass through the .resS stream and
+    // writing each referenced texture as its bytes arrive — so textures appear progressively while the map
+    // is already playable, and the 171 MB SerializedFile is never re-decompressed. Falls back to the
+    // two-decode path if the bundle is not the expected single-LZMA-block shape.
+    public static void StreamExtract(string bundlePath, string objectBundlesDir, string treeBundlesDir,
+        string assetsDir, HashSet<Guid> neededGuids, string cacheDir, string textureCacheDir,
+        Action onMeshesReady, Action<string> onTextureWritten)
+    {
+        byte[] bundle = File.ReadAllBytes(bundlePath);
+        using MasterBundleStream? stream = MasterBundleStream.Open(bundle);
+        if (stream == null)
+        {
+            GD.Print("[extract] bundle not single-block; falling back to two-pass decode.");
+            ExtractMeshes(bundlePath, objectBundlesDir, treeBundlesDir, assetsDir, neededGuids, cacheDir);
+            onMeshesReady();
+            ExtractTextures(bundlePath, cacheDir, textureCacheDir, onTextureWritten);
+            return;
+        }
+
+        Directory.CreateDirectory(cacheDir);
+        Directory.CreateDirectory(textureCacheDir);
+
+        // Read nodes in blob order: the SerializedFile (offset 0) first, then the .resS/.resource streams.
+        var ordered = new List<MasterBundleStream.Node>(stream.Nodes);
+        ordered.Sort((a, b) => a.Offset.CompareTo(b.Offset));
+        var neededTextures = new Dictionary<long, UnityTexture>();
+
+        const int chunkSize = 16 * 1024 * 1024;
+        foreach (MasterBundleStream.Node node in ordered)
+        {
+            bool isStream = node.Path.EndsWith(".resS") || node.Path.EndsWith(".resource");
+            if (!isStream)
+            {
+                byte[] sfBytes = stream.Read((int)node.Size);
+                ExtractMeshesFromSerializedFile(sfBytes, objectBundlesDir, treeBundlesDir, assetsDir,
+                    neededGuids, cacheDir, neededTextures);
+                GD.Print($"[extract] meshes={CachedMeshCountLoose(cacheDir)} (streamed); {neededTextures.Count} textures pending");
+                onMeshesReady();
+            }
+            else
+            {
+                string fileName = LastSegment(node.Path);
+                var pending = new List<(long texId, UnityTexture tex)>();
+                foreach (KeyValuePair<long, UnityTexture> kv in neededTextures)
+                    if (kv.Value.StreamFileName == fileName)
+                        pending.Add((kv.Key, kv.Value));
+                pending.Sort((a, b) => a.tex.StreamOffset.CompareTo(b.tex.StreamOffset));
+
+                var buffer = new byte[node.Size];
+                long filled = 0;
+                int next = 0;
+                while (filled < node.Size)
+                {
+                    int want = (int)Math.Min(chunkSize, node.Size - filled);
+                    byte[] part = stream.Read(want);
+                    if (part.Length == 0)
+                        break;
+                    Array.Copy(part, 0, buffer, filled, part.Length);
+                    filled += part.Length;
+                    while (next < pending.Count &&
+                        pending[next].tex.StreamOffset + pending[next].tex.StreamSize <= filled)
+                    {
+                        WriteStreamedTexture(pending[next].texId, pending[next].tex, fileName, buffer,
+                            textureCacheDir, onTextureWritten);
+                        next++;
+                    }
+                }
+            }
+        }
+    }
+
+    private static void WriteStreamedTexture(long texId, UnityTexture tex, string fileName, byte[] fileBytes,
+        string textureCacheDir, Action<string> onTextureWritten)
+    {
+        string texKey = texId.ToString("x");
+        string outPath = Path.Combine(textureCacheDir, texKey + ".tex");
+        if (File.Exists(outPath))
+        {
+            onTextureWritten(texKey);
+            return;
+        }
+        byte[]? pixels = tex.GetPixels(name => name == fileName ? fileBytes : null);
+        if (pixels == null || pixels.Length == 0)
+            return;
+        using (var stream = File.Create(outPath))
+            TextureCache.Write(stream, new CachedTexture(tex.Format, tex.Width, tex.Height, tex.MipCount, pixels));
+        onTextureWritten(texKey);
+    }
+
+    private static string LastSegment(string path)
+    {
+        int slash = path.LastIndexOf('/');
+        return slash >= 0 ? path[(slash + 1)..] : path;
+    }
+
+    private static int CachedMeshCountLoose(string cacheDir) =>
+        Directory.Exists(cacheDir) ? Directory.GetFiles(cacheDir, "*.mesh").Length : 0;
+
+    // Builds the per-GUID meshes from an already-decoded SerializedFile. When neededTextures is supplied,
+    // it is filled with the metadata of every referenced texture so a caller can stream in the pixels.
+    private static int ExtractMeshesFromSerializedFile(byte[] sfBytes, string objectBundlesDir,
+        string treeBundlesDir, string assetsDir, HashSet<Guid> neededGuids, string cacheDir,
+        Dictionary<long, UnityTexture>? neededTextures)
+    {
         SerializedFile file = SerializedFile.Read(sfBytes);
         var objectsByPathId = new Dictionary<long, SerializedObject>();
         foreach (SerializedObject o in file.Objects)
@@ -38,7 +158,6 @@ public static class ModelExtractor
         Dictionary<Guid, MaterialPalette> palettes = ScanPalettes(assetsDir);
 
         Directory.CreateDirectory(cacheDir);
-        Directory.CreateDirectory(textureCacheDir);
 
         // Objects and trees (Unturned "resources") share this pipeline; each asset maps to a prefab in
         // the masterbundle under objects/<folder>/object.prefab or trees/<folder>/resource.prefab.
@@ -50,9 +169,8 @@ public static class ModelExtractor
         foreach (ObjectAsset a in ObjectAssetDatabase.ScanDirectory(treeBundlesDir).All)
             work.Add((a, "trees/" + FolderKey(a.Directory, treeBundlesDir)));
 
-        var writtenTextures = new HashSet<long>();
         var mappedGuids = new HashSet<Guid>();
-        int extracted = 0, textured = 0;
+        int extracted = 0;
         foreach ((ObjectAsset asset, string key) in work)
         {
             if (!neededGuids.Contains(asset.Guid) || !mappedGuids.Add(asset.Guid) ||
@@ -91,10 +209,12 @@ public static class ModelExtractor
                 for (int si = 0; si < mesh.Submeshes.Count; si++)
                 {
                     long matId = MaterialForSubmesh(si, palette, assetPrefix, containerByPath, part.Materials);
-                    (Color color, string texKey, UnityMaterial.Blend blend) = ResolveMaterial(matId,
-                        objectsByPathId, file, bundle, textureCacheDir, writtenTextures);
-                    if (texKey.Length > 0)
-                        textured++;
+                    (Color color, string texKey, UnityMaterial.Blend blend, long texId) =
+                        ResolveMaterial(matId, objectsByPathId, file);
+                    if (neededTextures != null && texId != 0 && !neededTextures.ContainsKey(texId) &&
+                        objectsByPathId.TryGetValue(texId, out SerializedObject? texObj))
+                        neededTextures[texId] = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, file.ReaderFor(texObj)));
+
                     int[] src = mesh.Submeshes[si];
                     var indices = new int[src.Length];
                     for (int k = 0; k < src.Length; k++)
@@ -112,8 +232,78 @@ public static class ModelExtractor
             extracted++;
         }
 
-        GD.Print($"[extract] meshes={extracted} texturedSubmeshes={textured} textures={writtenTextures.Count}");
         return extracted;
+    }
+
+    // Phase 2: decode the full bundle (now including the ~1.18 GB .resS pixel stream) and write the
+    // textures referenced by the already-extracted meshes. Derives the needed set from the mesh cache, so
+    // it is independent of phase 1 and resumable (skips textures already cached). Reports each written key
+    // through onTextureWritten so a caller can hot-swap it into the live scene as it lands.
+    public static int ExtractTextures(string bundlePath, string cacheDir, string textureCacheDir,
+        Action<string>? onTextureWritten = null)
+    {
+        HashSet<long> needed = NeededTextureIds(cacheDir);
+        if (needed.Count == 0)
+            return 0;
+
+        UnityBundle bundle = UnityBundle.Read(File.ReadAllBytes(bundlePath)); // full decode (.resS needed)
+        byte[] sfBytes = Array.Empty<byte>();
+        foreach (KeyValuePair<string, byte[]> f in bundle.Files)
+            if (!f.Key.EndsWith(".resS") && !f.Key.EndsWith(".resource"))
+                sfBytes = f.Value;
+
+        SerializedFile file = SerializedFile.Read(sfBytes);
+        var objectsByPathId = new Dictionary<long, SerializedObject>();
+        foreach (SerializedObject o in file.Objects)
+            objectsByPathId[o.PathId] = o;
+
+        Directory.CreateDirectory(textureCacheDir);
+        int written = 0;
+        foreach (long texId in needed)
+        {
+            string texKey = texId.ToString("x");
+            string outPath = Path.Combine(textureCacheDir, texKey + ".tex");
+            if (File.Exists(outPath))
+            {
+                onTextureWritten?.Invoke(texKey); // already cached (resume) — still let the caller apply it
+                written++;
+                continue;
+            }
+            if (!objectsByPathId.TryGetValue(texId, out SerializedObject? texObj))
+                continue;
+
+            UnityTexture tex = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, file.ReaderFor(texObj)));
+            byte[]? pixels = tex.GetPixels(name => bundle.Files.TryGetValue(name, out byte[]? f) ? f : null);
+            if (pixels == null || pixels.Length == 0)
+                continue;
+
+            using (var stream = File.Create(outPath))
+                TextureCache.Write(stream, new CachedTexture(tex.Format, tex.Width, tex.Height, tex.MipCount, pixels));
+            written++;
+            onTextureWritten?.Invoke(texKey);
+        }
+
+        GD.Print($"[extract] textures written/cached={written}");
+        return written;
+    }
+
+    // The set of texture path ids the cached meshes reference (submesh texture keys are the id in hex).
+    private static HashSet<long> NeededTextureIds(string cacheDir)
+    {
+        var ids = new HashSet<long>();
+        if (!Directory.Exists(cacheDir))
+            return ids;
+
+        foreach (string path in Directory.GetFiles(cacheDir, "*.mesh"))
+        {
+            using var stream = File.OpenRead(path);
+            (_, _, _, List<CachedSubmesh> submeshes) = MeshCache.Read(stream);
+            foreach (CachedSubmesh sm in submeshes)
+                if (sm.TextureKey.Length > 0 &&
+                    long.TryParse(sm.TextureKey, System.Globalization.NumberStyles.HexNumber, null, out long id))
+                    ids.Add(id);
+        }
+        return ids;
     }
 
     // Picks the material id for a submesh: the palette's material (batched objects) if it covers this
@@ -131,42 +321,22 @@ public static class ModelExtractor
         return 0;
     }
 
-    // Reads a material's flat color, blend mode and (optional) _MainTex texture, caching textures deduped.
-    private static (Color color, string texKey, UnityMaterial.Blend blend) ResolveMaterial(long matId,
-        Dictionary<long, SerializedObject> objectsByPathId, SerializedFile file, UnityBundle bundle,
-        string textureCacheDir, HashSet<long> writtenTextures)
+    // Reads a material's flat color, blend mode and (optional) _MainTex texture KEY — the texture's path
+    // id in hex — without reading pixels (that needs the .resS stream). Also returns the raw texture path
+    // id (0 when none) so the caller can grab the texture's metadata for later streaming.
+    private static (Color color, string texKey, UnityMaterial.Blend blend, long texId) ResolveMaterial(
+        long matId, Dictionary<long, SerializedObject> objectsByPathId, SerializedFile file)
     {
         if (matId == 0 || !objectsByPathId.TryGetValue(matId, out SerializedObject? matObj))
-            return (Colors.White, string.Empty, UnityMaterial.Blend.Opaque);
+            return (Colors.White, string.Empty, UnityMaterial.Blend.Opaque, 0);
 
         Dictionary<string, object> matDict = TypeTreeReader.Read(matObj.TypeTree, file.ReaderFor(matObj));
         Color color = UnityMaterial.GetColor(matDict, "_Color") ?? Colors.White;
         UnityMaterial.Blend blend = UnityMaterial.GetBlendMode(matDict);
-        string texKey = ResolveTexture(matDict, objectsByPathId, file, bundle, textureCacheDir, writtenTextures);
-        return (color, texKey, blend);
-    }
 
-    private static string ResolveTexture(Dictionary<string, object> matDict,
-        Dictionary<long, SerializedObject> objectsByPathId, SerializedFile file, UnityBundle bundle,
-        string textureCacheDir, HashSet<long> writtenTextures)
-    {
         (int fileId, long texId) = UnityMaterial.GetTexture(matDict, "_MainTex");
-        if (fileId != 0 || texId == 0 || !objectsByPathId.TryGetValue(texId, out SerializedObject? texObj))
-            return string.Empty;
-
-        string texKey = texId.ToString("x");
-        if (writtenTextures.Contains(texId))
-            return texKey;
-
-        UnityTexture tex = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, file.ReaderFor(texObj)));
-        byte[]? pixels = tex.GetPixels(name => bundle.Files.TryGetValue(name, out byte[]? f) ? f : null);
-        if (pixels == null || pixels.Length == 0)
-            return string.Empty;
-
-        using (var stream = File.Create(Path.Combine(textureCacheDir, texKey + ".tex")))
-            TextureCache.Write(stream, new CachedTexture(tex.Format, tex.Width, tex.Height, tex.MipCount, pixels));
-        writtenTextures.Add(texId);
-        return texKey;
+        bool has = fileId == 0 && texId != 0 && objectsByPathId.ContainsKey(texId);
+        return (color, has ? texId.ToString("x") : string.Empty, blend, has ? texId : 0);
     }
 
     private static Dictionary<string, long> ReadContainer(SerializedFile file, out string assetPrefix,

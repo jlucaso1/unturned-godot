@@ -44,7 +44,7 @@ public static class WorldBuilder
             terrainSw.Elapsed.TotalMilliseconds, objectsSw.Elapsed.TotalMilliseconds);
     }
 
-    private static (Node3D root, int tileCount) BuildTerrain(LevelInfo level)
+    public static (Node3D root, int tileCount) BuildTerrain(LevelInfo level)
     {
         var tiles = level.EnumerateTiles();
         GD.Print($"[unturned-godot] Terrain tiles: {tiles.Count}");
@@ -85,17 +85,22 @@ public static class WorldBuilder
         foreach (PlacedObject o in objects)
             neededGuids.Add(o.Guid);
 
-        // Parse the 1.4 GB bundle once, then reuse the compact per-GUID mesh + texture cache.
+        // Parse the 1.4 GB bundle once, then reuse the compact per-GUID mesh + texture cache. This is the
+        // synchronous full build (used by the benchmark and the warm path); the interactive cold load
+        // streams the two phases separately via ObjectStreamer.
         if (ModelLibrary.CachedMeshCount(cacheDir) == 0 && System.IO.File.Exists(bundlePath))
         {
             GD.Print("[unturned-godot] Extracting models + textures from masterbundle (one-time)...");
-            int extracted = ModelExtractor.Extract(bundlePath, objectBundlesDir, treeBundlesDir, assetsDir,
-                neededGuids, cacheDir, textureCacheDir);
+            int extracted = ModelExtractor.ExtractMeshes(bundlePath, objectBundlesDir, treeBundlesDir,
+                assetsDir, neededGuids, cacheDir);
+            ModelExtractor.ExtractTextures(bundlePath, cacheDir, textureCacheDir);
             GD.Print($"[unturned-godot] Extracted {extracted} meshes to cache");
         }
 
-        var meshLibrary = ModelLibrary.Load(cacheDir, textureCacheDir);
+        var registry = new TextureRegistry(textureCacheDir);
+        var meshLibrary = ModelLibrary.Load(cacheDir, registry);
         Node3D objectsRoot = ObjectsBuilder.Build(objects, db, meshLibrary, out int withMesh);
+        registry.ApplyAllAvailable();
         GD.Print($"[unturned-godot] Rendered {withMesh}/{objects.Count} objects with real meshes " +
             $"({meshLibrary.Count} unique)");
         return (objectsRoot, objects.Count, withMesh, meshLibrary.Count);

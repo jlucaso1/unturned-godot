@@ -33,27 +33,46 @@ public partial class Main : Node3D
             return;
         }
 
-        WorldBuildResult world = WorldBuilder.Build(unturnedPath, MapName);
-        AddChild(world.Terrain);
-        AddChild(world.Objects);
-
         string environmentDir = System.IO.Path.Combine(unturnedPath, "Maps", MapName, "Environment");
-        AddChild(RoadsBuilder.Build(environmentDir));
-
         LevelLighting? lighting = LevelLighting.Load(System.IO.Path.Combine(environmentDir, "Lighting.dat"));
-        AddChild(WaterBuilder.Build(lighting));
-        SetupEnvironment(lighting);
+        bool headless = DisplayServer.GetName() == "headless";
+        string shot = OS.GetEnvironment("SCREENSHOT_PATH");
 
-        if (DisplayServer.GetName() == "headless")
+        if (headless || !string.IsNullOrEmpty(shot))
         {
-            GD.Print("[unturned-godot] Headless: data loaded, quitting.");
-            GetTree().Quit();
+            // Complete synchronous build — headless validation, or a screenshot that must be finished.
+            WorldBuildResult world = WorldBuilder.Build(unturnedPath, MapName);
+            AddChild(world.Terrain);
+            AddChild(world.Objects);
+            AddChild(RoadsBuilder.Build(environmentDir));
+            AddChild(WaterBuilder.Build(lighting));
+            SetupEnvironment(lighting);
+
+            if (headless)
+            {
+                GD.Print("[unturned-godot] Headless: data loaded, quitting.");
+                GetTree().Quit();
+                return;
+            }
+            _ = CaptureAndQuit(shot);
             return;
         }
 
-        string shot = OS.GetEnvironment("SCREENSHOT_PATH");
-        if (!string.IsNullOrEmpty(shot))
-            _ = CaptureAndQuit(shot);
+        // Interactive: terrain, roads, water and environment up front; objects stream in (mesh-first,
+        // textures hot-swapped as they decode) so a cold load is playable in ~3 s instead of ~10 s.
+        var level = new LevelInfo(System.IO.Path.Combine(unturnedPath, "Maps", MapName));
+        (Node3D terrain, _) = WorldBuilder.BuildTerrain(level);
+        AddChild(terrain);
+        AddChild(RoadsBuilder.Build(environmentDir));
+        AddChild(WaterBuilder.Build(lighting));
+        SetupEnvironment(lighting);
+
+        var streamer = new ObjectStreamer { Name = "ObjectStreamer" };
+        var overlay = new LoadingOverlay { Name = "LoadingOverlay" };
+        AddChild(streamer);
+        AddChild(overlay);
+        overlay.Track(streamer); // connect before Begin so a warm cache's instant signals are caught
+        streamer.Begin(unturnedPath, level);
     }
 
     // Render a few frames before grabbing the framebuffer so meshes are actually drawn.
