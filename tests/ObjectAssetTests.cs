@@ -54,6 +54,16 @@ public class ObjectAssetTests
         DatDictionary root = DatParser.Parse("GUID 2e698a7b85e94c019b3f91ec8796a961\nType Small\nID 1\n");
         Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset asset));
         Assert.Null(asset.BundleOverridePath);
+        Assert.Equal(System.Guid.Empty, asset.MaterialPaletteGuid);
+    }
+
+    [Fact]
+    public void ParsesMaterialPaletteGuid()
+    {
+        DatDictionary root = DatParser.Parse(
+            "GUID 2e698a7b85e94c019b3f91ec8796a961\nType Small\nID 1\nMaterial_Palette 3fcc42609bfb4154abb9dd39e7542ed8\n");
+        Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset asset));
+        Assert.NotEqual(System.Guid.Empty, asset.MaterialPaletteGuid);
     }
 
     [Fact]

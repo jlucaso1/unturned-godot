@@ -1,7 +1,4 @@
-using System.Collections.Generic;
 using Godot;
-using UnturnedGodot.Assets;
-using UnturnedGodot.Data;
 
 namespace UnturnedGodot;
 
@@ -20,15 +17,16 @@ public partial class Main : Node3D
         if (string.IsNullOrEmpty(unturnedPath))
             unturnedPath = DefaultUnturnedPath;
 
-        string mapPath = System.IO.Path.Combine(unturnedPath, "Maps", MapName);
-        var level = new LevelInfo(mapPath);
+        if (System.Array.IndexOf(OS.GetCmdlineUserArgs(), "--benchmark") >= 0)
+        {
+            Benchmark.BenchmarkRunner.Run(this, unturnedPath, MapName);
+            GetTree().Quit();
+            return;
+        }
 
-        GD.Print($"[unturned-godot] Loading map {level.Name} at {level.Path}");
-
-        BuildTerrain(level);
-        BuildObjects(level,
-            System.IO.Path.Combine(unturnedPath, "Bundles", "Objects"),
-            System.IO.Path.Combine(unturnedPath, "Bundles", "core_linux.masterbundle"));
+        WorldBuildResult world = WorldBuilder.Build(unturnedPath, MapName);
+        AddChild(world.Terrain);
+        AddChild(world.Objects);
         SetupEnvironment();
 
         if (DisplayServer.GetName() == "headless")
@@ -50,6 +48,14 @@ public partial class Main : Node3D
         cam.Position = new Vector3(-256, 900, 700);
         cam.RotationDegrees = new Vector3(-55, -20, 0);
 
+        string camEnv = OS.GetEnvironment("SHOT_CAM"); // "px,py,pz,rx,ry" to override
+        if (!string.IsNullOrEmpty(camEnv))
+        {
+            string[] p = camEnv.Split(',');
+            cam.Position = new Vector3(p[0].ToFloat(), p[1].ToFloat(), p[2].ToFloat());
+            cam.RotationDegrees = new Vector3(p[3].ToFloat(), p[4].ToFloat(), 0);
+        }
+
         for (int i = 0; i < 5; i++)
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
 
@@ -57,50 +63,6 @@ public partial class Main : Node3D
         img.SavePng(path);
         GD.Print($"[unturned-godot] Screenshot saved: {path}");
         GetTree().Quit();
-    }
-
-    private void BuildTerrain(LevelInfo level)
-    {
-        var tiles = level.EnumerateTiles();
-        GD.Print($"[unturned-godot] Terrain tiles: {tiles.Count}");
-
-        var terrainRoot = new Node3D { Name = "Terrain" };
-        AddChild(terrainRoot);
-
-        foreach (var (x, y) in tiles)
-        {
-            var tile = HeightmapTile.Read(level.HeightmapPath(x, y), x, y);
-            var splat = SplatmapTile.TryRead(level.SplatmapPath(x, y), x, y);
-            terrainRoot.AddChild(TerrainBuilder.BuildTile(tile, splat));
-        }
-    }
-
-    private void BuildObjects(LevelInfo level, string objectBundlesDir, string bundlePath)
-    {
-        List<PlacedObject> objects = LevelObjects.Load(level.ObjectsDat);
-        ObjectAssetDatabase db = ObjectAssetDatabase.ScanDirectory(objectBundlesDir);
-        GD.Print($"[unturned-godot] Placed objects: {objects.Count}, asset db entries: {db.Count}");
-
-        if (objects.Count == 0) return;
-
-        string cacheDir = ProjectSettings.GlobalizePath("user://model_cache");
-        var neededGuids = new HashSet<System.Guid>();
-        foreach (PlacedObject o in objects)
-            neededGuids.Add(o.Guid);
-
-        // Parse the 1.4 GB bundle once, then reuse the compact per-GUID mesh cache.
-        if (ModelLibrary.CachedMeshCount(cacheDir) == 0 && System.IO.File.Exists(bundlePath))
-        {
-            GD.Print("[unturned-godot] Extracting models from masterbundle (one-time)...");
-            int extracted = ModelExtractor.Extract(bundlePath, objectBundlesDir, neededGuids, cacheDir);
-            GD.Print($"[unturned-godot] Extracted {extracted} meshes to cache");
-        }
-
-        var meshLibrary = ModelLibrary.Load(cacheDir);
-        Node3D objectsRoot = ObjectsBuilder.Build(objects, db, meshLibrary, out int withMesh);
-        AddChild(objectsRoot);
-        GD.Print($"[unturned-godot] Rendered {withMesh}/{objects.Count} objects with real meshes " +
-            $"({meshLibrary.Count} unique)");
     }
 
     private void SetupEnvironment()

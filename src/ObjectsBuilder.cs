@@ -35,10 +35,10 @@ public static class ObjectsBuilder
         }
 
         withMesh = 0;
-        var meshMaterial = new StandardMaterial3D { VertexColorUseAsAlbedo = false };
         foreach ((Guid guid, List<Transform3D> transforms) in byMesh)
         {
-            root.AddChild(BuildMultiMesh(meshLibrary[guid], transforms, meshMaterial, $"Mesh_{guid:N}"));
+            // No MaterialOverride: the mesh's per-submesh surface materials carry the textures.
+            root.AddChild(BuildMultiMesh(meshLibrary[guid], transforms, $"Mesh_{guid:N}"));
             withMesh += transforms.Count;
         }
 
@@ -48,8 +48,7 @@ public static class ObjectsBuilder
         return root;
     }
 
-    private static MultiMeshInstance3D BuildMultiMesh(Mesh mesh, List<Transform3D> transforms,
-        Material material, string name)
+    private static MultiMeshInstance3D BuildMultiMesh(Mesh mesh, List<Transform3D> transforms, string name)
     {
         var multimesh = new MultiMesh
         {
@@ -60,7 +59,7 @@ public static class ObjectsBuilder
         for (int i = 0; i < transforms.Count; i++)
             multimesh.SetInstanceTransform(i, transforms[i]);
 
-        return new MultiMeshInstance3D { Multimesh = multimesh, Name = name, MaterialOverride = material };
+        return new MultiMeshInstance3D { Multimesh = multimesh, Name = name };
     }
 
     private static MultiMeshInstance3D BuildFallbackBoxes(List<(Transform3D transform, Color color)> items)

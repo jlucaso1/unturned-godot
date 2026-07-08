@@ -11,7 +11,9 @@ public sealed class UnityMesh
     public string Name = string.Empty;
     public Vector3[] Vertices = Array.Empty<Vector3>();
     public Vector3[] Normals = Array.Empty<Vector3>();
-    public int[] Indices = Array.Empty<int>();
+    public Vector2[] Uvs = Array.Empty<Vector2>();
+    public int[] Indices = Array.Empty<int>();       // all triangle indices flattened
+    public List<int[]> Submeshes = new();            // per-submesh triangle indices (parallel to materials)
 
     // False when the mesh uses compression or external stream data we don't decode (caller falls back).
     public bool Usable { get; private set; }
@@ -41,7 +43,10 @@ public sealed class UnityMesh
 
         result.Vertices = ReadChannel(channels, 0, buffer, vertexCount, strides, streamOffsets);
         result.Normals = ReadChannel(channels, 1, buffer, vertexCount, strides, streamOffsets);
-        result.Indices = ReadIndices(mesh);
+        result.Uvs = ReadUvChannel(channels, 4, buffer, vertexCount, strides, streamOffsets); // UV0
+        result.Submeshes = ReadSubmeshes(mesh);
+        foreach (int[] sm in result.Submeshes)
+            result.Indices = Concat(result.Indices, sm);
         result.Usable = result.Vertices.Length > 0 && result.Indices.Length > 0;
         return result;
     }
@@ -106,6 +111,32 @@ public sealed class UnityMesh
         return values;
     }
 
+    private static Vector2[] ReadUvChannel(List<object> channels, int index, byte[] buffer,
+        int vertexCount, int[] strides, int[] streamOffsets)
+    {
+        if (index >= channels.Count)
+            return Array.Empty<Vector2>();
+
+        var ch = (Dictionary<string, object>)channels[index];
+        int dim = ToInt(ch["dimension"]);
+        if (dim < 2)
+            return Array.Empty<Vector2>();
+
+        int stream = ToInt(ch["stream"]);
+        int format = ToInt(ch["format"]);
+        int stride = strides[stream];
+        int baseOffset = streamOffsets[stream] + ToInt(ch["offset"]);
+        int componentSize = FormatSize[format];
+
+        var values = new Vector2[vertexCount];
+        for (int v = 0; v < vertexCount; v++)
+        {
+            int p = baseOffset + v * stride;
+            values[v] = new Vector2(ReadComponent(buffer, p, format), ReadComponent(buffer, p + componentSize, format));
+        }
+        return values;
+    }
+
     private static float ReadComponent(byte[] buffer, int offset, int format) => format switch
     {
         0 => BitConverter.ToSingle(buffer, offset),                       // Float32
@@ -114,30 +145,43 @@ public sealed class UnityMesh
         _ => BitConverter.ToSingle(buffer, offset),
     };
 
-    private static int[] ReadIndices(Dictionary<string, object> mesh)
+    // One index array per submesh (triangle lists only), parallel to the palette's materials.
+    private static List<int[]> ReadSubmeshes(Dictionary<string, object> mesh)
     {
         byte[] indexBuffer = (byte[])mesh["m_IndexBuffer"];
         bool is32 = ToInt(mesh["m_IndexFormat"]) == 1;
-        var submeshes = (List<object>)mesh["m_SubMeshes"];
+        int size = is32 ? 4 : 2;
 
-        var indices = new List<int>();
-        foreach (object s in submeshes)
+        var result = new List<int[]>();
+        foreach (object s in (List<object>)mesh["m_SubMeshes"])
         {
             var sm = (Dictionary<string, object>)s;
             if (ToInt(sm["topology"]) != 0)
-                continue; // only triangle lists
+            {
+                result.Add(Array.Empty<int>()); // keep index alignment with materials
+                continue;
+            }
 
             int firstByte = ToInt(sm["firstByte"]);
             int indexCount = ToInt(sm["indexCount"]);
-            int size = is32 ? 4 : 2;
+            var indices = new int[indexCount];
             for (int i = 0; i < indexCount; i++)
             {
                 int p = firstByte + i * size;
                 // Index buffer values are absolute vertex indices.
-                indices.Add(is32 ? BitConverter.ToInt32(indexBuffer, p) : BitConverter.ToUInt16(indexBuffer, p));
+                indices[i] = is32 ? BitConverter.ToInt32(indexBuffer, p) : BitConverter.ToUInt16(indexBuffer, p);
             }
+            result.Add(indices);
         }
-        return indices.ToArray();
+        return result;
+    }
+
+    private static int[] Concat(int[] a, int[] b)
+    {
+        var r = new int[a.Length + b.Length];
+        Array.Copy(a, r, a.Length);
+        Array.Copy(b, 0, r, a.Length, b.Length);
+        return r;
     }
 
     private static int ToInt(object value) => Convert.ToInt32(value);

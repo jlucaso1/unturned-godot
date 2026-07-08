@@ -32,16 +32,18 @@ git-ignored.
 - **Object assets** — GUID/id/type resolution from `Bundles/Objects/**`.
 - **Unity asset bundle + mesh reader** (`core/Unity/`) — a from-scratch parser for the 2022.3
   `core_linux.masterbundle`: UnityFS container, LZ4 (own decoder) + LZMA (SharpCompress, the one
-  external dep) blocks, SerializedFile v22, TypeTree-driven object reader, and Mesh geometry
-  (vertex channels, submeshes). Real object models are extracted once and cached per GUID.
+  external dep) blocks, SerializedFile v22, TypeTree-driven object reader, Mesh geometry (vertex
+  channels, UVs, submeshes), Material (`_Color`/`_MainTex`) and Texture2D (DXT1/DXT5/RGB/RGBA).
 
-## Real object models
+## Real object models + materials
 
-The masterbundle is a single 1.4 GB LZMA block, so it is parsed **once** (`ModelExtractor`): the
-graph walk maps each placed object's GUID to its highest-detail `Model_0` LOD mesh, which is decoded
-and cached as a compact `user://model_cache/<guid>.mesh`. Runtime loads only those small meshes.
-`Bundle_Override_Path` (holiday/variant objects reusing a base mesh) and external/built-in mesh
-references are handled, so **all 4329 PEI objects render with real geometry**. Meshes are untextured.
+The masterbundle is a single 1.4 GB LZMA block, so it is parsed **once** (`ModelExtractor`): the graph
+walk maps each placed object's GUID to its highest-detail `Model_0` LOD mesh, and — through the object's
+`MaterialPalette` — resolves each submesh's flat `_Color` and (where present) `_MainTex` texture from
+the `.resS` stream. Meshes and deduplicated textures are cached (`user://model_cache`, `user://texture_cache`);
+runtime loads only what the map needs. `Bundle_Override_Path` (holiday/variant reuse) and external mesh
+references are handled, so **all 4329 PEI objects render with real geometry and materials**. Unturned's
+blocky objects are mostly flat-colored (5227/5229 materials have `_Color`), with textures on a few props.
 
 ## Run
 
@@ -79,8 +81,8 @@ dotnet test tests/UnturnedGodot.Tests.csproj            # run the suite
 dotnet format --verify-no-changes                       # lint (fails on style drift)
 dotnet format                                           # auto-format
 
-# Coverage
-dotnet test tests/UnturnedGodot.Tests.csproj --collect:"XPlat Code Coverage"
+# Coverage (excludes source-generated code via coverlet.runsettings)
+dotnet test tests/UnturnedGodot.Tests.csproj --settings coverlet.runsettings
 ```
 
 Style and analyzers are enforced via `.editorconfig` + `Directory.Build.props`
@@ -88,10 +90,12 @@ Style and analyzers are enforced via `.editorconfig` + `Directory.Build.props`
 
 ## Not yet done
 
-- **Textures/materials** — meshes render untextured; terrain colors are a stand-in palette blended
-  from real splatmap weights, not the game textures.
+- **Terrain textures** — terrain colors are a stand-in palette blended from real splatmap weights,
+  not the game's material textures.
 - **Stream-data / compressed meshes** — not needed for PEI (none of its objects use them), so the
-  `.resS` and `m_CompressedMesh` paths are not decoded yet; such meshes fall back to boxes.
+  vertex-data `.resS` and `m_CompressedMesh` paths are not decoded yet; such meshes fall back to boxes.
+  (Texture pixel data *is* read from `.resS`.)
 
-Coverage note: `core/` is 100% line + branch covered by the hermetic (synthetic-input) tests alone;
-the real-data tests under `tests/` are extra end-to-end validation and self-skip without the game.
+Coverage note: `core/` is 100% line + branch covered by the hermetic (synthetic-input) tests alone
+(source-generated JSON excluded); the real-data tests under `tests/` are extra end-to-end validation
+and self-skip without the game.

@@ -17,11 +17,14 @@ public sealed class ObjectAsset
     // Holiday/variant objects reuse a base object's mesh via this path (e.g. "/Objects/.../Grave_0").
     public string? BundleOverridePath { get; }
 
+    // Palette of materials (by GUID) whose textures the object's submeshes use.
+    public Guid MaterialPaletteGuid { get; }
+
     // Folder holding the .dat, used to match the object to its prefab path in the bundle.
     public string Directory { get; set; } = string.Empty;
 
     private ObjectAsset(Guid guid, ushort id, EObjectType type, string rawType, string? name,
-        string? bundleOverridePath)
+        string? bundleOverridePath, Guid materialPaletteGuid)
     {
         Guid = guid;
         Id = id;
@@ -29,6 +32,7 @@ public sealed class ObjectAsset
         RawType = rawType;
         Name = name;
         BundleOverridePath = bundleOverridePath;
+        MaterialPaletteGuid = materialPaletteGuid;
     }
 
     // A v2 file wraps identity in a "Metadata" block; v1 keeps it at the root (optionally under "Asset").
@@ -47,8 +51,9 @@ public sealed class ObjectAsset
         string rawType = data.GetString("Type") ?? string.Empty;
         string? name = localizedName ?? data.GetString("Name");
         string? overridePath = data.GetString("Bundle_Override_Path");
+        data.TryGetGuid("Material_Palette", out Guid paletteGuid);
 
-        asset = new ObjectAsset(guid, id, ClassifyType(rawType), rawType, name, overridePath);
+        asset = new ObjectAsset(guid, id, ClassifyType(rawType), rawType, name, overridePath, paletteGuid);
         return true;
     }
 

@@ -7,38 +7,40 @@ using UnturnedGodot.Unity;
 
 namespace UnturnedGodot;
 
-// Loads cached meshes into Godot ArrayMeshes keyed by object GUID. Vertices are converted from
-// Unity to Godot space (negate Z, matching ObjectPlacement), which flips winding, so triangles
-// are reversed to keep faces outward.
+// Loads cached models into Godot ArrayMeshes keyed by object GUID: one surface per submesh, with the
+// submesh's texture applied. Vertices convert Unity->Godot (negate Z, matching ObjectPlacement), which
+// flips winding, so triangles are reversed; UV V is flipped for Godot's texture origin.
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class ModelLibrary
 {
     public static int CachedMeshCount(string cacheDir) =>
         Directory.Exists(cacheDir) ? Directory.GetFiles(cacheDir, "*.mesh").Length : 0;
 
-    public static Dictionary<Guid, ArrayMesh> Load(string cacheDir)
+    public static Dictionary<Guid, ArrayMesh> Load(string cacheDir, string textureCacheDir)
     {
         var library = new Dictionary<Guid, ArrayMesh>();
         if (!Directory.Exists(cacheDir))
             return library;
 
+        var textures = new Dictionary<string, ImageTexture?>();
         foreach (string path in Directory.GetFiles(cacheDir, "*.mesh"))
         {
             if (!Guid.TryParseExact(Path.GetFileNameWithoutExtension(path), "N", out Guid guid))
                 continue;
 
             using var stream = File.OpenRead(path);
-            (Vector3[] verts, Vector3[] normals, int[] indices) = MeshCache.Read(stream);
-            ArrayMesh? mesh = Build(verts, normals, indices);
+            var (verts, normals, uvs, submeshes) = MeshCache.Read(stream);
+            ArrayMesh? mesh = Build(verts, normals, uvs, submeshes, textureCacheDir, textures);
             if (mesh != null)
                 library[guid] = mesh;
         }
         return library;
     }
 
-    private static ArrayMesh? Build(Vector3[] verts, Vector3[] normals, int[] indices)
+    private static ArrayMesh? Build(Vector3[] verts, Vector3[] normals, Vector2[] uvs,
+        List<CachedSubmesh> submeshes, string textureCacheDir, Dictionary<string, ImageTexture?> textures)
     {
-        if (verts.Length == 0 || indices.Length < 3)
+        if (verts.Length == 0 || submeshes.Count == 0)
             return null;
 
         var gverts = new Vector3[verts.Length];
@@ -49,24 +51,87 @@ public static class ModelLibrary
         for (int i = 0; i < normals.Length; i++)
             gnormals[i] = Landscape.UnityToGodot(normals[i]);
 
-        // Reverse winding to compensate for the mirrored (Z-negated) space.
-        var gindices = new int[indices.Length];
-        for (int i = 0; i + 2 < indices.Length; i += 3)
-        {
-            gindices[i] = indices[i];
-            gindices[i + 1] = indices[i + 2];
-            gindices[i + 2] = indices[i + 1];
-        }
-
-        var arrays = new Godot.Collections.Array();
-        arrays.Resize((int)Mesh.ArrayType.Max);
-        arrays[(int)Mesh.ArrayType.Vertex] = gverts;
-        if (gnormals.Length == gverts.Length)
-            arrays[(int)Mesh.ArrayType.Normal] = gnormals;
-        arrays[(int)Mesh.ArrayType.Index] = gindices;
+        var guvs = new Vector2[uvs.Length];
+        for (int i = 0; i < uvs.Length; i++)
+            guvs[i] = new Vector2(uvs[i].X, 1f - uvs[i].Y); // Godot's texture origin is top-left
 
         var mesh = new ArrayMesh();
-        mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
-        return mesh;
+        int surfaces = 0;
+        foreach (CachedSubmesh sm in submeshes)
+        {
+            if (sm.Indices.Length < 3)
+                continue;
+
+            var arrays = new Godot.Collections.Array();
+            arrays.Resize((int)Mesh.ArrayType.Max);
+            arrays[(int)Mesh.ArrayType.Vertex] = gverts;
+            if (gnormals.Length == gverts.Length)
+                arrays[(int)Mesh.ArrayType.Normal] = gnormals;
+            if (guvs.Length == gverts.Length)
+                arrays[(int)Mesh.ArrayType.TexUV] = guvs;
+            arrays[(int)Mesh.ArrayType.Index] = ReverseWinding(sm.Indices);
+
+            mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+            mesh.SurfaceSetMaterial(surfaces, MaterialFor(sm.Color, sm.TextureKey, textureCacheDir, textures));
+            surfaces++;
+        }
+        return surfaces > 0 ? mesh : null;
+    }
+
+    private static int[] ReverseWinding(int[] indices)
+    {
+        var r = new int[indices.Length];
+        for (int i = 0; i + 2 < indices.Length; i += 3)
+        {
+            r[i] = indices[i];
+            r[i + 1] = indices[i + 2];
+            r[i + 2] = indices[i + 1];
+        }
+        return r;
+    }
+
+    // Flat material tinted with the palette color; textured props also get their albedo texture.
+    private static StandardMaterial3D MaterialFor(Color color, string textureKey, string textureCacheDir,
+        Dictionary<string, ImageTexture?> textureCache)
+    {
+        var material = new StandardMaterial3D { AlbedoColor = color, Roughness = 1f };
+        if (textureKey.Length > 0)
+            material.AlbedoTexture = LoadTexture(textureKey, textureCacheDir, textureCache);
+        return material;
+    }
+
+    private static ImageTexture? LoadTexture(string textureKey, string textureCacheDir,
+        Dictionary<string, ImageTexture?> cache)
+    {
+        if (cache.TryGetValue(textureKey, out ImageTexture? tex))
+            return tex;
+
+        tex = null;
+        string path = Path.Combine(textureCacheDir, textureKey + ".tex");
+        if (File.Exists(path))
+        {
+            using var stream = File.OpenRead(path);
+            tex = BuildTexture(TextureCache.Read(stream));
+        }
+        cache[textureKey] = tex;
+        return tex;
+    }
+
+    private static ImageTexture? BuildTexture(CachedTexture cached)
+    {
+        Image.Format format = cached.Format switch
+        {
+            3 => Image.Format.Rgb8,
+            4 => Image.Format.Rgba8,
+            10 => Image.Format.Dxt1,
+            12 => Image.Format.Dxt5,
+            25 => Image.Format.BptcRgba,
+            _ => (Image.Format)(-1), // unsupported (e.g. crunched) -> no texture
+        };
+        if ((int)format < 0)
+            return null;
+
+        Image image = Image.CreateFromData(cached.Width, cached.Height, cached.MipCount > 1, format, cached.Pixels);
+        return ImageTexture.CreateFromImage(image);
     }
 }

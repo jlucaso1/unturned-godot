@@ -139,6 +139,52 @@ public class UnityMeshFormatTests
     }
 
     [Fact]
+    public void ReadsUvChannel()
+    {
+        // position (ch0) + UV0 (ch4). stride = 12 + 8 = 20.
+        var vd = new byte[20];
+        Buffer.BlockCopy(new[] { 0f, 0f, 0f }, 0, vd, 0, 12);
+        Buffer.BlockCopy(new[] { 0.25f, 0.75f }, 0, vd, 12, 8);
+
+        var channels = new List<object> { Channel(0, 0, 0, 3), Channel(0, 0, 0, 0), Channel(0, 0, 0, 0),
+            Channel(0, 0, 0, 0), Channel(0, 12, 0, 2) };
+        for (int i = 5; i < 8; i++)
+            channels.Add(Channel(0, 0, 0, 0));
+
+        var mesh = Mesh(0, vd, 1, Indices(0, 0, 0));
+        ((Dictionary<string, object>)mesh["m_VertexData"])["m_Channels"] = channels;
+        UnityMesh m = UnityMesh.Read(mesh);
+        Assert.Equal(new Godot.Vector2(0.25f, 0.75f), m.Uvs[0]);
+    }
+
+    [Fact]
+    public void KeepsSubmeshesSeparate()
+    {
+        var mesh = Mesh(0, MakeVerts(4), 4, Array.Empty<byte>());
+        mesh["m_IndexBuffer"] = Indices(0, 1, 2, 1, 2, 3);
+        mesh["m_SubMeshes"] = new List<object>
+        {
+            new Dictionary<string, object> { ["firstByte"] = 0u, ["indexCount"] = 3u, ["topology"] = 0, ["firstVertex"] = 0u, ["vertexCount"] = 3u },
+            new Dictionary<string, object> { ["firstByte"] = 6u, ["indexCount"] = 3u, ["topology"] = 0, ["firstVertex"] = 0u, ["vertexCount"] = 3u },
+        };
+        UnityMesh m = UnityMesh.Read(mesh);
+        Assert.Equal(2, m.Submeshes.Count);
+        Assert.Equal(new[] { 0, 1, 2 }, m.Submeshes[0]);
+        Assert.Equal(new[] { 1, 2, 3 }, m.Submeshes[1]);
+        Assert.Equal(6, m.Indices.Length); // flattened across submeshes
+    }
+
+    [Fact]
+    public void NonTriangleSubmesh_KeepsEmptySlot()
+    {
+        var mesh = Mesh(0, MakeVerts(3), 3, Indices(0, 1, 2));
+        ((Dictionary<string, object>)((List<object>)mesh["m_SubMeshes"])[0])["topology"] = 1;
+        UnityMesh m = UnityMesh.Read(mesh);
+        Assert.Single(m.Submeshes);
+        Assert.Empty(m.Submeshes[0]); // slot kept aligned with materials
+    }
+
+    [Fact]
     public void CompressedMesh_NotUsable()
     {
         Assert.False(UnityMesh.Read(Mesh(0, new byte[12], 1, Indices(0), compression: 1)).Usable);
