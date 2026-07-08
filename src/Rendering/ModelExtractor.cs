@@ -62,6 +62,18 @@ public static class ModelExtractor
         return trees;
     }
 
+    // Decodes just the masterbundle's SerializedFile (meshes + metadata; not the .resS pixel stream), for
+    // reading inline assets such as the small face textures. Callers should cache the result themselves.
+    public static SerializedFile ReadMasterbundleFile(string bundlePath)
+    {
+        UnityBundle bundle = UnityBundle.Read(File.ReadAllBytes(bundlePath), MeshDecodeCap);
+        byte[] sfBytes = Array.Empty<byte>();
+        foreach (KeyValuePair<string, byte[]> f in bundle.Files)
+            if (!f.Key.EndsWith(".resS") && !f.Key.EndsWith(".resource"))
+                sfBytes = f.Value;
+        return SerializedFile.Read(sfBytes);
+    }
+
     // Phase 1 (file based): decode only the SerializedFile and build the per-GUID meshes, recording each
     // submesh's texture key without touching the .resS pixel stream. Used by the synchronous/benchmark
     // build; the interactive cold load uses StreamExtract instead.

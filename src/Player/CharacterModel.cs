@@ -22,6 +22,7 @@ public static class CharacterModel
 
     // Customization.SKINS[0] — the default light skin tone the character's skin regions are filled with.
     private static readonly Color DefaultSkin = new(244f / 255f, 230f / 255f, 210f / 255f);
+    private const int DefaultFace = 0; // Items/Faces/0 — the default face overlay (eyes + mouth, transparent)
 
     // Builds the skinned Player_Client character, or null when the game data is absent or can't be parsed
     // (the caller then falls back to the placeholder figure).
@@ -69,7 +70,7 @@ public static class CharacterModel
                 return null;
 
             if (mesh.BoneIndices.Length == mesh.Vertices.Length * UnityMesh.BonesPerVertex && mesh.BindPoses.Count > 0)
-                return BuildSkinnedCharacter(file, byId, smr, mesh);
+                return BuildSkinnedCharacter(file, byId, smr, mesh, bundlePath);
 
             // Fallback: no skinning data -> static bind-pose mesh.
             return new MeshInstance3D { Mesh = BuildMesh(mesh, skinned: false), Name = "CharacterBody" };
@@ -81,7 +82,7 @@ public static class CharacterModel
     // body mesh as its child. Uses Godot's CreateSkinFromRestTransforms so the bind matrices derive from the
     // rest hierarchy — the mesh is authored in that same bind pose, so this is exact.
     private static Node3D BuildSkinnedCharacter(SerializedFile file, Dictionary<long, SerializedObject> byId,
-        Dictionary<string, object> smr, UnityMesh mesh)
+        Dictionary<string, object> smr, UnityMesh mesh, string bundlePath)
     {
         var boneRefs = (List<object>)smr["m_Bones"];
         int boneCount = boneRefs.Count;
@@ -125,6 +126,8 @@ public static class CharacterModel
 
         long clipId = DefaultClipOf(file, byId, Id(smr["m_GameObject"]));
         bool posed = clipId != 0 && ApplyClipPose(file, byId, skeleton, boneByName, clipId);
+
+        AddFace(skeleton, boneByName, bundlePath);
         GD.Print($"[unturned-godot] Character: real {EntityRoot} skinned body loaded ({boneCount} bones, " +
             (posed ? "default pose" : "bind pose") + ").");
         return skeleton;
@@ -204,6 +207,97 @@ public static class CharacterModel
     }
 
     private static float F(object value) => System.Convert.ToSingle(value);
+
+    // Overlays the default face (eyes + mouth) on the head-front as a small quad. The pose is static, so
+    // the quad is placed once at the Skull bone's global position with a forward/up offset; the texture is
+    // transparent apart from the features, so it reads over the skin. The character faces -Z (Unity +Z
+    // forward, reflected), so the quad is turned to face -Z.
+    private static void AddFace(Skeleton3D skeleton, Dictionary<string, int> boneByName, string bundlePath)
+    {
+        if (!boneByName.TryGetValue("Skull", out int skull))
+            return;
+        ImageTexture? face = LoadFace(bundlePath, DefaultFace);
+        if (face == null)
+            return;
+
+        Vector3 head = skeleton.GetBoneGlobalPose(skull).Origin;
+        skeleton.AddChild(new MeshInstance3D
+        {
+            Name = "Face",
+            Mesh = new QuadMesh { Size = new Vector2(0.2f, 0.2f) },
+            Position = head + new Vector3(0f, 0.16f, -0.13f),
+            RotationDegrees = new Vector3(0f, 180f, 0f), // QuadMesh faces +Z; turn it to the character's -Z front
+            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+            MaterialOverride = new StandardMaterial3D
+            {
+                AlbedoTexture = face,
+                Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+                TextureFilter = BaseMaterial3D.TextureFilterEnum.Nearest, // keep the 16x16 pixels crisp
+                CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+                Roughness = 1f,
+                SpecularMode = BaseMaterial3D.SpecularModeEnum.Disabled,
+            },
+        });
+    }
+
+    // Loads the face texture (small, stored inline in the masterbundle SerializedFile) via a tiny on-disk
+    // cache so it isn't re-decoded on every spawn.
+    private static ImageTexture? LoadFace(string bundlePath, int faceIndex)
+    {
+        string cachePath = ProjectSettings.GlobalizePath($"user://face_{faceIndex}.tex");
+        if (File.Exists(cachePath))
+        {
+            try
+            {
+                using FileStream s = File.OpenRead(cachePath);
+                return ModelLibrary.BuildTexture(TextureCache.Read(s));
+            }
+            catch (IOException) { /* corrupt cache -> regenerate */ }
+        }
+
+        CachedTexture? extracted = ExtractInlineTexture(ModelExtractor.ReadMasterbundleFile(bundlePath),
+            $"assets/coremasterbundle/items/faces/{faceIndex}/texture.png");
+        if (extracted is not { } face)
+            return null;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
+            using FileStream w = File.Create(cachePath);
+            TextureCache.Write(w, face);
+        }
+        catch (IOException) { /* best-effort cache */ }
+        return ModelLibrary.BuildTexture(face);
+    }
+
+    // Reads a texture stored inline in a SerializedFile, found by its AssetBundle container path.
+    private static CachedTexture? ExtractInlineTexture(SerializedFile mb, string containerPath)
+    {
+        var byId = new Dictionary<long, SerializedObject>();
+        foreach (SerializedObject o in mb.Objects)
+            byId[o.PathId] = o;
+
+        foreach (SerializedObject o in mb.Objects)
+        {
+            if (o.ClassId != 142) // AssetBundle
+                continue;
+            Dictionary<string, object> ab = TypeTreeReader.Read(o.TypeTree, mb.ReaderFor(o));
+            foreach (object entry in (List<object>)ab["m_Container"])
+            {
+                var pair = (Dictionary<string, object>)entry;
+                if ((string)pair["first"] != containerPath)
+                    continue;
+                long texId = Id(((Dictionary<string, object>)pair["second"])["asset"]);
+                if (!byId.TryGetValue(texId, out SerializedObject? texObj))
+                    return null;
+                UnityTexture tex = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, mb.ReaderFor(texObj)));
+                byte[]? pixels = tex.GetPixels(_ => null); // inline
+                return pixels == null || pixels.Length == 0
+                    ? null
+                    : new CachedTexture(tex.Format, tex.Width, tex.Height, tex.MipCount, pixels);
+            }
+        }
+        return null;
+    }
 
     // Walks the mesh's GameObject up to its prefab root and returns the root GameObject's name.
     private static string RootName(SerializedFile file, Dictionary<long, SerializedObject> byId, long goId)

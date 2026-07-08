@@ -146,6 +146,18 @@ public partial class Main : Node3D
         for (int i = 0; i < settleFrames; i++)
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
 
+        // PLAYER_FRONT=1 frames the character from the front (its face) instead of the over-the-shoulder view.
+        if (OS.GetEnvironment("PLAYER_FRONT") == "1" && GetNodeOrNull<Node3D>("Player") is { } player)
+        {
+            Vector3 headTarget = player.GlobalPosition + new Vector3(0, 1.7f, 0);
+            Vector3 forward = -player.GlobalTransform.Basis.Z; // the character's facing
+            var front = new Camera3D { Name = "FrontCamera", Current = true };
+            AddChild(front);
+            front.GlobalPosition = headTarget + (forward * 2.2f);
+            front.LookAt(headTarget);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+        }
+
         Image img = GetViewport().GetTexture().GetImage();
         img.SavePng(path);
         GD.Print($"[unturned-godot] Screenshot saved: {path}");
