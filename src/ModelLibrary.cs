@@ -105,8 +105,12 @@ public static class ModelLibrary
         };
         if (sm.TextureKey.Length > 0)
             material.AlbedoTexture = LoadTexture(sm.TextureKey, textureCacheDir, textureCache);
-        if (sm.Transparent)
-            material.Transparency = BaseMaterial3D.TransparencyEnum.Alpha;
+        material.Transparency = sm.Blend switch
+        {
+            UnityMaterial.Blend.Cutout => BaseMaterial3D.TransparencyEnum.AlphaScissor, // alpha clip (garlands, foliage)
+            UnityMaterial.Blend.Alpha => BaseMaterial3D.TransparencyEnum.Alpha,          // blend (glass)
+            _ => BaseMaterial3D.TransparencyEnum.Disabled,
+        };
         return material;
     }
 

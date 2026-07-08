@@ -65,28 +65,30 @@ public class UnityMaterialTests
         Assert.Null(UnityMaterial.GetFloat(new Dictionary<string, object>(), "_Mode")); // no props
     }
 
-    [Fact]
-    public void IsTransparent_ByRenderQueue()
+    [Theory]
+    [InlineData(0f, UnityMaterial.Blend.Opaque)]
+    [InlineData(1f, UnityMaterial.Blend.Cutout)] // alpha clip (garland)
+    [InlineData(2f, UnityMaterial.Blend.Alpha)]  // Fade
+    [InlineData(3f, UnityMaterial.Blend.Alpha)]  // Transparent (glass)
+    public void GetBlendMode_ByMode(float mode, UnityMaterial.Blend expected)
     {
-        Assert.True(UnityMaterial.IsTransparent(Material(null, null, renderQueue: 3000)));
-        Assert.False(UnityMaterial.IsTransparent(Material(null, null, renderQueue: 2000)));
+        var mat = Material(null, null, new List<object> { FloatEntry("_Mode", mode) });
+        Assert.Equal(expected, UnityMaterial.GetBlendMode(mat));
     }
 
     [Theory]
-    [InlineData(0f, false)]
-    [InlineData(1f, false)]
-    [InlineData(2f, true)]  // Fade
-    [InlineData(3f, true)]  // Transparent
-    public void IsTransparent_ByMode(float mode, bool expected)
+    [InlineData(3000, UnityMaterial.Blend.Alpha)]   // Transparent queue
+    [InlineData(2450, UnityMaterial.Blend.Cutout)]  // AlphaTest queue
+    [InlineData(2000, UnityMaterial.Blend.Opaque)]  // Geometry queue
+    public void GetBlendMode_ByRenderQueue(int renderQueue, UnityMaterial.Blend expected)
     {
-        var mat = Material(null, null, new List<object> { FloatEntry("_Mode", mode) });
-        Assert.Equal(expected, UnityMaterial.IsTransparent(mat));
+        Assert.Equal(expected, UnityMaterial.GetBlendMode(Material(null, null, renderQueue: renderQueue)));
     }
 
     [Fact]
-    public void IsTransparent_NoModeNoQueue_IsFalse()
+    public void GetBlendMode_NoModeNoQueue_IsOpaque()
     {
-        Assert.False(UnityMaterial.IsTransparent(Material(null, null)));
+        Assert.Equal(UnityMaterial.Blend.Opaque, UnityMaterial.GetBlendMode(Material(null, null)));
     }
 
     [Fact]

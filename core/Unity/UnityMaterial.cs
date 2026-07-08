@@ -51,14 +51,27 @@ public static class UnityMaterial
         return null;
     }
 
-    // Glass and other blended materials use a Transparent render queue (>= 3000) or a Fade/Transparent
-    // _Mode (2 or 3) on Unity's Standard shader; without this they render opaque with a garbled look.
-    public static bool IsTransparent(Dictionary<string, object> material)
+    // How a material blends. Unity's Standard shader _Mode: 0 Opaque, 1 Cutout (alpha clip, e.g. the
+    // Christmas-light garland), 2 Fade / 3 Transparent (alpha blend, e.g. glass). Render queue is the
+    // fallback: 2450 == AlphaTest (cutout), >= 3000 == Transparent (blend).
+    public enum Blend { Opaque, Cutout, Alpha }
+
+    public static Blend GetBlendMode(Dictionary<string, object> material)
     {
-        if (material.TryGetValue("m_CustomRenderQueue", out object? rq) && System.Convert.ToInt32(rq) >= 3000)
-            return true;
-        float mode = GetFloat(material, "_Mode") ?? 0f;
-        return mode == 2f || mode == 3f;
+        float? mode = GetFloat(material, "_Mode");
+        if (mode == 1f)
+            return Blend.Cutout;
+        if (mode == 2f || mode == 3f)
+            return Blend.Alpha;
+
+        int renderQueue = material.TryGetValue("m_CustomRenderQueue", out object? rq)
+            ? System.Convert.ToInt32(rq)
+            : -1;
+        if (renderQueue >= 3000)
+            return Blend.Alpha;
+        if (renderQueue >= 2450)
+            return Blend.Cutout;
+        return Blend.Opaque;
     }
 
     // The internal file id and path id of the texture bound to a property, (0, 0) when unset.

@@ -10,15 +10,15 @@ public readonly struct CachedSubmesh
 {
     public readonly int[] Indices;
     public readonly Color Color;
-    public readonly string TextureKey; // "" when the submesh has no resolved texture
-    public readonly bool Transparent;  // glass/blended material -> alpha blending
+    public readonly string TextureKey;         // "" when the submesh has no resolved texture
+    public readonly UnityMaterial.Blend Blend; // opaque / cutout (alpha clip) / alpha blend
 
-    public CachedSubmesh(int[] indices, Color color, string textureKey, bool transparent)
+    public CachedSubmesh(int[] indices, Color color, string textureKey, UnityMaterial.Blend blend)
     {
         Indices = indices;
         Color = color;
         TextureKey = textureKey;
-        Transparent = transparent;
+        Blend = blend;
     }
 }
 
@@ -53,7 +53,7 @@ public static class MeshCache
             w.Write(sm.Color.G);
             w.Write(sm.Color.B);
             w.Write(sm.Color.A);
-            w.Write(sm.Transparent);
+            w.Write((byte)sm.Blend);
             w.Write(sm.Indices.Length);
             foreach (int i in sm.Indices)
                 w.Write(i);
@@ -80,12 +80,12 @@ public static class MeshCache
         {
             string textureKey = r.ReadString();
             var color = new Color(r.ReadSingle(), r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
-            bool transparent = r.ReadBoolean();
+            var blend = (UnityMaterial.Blend)r.ReadByte();
             int indexCount = r.ReadInt32();
             var indices = new int[indexCount];
             for (int i = 0; i < indexCount; i++)
                 indices[i] = r.ReadInt32();
-            submeshes.Add(new CachedSubmesh(indices, color, textureKey, transparent));
+            submeshes.Add(new CachedSubmesh(indices, color, textureKey, blend));
         }
 
         return (vertices, normals, uvs, submeshes);
