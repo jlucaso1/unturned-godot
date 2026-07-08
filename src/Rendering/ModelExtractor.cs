@@ -25,7 +25,7 @@ public static class ModelExtractor
     // submesh's texture key without touching the .resS pixel stream. Used by the synchronous/benchmark
     // build; the interactive cold load uses StreamExtract instead.
     public static int ExtractMeshes(string bundlePath, string objectBundlesDir, string treeBundlesDir,
-        string assetsDir, HashSet<Guid> neededGuids, string cacheDir,
+        string assetsDir, HashSet<Guid> neededGuids, string cacheDir, ObjectAssetDatabase db,
         IReadOnlyList<FoliageAsset>? foliageAssets = null)
     {
         UnityBundle bundle = UnityBundle.Read(File.ReadAllBytes(bundlePath), MeshDecodeCap); // SerializedFile only
@@ -35,7 +35,7 @@ public static class ModelExtractor
                 sfBytes = f.Value;
 
         int extracted = ExtractMeshesFromSerializedFile(sfBytes, objectBundlesDir, treeBundlesDir,
-            assetsDir, neededGuids, cacheDir, neededTextures: null, foliageAssets);
+            assetsDir, neededGuids, cacheDir, db, neededTextures: null, foliageAssets);
         GD.Print($"[extract] meshes={extracted}");
         return extracted;
     }
@@ -47,7 +47,7 @@ public static class ModelExtractor
     // two-decode path if the bundle is not the expected single-LZMA-block shape.
     public static void StreamExtract(string bundlePath, string objectBundlesDir, string treeBundlesDir,
         string assetsDir, HashSet<Guid> neededGuids, string cacheDir, string textureCacheDir,
-        Action onMeshesReady, Action<string> onTextureWritten,
+        ObjectAssetDatabase db, Action onMeshesReady, Action<string> onTextureWritten,
         IReadOnlyList<FoliageAsset>? foliageAssets = null)
     {
         byte[] bundle = File.ReadAllBytes(bundlePath);
@@ -56,7 +56,7 @@ public static class ModelExtractor
         {
             GD.Print("[extract] bundle not single-block; falling back to two-pass decode.");
             ExtractMeshes(bundlePath, objectBundlesDir, treeBundlesDir, assetsDir, neededGuids, cacheDir,
-                foliageAssets);
+                db, foliageAssets);
             onMeshesReady();
             ExtractTextures(bundlePath, cacheDir, textureCacheDir, onTextureWritten);
             return;
@@ -78,7 +78,7 @@ public static class ModelExtractor
             {
                 byte[] sfBytes = stream.Read((int)node.Size);
                 ExtractMeshesFromSerializedFile(sfBytes, objectBundlesDir, treeBundlesDir, assetsDir,
-                    neededGuids, cacheDir, neededTextures, foliageAssets);
+                    neededGuids, cacheDir, db, neededTextures, foliageAssets);
                 GD.Print($"[extract] meshes={CachedMeshCountLoose(cacheDir)} (streamed); {neededTextures.Count} textures pending");
                 onMeshesReady();
             }
@@ -145,7 +145,8 @@ public static class ModelExtractor
     // it is filled with the metadata of every referenced texture so a caller can stream in the pixels.
     private static int ExtractMeshesFromSerializedFile(byte[] sfBytes, string objectBundlesDir,
         string treeBundlesDir, string assetsDir, HashSet<Guid> neededGuids, string cacheDir,
-        Dictionary<long, UnityTexture>? neededTextures, IReadOnlyList<FoliageAsset>? foliageAssets = null)
+        ObjectAssetDatabase db, Dictionary<long, UnityTexture>? neededTextures,
+        IReadOnlyList<FoliageAsset>? foliageAssets = null)
     {
         SerializedFile file = SerializedFile.Read(sfBytes);
         PrefabGraph graph = PrefabGraph.Read(file);
@@ -155,13 +156,21 @@ public static class ModelExtractor
 
         // Objects and trees (Unturned "resources") share this pipeline; each asset maps to a prefab in
         // the masterbundle under objects/<folder>/object.prefab or trees/<folder>/resource.prefab.
+        // Reuse the caller's already-scanned asset DB (built from the same object + tree bundle dirs)
+        // instead of re-scanning both trees here. Object vs tree — which sets the prefab-key prefix — is
+        // recovered from each asset's directory (they have disjoint GUID spaces, so the merged DB loses
+        // nothing).
         var work = new List<(ObjectAsset asset, string key)>();
-        foreach (ObjectAsset a in ObjectAssetDatabase.ScanDirectory(objectBundlesDir).All)
-            work.Add((a, a.BundleOverridePath is { Length: > 0 } ovr
-                ? OverrideKey(ovr)
-                : "objects/" + FolderKey(a.Directory, objectBundlesDir)));
-        foreach (ObjectAsset a in ObjectAssetDatabase.ScanDirectory(treeBundlesDir).All)
-            work.Add((a, "trees/" + FolderKey(a.Directory, treeBundlesDir)));
+        foreach (ObjectAsset a in db.All)
+        {
+            bool isTree = !Path.GetRelativePath(treeBundlesDir, a.Directory).StartsWith("..");
+            string key = isTree
+                ? "trees/" + FolderKey(a.Directory, treeBundlesDir)
+                : a.BundleOverridePath is { Length: > 0 } ovr
+                    ? OverrideKey(ovr)
+                    : "objects/" + FolderKey(a.Directory, objectBundlesDir);
+            work.Add((a, key));
+        }
 
         var mappedGuids = new HashSet<Guid>();
         int extracted = 0;

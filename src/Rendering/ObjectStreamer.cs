@@ -121,7 +121,7 @@ public partial class ObjectStreamer : Node
             try
             {
                 ModelExtractor.StreamExtract(_bundlePath, _objectBundlesDir, _treeBundlesDir, _assetsDir,
-                    needed, _cacheDir, _textureCacheDir,
+                    needed, _cacheDir, _textureCacheDir, _db,
                     onMeshesReady: () => Callable.From(OnMeshesExtracted).CallDeferred(),
                     onTextureWritten: key => _readyKeys.Enqueue(key),
                     foliageAssets: _foliageAssets.Values.ToList());

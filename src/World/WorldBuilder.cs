@@ -101,7 +101,7 @@ public static class WorldBuilder
         {
             GD.Print("[unturned-godot] Extracting models + textures from masterbundle (one-time)...");
             int extracted = ModelExtractor.ExtractMeshes(bundlePath, objectBundlesDir, treeBundlesDir,
-                assetsDir, neededGuids, cacheDir, foliageAssets.Values.ToList());
+                assetsDir, neededGuids, cacheDir, db, foliageAssets.Values.ToList());
             ModelExtractor.ExtractTextures(bundlePath, cacheDir, textureCacheDir);
             GD.Print($"[unturned-godot] Extracted {extracted} meshes to cache");
         }
