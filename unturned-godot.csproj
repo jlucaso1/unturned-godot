@@ -1,6 +1,7 @@
 <Project Sdk="Godot.NET.Sdk/4.7.0">
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
+    <PublishAot>true</PublishAot>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
@@ -12,6 +13,9 @@
     <Compile Remove="core/**/*.cs" />
     <Compile Remove="tests/**/*.cs" />
     <Compile Remove="build/**/*.cs" />
+    <!-- Root the assemblies to avoid trimming. -->
+    <TrimmerRootAssembly Include="GodotSharp" />
+    <TrimmerRootAssembly Include="$(TargetName)" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="core/UnturnedGodot.Core.csproj" />

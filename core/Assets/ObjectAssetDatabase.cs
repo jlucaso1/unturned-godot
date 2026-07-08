@@ -13,6 +13,8 @@ public sealed class ObjectAssetDatabase
 
     public int Count => _byGuid.Count;
 
+    public IEnumerable<ObjectAsset> All => _byGuid.Values;
+
     public ObjectAsset? ResolveByGuid(Guid guid) =>
         _byGuid.TryGetValue(guid, out ObjectAsset? a) ? a : null;
 
@@ -49,9 +51,13 @@ public sealed class ObjectAssetDatabase
                 continue;
             }
 
-            string? name = ReadLocalizedName(Path.GetDirectoryName(file));
+            string? directory = Path.GetDirectoryName(file);
+            string? name = ReadLocalizedName(directory);
             if (ObjectAsset.TryParse(parsed, name, out ObjectAsset asset))
+            {
+                asset.Directory = directory!; // never null for an enumerated file path
                 db.Add(asset);
+            }
         }
         return db;
     }

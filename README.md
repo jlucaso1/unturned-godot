@@ -30,6 +30,18 @@ git-ignored.
 - **`Level/Objects.dat`** — `River` stream reader, all `SAVEDATA_VERSION`s up to 12.
 - **DatParser** — Unturned's `.dat` grammar (nested `{}`/`[]`, quotes, comments, case-insensitive keys).
 - **Object assets** — GUID/id/type resolution from `Bundles/Objects/**`.
+- **Unity asset bundle + mesh reader** (`core/Unity/`) — a from-scratch parser for the 2022.3
+  `core_linux.masterbundle`: UnityFS container, LZ4 (own decoder) + LZMA (SharpCompress, the one
+  external dep) blocks, SerializedFile v22, TypeTree-driven object reader, and Mesh geometry
+  (vertex channels, submeshes). Real object models are extracted once and cached per GUID.
+
+## Real object models
+
+The masterbundle is a single 1.4 GB LZMA block, so it is parsed **once** (`ModelExtractor`): the
+graph walk maps each placed object's GUID to its `Model_0` mesh, which is decoded and cached as a
+compact `user://model_cache/<guid>.mesh`. Runtime loads only those small meshes. On PEI this yields
+~4056/4329 objects with real geometry (the rest use stream-data/compressed meshes and fall back to
+placeholder boxes). Meshes are currently untextured.
 
 ## Run
 
@@ -76,6 +88,9 @@ Style and analyzers are enforced via `.editorconfig` + `Directory.Build.props`
 
 ## Not yet done
 
-Object placeholders are colored boxes — real meshes live in Unity AssetBundles
-(`.masterbundle` / `.unity3d`) and need an AssetStudio-style extractor (next milestone).
-Terrain colors are a stand-in palette blended from real splatmap weights, not the game textures.
+- **Textures/materials** — meshes render untextured; terrain colors are a stand-in palette blended
+  from real splatmap weights, not the game textures.
+- **Stream-data / compressed meshes** (~6% of PEI objects) still fall back to placeholder boxes.
+
+Coverage note: `core/` is 100% line + branch covered by the hermetic (synthetic-input) tests alone;
+the real-data tests under `tests/` are extra end-to-end validation and self-skip without the game.

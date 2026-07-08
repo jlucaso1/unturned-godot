@@ -8,5 +8,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="GodotSharp" Version="4.7.0" />
+    <!-- LZMA decode for the masterbundle's single data block; parity-critical mesh/tree parsing stays ours. -->
+    <PackageReference Include="SharpCompress" Version="1.0.0" />
   </ItemGroup>
 </Project>

@@ -14,6 +14,9 @@ public sealed class ObjectAsset
     public string RawType { get; }
     public string? Name { get; }
 
+    // Folder holding the .dat, used to match the object to its prefab path in the bundle.
+    public string Directory { get; set; } = string.Empty;
+
     private ObjectAsset(Guid guid, ushort id, EObjectType type, string rawType, string? name)
     {
         Guid = guid;

@@ -35,6 +35,25 @@ public class ObjectAssetDatabaseTests
     }
 
     [Fact]
+    public void ScanDirectory_RecordsDirectory_AndExposesAll()
+    {
+        using var dir = new TempDir();
+        dir.Write("Cardboard/Cardboard.dat", "GUID 2e698a7b85e94c019b3f91ec8796a961\nType Small\nID 7\n");
+
+        ObjectAssetDatabase db = ObjectAssetDatabase.ScanDirectory(dir.Path);
+        ObjectAsset asset = Assert.Single(db.All);
+        Assert.EndsWith("Cardboard", asset.Directory);
+    }
+
+    [Fact]
+    public void ScanDirectory_SkipsDatWithoutGuid()
+    {
+        using var dir = new TempDir();
+        dir.Write("Loc/English.dat", "Name Something\n"); // no GUID -> not an object asset
+        Assert.Equal(0, ObjectAssetDatabase.ScanDirectory(dir.Path).Count);
+    }
+
+    [Fact]
     public void ScanDirectory_MissingRoot_ReturnsEmpty()
     {
         Assert.Equal(0, ObjectAssetDatabase.ScanDirectory("/no/such/dir").Count);
@@ -73,6 +92,25 @@ public class ObjectAssetDatabaseTests
     {
         var db = new ObjectAssetDatabase();
         Assert.Null(db.ResolveById(0));
+    }
+
+    [Fact]
+    public void ResolveById_UnknownNonZero_IsNull()
+    {
+        Assert.Null(new ObjectAssetDatabase().ResolveById(999));
+    }
+
+    [Fact]
+    public void Add_AssetWithoutId_NotIndexedById()
+    {
+        DatDictionary root = DatParser.Parse("GUID 2e698a7b85e94c019b3f91ec8796a961\nType Small\n"); // no ID
+        Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset asset));
+        Assert.Equal(0, asset.Id);
+
+        var db = new ObjectAssetDatabase();
+        db.Add(asset);
+        Assert.NotNull(db.ResolveByGuid(asset.Guid)); // reachable by GUID
+        Assert.Null(db.ResolveById(0));               // id 0 is never indexed
     }
 
     [Fact]

@@ -26,7 +26,9 @@ public partial class Main : Node3D
         GD.Print($"[unturned-godot] Loading map {level.Name} at {level.Path}");
 
         BuildTerrain(level);
-        BuildObjects(level, System.IO.Path.Combine(unturnedPath, "Bundles", "Objects"));
+        BuildObjects(level,
+            System.IO.Path.Combine(unturnedPath, "Bundles", "Objects"),
+            System.IO.Path.Combine(unturnedPath, "Bundles", "core_linux.masterbundle"));
         SetupEnvironment();
 
         if (DisplayServer.GetName() == "headless")
@@ -73,7 +75,7 @@ public partial class Main : Node3D
         }
     }
 
-    private void BuildObjects(LevelInfo level, string objectBundlesDir)
+    private void BuildObjects(LevelInfo level, string objectBundlesDir, string bundlePath)
     {
         List<PlacedObject> objects = LevelObjects.Load(level.ObjectsDat);
         ObjectAssetDatabase db = ObjectAssetDatabase.ScanDirectory(objectBundlesDir);
@@ -81,9 +83,24 @@ public partial class Main : Node3D
 
         if (objects.Count == 0) return;
 
-        var mmi = ObjectsBuilder.Build(objects, db, out int resolved);
-        AddChild(mmi);
-        GD.Print($"[unturned-godot] Resolved {resolved}/{objects.Count} placements to assets");
+        string cacheDir = ProjectSettings.GlobalizePath("user://model_cache");
+        var neededGuids = new HashSet<System.Guid>();
+        foreach (PlacedObject o in objects)
+            neededGuids.Add(o.Guid);
+
+        // Parse the 1.4 GB bundle once, then reuse the compact per-GUID mesh cache.
+        if (ModelLibrary.CachedMeshCount(cacheDir) == 0 && System.IO.File.Exists(bundlePath))
+        {
+            GD.Print("[unturned-godot] Extracting models from masterbundle (one-time)...");
+            int extracted = ModelExtractor.Extract(bundlePath, objectBundlesDir, neededGuids, cacheDir);
+            GD.Print($"[unturned-godot] Extracted {extracted} meshes to cache");
+        }
+
+        var meshLibrary = ModelLibrary.Load(cacheDir);
+        Node3D objectsRoot = ObjectsBuilder.Build(objects, db, meshLibrary, out int withMesh);
+        AddChild(objectsRoot);
+        GD.Print($"[unturned-godot] Rendered {withMesh}/{objects.Count} objects with real meshes " +
+            $"({meshLibrary.Count} unique)");
     }
 
     private void SetupEnvironment()

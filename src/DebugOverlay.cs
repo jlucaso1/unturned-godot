@@ -51,8 +51,17 @@ public partial class DebugOverlay : CanvasLayer
     private void UpdateText()
     {
         double fps = Mon(Performance.Monitor.TimeFps);
-        double frameMs = Mon(Performance.Monitor.TimeProcess) * 1000.0;
+        double cpuMs = Mon(Performance.Monitor.TimeProcess) * 1000.0;
         double physMs = Mon(Performance.Monitor.TimePhysicsProcess) * 1000.0;
+
+        // Godot exposes no GPU-time monitor. What we CAN derive is GPU-wait: wall-clock frame time
+        // (1000/fps) minus the CPU main-thread work. Since rendering is submitted on the main thread and
+        // does not block on the GPU, this is only the time the CPU actually stalls waiting for the GPU —
+        // it stays ~0 while CPU-bound (even at 100% GPU utilization) and only lights up once the GPU is the
+        // real bottleneck (or under VSync). It is NOT a measure of GPU cost; use Draw calls / Primitives
+        // for GPU workload, or an external tool (MangoHud/radeontop) for true GPU frame time.
+        double frameMs = fps > 0.0 ? 1000.0 / fps : 0.0;
+        double gpuWaitMs = Mathf.Max(0.0, frameMs - cpuMs);
         double memMb = Mon(Performance.Monitor.MemoryStatic) / (1024.0 * 1024.0);
         double drawCalls = Mon(Performance.Monitor.RenderTotalDrawCallsInFrame);
         double primitives = Mon(Performance.Monitor.RenderTotalPrimitivesInFrame);
@@ -60,7 +69,8 @@ public partial class DebugOverlay : CanvasLayer
         double nodes = Mon(Performance.Monitor.ObjectNodeCount);
 
         _label.Text =
-            $"FPS {fps:0}   ({frameMs:0.0} ms cpu / {physMs:0.0} ms phys)\n" +
+            $"FPS {fps:0}   Frame {frameMs:0.00} ms\n" +
+            $"CPU {cpuMs:0.00} ms   GPU-wait ~{gpuWaitMs:0.00} ms   Phys {physMs:0.0} ms\n" +
             $"Static memory {memMb:0.0} MB\n" +
             $"Draw calls {drawCalls:0}   Primitives {primitives:0}\n" +
             $"Render objects {renderObjects:0}   Nodes {nodes:0}";
