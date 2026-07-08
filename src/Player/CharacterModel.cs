@@ -15,6 +15,8 @@ public static class CharacterModel
 {
     private const int ClassSkinnedMeshRenderer = 137;
     private const int ClassTransform = 4;
+    private const int ClassAnimationClip = 74;
+    private const string IdleClip = "Idle_Stand";
 
     // Builds the skinned Player_Client character, or null when the game data is absent or can't be parsed
     // (the caller then falls back to the placeholder figure).
@@ -90,10 +92,13 @@ public static class CharacterModel
         var skeleton = new Skeleton3D { Name = "Skeleton" };
         var rests = new Transform3D[boneCount];
         var parents = new int[boneCount];
+        var boneByName = new Dictionary<string, int>(boneCount);
         for (int i = 0; i < boneCount; i++)
         {
             Dictionary<string, object> t = Read(file, byId, boneIds[i]);
-            skeleton.AddBone((string)Read(file, byId, Id(t["m_GameObject"]))["m_Name"]);
+            string name = (string)Read(file, byId, Id(t["m_GameObject"]))["m_Name"];
+            skeleton.AddBone(name);
+            boneByName[name] = i;
             rests[i] = LocalTransformOf(t);
             parents[i] = boneIndex.TryGetValue(Id(t["m_Father"]), out int p) ? p : -1;
         }
@@ -103,18 +108,69 @@ public static class CharacterModel
                 skeleton.SetBoneParent(i, parents[i]);
             skeleton.SetBoneRest(i, rests[i]);
         }
-        skeleton.ResetBonePoses(); // pose = rest, i.e. the bind pose
+        skeleton.ResetBonePoses(); // pose = rest (the bind/T-pose); the idle clip below overrides it
 
         var body = new MeshInstance3D
         {
             Mesh = BuildMesh(mesh, texture, skinned: true),
-            Skin = skeleton.CreateSkinFromRestTransforms(),
+            Skin = skeleton.CreateSkinFromRestTransforms(), // bind matrices from the rest hierarchy
             Name = "CharacterBody",
         };
         skeleton.AddChild(body);
         body.Skeleton = body.GetPathTo(skeleton);
-        GD.Print($"[unturned-godot] Character: real Player_Client skinned body loaded ({boneCount} bones).");
+
+        bool posed = ApplyIdlePose(file, byId, skeleton, boneByName);
+        GD.Print($"[unturned-godot] Character: real Player_Client skinned body loaded ({boneCount} bones, " +
+            (posed ? "idle pose" : "bind pose") + ").");
         return skeleton;
+    }
+
+    // Poses the skeleton to frame 0 of the "Idle_Stand" legacy clip: per-bone rotation/position/scale curves
+    // keyed by the bone's hierarchy path, converted Unity->Godot. Leaves the rest (T-pose) if the clip is
+    // absent. This is data-driven — the game's own idle animation, no hand-authored pose.
+    private static bool ApplyIdlePose(SerializedFile file, Dictionary<long, SerializedObject> byId,
+        Skeleton3D skeleton, Dictionary<string, int> boneByName)
+    {
+        foreach (SerializedObject o in file.Objects)
+        {
+            if (o.ClassId != ClassAnimationClip)
+                continue;
+            Dictionary<string, object> clip = Read(file, byId, o.PathId);
+            if ((string)clip["m_Name"] != IdleClip)
+                continue;
+
+            foreach (object c in (List<object>)clip["m_RotationCurves"])
+                if (BoneOf(c, boneByName, out int bone, out Dictionary<string, object> v))
+                    skeleton.SetBonePoseRotation(bone,
+                        UnityMath.UnityToGodotRotation(new Quaternion(F(v["x"]), F(v["y"]), F(v["z"]), F(v["w"]))));
+
+            foreach (object c in (List<object>)clip["m_PositionCurves"])
+                if (BoneOf(c, boneByName, out int bone, out Dictionary<string, object> v))
+                    skeleton.SetBonePosePosition(bone, new Vector3(F(v["x"]), F(v["y"]), -F(v["z"])));
+
+            foreach (object c in (List<object>)clip["m_ScaleCurves"])
+                if (BoneOf(c, boneByName, out int bone, out Dictionary<string, object> v))
+                    skeleton.SetBonePoseScale(bone, new Vector3(F(v["x"]), F(v["y"]), F(v["z"])));
+            return true;
+        }
+        return false;
+    }
+
+    // Resolves a curve to its target bone and first-keyframe value; false if the bone isn't in the skeleton.
+    private static bool BoneOf(object curveEntry, Dictionary<string, int> boneByName, out int bone,
+        out Dictionary<string, object> firstValue)
+    {
+        var entry = (Dictionary<string, object>)curveEntry;
+        string path = (string)entry["path"];
+        string name = path[(path.LastIndexOf('/') + 1)..];
+        var keys = (List<object>)((Dictionary<string, object>)entry["curve"])["m_Curve"];
+        if (boneByName.TryGetValue(name, out bone) && keys.Count > 0)
+        {
+            firstValue = (Dictionary<string, object>)((Dictionary<string, object>)keys[0])["value"];
+            return true;
+        }
+        firstValue = null!;
+        return false;
     }
 
     private static Transform3D LocalTransformOf(Dictionary<string, object> t)
