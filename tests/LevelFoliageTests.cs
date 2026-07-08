@@ -72,7 +72,8 @@ public class LevelFoliageTests
         FoliageInstances inst = Assert.Single(tile.Instances);
         Assert.Equal(guid, inst.Asset);
         // Unity (10,20,30) -> Godot negates Z.
-        Assert.Equal(new Vector3(10f, 20f, -30f), Assert.Single(inst.Transforms).Origin);
+        Assert.Equal(1, inst.Count);
+        Assert.Equal(new Vector3(10f, 20f, -30f), inst.InstanceTransform(0).Origin);
     }
 
     [Fact]
@@ -95,7 +96,9 @@ public class LevelFoliageTests
         float[] m = { 1, 0, 2, 0, 0, 1, 3, 0, 4, 5, 1, 0, 0, 0, 0, 1 };
         byte[] blob = Build(2, Guid.NewGuid(), (0, 0, new[] { m }));
 
-        Transform3D t = Assert.Single(Assert.Single(Assert.Single(LevelFoliage.Parse(blob).Tiles).Instances).Transforms);
+        FoliageInstances inst = Assert.Single(Assert.Single(LevelFoliage.Parse(blob).Tiles).Instances);
+        Assert.Equal(1, inst.Count);
+        Transform3D t = inst.InstanceTransform(0);
         Assert.Equal(new Vector3(1, 0, -2), t.Basis.X);   // column 0: z-row negated
         Assert.Equal(new Vector3(0, 1, -3), t.Basis.Y);   // column 1: z-row negated
         Assert.Equal(new Vector3(-4, -5, 1), t.Basis.Z);  // column 2: x/y rows negated

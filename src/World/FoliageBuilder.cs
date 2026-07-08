@@ -51,20 +51,35 @@ public static class FoliageBuilder
             }
         }
 
-        int total = 0;
-        foreach (((int cx, int cy, Guid asset), List<FoliageInstances> instances) in groups)
+        // Build each chunk's packed instance buffer on worker threads — a pure Array.Copy of the parsed
+        // floats into the MultiMesh buffer layout. Creating the MultiMesh, assigning its Buffer and AddChild
+        // are RenderingServer ops, so they stay on this (main) thread. Arrays (not a List) hold the parallel
+        // results so different indices are written without synchronization.
+        var keys = new (int cx, int cy, Guid asset)[groups.Count];
+        var lists = new List<FoliageInstances>[groups.Count];
+        int gi = 0;
+        foreach (KeyValuePair<(int cx, int cy, Guid asset), List<FoliageInstances>> kv in groups)
         {
-            int count = 0;
-            foreach (FoliageInstances inst in instances)
-                count += inst.Transforms.Count;
+            keys[gi] = kv.Key;
+            lists[gi] = kv.Value;
+            gi++;
+        }
+        var buffers = new float[groups.Count][];
+        System.Threading.Tasks.Parallel.For(0, groups.Count, i => buffers[i] = PackBuffer(lists[i]));
 
+        int total = 0;
+        for (int i = 0; i < keys.Length; i++)
+        {
+            (int cx, int cy, Guid asset) = keys[i];
+            float[] buffer = buffers[i];
+            int count = buffer.Length / 12;
             var multimesh = new MultiMesh
             {
                 Mesh = meshLibrary[asset],
                 TransformFormat = MultiMesh.TransformFormatEnum.Transform3D,
                 InstanceCount = count,
+                Buffer = buffer,
             };
-            SetTransforms(multimesh, instances, count);
 
             root.AddChild(new MultiMeshInstance3D
             {
@@ -83,25 +98,22 @@ public static class FoliageBuilder
         return root;
     }
 
-    // Fills the MultiMesh's instance buffer directly from the chunk's grouped instances (12 floats per
-    // Transform3D: three basis rows each followed by the origin component), reading the transforms straight
-    // from the parsed foliage pool — no intermediate per-chunk Transform3D copy, no SetInstanceTransform.
-    private static void SetTransforms(MultiMesh multimesh, List<FoliageInstances> instances, int count)
+    // Concatenates a chunk's grouped instances into one MultiMesh instance buffer with a bulk Array.Copy per
+    // run — FoliageInstances already hold their transforms in the exact 12-float buffer layout, so no
+    // per-instance Transform3D read is needed. Pure CPU (no Godot resource touched): safe on a worker thread.
+    private static float[] PackBuffer(List<FoliageInstances> instances)
     {
+        int count = 0;
+        foreach (FoliageInstances inst in instances)
+            count += inst.Count;
+
         var buffer = new float[count * 12];
         int o = 0;
         foreach (FoliageInstances inst in instances)
         {
-            IReadOnlyList<Transform3D> transforms = inst.Transforms;
-            for (int i = 0; i < transforms.Count; i++)
-            {
-                Transform3D t = transforms[i];
-                buffer[o + 0] = t.Basis.X.X; buffer[o + 1] = t.Basis.Y.X; buffer[o + 2] = t.Basis.Z.X; buffer[o + 3] = t.Origin.X;
-                buffer[o + 4] = t.Basis.X.Y; buffer[o + 5] = t.Basis.Y.Y; buffer[o + 6] = t.Basis.Z.Y; buffer[o + 7] = t.Origin.Y;
-                buffer[o + 8] = t.Basis.X.Z; buffer[o + 9] = t.Basis.Y.Z; buffer[o + 10] = t.Basis.Z.Z; buffer[o + 11] = t.Origin.Z;
-                o += 12;
-            }
+            Array.Copy(inst.Packed, 0, buffer, o, inst.Packed.Length);
+            o += inst.Packed.Length;
         }
-        multimesh.Buffer = buffer;
+        return buffer;
     }
 }

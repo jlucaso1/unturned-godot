@@ -123,7 +123,7 @@ public class RealDataTests
         int total = 0;
         foreach (FoliageTile tile in foliage.Tiles)
             foreach (FoliageInstances inst in tile.Instances)
-                total += inst.Transforms.Count;
+                total += inst.Count;
         Assert.Equal(667254, total); // matches a direct scan of PEI's Foliage.blob
     }
 

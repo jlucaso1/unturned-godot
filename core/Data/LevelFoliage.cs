@@ -6,17 +6,36 @@ using Godot;
 
 namespace UnturnedGodot.Data;
 
-// One foliage asset's instances inside a tile: the FoliageInstancedMeshInfoAsset GUID and the world
-// transforms (already converted from Unity to Godot space) at which to place its mesh.
+// One foliage asset's instances inside a tile: the FoliageInstancedMeshInfoAsset GUID and, packed straight
+// into the MultiMesh instance-buffer layout, the world transforms (already reflected from Unity to Godot
+// space) at which to place its mesh. Each instance is 12 floats — the three basis rows interleaved with the
+// origin component (m00 m10 m20 ox | m01 m11 m21 oy | m02 m12 m22 oz) — so FoliageBuilder can Array.Copy them
+// into the MultiMesh buffer without ever materializing a Transform3D.
 public sealed class FoliageInstances
 {
-    public Guid Asset { get; }
-    public IReadOnlyList<Transform3D> Transforms { get; }
+    private const int Stride = 12;
 
-    public FoliageInstances(Guid asset, IReadOnlyList<Transform3D> transforms)
+    public Guid Asset { get; }
+    public float[] Packed { get; }
+    public int Count => Packed.Length / Stride;
+
+    public FoliageInstances(Guid asset, float[] packed)
     {
         Asset = asset;
-        Transforms = transforms;
+        Packed = packed;
+    }
+
+    // Reconstructs the i-th instance's Godot transform from the packed floats (for callers/tests that need a
+    // Transform3D). Inverse of the packing in LevelFoliage.PackTransform: the Basis takes column vectors.
+    public Transform3D InstanceTransform(int i)
+    {
+        int o = i * Stride;
+        return new Transform3D(
+            new Basis(
+                new Vector3(Packed[o + 0], Packed[o + 4], Packed[o + 8]),
+                new Vector3(Packed[o + 1], Packed[o + 5], Packed[o + 9]),
+                new Vector3(Packed[o + 2], Packed[o + 6], Packed[o + 10])),
+            new Vector3(Packed[o + 3], Packed[o + 7], Packed[o + 11]));
     }
 }
 
@@ -86,14 +105,22 @@ public sealed class LevelFoliage
 
         long tileBlobHeaderOffset = pos;
 
-        var tiles = new List<FoliageTile>();
-        foreach ((int x, int y, long offset) in coords)
+        // Parse each tile from its own independent blob region in parallel — data and assetGuids are only
+        // read, and each tile writes to its own result slot, so no synchronization is needed. Tiles is then
+        // assembled in coords order for a deterministic result regardless of completion order.
+        var tileInstances = new List<FoliageInstances>?[tileCount];
+        System.Threading.Tasks.Parallel.For(0, tileCount, i =>
         {
-            pos = (int)(tileBlobHeaderOffset + offset);
-            List<FoliageInstances> instances = ReadTile(data, ref pos, version, assetGuids);
+            int p = (int)(tileBlobHeaderOffset + coords[i].offset);
+            List<FoliageInstances> instances = ReadTile(data, ref p, version, assetGuids);
             if (instances.Count > 0)
-                tiles.Add(new FoliageTile(x, y, instances));
-        }
+                tileInstances[i] = instances;
+        });
+
+        var tiles = new List<FoliageTile>();
+        for (int i = 0; i < tileCount; i++)
+            if (tileInstances[i] is { } instances)
+                tiles.Add(new FoliageTile(coords[i].x, coords[i].y, instances));
 
         return new LevelFoliage(version, assetGuids, tiles);
     }
@@ -109,14 +136,14 @@ public sealed class LevelFoliage
                 : ReadGuid(data, ref pos);
 
             int matrixCount = ReadInt32(data, ref pos);
-            var transforms = new List<Transform3D>(matrixCount);
+            var packed = new float[matrixCount * 12];
             for (int m = 0; m < matrixCount; m++)
             {
-                transforms.Add(ReadTransform(data, ref pos));
+                PackTransform(data, ref pos, packed, m * 12);
                 pos++; // clearWhenBaked flag (editor-only bake bookkeeping)
             }
             if (matrixCount > 0)
-                result.Add(new FoliageInstances(asset, transforms));
+                result.Add(new FoliageInstances(asset, packed));
         }
         return result;
     }
@@ -124,21 +151,21 @@ public sealed class LevelFoliage
     private static Guid AssetForIndex(int index, List<Guid> assetGuids) =>
         index >= 0 && index < assetGuids.Count ? assetGuids[index] : Guid.Empty;
 
-    // Reads a Unity column-major 4x4 (16 floats, element = row + col*4) and converts it to a Godot
-    // Transform3D. Unity is left-handed with +Z forward; Godot is right-handed, so world space is the
-    // Z-negating reflection F = diag(1,1,-1). A transform M maps the same way in both frames as F*M*F,
-    // which negates the off-diagonal Z terms of the basis and the Z of the origin.
-    private static Transform3D ReadTransform(byte[] data, ref int pos)
+    // Reads a Unity column-major 4x4 (16 floats, element = row + col*4) and writes the 12 floats of the
+    // Godot MultiMesh instance transform straight into dest at offset o (three basis rows interleaved with
+    // the origin: m00 m10 m20 ox | m01 m11 m21 oy | m02 m12 m22 oz). Unity is left-handed with +Z forward,
+    // Godot right-handed, so world space is the Z-negating reflection F = diag(1,1,-1): a transform M maps as
+    // F*M*F, negating the basis' off-diagonal Z terms (m2, m6, m8, m9) and the origin Z (m14). Packing here
+    // avoids ever constructing a Basis/Transform3D, which the profiler flagged as the per-instance cost.
+    private static void PackTransform(byte[] data, ref int pos, float[] dest, int o)
     {
         Span<float> m = stackalloc float[16];
         for (int i = 0; i < 16; i++)
             m[i] = ReadSingle(data, ref pos);
 
-        var basis = new Basis(
-            new Vector3(m[0], m[1], -m[2]),   // X axis (column 0)
-            new Vector3(m[4], m[5], -m[6]),   // Y axis (column 1)
-            new Vector3(-m[8], -m[9], m[10])); // Z axis (column 2)
-        return new Transform3D(basis, new Vector3(m[12], m[13], -m[14]));
+        dest[o + 0] = m[0];  dest[o + 1] = m[4];  dest[o + 2] = -m[8];  dest[o + 3] = m[12];
+        dest[o + 4] = m[1];  dest[o + 5] = m[5];  dest[o + 6] = -m[9];  dest[o + 7] = m[13];
+        dest[o + 8] = -m[2]; dest[o + 9] = -m[6]; dest[o + 10] = m[10]; dest[o + 11] = -m[14];
     }
 
     private static int ReadInt32(byte[] d, ref int p)
