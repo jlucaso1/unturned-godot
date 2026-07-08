@@ -65,8 +65,18 @@ public static class ObjectsBuilder
             TransformFormat = MultiMesh.TransformFormatEnum.Transform3D,
             InstanceCount = transforms.Count,
         };
+        // One native buffer upload (12 floats per Transform3D: three basis rows each followed by the
+        // origin component) instead of a marshaled SetInstanceTransform call per instance.
+        var buffer = new float[transforms.Count * 12];
         for (int i = 0; i < transforms.Count; i++)
-            multimesh.SetInstanceTransform(i, transforms[i]);
+        {
+            Transform3D t = transforms[i];
+            int o = i * 12;
+            buffer[o + 0] = t.Basis.X.X; buffer[o + 1] = t.Basis.Y.X; buffer[o + 2] = t.Basis.Z.X; buffer[o + 3] = t.Origin.X;
+            buffer[o + 4] = t.Basis.X.Y; buffer[o + 5] = t.Basis.Y.Y; buffer[o + 6] = t.Basis.Z.Y; buffer[o + 7] = t.Origin.Y;
+            buffer[o + 8] = t.Basis.X.Z; buffer[o + 9] = t.Basis.Y.Z; buffer[o + 10] = t.Basis.Z.Z; buffer[o + 11] = t.Origin.Z;
+        }
+        multimesh.Buffer = buffer;
 
         return new MultiMeshInstance3D { Multimesh = multimesh, Name = name };
     }
