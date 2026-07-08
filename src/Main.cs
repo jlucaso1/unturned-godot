@@ -99,49 +99,12 @@ public partial class Main : Node3D
         GetTree().Quit();
     }
 
-    // PEI's real midday values, used as a fallback when a map ships no Lighting.dat.
-    private static readonly LightingKeyframe DefaultMidday = new(
-        sun: new Color(0.933f, 0.863f, 0.757f),
-        sea: new Color(0.482f, 0.608f, 0.792f),
-        fog: new Color(0.784f, 0.784f, 0.784f),
-        ambientSky: new Color(0.8f, 0.627f, 0.388f),
-        ambientEquator: new Color(0.722f, 0.62f, 0.467f),
-        ambientGround: new Color(0.682f, 0.627f, 0.545f),
-        intensity: 1f, fogDensity: 0.147f, clouds: 0.087f, shadows: 1f, rays: 0.25f);
-
-    private const float DefaultAzimuth = 281.74f;
-
+    // Sun + sky/ambient from the map lighting, then the free camera and (windowed only) the debug overlay.
     private void SetupEnvironment(LevelLighting? lighting)
     {
-        // Replicates Unturned's lighting model (LevelLighting.cs): a flat ambient plus one directional
-        // sun, driven by the map's real midday keyframe decoded from Environment/Lighting.dat. The strong
-        // warm ambient is what fills shadowed/enclosed surfaces so they aren't black.
-        LightingKeyframe day = lighting?.Midday ?? DefaultMidday;
-        float azimuth = lighting?.Azimuth ?? DefaultAzimuth;
-
-        var sun = new DirectionalLight3D
-        {
-            Name = "Sun",
-            RotationDegrees = new Vector3(-50, -azimuth, 0),
-            LightColor = day.Sun,
-            LightEnergy = day.Intensity,
-            ShadowEnabled = true,
-            // 4 cascades is overkill for the ~100 m default shadow range; 2 is visually identical here
-            // (shadows are subtle in Unturned's ambient-filled look) and ~10% cheaper on frame time (#6).
-            DirectionalShadowMode = DirectionalLight3D.ShadowMode.Parallel2Splits,
-        };
+        (DirectionalLight3D sun, WorldEnvironment world) = SceneEnvironment.Build(lighting);
         AddChild(sun);
-
-        var env = new Godot.Environment
-        {
-            BackgroundMode = Godot.Environment.BGMode.Sky,
-            Sky = new Sky { SkyMaterial = new ProceduralSkyMaterial() },
-            AmbientLightSource = Godot.Environment.AmbientSource.Color,
-            // Godot has no trilight ambient, so average Unturned's sky/equator/ground into one flat color.
-            AmbientLightColor = AverageAmbient(day),
-            AmbientLightEnergy = 1.0f,
-        };
-        AddChild(new WorldEnvironment { Environment = env, Name = "WorldEnvironment" });
+        AddChild(world);
 
         var camera = new FreeCamera { Name = "FreeCamera" };
         AddChild(camera);
@@ -151,9 +114,4 @@ public partial class Main : Node3D
         if (DisplayServer.GetName() != "headless")
             AddChild(new DebugOverlay { Name = "DebugOverlay" });
     }
-
-    private static Color AverageAmbient(LightingKeyframe day) => new(
-        (day.AmbientSky.R + day.AmbientEquator.R + day.AmbientGround.R) / 3f,
-        (day.AmbientSky.G + day.AmbientEquator.G + day.AmbientGround.G) / 3f,
-        (day.AmbientSky.B + day.AmbientEquator.B + day.AmbientGround.B) / 3f);
 }
