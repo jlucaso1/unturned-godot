@@ -18,6 +18,12 @@ public static class FoliageBuilder
     // enough AABBs that off-screen foliage culls.
     private const int ChunkTiles = 4;
 
+    // Grass/flowers/pebbles are only meaningful up close (Unturned itself fades ground detail out at a
+    // short distance). Beyond this, each 128 m chunk stops rendering, so the many chunks that carpet the
+    // whole island no longer cost draw calls / primitives from elevated or distant views.
+    private const float DrawDistance = 160f;
+    private const float FadeMargin = 32f; // dither-fade over the last stretch so chunks don't pop
+
     public static Node3D Build(string mapPath, IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary)
     {
         var root = new Node3D { Name = "Foliage" };
@@ -57,6 +63,9 @@ public static class FoliageBuilder
                 Multimesh = multimesh,
                 Name = $"F{cx}_{cy}_{asset:N}",
                 CastShadow = GeometryInstance3D.ShadowCastingSetting.Off, // foliage doesn't self-shadow
+                VisibilityRangeEnd = DrawDistance,
+                VisibilityRangeEndMargin = FadeMargin,
+                VisibilityRangeFadeMode = GeometryInstance3D.VisibilityRangeFadeModeEnum.Self,
             });
             total += transforms.Count;
         }
