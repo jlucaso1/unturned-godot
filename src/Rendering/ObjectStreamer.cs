@@ -93,8 +93,39 @@ public partial class ObjectStreamer : Node
     {
         BuildObjects();
         _registry.ApplyAllAvailable();
+        ReclaimLoadMemory();
         EmitSignal(SignalName.MeshesReady, 0.0);
         EmitSignal(SignalName.Finished);
+    }
+
+    // The one-time load allocates large transient buffers — mesh-cache reads, the foliage transform pool,
+    // native Godot.Collections.Array copies, and on a cold load the ~1.4 GB masterbundle decode. The
+    // workstation GC holds those freed segments rather than returning them to the OS, so steady-state RSS
+    // stays inflated long after load. Force one compacting collection (including the large-object heap) once
+    // load has settled to hand the memory back. One-time cost, off the steady frame loop.
+    private static void ReclaimLoadMemory()
+    {
+        long before = ProcessRssMib();
+        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+        GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+        GC.WaitForPendingFinalizers();
+        GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+        if (before > 0) // Linux only (from /proc); skip the line where RSS is unavailable
+            GD.Print($"[stream] post-load reclaim: RSS {before} -> {ProcessRssMib()} MB " +
+                $"(managed {GC.GetTotalMemory(false) >> 20} MB)");
+    }
+
+    // VmRSS from /proc/self/status in MiB (Linux); 0 elsewhere. Diagnostic only.
+    private static long ProcessRssMib()
+    {
+        try
+        {
+            foreach (string line in File.ReadLines("/proc/self/status"))
+                if (line.StartsWith("VmRSS:", StringComparison.Ordinal))
+                    return long.Parse(line.Split(':')[1].Trim().Split(' ')[0]) / 1024;
+        }
+        catch (Exception) { /* non-Linux or unreadable — diagnostic only */ }
+        return 0;
     }
 
     private void BuildObjects()
@@ -113,6 +144,7 @@ public partial class ObjectStreamer : Node
         _foliage = null;
         _objects = null!;
         _db = null!;
+        _foliageAssets = new(); // consumed by the streaming worker / mesh extraction; drop it too
     }
 
     private void StartStreaming()
@@ -172,6 +204,7 @@ public partial class ObjectStreamer : Node
         {
             _drainedFinal = true;
             _registry.ApplyAllAvailable(); // catch-up for any keys never signaled
+            ReclaimLoadMemory();
             GD.Print($"[stream] fully textured in {_cold.Elapsed.TotalMilliseconds:0} ms " +
                 $"({_appliedTextures}/{_totalTextureKeys} keys)");
             EmitSignal(SignalName.Finished);

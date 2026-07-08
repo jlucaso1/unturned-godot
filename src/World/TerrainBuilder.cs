@@ -197,7 +197,7 @@ public static class TerrainBuilder
                 normals[i] = new Vector3(nx[i] / len, ny[i] / len, nz[i] / len);
         }
 
-        var arrays = new Godot.Collections.Array();
+        using var arrays = new Godot.Collections.Array(); // freed at scope exit (data copied into the mesh)
         arrays.Resize((int)Mesh.ArrayType.Max);
         arrays[(int)Mesh.ArrayType.Vertex] = positions;
         arrays[(int)Mesh.ArrayType.Normal] = normals;
@@ -276,6 +276,12 @@ public static class TerrainBuilder
             Transform = TerrainHeightfield.CollisionTransform(tileX, tileY),
         });
         tile.AddChild(body);
+
+        // The heightfield now lives in the physics server's HeightMapShape3D; drop the ~264 KB/tile source
+        // copy the tile carried in metadata (collision is built once and never rebuilt).
+        tile.RemoveMeta("hf_heights");
+        tile.RemoveMeta("hf_x");
+        tile.RemoveMeta("hf_y");
     }
 
     // A per-tile ShaderMaterial: the shared 8 layer textures plus this tile's two splat control textures

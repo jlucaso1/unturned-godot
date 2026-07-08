@@ -92,7 +92,7 @@ public static class ModelLibrary
         int surfaces = 0;
         foreach ((CachedSubmesh rep, List<int> indices) in groups)
         {
-            var arrays = new Godot.Collections.Array();
+            using var arrays = new Godot.Collections.Array(); // freed each iteration (data copied into the mesh)
             arrays.Resize((int)Mesh.ArrayType.Max);
             arrays[(int)Mesh.ArrayType.Vertex] = gverts;
             arrays[(int)Mesh.ArrayType.Normal] = gnormals;
