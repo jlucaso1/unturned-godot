@@ -55,6 +55,10 @@ public partial class FreeCamera : Camera3D
         if (Input.IsKeyPressed(Key.E)) dir += Vector3.Up;
         if (Input.IsKeyPressed(Key.Q)) dir += Vector3.Down;
 
+        if (dir == Vector3.Zero)
+            return; // idle: don't touch Position — writing it dirties the transform and re-sends the
+                    // camera to the RenderingServer every frame even when the view hasn't moved.
+
         float speed = Speed * (Input.IsKeyPressed(Key.Shift) ? BoostMultiplier : 1f);
         Position += dir.Normalized() * speed * (float)delta;
     }
