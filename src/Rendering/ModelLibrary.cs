@@ -153,19 +153,37 @@ public static class ModelLibrary
 
     internal static ImageTexture? BuildTexture(CachedTexture cached)
     {
-        Image.Format format = cached.Format switch
+        byte[] pixels = cached.Pixels;
+        Image.Format format;
+        switch (cached.Format)
         {
-            3 => Image.Format.Rgb8,
-            4 => Image.Format.Rgba8,
-            10 => Image.Format.Dxt1,
-            12 => Image.Format.Dxt5,
-            25 => Image.Format.BptcRgba,
-            _ => (Image.Format)(-1), // unsupported (e.g. crunched) -> no texture
-        };
-        if ((int)format < 0)
-            return null;
+            case 3: format = Image.Format.Rgb8; break;
+            case 4: format = Image.Format.Rgba8; break;
+            case 5: // ARGB32: Godot has no ARGB, so swizzle to RGBA8 (used by the terrain layer textures)
+                pixels = ArgbToRgba(cached.Pixels);
+                format = Image.Format.Rgba8;
+                break;
+            case 10: format = Image.Format.Dxt1; break;
+            case 12: format = Image.Format.Dxt5; break;
+            case 25: format = Image.Format.BptcRgba; break;
+            default: return null; // unsupported (e.g. crunched) -> no texture
+        }
 
-        Image image = Image.CreateFromData(cached.Width, cached.Height, cached.MipCount > 1, format, cached.Pixels);
+        Image image = Image.CreateFromData(cached.Width, cached.Height, cached.MipCount > 1, format, pixels);
         return ImageTexture.CreateFromImage(image);
+    }
+
+    // Reorders A,R,G,B bytes to R,G,B,A across every pixel (all mip levels), for Unity's ARGB32 format.
+    private static byte[] ArgbToRgba(byte[] argb)
+    {
+        var rgba = new byte[argb.Length];
+        for (int i = 0; i + 3 < argb.Length; i += 4)
+        {
+            rgba[i + 0] = argb[i + 1]; // R
+            rgba[i + 1] = argb[i + 2]; // G
+            rgba[i + 2] = argb[i + 3]; // B
+            rgba[i + 3] = argb[i + 0]; // A
+        }
+        return rgba;
     }
 }

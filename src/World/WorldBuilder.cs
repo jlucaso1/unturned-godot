@@ -52,12 +52,19 @@ public static class WorldBuilder
         var tiles = level.EnumerateTiles();
         GD.Print($"[unturned-godot] Terrain tiles: {tiles.Count}");
 
+        // Real per-layer terrain textures (Materials.unity3d), blended by the splatmap; null if the bundle
+        // or a layer texture is missing, in which case tiles fall back to averaged layer colors.
+        var textures = TerrainTextures.Load(System.IO.Path.Combine(level.Path, "Terrain"));
+        ImageTexture[]? layers = TerrainBuilder.MapLayerTextures(textures);
+        GD.Print($"[unturned-godot] Terrain textures: {textures.Count} loaded, " +
+            (layers != null ? "8 layers textured" : "flat-color fallback"));
+
         var terrainRoot = new Node3D { Name = "Terrain" };
         foreach (var (x, y) in tiles)
         {
             var tile = HeightmapTile.Read(level.HeightmapPath(x, y), x, y);
             var splat = SplatmapTile.TryRead(level.SplatmapPath(x, y), x, y);
-            terrainRoot.AddChild(TerrainBuilder.BuildTile(tile, splat));
+            terrainRoot.AddChild(TerrainBuilder.BuildTile(tile, splat, layers));
         }
         return (terrainRoot, tiles.Count);
     }
