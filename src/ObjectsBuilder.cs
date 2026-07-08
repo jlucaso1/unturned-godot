@@ -12,13 +12,14 @@ public static class ObjectsBuilder
     // Instances real meshes (grouped per GUID into one MultiMesh each) where available; placed objects
     // without an extracted mesh fall back to colored placeholder boxes.
     //
-    // We deliberately do NOT spatially partition these MultiMeshes into a grid (issue #2). It was swept
-    // empirically with the Tier-2 benchmark and is a net loss on PEI: object types are already tightly
-    // clustered, so each per-GUID MultiMesh has a compact AABB that frustum-culls well on its own — a
-    // near-ground view already drops to ~16 draw calls. Grid-partitioning only fragmented draw calls
-    // (full view 392 -> 700+, zoomed 216 -> 232) with a benefit only at extreme close-ups where the cost
-    // was already negligible. The widest type spans just ~1.8 km, so nothing "never culls" badly enough
-    // to justify it. Revisit for larger maps whose object types genuinely span the world.
+    // We deliberately do NOT spatially partition these MultiMeshes into a grid (issue #2). Vegetation is
+    // the tempting case — the 1694 trees of a type spread ~3 km, so their single MultiMesh AABB never
+    // frustum-culls and re-draws ~679k primitives (~20% of the frame, ~0.18 ms) in every view. But
+    // splitting the wide types into a grid was swept empirically (Tier-2) and is a large net LOSS: the
+    // oblique/overhead views that dominate frame cost see most cells, so it only multiplies draw calls
+    // (507 -> 1605 at 512 m cells / 994 at 2048 m) and ~doubles frame time there, while the only view it
+    // helps (near-ground "tight") was already the cheapest (~0.5 ms). Median frame time regressed +52-82%.
+    // Real vegetation wins need per-instance LOD/impostors, which MultiMesh doesn't do natively.
     public static Node3D Build(IReadOnlyList<PlacedObject> objects, ObjectAssetDatabase db,
         IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary, out int withMesh)
     {
