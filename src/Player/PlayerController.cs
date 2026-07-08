@@ -1,31 +1,22 @@
 using Godot;
+using UnturnedGodot.Player;
 
 namespace UnturnedGodot;
 
-// A faithful-enough port of Unturned's character controller (PlayerMovement/PlayerLook/PlayerStance): a
-// capsule character with walk/sprint/crouch speeds, a jump, mouse look with a clamped pitch, and a
-// first/third-person camera. Numeric constants are Unturned's real values. Toggled against the free camera
-// by a feature flag in Main; runtime keys: F5 = perspective, Ctrl = crouch, Esc = release the mouse.
+// A faithful port of Unturned's on-foot controller (PlayerMovement / PlayerLook / PlayerStance). The feel-
+// defining maths and the numeric constants live in core/Player (PlayerConfig, PlayerMovement,
+// PlayerStanceMachine) and are unit-tested against the game's real values; this node only samples input,
+// resolves collision via CharacterBody3D, and drives the camera. Settings (sensitivity, FOV, control modes,
+// key bindings) come from PlayerSettings, defaulting to Unturned's own defaults.
+//
+// Unturned simulates movement on a fixed 12.5 Hz tick for deterministic netcode; single-player here runs on
+// Godot's physics step with the same instant-velocity/gravity/jump maths, which yields the same speeds,
+// jump arc and gravity while staying smooth. Runtime keys: H = perspective, X = crouch, Z = prone,
+// Shift = sprint, Space = jump, Esc = release mouse.
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class PlayerController : CharacterBody3D
 {
-    // PlayerMovement / PlayerStance constants (metres, m/s).
-    private const float HeightStand = 2f;
-    private const float HeightCrouch = 1.2f;
-    private const float Radius = 0.4f;
-    private const float SpeedStand = 4.5f;
-    private const float SpeedSprint = 7f;
-    private const float SpeedCrouch = 2.5f;
-    private const float JumpSpeed = 7f;      // sqrt(2 * height * gravity); ~2.5 m jump
-    private const float Gravity = 9.81f;     // LevelInfo default
-    private const float EyeDrop = 0.2f;      // camera sits this far below the capsule top
-
-    private const float MouseSensitivity = 0.12f; // degrees per pixel
-    private const float Fov = 60f;                 // vertical FOV
-    private const float SprintFovBoost = 8f;
-    private const float ThirdPersonDistance = 4.5f;
-    private const float ThirdPersonRight = 0.5f;
-    private const float ThirdPersonUp = 0.3f;
+    private readonly PlayerSettings _settings = PlayerSettings.Default;
 
     // Set before adding to the tree to choose the initial perspective (e.g. third person for a screenshot).
     public bool StartThirdPerson { get; set; }
@@ -38,23 +29,32 @@ public partial class PlayerController : CharacterBody3D
     private CollisionShape3D _collider = null!;
     private CapsuleShape3D _capsule = null!;
     private Node3D _model = null!;
-    private float _pitch;
+
+    private EPlayerStance _stance = EPlayerStance.Stand;
+    private bool _wantCrouch;
+    private bool _wantProne;
+    private float _pitch;       // Godot pitch degrees: 0 = horizon, + up, - down
+    private float _eyeHeight = PlayerConfig.EyeHeightStand;
     private bool _thirdPerson;
-    private bool _crouching;
 
     public override void _Ready()
     {
         _thirdPerson = StartThirdPerson;
-        _capsule = new CapsuleShape3D { Radius = Radius, Height = HeightStand };
-        _collider = new CollisionShape3D { Shape = _capsule, Position = new Vector3(0, HeightStand * 0.5f, 0) };
+
+        FloorMaxAngle = Mathf.DegToRad(PlayerConfig.MaxWalkableSlopeDegrees);
+        FloorSnapLength = 0.5f;
+        FloorStopOnSlope = true;
+
+        _capsule = new CapsuleShape3D { Radius = PlayerConfig.Radius, Height = PlayerConfig.HeightStand };
+        _collider = new CollisionShape3D { Shape = _capsule, Position = Vector3.Up * (PlayerConfig.HeightStand * 0.5f) };
         AddChild(_collider);
 
         _model = BodyModel ?? BuildPlaceholderModel();
         AddChild(_model);
 
-        _head = new Node3D { Position = new Vector3(0, HeightStand - EyeDrop, 0) };
+        _head = new Node3D { Position = Vector3.Up * _eyeHeight };
         AddChild(_head);
-        _camera = new Camera3D { Fov = Fov, Current = true, Name = "PlayerCamera" };
+        _camera = new Camera3D { Fov = _settings.VerticalFovDegrees, Current = true, Name = "PlayerCamera" };
         _head.AddChild(_camera);
         ApplyPerspective();
 
@@ -65,96 +65,161 @@ public partial class PlayerController : CharacterBody3D
     {
         if (@event is InputEventMouseMotion motion && Input.MouseMode == Input.MouseModeEnum.Captured)
         {
-            RotateY(-Mathf.DegToRad(motion.Relative.X * MouseSensitivity)); // yaw the whole body
-            _pitch = Mathf.Clamp(_pitch - (motion.Relative.Y * MouseSensitivity), -89f, 89f);
+            RotateY(-Mathf.DegToRad(motion.Relative.X * _settings.MouseSensitivity)); // yaw the whole body
+            float dir = _settings.InvertLook ? 1f : -1f;
+            (float down, float up) = PlayerConfig.PitchLimitsFor(_stance);
+            _pitch = Mathf.Clamp(_pitch + (dir * motion.Relative.Y * _settings.MouseSensitivity), down, up);
             _head.RotationDegrees = new Vector3(_pitch, 0, 0);
             return;
         }
 
         if (@event is InputEventKey { Pressed: true, Echo: false } key)
         {
-            switch (key.Keycode)
-            {
-                case Key.F5: _thirdPerson = !_thirdPerson; ApplyPerspective(); break;
-                case Key.Ctrl: ToggleCrouch(); break;
-                case Key.Escape:
-                    Input.MouseMode = Input.MouseMode == Input.MouseModeEnum.Captured
-                        ? Input.MouseModeEnum.Visible
-                        : Input.MouseModeEnum.Captured;
-                    break;
-            }
+            if (key.Keycode == _settings.Perspective) { _thirdPerson = !_thirdPerson; ApplyPerspective(); }
+            else if (key.Keycode == _settings.Crouch) { _wantCrouch = !_wantCrouch; if (_wantCrouch) _wantProne = false; }
+            else if (key.Keycode == _settings.Prone) { _wantProne = !_wantProne; if (_wantProne) _wantCrouch = false; }
+            else if (key.Keycode == Key.Escape)
+                Input.MouseMode = Input.MouseMode == Input.MouseModeEnum.Captured
+                    ? Input.MouseModeEnum.Visible
+                    : Input.MouseModeEnum.Captured;
         }
     }
 
     public override void _PhysicsProcess(double delta)
     {
         float dt = (float)delta;
+
+        var input = new Vector2(
+            (Input.IsKeyPressed(_settings.Right) ? 1f : 0f) - (Input.IsKeyPressed(_settings.Left) ? 1f : 0f),
+            (Input.IsKeyPressed(_settings.Back) ? 1f : 0f) - (Input.IsKeyPressed(_settings.Forward) ? 1f : 0f));
+        bool moving = input != Vector2.Zero;
+        Vector3 wishDir = moving ? (Transform.Basis * new Vector3(input.X, 0f, input.Y)).Normalized() : Vector3.Zero;
+
+        bool wantSprint = Input.IsKeyPressed(_settings.Sprint);
+        UpdateStance(moving, wantSprint);
+
+        float speed = PlayerConfig.SpeedFor(_stance);
         Vector3 velocity = Velocity;
 
-        if (!IsOnFloor())
-            velocity.Y -= Gravity * dt;
-        else if (Input.IsKeyPressed(Key.Space) && !_crouching)
-            velocity.Y = JumpSpeed;
-
-        // WASD relative to where the body faces.
-        var input = new Vector2(
-            (Input.IsKeyPressed(Key.D) ? 1f : 0f) - (Input.IsKeyPressed(Key.A) ? 1f : 0f),
-            (Input.IsKeyPressed(Key.S) ? 1f : 0f) - (Input.IsKeyPressed(Key.W) ? 1f : 0f));
-        Vector3 direction = (Transform.Basis * new Vector3(input.X, 0f, input.Y)).Normalized();
-
-        float speed = _crouching ? SpeedCrouch : (Input.IsKeyPressed(Key.Shift) ? SpeedSprint : SpeedStand);
-        Vector3 desired = direction * speed;
-        // Unturned pretends base acceleration equals the desired speed (~1 s to full speed).
-        velocity.X = Mathf.MoveToward(velocity.X, desired.X, speed * dt);
-        velocity.Z = Mathf.MoveToward(velocity.Z, desired.Z, speed * dt);
+        if (IsOnFloor())
+        {
+            Vector3 ground = PlayerMovement.GroundVelocity(wishDir, speed);
+            velocity.X = ground.X;
+            velocity.Z = ground.Z;
+            bool canJump = Input.IsKeyPressed(_settings.Jump)
+                && _stance is EPlayerStance.Stand or EPlayerStance.Sprint;
+            velocity.Y = canJump ? PlayerConfig.JumpSpeed : -2f; // small downward keeps us snapped to the floor
+        }
+        else
+        {
+            velocity = PlayerMovement.AirVelocity(velocity, wishDir, speed, dt);
+        }
 
         Velocity = velocity;
         MoveAndSlide();
 
-        // Sprint widens the FOV a touch, like Unturned.
-        bool sprinting = speed == SpeedSprint && input != Vector2.Zero && IsOnFloor();
-        _camera.Fov = Mathf.Lerp(_camera.Fov, sprinting ? Fov + SprintFovBoost : Fov, 8f * dt);
+        UpdateCamera(dt);
     }
 
-    private void ToggleCrouch()
+    private void UpdateStance(bool moving, bool wantSprint)
     {
-        _crouching = !_crouching;
-        float height = _crouching ? HeightCrouch : HeightStand;
+        EPlayerStance next = PlayerStanceMachine.Resolve(
+            _stance, _wantCrouch, _wantProne, wantSprint, moving,
+            hasStamina: true, // stamina/skills are a follow-up; base player is never exhausted
+            canStand: HasClearance(PlayerConfig.HeightStand),
+            canCrouch: HasClearance(PlayerConfig.HeightCrouch));
+        if (next == _stance)
+            return;
+
+        _stance = next;
+        float height = PlayerConfig.HeightFor(next);
         _capsule.Height = height;
-        _collider.Position = new Vector3(0, height * 0.5f, 0);
-        _model.Scale = new Vector3(1, height / HeightStand, 1);
-        _head.Position = new Vector3(0, height - EyeDrop, 0);
+        _collider.Position = Vector3.Up * (height * 0.5f);
+    }
+
+    // True when a standing/crouching capsule of the given height fits at the current position (headroom).
+    private bool HasClearance(float targetHeight)
+    {
+        if (targetHeight <= _capsule.Height)
+            return true; // dropping lower always fits
+
+        var shape = new CapsuleShape3D { Radius = PlayerConfig.Radius - 0.01f, Height = targetHeight };
+        var query = new PhysicsShapeQueryParameters3D
+        {
+            Shape = shape,
+            Transform = new Transform3D(Basis.Identity, GlobalPosition + (Vector3.Up * (targetHeight * 0.5f))),
+            CollisionMask = CollisionMask,
+            Exclude = new Godot.Collections.Array<Rid> { GetRid() },
+        };
+        return GetWorld3D().DirectSpaceState.IntersectShape(query, 1).Count == 0;
+    }
+
+    private void UpdateCamera(float dt)
+    {
+        // Eye height eases toward the stance's value (rate 4), like PlayerLook's camera lerp.
+        float targetEye = PlayerConfig.EyeHeightFor(_stance);
+        _eyeHeight = Mathf.Lerp(_eyeHeight, targetEye, PlayerConfig.EyeLerpRate * dt);
+        _head.Position = Vector3.Up * _eyeHeight;
+
+        // Sprint widens the FOV a touch (rate 8).
+        float targetFov = _settings.VerticalFovDegrees + (_stance == EPlayerStance.Sprint ? _settings.SprintFovBoost : 0f);
+        _camera.Fov = Mathf.Lerp(_camera.Fov, targetFov, PlayerConfig.FovLerpRate * dt);
+
+        if (_thirdPerson)
+            PlaceThirdPersonCamera();
     }
 
     private void ApplyPerspective()
     {
-        _camera.Position = _thirdPerson
-            ? new Vector3(ThirdPersonRight, ThirdPersonUp, ThirdPersonDistance)
-            : Vector3.Zero;
         _model.Visible = _thirdPerson; // hide own body in first person
+        if (_thirdPerson)
+            PlaceThirdPersonCamera();
+        else
+            _camera.Position = Vector3.Zero;
     }
 
-    // A simple stand-in figure (real skinned character is a follow-up): a capsule body plus a head, so the
-    // facing and stance read in third person. Children sit relative to the player's feet at the origin.
+    // Over-the-shoulder third-person camera: ~2 m behind and up-right of the eye, pulled in on collision.
+    private void PlaceThirdPersonCamera()
+    {
+        Vector3 local = new Vector3(PlayerConfig.ThirdPersonShoulder, PlayerConfig.ThirdPersonUp,
+            PlayerConfig.ThirdPersonDistance); // +Z is behind (forward is -Z)
+        Vector3 origin = _head.GlobalPosition;
+        Vector3 target = _head.GlobalTransform * local;
+
+        var ray = new PhysicsRayQueryParameters3D
+        {
+            From = origin,
+            To = target,
+            CollisionMask = CollisionMask,
+            Exclude = new Godot.Collections.Array<Rid> { GetRid() },
+        };
+        Godot.Collections.Dictionary hit = GetWorld3D().DirectSpaceState.IntersectRay(ray);
+        if (hit.Count > 0)
+        {
+            var point = (Vector3)hit["position"];
+            target = point + ((origin - point).Normalized() * PlayerConfig.CameraSweepRadius);
+        }
+        _camera.GlobalPosition = target;
+    }
+
+    // A simple stand-in figure used only when the real skinned body is unavailable.
     private static Node3D BuildPlaceholderModel()
     {
         var root = new Node3D { Name = "Model" };
         root.AddChild(new MeshInstance3D
         {
-            Mesh = new CapsuleMesh { Radius = Radius, Height = HeightStand },
-            Position = new Vector3(0, HeightStand * 0.5f, 0),
+            Mesh = new CapsuleMesh { Radius = PlayerConfig.Radius, Height = PlayerConfig.HeightStand },
+            Position = Vector3.Up * (PlayerConfig.HeightStand * 0.5f),
             MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.35f, 0.45f, 0.7f) },
             Name = "Body",
         });
-
         var head = new MeshInstance3D
         {
             Mesh = new SphereMesh { Radius = 0.18f, Height = 0.36f },
-            Position = new Vector3(0, HeightStand - 0.22f, 0),
+            Position = Vector3.Up * (PlayerConfig.HeightStand - 0.22f),
             MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.8f, 0.65f, 0.5f) },
             Name = "Head",
         };
-        // A small nose (child of the head) marks which way the figure faces (-Z is forward in Godot).
         head.AddChild(new MeshInstance3D
         {
             Mesh = new BoxMesh { Size = new Vector3(0.08f, 0.08f, 0.14f) },
