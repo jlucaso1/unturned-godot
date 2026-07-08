@@ -110,12 +110,6 @@ public partial class Main : Node3D
             // 4 cascades is overkill for the ~100 m default shadow range; 2 is visually identical here
             // (shadows are subtle in Unturned's ambient-filled look) and ~10% cheaper on frame time (#6).
             DirectionalShadowMode = DirectionalLight3D.ShadowMode.Parallel2Splits,
-            // The default normal bias (2 m) pushes the shadow test so far off large flat surfaces that
-            // the terrain stopped catching tree shadows while the raised roads still did; lower it and
-            // extend the range so shadows land on the ground too.
-            ShadowNormalBias = 0.3f,
-            ShadowBias = 0.03f,
-            DirectionalShadowMaxDistance = 300f,
         };
         AddChild(sun);
 

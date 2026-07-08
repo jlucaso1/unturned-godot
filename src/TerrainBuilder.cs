@@ -79,9 +79,11 @@ public static class TerrainBuilder
             float e2x = positions[c].X - pa.X;
             float e2y = positions[c].Y - pa.Y;
             float e2z = positions[c].Z - pa.Z;
-            float fnx = e1y * e2z - e1z * e2y;
-            float fny = e1z * e2x - e1x * e2z;
-            float fnz = e1x * e2y - e1y * e2x;
+            // Cross(e2, e1): the triangles wind so that Cross(e1, e2) faces down, which left the terrain
+            // lit only by ambient (no sun term, so no shadows and no slope shading).
+            float fnx = e1z * e2y - e1y * e2z;
+            float fny = e1x * e2z - e1z * e2x;
+            float fnz = e1y * e2x - e1x * e2y;
             nx[a] += fnx;
             ny[a] += fny;
             nz[a] += fnz;
