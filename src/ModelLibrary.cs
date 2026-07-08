@@ -94,7 +94,14 @@ public static class ModelLibrary
     private static StandardMaterial3D MaterialFor(Color color, string textureKey, string textureCacheDir,
         Dictionary<string, ImageTexture?> textureCache)
     {
-        var material = new StandardMaterial3D { AlbedoColor = color, Roughness = 1f };
+        var material = new StandardMaterial3D
+        {
+            AlbedoColor = color,
+            Roughness = 1f,
+            // Many object meshes (rocks, foliage) are single-sided shells; render both sides so they
+            // don't show culling holes up close.
+            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+        };
         if (textureKey.Length > 0)
             material.AlbedoTexture = LoadTexture(textureKey, textureCacheDir, textureCache);
         return material;

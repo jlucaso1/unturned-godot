@@ -33,7 +33,8 @@ public static class ModelExtractor
             out Dictionary<long, string> pathByRootGo);
         BuildTransformMaps(file, out var goToTransform, out var transformFather, out var transformGo);
         Dictionary<string, long> meshIdByKey = MapObjectKeysToMeshes(
-            file, objectsByPathId, pathByRootGo, goToTransform, transformFather, transformGo);
+            file, objectsByPathId, pathByRootGo, goToTransform, transformFather, transformGo,
+            out Dictionary<string, List<long>> materialsByKey);
         Dictionary<Guid, MaterialPalette> palettes = ScanPalettes(assetsDir);
 
         ObjectAssetDatabase db = ObjectAssetDatabase.ScanDirectory(objectBundlesDir);
@@ -59,11 +60,13 @@ public static class ModelExtractor
                 continue;
 
             palettes.TryGetValue(asset.MaterialPaletteGuid, out MaterialPalette? palette);
+            materialsByKey.TryGetValue(key, out List<long>? rendererMaterials);
             var submeshes = new List<CachedSubmesh>(mesh.Submeshes.Count);
             for (int si = 0; si < mesh.Submeshes.Count; si++)
             {
-                (Color color, string texKey) = ResolveMaterial(si, palette, assetPrefix, containerByPath,
-                    objectsByPathId, file, bundle, textureCacheDir, writtenTextures);
+                long matId = MaterialForSubmesh(si, palette, assetPrefix, containerByPath, rendererMaterials);
+                (Color color, string texKey) = ResolveMaterial(matId, objectsByPathId, file, bundle,
+                    textureCacheDir, writtenTextures);
                 if (texKey.Length > 0)
                     textured++;
                 submeshes.Add(new CachedSubmesh(mesh.Submeshes[si], color, texKey));
@@ -78,19 +81,27 @@ public static class ModelExtractor
         return extracted;
     }
 
-    // Resolves a submesh's palette material into its flat color and (optional) _MainTex texture key,
-    // caching textures deduplicated. Returns white + "" when there is no resolvable material.
-    private static (Color color, string texKey) ResolveMaterial(int submeshIndex, MaterialPalette? palette,
-        string assetPrefix, Dictionary<string, long> containerByPath,
+    // Picks the material id for a submesh: the palette's material (batched objects) if it covers this
+    // submesh, otherwise the object's own MeshRenderer material (rocks/trees have no palette). 0 = none.
+    private static long MaterialForSubmesh(int submeshIndex, MaterialPalette? palette, string assetPrefix,
+        Dictionary<string, long> containerByPath, List<long>? rendererMaterials)
+    {
+        if (palette != null && submeshIndex < palette.MaterialPaths.Count)
+        {
+            string matPath = assetPrefix + palette.MaterialPaths[submeshIndex].Replace('\\', '/').ToLowerInvariant();
+            return containerByPath.TryGetValue(matPath, out long id) ? id : 0;
+        }
+        if (rendererMaterials != null && submeshIndex < rendererMaterials.Count)
+            return rendererMaterials[submeshIndex];
+        return 0;
+    }
+
+    // Reads a material's flat color and (optional) _MainTex texture key, caching textures deduplicated.
+    private static (Color color, string texKey) ResolveMaterial(long matId,
         Dictionary<long, SerializedObject> objectsByPathId, SerializedFile file, UnityBundle bundle,
         string textureCacheDir, HashSet<long> writtenTextures)
     {
-        if (palette == null || submeshIndex >= palette.MaterialPaths.Count)
-            return (Colors.White, string.Empty);
-
-        string matPath = assetPrefix + palette.MaterialPaths[submeshIndex].Replace('\\', '/').ToLowerInvariant();
-        if (!containerByPath.TryGetValue(matPath, out long matId) ||
-            !objectsByPathId.TryGetValue(matId, out SerializedObject? matObj))
+        if (matId == 0 || !objectsByPathId.TryGetValue(matId, out SerializedObject? matObj))
             return (Colors.White, string.Empty);
 
         Dictionary<string, object> matDict = TypeTreeReader.Read(matObj.TypeTree, file.ReaderFor(matObj));
@@ -193,9 +204,10 @@ public static class ModelExtractor
     private static Dictionary<string, long> MapObjectKeysToMeshes(SerializedFile file,
         Dictionary<long, SerializedObject> objectsByPathId, Dictionary<long, string> pathByRootGo,
         Dictionary<long, long> goToTransform, Dictionary<long, long> transformFather,
-        Dictionary<long, long> transformGo)
+        Dictionary<long, long> transformGo, out Dictionary<string, List<long>> materialsByKey)
     {
         var meshIdByKey = new Dictionary<string, long>();
+        materialsByKey = new Dictionary<string, List<long>>();
         var keyHasModel0 = new HashSet<string>();      // Model_0 is the highest-detail LOD
         var nameCache = new Dictionary<long, string>();
 
@@ -223,14 +235,40 @@ public static class ModelExtractor
             if (GameObjectName(file, objectsByPathId, nameCache, goId) == "Model_0")
             {
                 if (keyHasModel0.Add(key))
+                {
                     meshIdByKey[key] = meshId;
+                    materialsByKey[key] = MeshRendererMaterials(file, objectsByPathId, goId);
+                }
             }
             else if (!meshIdByKey.ContainsKey(key))
             {
                 meshIdByKey[key] = meshId;
+                materialsByKey[key] = MeshRendererMaterials(file, objectsByPathId, goId);
             }
         }
         return meshIdByKey;
+    }
+
+    // The material path ids on the GameObject's MeshRenderer, in submesh order.
+    private static List<long> MeshRendererMaterials(SerializedFile file,
+        Dictionary<long, SerializedObject> objects, long goId)
+    {
+        var materials = new List<long>();
+        if (!objects.TryGetValue(goId, out SerializedObject? go))
+            return materials;
+
+        Dictionary<string, object> gameObject = TypeTreeReader.Read(go.TypeTree, file.ReaderFor(go));
+        foreach (object component in (List<object>)gameObject["m_Component"])
+        {
+            long compId = PathId((Dictionary<string, object>)((Dictionary<string, object>)component)["component"]);
+            if (!objects.TryGetValue(compId, out SerializedObject? comp) || comp.ClassId != 23) // MeshRenderer
+                continue;
+            Dictionary<string, object> renderer = TypeTreeReader.Read(comp.TypeTree, file.ReaderFor(comp));
+            foreach (object m in (List<object>)renderer["m_Materials"])
+                materials.Add(PathId((Dictionary<string, object>)m));
+            break;
+        }
+        return materials;
     }
 
     private static string GameObjectName(SerializedFile file, Dictionary<long, SerializedObject> objects,
