@@ -25,6 +25,10 @@ public static class ModelLibrary
         if (!Directory.Exists(cacheDir))
             return library;
 
+        // Deduplicate materials across every mesh: submeshes sharing a texture key, color and blend share
+        // one StandardMaterial3D (fewer material objects + GPU parameter buffers, fewer render-state
+        // changes). Scoped to this load so nothing leaks between calls.
+        var materials = new Dictionary<(string, Color, UnityMaterial.Blend), StandardMaterial3D>();
         foreach (string path in Directory.GetFiles(cacheDir, "*.mesh"))
         {
             if (!Guid.TryParseExact(Path.GetFileNameWithoutExtension(path), "N", out Guid guid))
@@ -32,7 +36,7 @@ public static class ModelLibrary
 
             using var stream = File.OpenRead(path);
             var (verts, normals, uvs, submeshes) = MeshCache.Read(stream);
-            ArrayMesh? mesh = Build(verts, normals, uvs, submeshes, registry);
+            ArrayMesh? mesh = Build(verts, normals, uvs, submeshes, registry, materials);
             if (mesh != null)
                 library[guid] = mesh;
         }
@@ -40,7 +44,8 @@ public static class ModelLibrary
     }
 
     private static ArrayMesh? Build(Vector3[] verts, Vector3[] normals, Vector2[] uvs,
-        List<CachedSubmesh> submeshes, TextureRegistry registry)
+        List<CachedSubmesh> submeshes, TextureRegistry registry,
+        Dictionary<(string, Color, UnityMaterial.Blend), StandardMaterial3D> materials)
     {
         if (verts.Length == 0 || submeshes.Count == 0)
             return null;
@@ -77,7 +82,7 @@ public static class ModelLibrary
             arrays[(int)Mesh.ArrayType.Index] = reversed[s];
 
             mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
-            mesh.SurfaceSetMaterial(surfaces, MaterialFor(submeshes[s], registry));
+            mesh.SurfaceSetMaterial(surfaces, MaterialFor(submeshes[s], registry, materials));
             surfaces++;
         }
         return surfaces > 0 ? mesh : null;
@@ -118,8 +123,13 @@ public static class ModelLibrary
     // Flat material tinted with the palette color; glass/blended submeshes get alpha transparency. A
     // textured submesh's material starts untextured and is registered under its texture key — the texture
     // is applied later (immediately for a warm cache, progressively while a cold load streams).
-    private static StandardMaterial3D MaterialFor(CachedSubmesh sm, TextureRegistry registry)
+    private static StandardMaterial3D MaterialFor(CachedSubmesh sm, TextureRegistry registry,
+        Dictionary<(string, Color, UnityMaterial.Blend), StandardMaterial3D> cache)
     {
+        var key = (sm.TextureKey, sm.Color, sm.Blend);
+        if (cache.TryGetValue(key, out StandardMaterial3D? shared))
+            return shared; // already built and registered under this texture key
+
         var material = new StandardMaterial3D
         {
             AlbedoColor = sm.Color,
@@ -137,6 +147,7 @@ public static class ModelLibrary
             UnityMaterial.Blend.Alpha => BaseMaterial3D.TransparencyEnum.Alpha,          // blend (glass)
             _ => BaseMaterial3D.TransparencyEnum.Disabled,
         };
+        cache[key] = material;
         return material;
     }
 
