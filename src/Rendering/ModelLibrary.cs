@@ -66,23 +66,43 @@ public static class ModelLibrary
             reversed[s] = ReverseWinding(submeshes[s].Indices);
         Vector3[] gnormals = SmoothNormals(gverts, reversed);
 
-        var mesh = new ArrayMesh();
-        int surfaces = 0;
+        // Merge submeshes that resolve to the same deduplicated material (TextureKey/Color/Blend) into one
+        // surface with concatenated indices: a mesh's several same-material submeshes then cost one
+        // instanced draw call per MultiMesh instead of several. Output is pixel-identical — the vertex/
+        // normal/uv pool and the material are the same, only the surface count changes.
+        bool hasUv = guvs.Length == gverts.Length;
+        var groups = new List<(CachedSubmesh rep, List<int> indices)>();
+        var groupByKey = new Dictionary<(string, Color, UnityMaterial.Blend), int>();
         for (int s = 0; s < submeshes.Count; s++)
         {
-            if (submeshes[s].Indices.Length < 3)
+            int[] idx = reversed[s];
+            if (idx.Length < 3)
                 continue;
+            CachedSubmesh sm = submeshes[s];
+            var key = (sm.TextureKey, sm.Color, sm.Blend);
+            if (!groupByKey.TryGetValue(key, out int gi))
+            {
+                gi = groups.Count;
+                groupByKey[key] = gi;
+                groups.Add((sm, new List<int>()));
+            }
+            groups[gi].indices.AddRange(idx);
+        }
 
+        var mesh = new ArrayMesh();
+        int surfaces = 0;
+        foreach ((CachedSubmesh rep, List<int> indices) in groups)
+        {
             var arrays = new Godot.Collections.Array();
             arrays.Resize((int)Mesh.ArrayType.Max);
             arrays[(int)Mesh.ArrayType.Vertex] = gverts;
             arrays[(int)Mesh.ArrayType.Normal] = gnormals;
-            if (guvs.Length == gverts.Length)
+            if (hasUv)
                 arrays[(int)Mesh.ArrayType.TexUV] = guvs;
-            arrays[(int)Mesh.ArrayType.Index] = reversed[s];
+            arrays[(int)Mesh.ArrayType.Index] = indices.ToArray();
 
             mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
-            mesh.SurfaceSetMaterial(surfaces, MaterialFor(submeshes[s], registry, materials));
+            mesh.SurfaceSetMaterial(surfaces, MaterialFor(rep, registry, materials));
             surfaces++;
         }
         return surfaces > 0 ? mesh : null;
