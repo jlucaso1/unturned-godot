@@ -34,20 +34,14 @@ public static class CharacterModel
     private static MeshInstance3D? BuildInternal(string unturnedPath)
     {
         string assetsPath = Path.Combine(unturnedPath, "Unturned_Data", "resources.assets");
-        if (!File.Exists(assetsPath))
+        string bundlePath = Path.Combine(unturnedPath, "Bundles", "core_linux.masterbundle");
+        if (!File.Exists(assetsPath) || !File.Exists(bundlePath))
             return null;
 
-        SerializedFile file = SerializedFile.Read(File.ReadAllBytes(assetsPath));
-
-        // The game ships resources.assets with type trees stripped (enableTypeTree = 0), unlike the map
-        // masterbundle. Our reader is type-tree driven, so without them we can't decode the character's
-        // objects — that needs a hardcoded Unity class-layout database (a separate, larger foundation).
-        if (file.Objects.Count == 0 || file.Objects[0].TypeTree.Count == 0)
-        {
-            GD.Print("[unturned-godot] Character: resources.assets has no type trees; using placeholder " +
-                "(real body needs a Unity class-layout reader).");
-            return null;
-        }
+        // resources.assets ships with its type trees stripped (enableTypeTree = 0). Type trees are identical
+        // across files of the same Unity version, so decode it with the ones gathered from the masterbundle.
+        IReadOnlyDictionary<int, List<TypeTreeNode>> classTypeTrees = ModelExtractor.ReadClassTypeTrees(bundlePath);
+        SerializedFile file = SerializedFile.Read(File.ReadAllBytes(assetsPath), classTypeTrees);
         var byId = new Dictionary<long, SerializedObject>();
         foreach (SerializedObject o in file.Objects)
             byId[o.PathId] = o;
