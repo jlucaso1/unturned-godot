@@ -117,12 +117,15 @@ public sealed class MasterBundleStream : IDisposable
             nodes.Add(new Node(info.ReadCString(), offset, size));
         }
 
-        // The compressed block sits at the reader's current position: 5 LZMA property bytes then the stream.
-        byte[] compressed = r.ReadBytes((int)blockCompressed);
+        // The compressed block sits at the reader's current position: 5 LZMA property bytes then the
+        // stream. Wrap the decoder over that region of `bundle` in place instead of copying the whole
+        // (~compressed-file-sized) block into a fresh array; the MemoryStream keeps `bundle` alive.
+        int blockStart = r.Position;
         var properties = new byte[5];
-        Array.Copy(compressed, 0, properties, 0, 5);
-        var input = new MemoryStream(compressed, 5, compressed.Length - 5);
-        var lzma = new LzmaStream(properties, input, compressed.Length - 5, blockUncompressed);
+        Array.Copy(bundle, blockStart, properties, 0, 5);
+        int payloadLength = (int)blockCompressed - 5;
+        var input = new MemoryStream(bundle, blockStart + 5, payloadLength);
+        var lzma = new LzmaStream(properties, input, payloadLength, blockUncompressed);
         return new MasterBundleStream(lzma, input, nodes, blockUncompressed);
     }
 
