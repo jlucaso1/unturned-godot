@@ -66,6 +66,9 @@ public class LevelLightingTests
         Assert.Equal(0f, day.Sun.G);                 // color index 0 -> green byte 0
         Assert.Equal(new Color(1f / 255f, 1f / 255f, 2f / 255f), day.Sea);          // color 1
         Assert.Equal(new Color(1f / 255f, 2f / 255f, 4f / 255f), day.Fog);          // color 2
+        Assert.Equal(new Color(1f / 255f, 3f / 255f, 6f / 255f), day.SkyTop);       // color 3
+        Assert.Equal(new Color(1f / 255f, 4f / 255f, 8f / 255f), day.SkyHorizon);   // color 4
+        Assert.Equal(new Color(1f / 255f, 5f / 255f, 10f / 255f), day.SkyGround);   // color 5
         Assert.Equal(new Color(1f / 255f, 6f / 255f, 12f / 255f), day.AmbientSky);  // color 6
         Assert.Equal(new Color(1f / 255f, 7f / 255f, 14f / 255f), day.AmbientEquator); // color 7
         Assert.Equal(new Color(1f / 255f, 8f / 255f, 16f / 255f), day.AmbientGround);  // color 8

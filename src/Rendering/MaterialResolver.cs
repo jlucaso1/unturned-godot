@@ -1,0 +1,81 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using Godot;
+using UnturnedGodot.Assets;
+using UnturnedGodot.Dat;
+using UnturnedGodot.Unity;
+
+namespace UnturnedGodot;
+
+// Resolves each submesh's material off a PrefabGraph: the material palette (batched objects) or the
+// object's own MeshRenderer material (rocks/trees), then reads its color, blend mode and texture key.
+[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
+public sealed class MaterialResolver
+{
+    private readonly PrefabGraph _graph;
+    private readonly Dictionary<Guid, MaterialPalette> _palettes;
+
+    private MaterialResolver(PrefabGraph graph, Dictionary<Guid, MaterialPalette> palettes)
+    {
+        _graph = graph;
+        _palettes = palettes;
+    }
+
+    public static MaterialResolver Read(PrefabGraph graph, string assetsDir) =>
+        new(graph, ScanPalettes(assetsDir));
+
+    public MaterialPalette? PaletteFor(Guid guid) =>
+        _palettes.TryGetValue(guid, out MaterialPalette? p) ? p : null;
+
+    // Reads a submesh's flat color, blend mode and (optional) _MainTex texture KEY — the texture path id in
+    // hex — without reading pixels (that needs the .resS stream). Also returns the raw texture path id
+    // (0 when none) so the caller can grab the texture's metadata for later streaming.
+    public (Color color, string texKey, UnityMaterial.Blend blend, long texId) Resolve(
+        int submeshIndex, MaterialPalette? palette, List<long> rendererMaterials)
+    {
+        long matId = MaterialForSubmesh(submeshIndex, palette, rendererMaterials);
+        if (matId == 0 || !_graph.ObjectsByPathId.TryGetValue(matId, out SerializedObject? matObj))
+            return (Colors.White, string.Empty, UnityMaterial.Blend.Opaque, 0);
+
+        Dictionary<string, object> matDict = TypeTreeReader.Read(matObj.TypeTree, _graph.File.ReaderFor(matObj));
+        Color color = UnityMaterial.GetColor(matDict, "_Color") ?? Colors.White;
+        UnityMaterial.Blend blend = UnityMaterial.GetBlendMode(matDict);
+
+        (int fileId, long texId) = UnityMaterial.GetTexture(matDict, "_MainTex");
+        bool has = fileId == 0 && texId != 0 && _graph.ObjectsByPathId.ContainsKey(texId);
+        return (color, has ? texId.ToString("x") : string.Empty, blend, has ? texId : 0);
+    }
+
+    // Picks the material id: the palette's material (batched objects) if it covers this submesh, otherwise
+    // the object's own MeshRenderer material (rocks/trees have no palette). 0 = none.
+    private long MaterialForSubmesh(int submeshIndex, MaterialPalette? palette, List<long>? rendererMaterials)
+    {
+        if (palette != null && submeshIndex < palette.MaterialPaths.Count)
+        {
+            string matPath = _graph.AssetPrefix +
+                palette.MaterialPaths[submeshIndex].Replace('\\', '/').ToLowerInvariant();
+            return _graph.ContainerByPath.TryGetValue(matPath, out long id) ? id : 0;
+        }
+        if (rendererMaterials != null && submeshIndex < rendererMaterials.Count)
+            return rendererMaterials[submeshIndex];
+        return 0;
+    }
+
+    private static Dictionary<Guid, MaterialPalette> ScanPalettes(string assetsDir)
+    {
+        var palettes = new Dictionary<Guid, MaterialPalette>();
+        if (!Directory.Exists(assetsDir))
+            return palettes;
+
+        foreach (string path in Directory.EnumerateFiles(assetsDir, "*.asset", SearchOption.AllDirectories))
+        {
+            MaterialPalette? palette;
+            try { palette = MaterialPalette.Read(DatParser.Parse(File.ReadAllText(path))); }
+            catch (IOException) { continue; }
+            if (palette != null && palette.MaterialPaths.Count > 0)
+                palettes[palette.Guid] = palette;
+        }
+        return palettes;
+    }
+}

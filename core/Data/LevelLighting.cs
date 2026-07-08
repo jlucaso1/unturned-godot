@@ -22,6 +22,9 @@ public readonly struct LightingKeyframe
     public readonly Color Sun;
     public readonly Color Sea;
     public readonly Color Fog;
+    public readonly Color SkyTop;     // SKY_SKY: zenith
+    public readonly Color SkyHorizon; // SKY_EQUATOR: horizon haze
+    public readonly Color SkyGround;  // SKY_GROUND: below the horizon
     public readonly Color AmbientSky;
     public readonly Color AmbientEquator;
     public readonly Color AmbientGround;
@@ -31,12 +34,16 @@ public readonly struct LightingKeyframe
     public readonly float Shadows; // shadow strength
     public readonly float Rays;
 
-    public LightingKeyframe(Color sun, Color sea, Color fog, Color ambientSky, Color ambientEquator,
-        Color ambientGround, float intensity, float fogDensity, float clouds, float shadows, float rays)
+    public LightingKeyframe(Color sun, Color sea, Color fog, Color skyTop, Color skyHorizon, Color skyGround,
+        Color ambientSky, Color ambientEquator, Color ambientGround, float intensity, float fogDensity,
+        float clouds, float shadows, float rays)
     {
         Sun = sun;
         Sea = sea;
         Fog = fog;
+        SkyTop = skyTop;
+        SkyHorizon = skyHorizon;
+        SkyGround = skyGround;
         AmbientSky = ambientSky;
         AmbientEquator = ambientEquator;
         AmbientGround = ambientGround;
@@ -139,6 +146,7 @@ public sealed class LevelLighting
 
         return new LightingKeyframe(
             sun: colors[0], sea: colors[1], fog: colors[2],
+            skyTop: colors[3], skyHorizon: colors[4], skyGround: colors[5],
             ambientSky: colors[6], ambientEquator: colors[7], ambientGround: colors[8],
             intensity, fogDensity, clouds, shadows, rays);
     }

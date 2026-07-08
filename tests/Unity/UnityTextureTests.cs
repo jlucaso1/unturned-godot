@@ -58,6 +58,24 @@ public class UnityTextureTests
     }
 
     [Fact]
+    public void Read_WithoutStreamData_UsesInline()
+    {
+        // Unity 5.x per-map textures (Roads.unity3d) have no m_StreamData; pixels are inline.
+        var dict = new Dictionary<string, object>
+        {
+            ["m_Name"] = "Highway_0",
+            ["m_Width"] = 256,
+            ["m_Height"] = 128,
+            ["m_TextureFormat"] = 3,
+            ["m_MipCount"] = 1,
+            ["image data"] = new byte[] { 5, 6, 7 },
+        };
+        UnityTexture t = UnityTexture.Read(dict);
+        Assert.Equal(string.Empty, t.StreamPath);
+        Assert.Equal(new byte[] { 5, 6, 7 }, t.GetPixels(_ => null));
+    }
+
+    [Fact]
     public void StreamFileName_NoSlash_ReturnsPath()
     {
         UnityTexture t = UnityTexture.Read(TextureDict("plain.resS", 0, 0, new byte[0]));

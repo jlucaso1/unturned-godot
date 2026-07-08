@@ -19,19 +19,24 @@ public sealed class UnityTexture
 
     public static UnityTexture Read(Dictionary<string, object> tex)
     {
-        var stream = (Dictionary<string, object>)tex["m_StreamData"];
-        return new UnityTexture
+        var result = new UnityTexture
         {
             Name = tex.TryGetValue("m_Name", out object? n) ? (string)n : string.Empty,
             Width = Convert.ToInt32(tex["m_Width"]),
             Height = Convert.ToInt32(tex["m_Height"]),
             Format = Convert.ToInt32(tex["m_TextureFormat"]),
             MipCount = Convert.ToInt32(tex["m_MipCount"]),
-            StreamPath = (string)stream["path"],
-            StreamOffset = Convert.ToInt64(stream["offset"]),
-            StreamSize = Convert.ToInt32(stream["size"]),
             InlineData = tex.TryGetValue("image data", out object? d) ? (byte[])d : Array.Empty<byte>(),
         };
+
+        // Older textures (Unity 5.x per-map bundles) store pixels inline with no m_StreamData field.
+        if (tex.TryGetValue("m_StreamData", out object? sd) && sd is Dictionary<string, object> stream)
+        {
+            result.StreamPath = (string)stream["path"];
+            result.StreamOffset = Convert.ToInt64(stream["offset"]);
+            result.StreamSize = Convert.ToInt32(stream["size"]);
+        }
+        return result;
     }
 
     // The last path segment of an "archive:/CAB-x/CAB-x.resS" reference is the bundle file name.
