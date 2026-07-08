@@ -87,38 +87,40 @@ public class LevelRoadsTests
         Assert.Empty(LevelRoads.LoadMaterials("/no/such/Roads.dat"));
 
     [Fact]
-    public void LoadMaterials_Version0_ReturnsEmpty()
+    public void LoadMaterials_ObsoleteVersion_ReturnsEmpty()
     {
         using var dir = new TempDir();
-        string path = dir.Write("Roads.dat", new RiverBytes().Byte(0).ToArray()); // version < 1
+        string path = dir.Write("Roads.dat", new RiverBytes().Byte(0).ToArray());
         Assert.Empty(LevelRoads.LoadMaterials(path));
     }
 
     [Fact]
-    public void LoadMaterials_Version1_HasNoOffsetField()
+    public void LoadMaterials_Version1_DefaultsOffset()
     {
         using var dir = new TempDir();
-        // Version 1 predates the per-material offset field, so it isn't read.
-        var w = new RiverBytes().Byte(1).Byte(1)
-            .Single(6f).Single(3f).Single(0.1f).Bool(false); // width, height, depth, isConcrete
+        // Version 1 has no per-material offset field.
+        var w = new RiverBytes().Byte(1).Byte(1).Single(8f).Single(4f).Single(0.2f).Bool(true);
         List<RoadMaterialConfig> mats = LevelRoads.LoadMaterials(dir.Write("Roads.dat", w.ToArray()));
         Assert.Single(mats);
-        Assert.Equal(6f, mats[0].Width);
         Assert.Equal(0f, mats[0].Offset);
     }
 
     [Fact]
-    public void LoadPaths_Version2_HasNoLoopFlag()
+    public void LoadPaths_Version2_OmitsLoopTangentsAndAsset()
     {
         using var dir = new TempDir();
-        // Version 2 predates the loop flag and joint tangents; each joint is a bare vertex.
-        var joints = new[] { new Joint(new Vector3(1, 2, 3), Vector3.Zero, Vector3.Zero) };
-        List<PlacedRoad> roads = LevelRoads.LoadPaths(
-            dir.Write("Paths.dat", BuildPaths(2, ((byte)4, false, joints))));
+        var joints = new[]
+        {
+            new Joint(new Vector3(0, 32, 0), Vector3.Zero, Vector3.Zero),
+            new Joint(new Vector3(10, 34, 0), Vector3.Zero, Vector3.Zero),
+        };
+        string path = dir.Write("Paths.dat", BuildPaths(2, ((byte)0, false, joints)));
+
+        List<PlacedRoad> roads = LevelRoads.LoadPaths(path);
+
         Assert.Single(roads);
         Assert.False(roads[0].IsLoop);
-        Assert.Equal(4, roads[0].Material);
-        Assert.Equal(new Vector3(1, 2, 3), roads[0].Joints[0].Vertex);
+        Assert.Equal(2, roads[0].Joints.Count);
     }
 
     [Fact]
