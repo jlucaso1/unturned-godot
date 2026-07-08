@@ -15,6 +15,14 @@ public sealed class UnityMesh
     public int[] Indices = Array.Empty<int>();       // all triangle indices flattened
     public List<int[]> Submeshes = new();            // per-submesh triangle indices (parallel to materials)
 
+    // Skinning (empty for non-skinned meshes): 4 bone weights + 4 bone indices per vertex, and one bind
+    // pose matrix per bone (Unity column-major, 16 floats). Populated from the BlendWeight/BlendIndices
+    // vertex channels and m_BindPose.
+    public float[] BoneWeights = Array.Empty<float>();
+    public int[] BoneIndices = Array.Empty<int>();
+    public List<float[]> BindPoses = new();
+    public const int BonesPerVertex = 4;
+
     // False when the mesh uses compression or external stream data we don't decode (caller falls back).
     public bool Usable { get; private set; }
 
@@ -44,6 +52,9 @@ public sealed class UnityMesh
         result.Vertices = ReadChannel(channels, 0, buffer, vertexCount, strides, streamOffsets);
         result.Normals = ReadChannel(channels, 1, buffer, vertexCount, strides, streamOffsets);
         result.Uvs = ReadUvChannel(channels, 4, buffer, vertexCount, strides, streamOffsets); // UV0
+        result.BoneWeights = ReadFloat4Channel(channels, 12, buffer, vertexCount, strides, streamOffsets);
+        result.BoneIndices = ReadInt4Channel(channels, 13, buffer, vertexCount, strides, streamOffsets);
+        result.BindPoses = ReadBindPoses(mesh);
         result.Submeshes = ReadSubmeshes(mesh);
         foreach (int[] sm in result.Submeshes)
             result.Indices = Concat(result.Indices, sm);
@@ -135,6 +146,84 @@ public sealed class UnityMesh
             values[v] = new Vector2(ReadComponent(buffer, p, format), ReadComponent(buffer, p + componentSize, format));
         }
         return values;
+    }
+
+    // 4 float bone weights per vertex (BlendWeight channel), flattened; empty when absent.
+    private static float[] ReadFloat4Channel(List<object> channels, int index, byte[] buffer,
+        int vertexCount, int[] strides, int[] streamOffsets)
+    {
+        if (index >= channels.Count)
+            return Array.Empty<float>();
+        var ch = (Dictionary<string, object>)channels[index];
+        if (ToInt(ch["dimension"]) < 4)
+            return Array.Empty<float>();
+
+        int stream = ToInt(ch["stream"]);
+        int format = ToInt(ch["format"]);
+        int stride = strides[stream];
+        int baseOffset = streamOffsets[stream] + ToInt(ch["offset"]);
+        int size = FormatSize[format];
+
+        var values = new float[vertexCount * 4];
+        for (int v = 0; v < vertexCount; v++)
+        {
+            int p = baseOffset + v * stride;
+            for (int c = 0; c < 4; c++)
+                values[v * 4 + c] = ReadComponent(buffer, p + c * size, format);
+        }
+        return values;
+    }
+
+    // 4 bone indices per vertex (BlendIndices channel; UInt8/16/32), flattened; empty when absent.
+    private static int[] ReadInt4Channel(List<object> channels, int index, byte[] buffer,
+        int vertexCount, int[] strides, int[] streamOffsets)
+    {
+        if (index >= channels.Count)
+            return Array.Empty<int>();
+        var ch = (Dictionary<string, object>)channels[index];
+        if (ToInt(ch["dimension"]) < 4)
+            return Array.Empty<int>();
+
+        int stream = ToInt(ch["stream"]);
+        int format = ToInt(ch["format"]);
+        int stride = strides[stream];
+        int baseOffset = streamOffsets[stream] + ToInt(ch["offset"]);
+        int size = FormatSize[format];
+
+        var values = new int[vertexCount * 4];
+        for (int v = 0; v < vertexCount; v++)
+        {
+            int p = baseOffset + v * stride;
+            for (int c = 0; c < 4; c++)
+                values[v * 4 + c] = ReadIntComponent(buffer, p + c * size, format);
+        }
+        return values;
+    }
+
+    private static int ReadIntComponent(byte[] buffer, int offset, int format) => format switch
+    {
+        6 => buffer[offset],                            // UInt8
+        8 => BitConverter.ToUInt16(buffer, offset),     // UInt16
+        _ => BitConverter.ToInt32(buffer, offset),      // UInt32/SInt32 (format 10/11)
+    };
+
+    // One bind pose matrix (16 floats, Unity column-major e00..e33) per bone.
+    private static List<float[]> ReadBindPoses(Dictionary<string, object> mesh)
+    {
+        var result = new List<float[]>();
+        if (!mesh.TryGetValue("m_BindPose", out object? bp) || bp is not List<object> poses)
+            return result;
+
+        foreach (object pose in poses)
+        {
+            var m = (Dictionary<string, object>)pose;
+            var matrix = new float[16];
+            for (int col = 0; col < 4; col++)
+                for (int row = 0; row < 4; row++)
+                    matrix[col * 4 + row] = Convert.ToSingle(m[$"e{row}{col}"]); // column-major
+            result.Add(matrix);
+        }
+        return result;
     }
 
     private static float ReadComponent(byte[] buffer, int offset, int format) => format switch
