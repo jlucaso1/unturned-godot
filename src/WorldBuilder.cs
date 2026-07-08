@@ -36,6 +36,7 @@ public static class WorldBuilder
         var objectsSw = Stopwatch.StartNew();
         (Node3D objects, int placed, int withMesh, int unique) = BuildObjects(level,
             System.IO.Path.Combine(unturnedPath, "Bundles", "Objects"),
+            System.IO.Path.Combine(unturnedPath, "Bundles", "Trees"),
             System.IO.Path.Combine(unturnedPath, "Bundles", "core_linux.masterbundle"));
         objectsSw.Stop();
 
@@ -59,11 +60,20 @@ public static class WorldBuilder
     }
 
     private static (Node3D root, int placed, int withMesh, int unique) BuildObjects(
-        LevelInfo level, string objectBundlesDir, string bundlePath)
+        LevelInfo level, string objectBundlesDir, string treeBundlesDir, string bundlePath)
     {
+        // Trees are Unturned "resources" placed via a separate file; render them alongside objects so
+        // the map isn't bare. They share the object transform, asset db and mesh pipeline.
         List<PlacedObject> objects = LevelObjects.Load(level.ObjectsDat);
+        List<PlacedTree> trees = LevelTrees.Load(System.IO.Path.Combine(level.Path, "Terrain", "Trees.dat"));
+        foreach (PlacedTree t in trees)
+            objects.Add(new PlacedObject(t.Position, t.EulerDegrees, t.Scale, 0, t.Guid));
+
         ObjectAssetDatabase db = ObjectAssetDatabase.ScanDirectory(objectBundlesDir);
-        GD.Print($"[unturned-godot] Placed objects: {objects.Count}, asset db entries: {db.Count}");
+        foreach (ObjectAsset a in ObjectAssetDatabase.ScanDirectory(treeBundlesDir).All)
+            db.Add(a);
+        GD.Print($"[unturned-godot] Placed objects: {objects.Count} (incl. {trees.Count} trees), " +
+            $"asset db entries: {db.Count}");
 
         if (objects.Count == 0)
             return (new Node3D { Name = "Objects" }, 0, 0, 0);
@@ -79,7 +89,7 @@ public static class WorldBuilder
         if (ModelLibrary.CachedMeshCount(cacheDir) == 0 && System.IO.File.Exists(bundlePath))
         {
             GD.Print("[unturned-godot] Extracting models + textures from masterbundle (one-time)...");
-            int extracted = ModelExtractor.Extract(bundlePath, objectBundlesDir, assetsDir,
+            int extracted = ModelExtractor.Extract(bundlePath, objectBundlesDir, treeBundlesDir, assetsDir,
                 neededGuids, cacheDir, textureCacheDir);
             GD.Print($"[unturned-godot] Extracted {extracted} meshes to cache");
         }
