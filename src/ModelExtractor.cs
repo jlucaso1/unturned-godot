@@ -65,11 +65,11 @@ public static class ModelExtractor
             for (int si = 0; si < mesh.Submeshes.Count; si++)
             {
                 long matId = MaterialForSubmesh(si, palette, assetPrefix, containerByPath, rendererMaterials);
-                (Color color, string texKey) = ResolveMaterial(matId, objectsByPathId, file, bundle,
-                    textureCacheDir, writtenTextures);
+                (Color color, string texKey, bool transparent) = ResolveMaterial(matId, objectsByPathId,
+                    file, bundle, textureCacheDir, writtenTextures);
                 if (texKey.Length > 0)
                     textured++;
-                submeshes.Add(new CachedSubmesh(mesh.Submeshes[si], color, texKey));
+                submeshes.Add(new CachedSubmesh(mesh.Submeshes[si], color, texKey, transparent));
             }
 
             using var stream = File.Create(Path.Combine(cacheDir, asset.Guid.ToString("N") + ".mesh"));
@@ -96,18 +96,19 @@ public static class ModelExtractor
         return 0;
     }
 
-    // Reads a material's flat color and (optional) _MainTex texture key, caching textures deduplicated.
-    private static (Color color, string texKey) ResolveMaterial(long matId,
+    // Reads a material's flat color, transparency and (optional) _MainTex texture, caching textures deduped.
+    private static (Color color, string texKey, bool transparent) ResolveMaterial(long matId,
         Dictionary<long, SerializedObject> objectsByPathId, SerializedFile file, UnityBundle bundle,
         string textureCacheDir, HashSet<long> writtenTextures)
     {
         if (matId == 0 || !objectsByPathId.TryGetValue(matId, out SerializedObject? matObj))
-            return (Colors.White, string.Empty);
+            return (Colors.White, string.Empty, false);
 
         Dictionary<string, object> matDict = TypeTreeReader.Read(matObj.TypeTree, file.ReaderFor(matObj));
         Color color = UnityMaterial.GetColor(matDict, "_Color") ?? Colors.White;
+        bool transparent = UnityMaterial.IsTransparent(matDict);
         string texKey = ResolveTexture(matDict, objectsByPathId, file, bundle, textureCacheDir, writtenTextures);
-        return (color, texKey);
+        return (color, texKey, transparent);
     }
 
     private static string ResolveTexture(Dictionary<string, object> matDict,

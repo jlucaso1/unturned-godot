@@ -16,8 +16,8 @@ public class MeshCacheTests
         var uvs = new[] { new Vector2(0, 0), new Vector2(1, 0), new Vector2(1, 1) };
         var submeshes = new List<CachedSubmesh>
         {
-            new(new[] { 0, 1, 2 }, new Color(0.5f, 0.4f, 0.3f, 1f), "abc"),
-            new(new[] { 2, 1, 0 }, Colors.White, ""),
+            new(new[] { 0, 1, 2 }, new Color(0.5f, 0.4f, 0.3f, 1f), "abc", transparent: false),
+            new(new[] { 2, 1, 0 }, Colors.White, "", transparent: true),
         };
 
         using var stream = new MemoryStream();
@@ -32,14 +32,16 @@ public class MeshCacheTests
         Assert.Equal("abc", sm[0].TextureKey);
         Assert.Equal(new Color(0.5f, 0.4f, 0.3f, 1f), sm[0].Color);
         Assert.Equal(new[] { 0, 1, 2 }, sm[0].Indices);
+        Assert.False(sm[0].Transparent);
         Assert.Equal("", sm[1].TextureKey);
+        Assert.True(sm[1].Transparent);
     }
 
     [Fact]
     public void RoundTrip_WithoutNormalsOrUvs()
     {
         var verts = new[] { new Vector3(1, 1, 1) };
-        var submeshes = new List<CachedSubmesh> { new(new[] { 0 }, Colors.Red, "") };
+        var submeshes = new List<CachedSubmesh> { new(new[] { 0 }, Colors.Red, "", transparent: false) };
 
         using var stream = new MemoryStream();
         MeshCache.Write(stream, verts, System.Array.Empty<Vector3>(), System.Array.Empty<Vector2>(), submeshes);

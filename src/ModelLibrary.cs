@@ -72,7 +72,7 @@ public static class ModelLibrary
             arrays[(int)Mesh.ArrayType.Index] = ReverseWinding(sm.Indices);
 
             mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
-            mesh.SurfaceSetMaterial(surfaces, MaterialFor(sm.Color, sm.TextureKey, textureCacheDir, textures));
+            mesh.SurfaceSetMaterial(surfaces, MaterialFor(sm, textureCacheDir, textures));
             surfaces++;
         }
         return surfaces > 0 ? mesh : null;
@@ -90,20 +90,23 @@ public static class ModelLibrary
         return r;
     }
 
-    // Flat material tinted with the palette color; textured props also get their albedo texture.
-    private static StandardMaterial3D MaterialFor(Color color, string textureKey, string textureCacheDir,
+    // Flat material tinted with the palette color; textured props also get their albedo texture, and
+    // glass/blended submeshes get alpha transparency.
+    private static StandardMaterial3D MaterialFor(CachedSubmesh sm, string textureCacheDir,
         Dictionary<string, ImageTexture?> textureCache)
     {
         var material = new StandardMaterial3D
         {
-            AlbedoColor = color,
+            AlbedoColor = sm.Color,
             Roughness = 1f,
             // Many object meshes (rocks, foliage) are single-sided shells; render both sides so they
             // don't show culling holes up close.
             CullMode = BaseMaterial3D.CullModeEnum.Disabled,
         };
-        if (textureKey.Length > 0)
-            material.AlbedoTexture = LoadTexture(textureKey, textureCacheDir, textureCache);
+        if (sm.TextureKey.Length > 0)
+            material.AlbedoTexture = LoadTexture(sm.TextureKey, textureCacheDir, textureCache);
+        if (sm.Transparent)
+            material.Transparency = BaseMaterial3D.TransparencyEnum.Alpha;
         return material;
     }
 
