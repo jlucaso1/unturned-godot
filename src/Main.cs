@@ -24,7 +24,17 @@ public partial class Main : Node3D
         if (OS.GetEnvironment("CHAR_ONLY") == "1" && !string.IsNullOrEmpty(shotOnly))
         {
             if (CharacterModel.Build(unturnedPath) is { } model)
+            {
+                if (model is CharacterSkeleton rig && OS.GetEnvironment("CHAR_STANCE") is { Length: > 0 } s)
+                {
+                    rig.SetState(System.Enum.Parse<Player.EPlayerStance>(s, ignoreCase: true),
+                        OS.GetEnvironment("CHAR_MOVING") == "1");
+                    if (OS.GetEnvironment("CHAR_PITCH") is { Length: > 0 } cp)
+                        rig.SetPitch(cp.ToFloat()); // look pitch -> spine/skull bend
+                    rig.Seek(OS.GetEnvironment("CHAR_ANIM_TIME") is { Length: > 0 } at ? at.ToFloat() : 0f);
+                }
                 AddChild(model);
+            }
             AddChild(new DirectionalLight3D { RotationDegrees = new Vector3(-50, -140, 0) });
             AddChild(new WorldEnvironment
             {
@@ -37,10 +47,13 @@ public partial class Main : Node3D
             });
             var cam = new Camera3D { Current = true };
             AddChild(cam);
-            float side = OS.GetEnvironment("CHAR_BACK") == "1" ? 1.0f : -1.0f; // -Z is the front
-            cam.Position = new Vector3(0, 1.8f, side); // close-up on the head
-            cam.LookAt(new Vector3(0, 1.85f, 0));
-            _ = CaptureAndQuit(shotOnly, settleFrames: 5);
+            float side = OS.GetEnvironment("CHAR_BACK") == "1" ? 3.2f : -3.2f; // -Z is the front
+            cam.Position = OS.GetEnvironment("CHAR_SIDE") == "1"
+                ? new Vector3(4.0f, 1.0f, 0f)  // side profile, for reading prone/lie-down poses
+                : new Vector3(0, 1.1f, side);  // full-body 3/4-front, so any stance is framed
+            cam.LookAt(new Vector3(0, 0.5f, 0));
+            int settle = OS.GetEnvironment("CHAR_SETTLE") is { Length: > 0 } sf ? int.Parse(sf) : 5;
+            _ = CaptureAndQuit(shotOnly, settle); // more settle frames -> the animation advances further
             return;
         }
 
