@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 using Godot;
@@ -60,34 +61,36 @@ public sealed class LevelFoliage
     public static LevelFoliage? Load(string blobPath) =>
         File.Exists(blobPath) ? Parse(File.ReadAllBytes(blobPath)) : null;
 
+    // Parses directly over the byte[] with a cursor and explicit little-endian reads (BinaryPrimitives),
+    // instead of wrapping a MemoryStream+BinaryReader — the blob is ~667k instances, so this avoids ~11M
+    // virtual Stream.Read dispatches for byte-identical output.
     public static LevelFoliage Parse(byte[] data)
     {
-        using var reader = new BinaryReader(new MemoryStream(data));
-
-        int version = reader.ReadInt32();
+        int pos = 0;
+        int version = ReadInt32(data, ref pos);
         if (version is not (1 or VersionAssetListHeader))
             throw new NotSupportedException($"Unsupported Foliage.blob version {version}");
 
-        int tileCount = reader.ReadInt32();
+        int tileCount = ReadInt32(data, ref pos);
         var coords = new (int x, int y, long offset)[tileCount];
         for (int i = 0; i < tileCount; i++)
-            coords[i] = (reader.ReadInt32(), reader.ReadInt32(), reader.ReadInt64());
+            coords[i] = (ReadInt32(data, ref pos), ReadInt32(data, ref pos), ReadInt64(data, ref pos));
 
         var assetGuids = new List<Guid>();
         if (version >= VersionAssetListHeader)
         {
-            int assetCount = reader.ReadInt32();
+            int assetCount = ReadInt32(data, ref pos);
             for (int i = 0; i < assetCount; i++)
-                assetGuids.Add(new Guid(reader.ReadBytes(16)));
+                assetGuids.Add(ReadGuid(data, ref pos));
         }
 
-        long tileBlobHeaderOffset = reader.BaseStream.Position;
+        long tileBlobHeaderOffset = pos;
 
         var tiles = new List<FoliageTile>();
         foreach ((int x, int y, long offset) in coords)
         {
-            reader.BaseStream.Position = tileBlobHeaderOffset + offset;
-            List<FoliageInstances> instances = ReadTile(reader, version, assetGuids);
+            pos = (int)(tileBlobHeaderOffset + offset);
+            List<FoliageInstances> instances = ReadTile(data, ref pos, version, assetGuids);
             if (instances.Count > 0)
                 tiles.Add(new FoliageTile(x, y, instances));
         }
@@ -95,22 +98,22 @@ public sealed class LevelFoliage
         return new LevelFoliage(version, assetGuids, tiles);
     }
 
-    private static List<FoliageInstances> ReadTile(BinaryReader reader, int version, List<Guid> assetGuids)
+    private static List<FoliageInstances> ReadTile(byte[] data, ref int pos, int version, List<Guid> assetGuids)
     {
-        int instanceCount = reader.ReadInt32();
+        int instanceCount = ReadInt32(data, ref pos);
         var result = new List<FoliageInstances>(instanceCount);
         for (int i = 0; i < instanceCount; i++)
         {
             Guid asset = version >= VersionAssetListHeader
-                ? AssetForIndex(reader.ReadInt32(), assetGuids)
-                : new Guid(reader.ReadBytes(16));
+                ? AssetForIndex(ReadInt32(data, ref pos), assetGuids)
+                : ReadGuid(data, ref pos);
 
-            int matrixCount = reader.ReadInt32();
+            int matrixCount = ReadInt32(data, ref pos);
             var transforms = new List<Transform3D>(matrixCount);
             for (int m = 0; m < matrixCount; m++)
             {
-                transforms.Add(ReadTransform(reader));
-                reader.ReadBoolean(); // clearWhenBaked (editor-only bake bookkeeping)
+                transforms.Add(ReadTransform(data, ref pos));
+                pos++; // clearWhenBaked flag (editor-only bake bookkeeping)
             }
             if (matrixCount > 0)
                 result.Add(new FoliageInstances(asset, transforms));
@@ -125,16 +128,44 @@ public sealed class LevelFoliage
     // Transform3D. Unity is left-handed with +Z forward; Godot is right-handed, so world space is the
     // Z-negating reflection F = diag(1,1,-1). A transform M maps the same way in both frames as F*M*F,
     // which negates the off-diagonal Z terms of the basis and the Z of the origin.
-    private static Transform3D ReadTransform(BinaryReader reader)
+    private static Transform3D ReadTransform(byte[] data, ref int pos)
     {
         Span<float> m = stackalloc float[16];
         for (int i = 0; i < 16; i++)
-            m[i] = reader.ReadSingle();
+            m[i] = ReadSingle(data, ref pos);
 
         var basis = new Basis(
             new Vector3(m[0], m[1], -m[2]),   // X axis (column 0)
             new Vector3(m[4], m[5], -m[6]),   // Y axis (column 1)
             new Vector3(-m[8], -m[9], m[10])); // Z axis (column 2)
         return new Transform3D(basis, new Vector3(m[12], m[13], -m[14]));
+    }
+
+    private static int ReadInt32(byte[] d, ref int p)
+    {
+        int v = BinaryPrimitives.ReadInt32LittleEndian(d.AsSpan(p));
+        p += 4;
+        return v;
+    }
+
+    private static long ReadInt64(byte[] d, ref int p)
+    {
+        long v = BinaryPrimitives.ReadInt64LittleEndian(d.AsSpan(p));
+        p += 8;
+        return v;
+    }
+
+    private static float ReadSingle(byte[] d, ref int p)
+    {
+        float v = BinaryPrimitives.ReadSingleLittleEndian(d.AsSpan(p));
+        p += 4;
+        return v;
+    }
+
+    private static Guid ReadGuid(byte[] d, ref int p)
+    {
+        var g = new Guid(d.AsSpan(p, 16));
+        p += 16;
+        return g;
     }
 }
