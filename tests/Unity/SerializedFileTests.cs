@@ -59,6 +59,19 @@ public class SerializedFileTests
     }
 
     [Fact]
+    public void Read_UsesProvidedTypeTrees_WhenFileHasNone()
+    {
+        // A file with type trees exposes the canonical per-class-id tree...
+        SerializedFile withTrees = SerializedFile.Read(new SerializedFileBuilder { ClassId = 43 }.Build());
+        Assert.Equal("Base", Assert.Single(withTrees.TypeTreesByClassId[43]).Type);
+
+        // ...which decodes another same-class file whose type trees were stripped (enableTypeTree = 0).
+        byte[] stripped = new SerializedFileBuilder { ClassId = 43, EnableTypeTree = false }.Build();
+        SerializedFile file = SerializedFile.Read(stripped, withTrees.TypeTreesByClassId);
+        Assert.Equal("Base", Assert.Single(Assert.Single(file.Objects).TypeTree).Type);
+    }
+
+    [Fact]
     public void UnsupportedVersion_Throws()
     {
         // metadataSize, fileSize, version(=20, big-endian), dataOffset.

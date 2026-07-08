@@ -21,6 +21,18 @@ public static class ModelExtractor
     // stream to ExtractTextures. See the cold-load streaming design.
     private const long MeshDecodeCap = 200L * 1024 * 1024;
 
+    // The masterbundle's per-class-id type trees. Since type trees are identical across files of the same
+    // Unity version, these decode the game's resources.assets (which ships with its type trees stripped).
+    public static IReadOnlyDictionary<int, List<TypeTreeNode>> ReadClassTypeTrees(string bundlePath)
+    {
+        UnityBundle bundle = UnityBundle.Read(File.ReadAllBytes(bundlePath), MeshDecodeCap); // SerializedFile only
+        byte[] sfBytes = Array.Empty<byte>();
+        foreach (KeyValuePair<string, byte[]> f in bundle.Files)
+            if (!f.Key.EndsWith(".resS") && !f.Key.EndsWith(".resource"))
+                sfBytes = f.Value;
+        return SerializedFile.Read(sfBytes).TypeTreesByClassId;
+    }
+
     // Phase 1 (file based): decode only the SerializedFile and build the per-GUID meshes, recording each
     // submesh's texture key without touching the .resS pixel stream. Used by the synchronous/benchmark
     // build; the interactive cold load uses StreamExtract instead.

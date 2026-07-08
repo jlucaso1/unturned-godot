@@ -19,20 +19,29 @@ public sealed class SerializedFile
 {
     public bool BigEndian { get; private set; }
     public IReadOnlyList<SerializedObject> Objects { get; }
+
+    // The canonical type tree for each built-in class id present in this file. Type trees are identical
+    // across files of the same Unity version, so these can decode another file (e.g. the game's
+    // resources.assets) that was saved with its type trees stripped.
+    public IReadOnlyDictionary<int, List<TypeTreeNode>> TypeTreesByClassId { get; }
+
     private readonly byte[] _data;
 
-    private SerializedFile(byte[] data, bool bigEndian, List<SerializedObject> objects)
+    private SerializedFile(byte[] data, bool bigEndian, List<SerializedObject> objects,
+        Dictionary<int, List<TypeTreeNode>> typeTreesByClassId)
     {
         _data = data;
         BigEndian = bigEndian;
         Objects = objects;
+        TypeTreesByClassId = typeTreesByClassId;
     }
 
     // A reader positioned at the object's data, in the file's endianness.
     public UnityBinaryReader ReaderFor(SerializedObject obj) =>
         new(_data, BigEndian) { Position = (int)obj.ByteStart };
 
-    public static SerializedFile Read(byte[] data)
+    public static SerializedFile Read(byte[] data,
+        IReadOnlyDictionary<int, List<TypeTreeNode>>? classTypeTrees = null)
     {
         var r = new UnityBinaryReader(data, bigEndian: true); // header is always big-endian
 
@@ -74,6 +83,12 @@ public sealed class SerializedFile
             for (int i = 0; i < typeCount; i++)
                 treeByClassId[typeClassIds[i]] = typeTrees[i];
 
+        // The canonical (non-empty) type tree per class id, for reuse against type-tree-stripped files.
+        var typeTreesByClassId = new Dictionary<int, List<TypeTreeNode>>();
+        for (int i = 0; i < typeCount; i++)
+            if (typeTrees[i].Count > 0)
+                typeTreesByClassId.TryAdd(typeClassIds[i], typeTrees[i]);
+
         int objectCount = r.ReadInt32();
         var objects = new List<SerializedObject>(objectCount);
         for (int i = 0; i < objectCount; i++)
@@ -99,6 +114,12 @@ public sealed class SerializedFile
                 tree = typeTrees[typeId];
             }
 
+            // When this file's type trees are stripped (enableTypeTree = 0), fall back to a supplied
+            // per-class-id database (e.g. gathered from the masterbundle, same Unity version).
+            if (tree.Count == 0 && classTypeTrees != null &&
+                classTypeTrees.TryGetValue(classId, out List<TypeTreeNode>? provided))
+                tree = provided;
+
             objects.Add(new SerializedObject
             {
                 PathId = pathId,
@@ -109,7 +130,7 @@ public sealed class SerializedFile
             });
         }
 
-        return new SerializedFile(data, bigEndian, objects);
+        return new SerializedFile(data, bigEndian, objects, typeTreesByClassId);
     }
 
     private static (int classId, List<TypeTreeNode> tree) ReadType(
