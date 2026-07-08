@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using UnturnedGodot.Assets;
@@ -102,6 +103,28 @@ public class RealDataTests
         Assert.Equal(10, byName.Count);
         Assert.Equal((256, 128), byName["Highway_0"]);
         Assert.Equal((64, 64), byName["Trail"]);
+    }
+
+    [Fact]
+    public void RealFoliage_ParsesBlobInstances()
+    {
+        string? root = UnturnedPath();
+        if (root == null) return;
+        string path = Path.Combine(root, "Maps", "PEI", "Foliage.blob");
+        if (!File.Exists(path)) return;
+
+        LevelFoliage foliage = LevelFoliage.Parse(File.ReadAllBytes(path));
+
+        Assert.Equal(2, foliage.Version);
+        Assert.Equal(7, foliage.AssetGuids.Count);
+        // The blob's 16-byte GUIDs must decode to the same Guid the .asset files are keyed by.
+        Assert.Contains(new Guid("c928fb99bae9434795563319a64f6461"), foliage.AssetGuids); // PEI_Grass_00
+
+        int total = 0;
+        foreach (FoliageTile tile in foliage.Tiles)
+            foreach (FoliageInstances inst in tile.Instances)
+                total += inst.Transforms.Count;
+        Assert.Equal(667254, total); // matches a direct scan of PEI's Foliage.blob
     }
 
     [Fact]
