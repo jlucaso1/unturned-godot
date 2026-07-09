@@ -16,12 +16,12 @@ public static class WaterBuilder
     private const float DefaultSeaLevel = 0.1f;
     private static readonly Color DefaultSeaColor = new(0.482f, 0.608f, 0.792f);
 
-    public static Node3D Build(LevelLighting? lighting)
+    public static Node3D Build(LevelLighting? lighting, out StandardMaterial3D material)
     {
         float seaLevel = lighting?.SeaLevel ?? DefaultSeaLevel;
         Color seaColor = lighting?.Midday.Sea ?? DefaultSeaColor;
 
-        var material = new StandardMaterial3D
+        material = new StandardMaterial3D
         {
             AlbedoColor = new Color(seaColor.R, seaColor.G, seaColor.B, 0.88f),
             Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
@@ -30,6 +30,9 @@ public static class WaterBuilder
             Metallic = 0.0f,
             SpecularMode = BaseMaterial3D.SpecularModeEnum.Disabled,
             CullMode = BaseMaterial3D.CullModeEnum.Disabled, // visible from above and from underwater
+            // Shadows fall through onto the seabed, not onto the surface — Unturned's translucent water
+            // doesn't catch shadows, and a tree shadow floating on the sea reads wrong.
+            DisableReceiveShadows = true,
         };
 
         return new MeshInstance3D

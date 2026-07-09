@@ -67,16 +67,21 @@ public sealed class LevelLighting
 
     public byte Version { get; }
     public float Azimuth { get; }     // sun compass angle in degrees
+    public float Bias { get; }        // fraction of the cycle that is daytime (time < bias = day)
+    public float Fade { get; }        // scales the dawn/dusk transition width (see LightingCycle.Transition)
     public float TimeOfDay { get; }   // 0..1 fraction of the day the map was saved at
     public float SeaLevel { get; }    // fraction of Level.TERRAIN (256): water surface Y = SeaLevel * 256
     public IReadOnlyList<LightingKeyframe> Times { get; }
 
     public LightingKeyframe Midday => Times[(int)LightingTime.Midday];
 
-    private LevelLighting(byte version, float azimuth, float timeOfDay, float seaLevel, LightingKeyframe[] times)
+    private LevelLighting(byte version, float azimuth, float bias, float fade, float timeOfDay, float seaLevel,
+        LightingKeyframe[] times)
     {
         Version = version;
         Azimuth = azimuth;
+        Bias = bias;
+        Fade = fade;
         TimeOfDay = timeOfDay;
         SeaLevel = seaLevel;
         Times = times;
@@ -100,8 +105,8 @@ public sealed class LevelLighting
             throw new NotSupportedException($"Lighting.dat version {version} is too old to read");
 
         float azimuth = r.ReadSingle();
-        r.ReadSingle();               // bias (unused)
-        r.ReadSingle();               // fade (unused)
+        float bias = r.ReadSingle();
+        float fade = r.ReadSingle();
         float timeOfDay = r.ReadSingle();
         r.ReadByte();                 // moon phase (unused)
         float seaLevel = r.ReadSingle();
@@ -128,7 +133,7 @@ public sealed class LevelLighting
         for (int i = 0; i < TimeCount; i++)
             times[i] = ReadKeyframe(r);
 
-        return new LevelLighting(version, azimuth, timeOfDay, seaLevel, times);
+        return new LevelLighting(version, azimuth, bias, fade, timeOfDay, seaLevel, times);
     }
 
     // A keyframe is the 12 ELightingColor entries (RGB) followed by the 5 ELightingSingle scalars.
