@@ -403,6 +403,57 @@ public class ZombieSystemTests
     }
 
     [Fact]
+    public void BlockedHeadOn_TheZombieHugsAroundTheObstacle()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        // A tree trunk: a solid circle of radius 1 at (5, 0). This resolver does NOT slide (the
+        // worst case: a dead stop at the surface), so only the detour can get the zombie past it.
+        Vector3 trunk = new(5, 5, 0);
+        system.MoveResolver = (from, to, radius) =>
+        {
+            float dx = to.X - trunk.X;
+            float dz = to.Z - trunk.Z;
+            float dist = MathF.Sqrt((dx * dx) + (dz * dz));
+            float minDist = 1f + radius;
+            if (dist >= minDist)
+                return to;
+            return from; // dead stop, no slide at all
+        };
+
+        var player = Player(1, new Vector3(10, 5, 0)); // straight behind the trunk
+        for (int i = 0; i < 80; i++)
+            system.Tick(new[] { player }, 0.1f);
+
+        // The sticky tangent detour walked it around the trunk and back on course.
+        Assert.True(zombie.Position.X > 6.5f, $"stuck at {zombie.Position}");
+    }
+
+    [Fact]
+    public void FullyWalledIn_TheZombieStaysPutWithoutJitter()
+    {
+        var system = new ZombieSystem(new[] { Table() }, TwoBounds(), FlatGround);
+        // A dozen zombies so the sticky detour side gets rolled both ways at least once.
+        system.Spawn(Enumerable.Range(0, 48).Select(i => At((i % 8) * 3, i / 8 * 3)).ToList(), new Random(6));
+        foreach (ZombieInstance z in system.Zombies)
+        {
+            z.Speciality = EZombieSpeciality.Normal;
+            z.Yaw = 0f;
+        }
+        system.MoveResolver = (from, to, radius) => from; // sealed in: nothing moves, ever
+
+        var player = Player(1, new Vector3(11, 5, 11));
+        for (int i = 0; i < 10; i++)
+            system.Tick(new[] { player }, 0.1f);
+
+        List<ZombieInstance> blocked = system.Zombies.Where(z => z.DetourSide != 0).ToList();
+        Assert.True(blocked.Count >= 2);
+        Assert.Contains(blocked, z => z.DetourSide == -1); // both sides get rolled
+        Assert.Contains(blocked, z => z.DetourSide == 1);
+        // The failed tangent never teleports anyone: everyone is exactly where they spawned.
+        Assert.All(system.Zombies, z => Assert.Equal(z.Home, z.Position));
+    }
+
+    [Fact]
     public void ZombiesQueue_InsteadOfStackingInsideEachOther()
     {
         var system = new ZombieSystem(new[] { Table() }, TwoBounds(), FlatGround);
