@@ -165,8 +165,8 @@ public sealed class LevelFoliage
         ReadOnlySpan<float> m = MemoryMarshal.Cast<byte, float>(data.AsSpan(pos, 64));
         pos += 64;
 
-        dest[o + 0] = m[0];  dest[o + 1] = m[4];  dest[o + 2] = -m[8];  dest[o + 3] = m[12];
-        dest[o + 4] = m[1];  dest[o + 5] = m[5];  dest[o + 6] = -m[9];  dest[o + 7] = m[13];
+        dest[o + 0] = m[0]; dest[o + 1] = m[4]; dest[o + 2] = -m[8]; dest[o + 3] = m[12];
+        dest[o + 4] = m[1]; dest[o + 5] = m[5]; dest[o + 6] = -m[9]; dest[o + 7] = m[13];
         dest[o + 8] = -m[2]; dest[o + 9] = -m[6]; dest[o + 10] = m[10]; dest[o + 11] = -m[14];
     }
 

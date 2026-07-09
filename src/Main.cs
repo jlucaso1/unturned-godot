@@ -1,4 +1,5 @@
 using Godot;
+using UnturnedGodot.Assets;
 using UnturnedGodot.Data;
 
 namespace UnturnedGodot;
@@ -158,7 +159,44 @@ public partial class Main : Node3D
             Position = PlayerSpawn,
             StartThirdPerson = thirdPerson,
             BodyModel = CharacterModel.Build(unturnedPath), // real Unturned body, or null -> placeholder
+            Footsteps = BuildFootsteps(unturnedPath),
         });
+    }
+
+    // Movement audio: the physics-material bank + terrain splat sampler feed PlayerFootsteps, and the
+    // referenced OneShotAudioDefinitions extract from the masterbundle in the background on first run.
+    private PlayerFootsteps BuildFootsteps(string unturnedPath)
+    {
+        string bundlesAssets = System.IO.Path.Combine(unturnedPath, "Bundles", "Assets");
+        PhysicsMaterialBank bank =
+            PhysicsMaterialBank.ScanDirectory(System.IO.Path.Combine(bundlesAssets, "PhysicsMaterials"));
+        LandscapePhysics landscape =
+            LandscapePhysics.ScanDirectory(System.IO.Path.Combine(bundlesAssets, "Landscapes"));
+
+        var level = new LevelInfo(System.IO.Path.Combine(unturnedPath, "Maps", MapName));
+        var splat = new SplatSampler();
+        System.Collections.Generic.Dictionary<(int x, int y), System.Guid[]> tileMaterials =
+            LevelHierarchy.ReadTileMaterials(System.IO.Path.Combine(level.Path, "Level.hierarchy"));
+        foreach (((int x, int y), System.Guid[] materials) in tileMaterials)
+        {
+            SplatmapTile? tile = SplatmapTile.TryRead(level.SplatmapPath(x, y), x, y);
+            if (tile != null)
+                splat.Add(tile, materials);
+        }
+
+        string audioCacheDir = ProjectSettings.GlobalizePath("user://audio_cache");
+        string bundlePath = System.IO.Path.Combine(unturnedPath, "Bundles", "core_linux.masterbundle");
+        var defPaths = new System.Collections.Generic.HashSet<string>();
+        foreach (string key in new[] { "FootstepWalk", "FootstepRun", "BipedLand" })
+            foreach (string name in new[]
+                { "Foliage", "Concrete", "Gravel", "Sand", "Tile", "Metal", "Wood", "Cloth", "Snow", "Ice" })
+                if (bank.FindAudioDefPath(name, key) is { } path)
+                    defPaths.Add(path);
+        _ = System.Threading.Tasks.Task.Run(() => AudioExtractor.Extract(bundlePath, defPaths, audioCacheDir));
+
+        GD.Print($"[audio] footsteps ready: {bank.Count} physics materials, {landscape.Count} landscape " +
+            $"materials, {splat.TileCount} splat tiles");
+        return PlayerFootsteps.Create(bank, landscape, splat, audioCacheDir);
     }
 
     private void AddFreeCamera()

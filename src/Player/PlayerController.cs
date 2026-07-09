@@ -24,6 +24,9 @@ public partial class PlayerController : CharacterBody3D
     // The third-person body model; when null a simple placeholder figure is used instead.
     public Node3D? BodyModel { get; set; }
 
+    // Movement audio (footsteps + landing), built by the caller with the map's terrain material data.
+    public PlayerFootsteps? Footsteps { get; set; }
+
     private Node3D _head = null!;
     private Camera3D _camera = null!;
     private CollisionShape3D _collider = null!;
@@ -62,6 +65,9 @@ public partial class PlayerController : CharacterBody3D
         _model = BodyModel ?? BuildPlaceholderModel();
         _rig = BodyModel as CharacterSkeleton;
         AddChild(_model);
+
+        if (Footsteps != null)
+            AddChild(Footsteps);
 
         _head = new Node3D { Position = Vector3.Up * _eyeHeight };
         AddChild(_head);
@@ -129,7 +135,14 @@ public partial class PlayerController : CharacterBody3D
         }
 
         Velocity = velocity;
+        bool wasOnFloor = IsOnFloor();
         MoveAndSlide();
+
+        // PlayerMovement's footstep block: the landing thud on the airborne->grounded transition (jump
+        // takeoff is silent in Unturned), plus the 2.1/speed footstep clock while grounded and moving.
+        if (!wasOnFloor && IsOnFloor())
+            Footsteps?.OnLanded(_stance, GlobalPosition);
+        Footsteps?.TickMovement(_stance, moving, IsOnFloor(), speed, GlobalPosition, dt);
 
         UpdateCamera(dt);
     }

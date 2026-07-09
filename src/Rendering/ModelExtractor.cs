@@ -438,7 +438,10 @@ public static class ModelExtractor
             if (!mesh.Usable || mesh.Submeshes.Count == 0)
                 continue;
 
-            (string texKey, Color color, float metallic, float smoothness) =
+            // Foliage renders with Unturned's own Framework/Grass-family shaders, which hard-code
+            // "OUT.Specular = 0.0" — the material's Standard-shader _Glossiness (0.5 Unity default) is
+            // never read there, so carrying it would give grass a sky-reflection sheen the game never shows.
+            (string texKey, Color color, float _, float _) =
                 ResolveMaterialByPath(graph, fa.MaterialPath, neededTextures);
 
             var uvs = new Vector2[mesh.Vertices.Length];
@@ -450,8 +453,7 @@ public static class ModelExtractor
             // Standard shader's _Mode (GetBlendMode would misread them as opaque and break the grass cards).
             var submeshes = new List<CachedSubmesh>();
             foreach (int[] src in mesh.Submeshes)
-                submeshes.Add(new CachedSubmesh((int[])src.Clone(), color, texKey, UnityMaterial.Blend.Cutout,
-                    metallic, smoothness));
+                submeshes.Add(new CachedSubmesh((int[])src.Clone(), color, texKey, UnityMaterial.Blend.Cutout));
 
             using var stream = File.Create(outPath);
             MeshCache.Write(stream, mesh.Vertices, normals, uvs, submeshes);
