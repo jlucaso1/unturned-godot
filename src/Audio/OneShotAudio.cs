@@ -1,0 +1,78 @@
+using System;
+using System.Collections.Generic;
+using Godot;
+using UnturnedGodot.Unity;
+
+namespace UnturnedGodot;
+
+// The positional one-shot service — our OneShotAudioParameters.Play(): any system (movement audio,
+// future gunshots, melee impacts, explosions) asks for a definition to be played AT a world position
+// with a volume scale and rolloff distance; the definition's own volumeMultiplier and pitch range
+// apply on top, exactly as Unturned layers them. Discrete gameplay sounds are a CONSEQUENCE of
+// replicated events rendered locally by each client — there is deliberately no "play sound" network
+// message; a feature replicates its event and its client handler calls this.
+//
+// A fixed pool of AudioStreamPlayer3D voices is reused round-robin with oldest-voice stealing, so
+// a firefight can't allocate unbounded audio nodes.
+[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
+public partial class OneShotAudio : Node3D
+{
+    private const int MaxVoices = 24;
+
+    private readonly List<AudioStreamPlayer3D> _voices = new();
+    private readonly Random _random = new();
+    private AudioDefLibrary _library = null!;
+    private int _nextVoice;
+
+    public static OneShotAudio Create(AudioDefLibrary library) => new()
+    {
+        Name = "OneShotAudio",
+        _library = library,
+    };
+
+    // Plays a random clip of the definition at a world position. volumeScale is the caller's gameplay
+    // volume (e.g. FootstepConfig's 0.125), multiplied by the def's own volumeMultiplier; pitch is
+    // randomized in the def's range. Returns false when the definition isn't extracted yet.
+    public bool Play(string defName, Vector3 position, float volumeScale, float maxDistance)
+    {
+        AudioDefLibrary.Entry? entry = _library.Resolve(defName);
+        if (entry == null)
+            return false;
+
+        AudioStreamPlayer3D voice = NextVoice();
+        voice.Stream = entry.Clips[_random.Next(entry.Clips.Length)];
+        voice.GlobalPosition = position;
+        voice.MaxDistance = maxDistance;
+        voice.VolumeDb = Mathf.LinearToDb(volumeScale * entry.Def.VolumeMultiplier);
+        voice.PitchScale = Mathf.Lerp(entry.Def.MinPitch, entry.Def.MaxPitch, (float)_random.NextDouble());
+        voice.Play();
+        return true;
+    }
+
+    // Round-robin with oldest-voice stealing: prefer an idle voice; grow the pool up to the cap;
+    // past the cap, retarget the next slot in ring order (the oldest started).
+    private AudioStreamPlayer3D NextVoice()
+    {
+        for (int i = 0; i < _voices.Count; i++)
+        {
+            AudioStreamPlayer3D candidate = _voices[(_nextVoice + i) % _voices.Count];
+            if (!candidate.Playing)
+            {
+                _nextVoice = (_voices.IndexOf(candidate) + 1) % Math.Max(1, _voices.Count);
+                return candidate;
+            }
+        }
+
+        if (_voices.Count < MaxVoices)
+        {
+            var voice = new AudioStreamPlayer3D { UnitSize = 6f };
+            _voices.Add(voice);
+            AddChild(voice);
+            return voice;
+        }
+
+        AudioStreamPlayer3D stolen = _voices[_nextVoice];
+        _nextVoice = (_nextVoice + 1) % _voices.Count;
+        return stolen;
+    }
+}

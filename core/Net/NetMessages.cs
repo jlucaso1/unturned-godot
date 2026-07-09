@@ -88,14 +88,20 @@ public readonly struct PlayerSnapshotState
     public readonly byte Yaw;
     public readonly EPlayerStance Stance;
 
+    // Input-derived, replicated so remote animation matches what the owner's controller does: a player
+    // jumping in place keeps Moving=false and holds Idle — inferring it from position deltas made the
+    // vertical motion flicker the walk state on and off, restarting the crossfade mid-air.
+    public readonly bool Moving;
+
     public PlayerSnapshotState(byte playerId, Vector3 position, byte pitch, byte yaw,
-        EPlayerStance stance = EPlayerStance.Stand)
+        EPlayerStance stance = EPlayerStance.Stand, bool moving = false)
     {
         PlayerId = playerId;
         Position = position;
         Pitch = pitch;
         Yaw = yaw;
         Stance = stance;
+        Moving = moving;
     }
 }
 
@@ -113,7 +119,7 @@ public sealed class PlayerListing
 public static class NetMessages
 {
     // Bump whenever a message layout changes; the server refuses mismatched clients at the handshake.
-    public const byte ProtocolVersion = 2;
+    public const byte ProtocolVersion = 3;
 
     public static ENetMessage TypeOf(byte[] payload) => (ENetMessage)payload[0];
 
@@ -234,7 +240,7 @@ public static class NetMessages
             w.Write(s.Position.Z);
             w.Write(s.Pitch);
             w.Write(s.Yaw);
-            w.Write((byte)s.Stance);
+            w.Write(PackStanceMoving(s.Stance, s.Moving));
         }
         return ms.ToArray();
     }
@@ -251,8 +257,8 @@ public static class NetMessages
             var pos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
             byte pitch = r.ReadByte();
             byte yaw = r.ReadByte();
-            var stance = (EPlayerStance)r.ReadByte();
-            states.Add(new PlayerSnapshotState(id, pos, pitch, yaw, stance));
+            (EPlayerStance stance, bool moving) = UnpackStanceMoving(r.ReadByte());
+            states.Add(new PlayerSnapshotState(id, pos, pitch, yaw, stance, moving));
         }
         return (tick, states);
     }
@@ -278,6 +284,13 @@ public static class NetMessages
         Yaw = r.ReadByte(),
         Stance = (EPlayerStance)r.ReadByte(),
     };
+
+    // Stance fits in the low bits; bit 7 carries the input-derived Moving flag.
+    private static byte PackStanceMoving(EPlayerStance stance, bool moving) =>
+        (byte)((byte)stance | (moving ? 0x80 : 0));
+
+    private static (EPlayerStance Stance, bool Moving) UnpackStanceMoving(byte value) =>
+        ((EPlayerStance)(value & 0x7F), (value & 0x80) != 0);
 
     // Positions the reader just past the message-type byte.
     private static BinaryReader Reader(byte[] payload)

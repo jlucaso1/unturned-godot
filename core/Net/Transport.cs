@@ -62,9 +62,14 @@ public interface IClientTransport
 // NetServer. A dedicated server is just this with a single UDP transport (or the UDP transport directly).
 public sealed class CompositeServerTransport : IServerTransport
 {
-    private readonly IReadOnlyList<IServerTransport> _transports;
+    private readonly List<IServerTransport> _transports;
 
-    public CompositeServerTransport(params IServerTransport[] transports) => _transports = transports;
+    public CompositeServerTransport(params IServerTransport[] transports) =>
+        _transports = new List<IServerTransport>(transports);
+
+    // Attaches another listener to the LIVE server — how "open to LAN" works: the always-on
+    // singleplayer loopback server simply gains a UDP transport, no restart, no second code path.
+    public void Add(IServerTransport transport) => _transports.Add(transport);
 
     public bool TryReceive(out ServerTransportEvent evt)
     {

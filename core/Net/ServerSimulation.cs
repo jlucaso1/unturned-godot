@@ -14,6 +14,7 @@ public struct PlayerMoveState
     public float Yaw;   // view yaw in degrees; movement is relative to it
     public float Pitch;
     public UnturnedGodot.Player.EPlayerStance Stance;
+    public bool Moving; // input-derived (keys held), NOT position-derived: drives remote walk/idle animation
 }
 
 // How the server resolves one input frame into movement. The pure heightfield solver below covers open
@@ -43,19 +44,9 @@ public sealed class HeightfieldMoveSolver : IMoveSolver
         next.Yaw = NetAngles.DequantizeYaw(input.Yaw);
         next.Pitch = NetAngles.DequantizePitch(input.Pitch);
         next.Stance = input.Stance;
+        next.Moving = input.InputX != 0 || input.InputY != 0;
 
-        // Client-simulated position (forceTrustClient): the client resolved collision against the full
-        // world; adopt its position when the step fits the speed budget, otherwise hold the last verified
-        // one (rubber-band) — a teleport can't be smuggled through a burst of inputs.
-        if (input.HasPosition)
-        {
-            float budget = (PlayerConfig.SpeedSprint - PlayerConfig.TerminalVelocity) * dt * 1.5f;
-            if ((input.Position - next.Position).Length() <= budget)
-                next.Position = input.Position;
-            return next;
-        }
-
-        bool moving = input.InputX != 0 || input.InputY != 0;
+        bool moving = next.Moving;
         Vector3 wishDir = Vector3.Zero;
         if (moving)
         {
@@ -116,6 +107,13 @@ public sealed class ServerSimulation
         public PlayerMoveState State;
         public readonly Queue<InputCommand> Inputs = new();
         public InputCommand LastInput;
+
+        // Trusted-position bookkeeping: the budget rate-limits CONSECUTIVE client claims, so it needs the
+        // last claim we accepted and when. Before any claim exists there is nothing to rate-limit against —
+        // the server-invented spawn is not a position the client ever occupied (a host who opens to LAN
+        // after already moving would otherwise be rejected forever, frozen at spawn for everyone else).
+        public bool HasVerifiedPosition;
+        public uint LastAcceptedTick;
     }
 
     private readonly IMoveSolver _solver;
@@ -168,12 +166,45 @@ public sealed class ServerSimulation
                 ? queued
                 : new InputCommand(0, 0, 0, false, false, entry.LastInput.Yaw, entry.LastInput.Pitch);
             entry.LastInput = input;
-            entry.State = _solver.Step(entry.State, input, TickRate);
+
+            if (input.HasPosition)
+                ApplyTrustedPosition(entry, input);
+            else
+                entry.State = _solver.Step(entry.State, input, TickRate);
 
             states.Add(new PlayerSnapshotState(id, entry.State.Position,
                 NetAngles.QuantizePitch(entry.State.Pitch), NetAngles.QuantizeYaw(entry.State.Yaw),
-                entry.State.Stance));
+                entry.State.Stance, entry.State.Moving));
         }
         return states;
+    }
+
+    // Unturned's forceTrustClient shape: the client resolved collision against the full world (objects,
+    // buildings) that the heightfield solver can't. The first claim is the baseline; each later claim must
+    // fit a speed budget scaled by the time since the last ACCEPTED one, so packet loss widens the window
+    // instead of poisoning every subsequent frame, while a genuine teleport still rubber-bands.
+    private void ApplyTrustedPosition(Entry entry, in InputCommand input)
+    {
+        entry.State.Yaw = NetAngles.DequantizeYaw(input.Yaw);
+        entry.State.Pitch = NetAngles.DequantizePitch(input.Pitch);
+        entry.State.Stance = input.Stance;
+        entry.State.Moving = input.InputX != 0 || input.InputY != 0;
+
+        if (!entry.HasVerifiedPosition)
+        {
+            entry.State.Position = input.Position;
+            entry.HasVerifiedPosition = true;
+            entry.LastAcceptedTick = Tick;
+            return;
+        }
+
+        uint elapsedTicks = Math.Max(1, Tick - entry.LastAcceptedTick);
+        float budget = (PlayerConfig.SpeedSprint - PlayerConfig.TerminalVelocity)
+            * (elapsedTicks * TickRate) * 1.5f;
+        if ((input.Position - entry.State.Position).Length() <= budget)
+        {
+            entry.State.Position = input.Position;
+            entry.LastAcceptedTick = Tick;
+        }
     }
 }

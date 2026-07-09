@@ -218,6 +218,71 @@ public class EndToEndTests
     }
 
     [Fact]
+    public void OpenToLanAtRuntime_AttachesATransportToTheLiveServer()
+    {
+        // The always-on singleplayer shape: the server starts loopback-only, plays a while, then a second
+        // transport is attached mid-session ("open to LAN") and a friend joins the SAME world.
+        var hostSide = new LoopbackServerTransport();
+        var composite = new CompositeServerTransport(hostSide);
+        var server = new NetServer(composite,
+            new ServerSimulation(new HeightfieldMoveSolver(FlatGround)), Spawn);
+        var host = new NetClient(hostSide.CreateClient(), "Host");
+
+        double now = 5000;
+        for (int i = 0; i < 5; i++)
+        {
+            now += ServerSimulation.TickRate;
+            server.Update(now);
+            host.Update(now);
+        }
+        Assert.True(host.Joined);
+
+        var lanSide = new LoopbackServerTransport();
+        composite.Add(lanSide); // the pause-menu button
+        var friend = new NetClient(lanSide.CreateClient(), "Friend");
+        for (int i = 0; i < 5; i++)
+        {
+            now += ServerSimulation.TickRate;
+            server.Update(now);
+            host.Update(now);
+            friend.Update(now);
+        }
+
+        Assert.True(friend.Joined);
+        Assert.Equal("Host", friend.Remotes[host.PlayerId].Name);
+        Assert.Equal("Friend", host.Remotes[friend.PlayerId].Name);
+    }
+
+    [Fact]
+    public void ServerTick_AndUnhandledMessage_ExtensionSeams()
+    {
+        // Future replicated systems hook OnTick server-side and OnUnhandledMessage client-side; the
+        // protocol enum is the only shared contract.
+        var h = new Harness();
+        NetClient a = h.Join("A");
+
+        var ticks = new List<uint>();
+        h.Server.OnTick = tick => ticks.Add(tick);
+
+        byte[]? unknown = null;
+        a.OnUnhandledMessage = payload => unknown = payload;
+
+        h.Pump(3);
+        Assert.True(ticks.Count >= 3);
+        Assert.Equal((uint)ticks.Count, ticks[^1]); // consecutive fixed ticks
+
+        // A message type from a future feature: today's client routes it to the hook untouched, and a
+        // client with no hook subscribed simply drops it (forward compatibility, no crash).
+        NetClient b = h.Join("B"); // no OnUnhandledMessage hook
+        h.Pump(2);
+        h.Server.Broadcast(new byte[] { 250, 1, 2, 3 }, ESendType.Reliable);
+        h.Pump();
+        Assert.NotNull(unknown);
+        Assert.Equal(new byte[] { 250, 1, 2, 3 }, unknown);
+        Assert.True(b.Joined);
+    }
+
+    [Fact]
     public void CompositeClose_ClosesAllTransports()
     {
         var t1 = new LoopbackServerTransport();

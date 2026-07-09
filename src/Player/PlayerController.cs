@@ -25,7 +25,7 @@ public partial class PlayerController : CharacterBody3D
     public Node3D? BodyModel { get; set; }
 
     // Movement audio (footsteps + landing), built by the caller with the map's terrain material data.
-    public PlayerFootsteps? Footsteps { get; set; }
+    public MovementAudio? Footsteps { get; set; }
 
     // Multiplayer session, when hosting or joined: the controller forwards inputs at the 12.5 Hz cadence.
     public UnturnedGodot.Net.NetClient? Net { get; set; }
@@ -70,9 +70,6 @@ public partial class PlayerController : CharacterBody3D
         _model = BodyModel ?? BuildPlaceholderModel();
         _rig = BodyModel as CharacterSkeleton;
         AddChild(_model);
-
-        if (Footsteps != null)
-            AddChild(Footsteps);
 
         _head = new Node3D { Position = Vector3.Up * _eyeHeight };
         AddChild(_head);
@@ -142,14 +139,12 @@ public partial class PlayerController : CharacterBody3D
         }
 
         Velocity = velocity;
-        bool wasOnFloor = IsOnFloor();
         MoveAndSlide();
 
-        // PlayerMovement's footstep block: the landing thud on the airborne->grounded transition (jump
-        // takeoff is silent in Unturned), plus the 2.1/speed footstep clock while grounded and moving.
-        if (!wasOnFloor && IsOnFloor())
-            Footsteps?.OnLanded(_stance, GlobalPosition);
-        Footsteps?.TickMovement(_stance, moving, IsOnFloor(), speed, GlobalPosition, dt);
+        // PlayerMovement's footstep block: the MovementSoundClock derives the landing thud on the
+        // airborne->grounded edge and the 2.1/speed footstep cadence from this state, like every client
+        // does for every player (local and remote) — movement audio never travels over the network.
+        Footsteps?.Tick(_stance, moving, IsOnFloor(), GlobalPosition, dt);
 
         // Multiplayer: forward one input frame per 0.08 s (PlayerInput.RATE). Idle frames still flow so
         // the server keeps simulating (gravity) and other players see us stop.
