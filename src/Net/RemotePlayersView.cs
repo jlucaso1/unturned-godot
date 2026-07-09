@@ -42,11 +42,11 @@ public partial class RemotePlayersView : Node3D
             avatar.Root.Position = pose.Position;
             avatar.Root.RotationDegrees = new Vector3(0, pose.Yaw, 0);
 
-            // Animate from replicated motion: walking when the interpolated position is advancing.
-            bool moving = delta > 0 &&
-                (pose.Position - avatar.LastPosition).Length() / (float)delta > 0.5f;
+            // Animate from the replicated input-derived flag, exactly what the owner's controller uses:
+            // position deltas would flicker walk/idle during in-place jumps (vertical motion) and packet
+            // stalls, restarting the crossfade mid-air.
             avatar.LastPosition = pose.Position;
-            avatar.Rig?.SetState(remote.Stance, moving);
+            avatar.Rig?.SetState(remote.Stance, remote.Moving);
             avatar.Rig?.SetPitch(pose.Pitch - 90f); // wire pitch (0..180) -> Godot pitch (-90..+90)
         }
 

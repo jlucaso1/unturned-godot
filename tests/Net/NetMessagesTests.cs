@@ -116,7 +116,7 @@ public class NetMessagesTests
     {
         var states = new List<PlayerSnapshotState>
         {
-            new(1, new Vector3(10, 20, 30), 90, 0, UnturnedGodot.Player.EPlayerStance.Crouch),
+            new(1, new Vector3(10, 20, 30), 90, 0, UnturnedGodot.Player.EPlayerStance.Crouch, moving: true),
             new(2, new Vector3(-1.5f, 0.25f, 7f), 45, 128),
         };
         byte[] p = NetMessages.WriteStateUpdate(77, states);
@@ -128,6 +128,8 @@ public class NetMessagesTests
         Assert.Equal(new Vector3(-1.5f, 0.25f, 7f), read[1].Position);
         Assert.Equal(128, read[1].Yaw);
         Assert.Equal(UnturnedGodot.Player.EPlayerStance.Crouch, read[0].Stance);
+        Assert.True(read[0].Moving);  // the moving bit shares the stance byte and must not corrupt it
         Assert.Equal(UnturnedGodot.Player.EPlayerStance.Stand, read[1].Stance);
+        Assert.False(read[1].Moving);
     }
 }

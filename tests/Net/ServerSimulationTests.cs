@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using Godot;
 using UnturnedGodot.Net;
 using UnturnedGodot.Player;
@@ -164,6 +165,28 @@ public class ServerSimulationTests
         Assert.True(sim.TryGetState(1, out PlayerMoveState state));
         Assert.Equal(real, state.Position);
         Assert.Equal(UnturnedGodot.Player.EPlayerStance.Crouch, state.Stance);
+        Assert.True(state.Moving); // input (0,-1) held: replicated for remote walk animation
+    }
+
+    [Fact]
+    public void JumpingInPlace_KeepsMovingFalse()
+    {
+        // The remote-animation glitch: a player jumping without directional keys must replicate
+        // Moving=false the whole flight, so their avatar holds Idle instead of flickering into walk.
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, new Vector3(0, 10f, 0));
+        sim.QueueInput(1, new InputCommand(0, 0, 0, false, false, 0, 90,
+            UnturnedGodot.Player.EPlayerStance.Stand, new Vector3(0, 10f, 0))); // baseline
+        sim.Step();
+
+        for (int i = 1; i <= 12; i++) // a full in-place jump arc, trusted positions rising and falling
+        {
+            float y = 10f + Mathf.Max(0f, 1f - Mathf.Abs(i - 6) / 6f);
+            sim.QueueInput(1, new InputCommand((uint)i, 0, 0, jump: i == 1, sprint: false, 0, 90,
+                UnturnedGodot.Player.EPlayerStance.Stand, new Vector3(0, y, 0)));
+            List<PlayerSnapshotState> states = sim.Step();
+            Assert.False(states[0].Moving, $"tick {i} flickered Moving on");
+        }
     }
 
     [Fact]
@@ -175,13 +198,14 @@ public class ServerSimulationTests
             UnturnedGodot.Player.EPlayerStance.Stand, new Vector3(0, 10f, 0))); // baseline at spawn
         sim.Step();
 
-        var step = new Vector3(0.3f, 10f, -0.2f); // a normal walking step, client-resolved
-        sim.QueueInput(1, new InputCommand(1, 0, -1, false, false, 0, 90,
+        var step = new Vector3(0.3f, 10f, -0.2f); // a normal strafing step, client-resolved
+        sim.QueueInput(1, new InputCommand(1, 1, 0, false, false, 0, 90,
             UnturnedGodot.Player.EPlayerStance.Stand, step));
         sim.Step();
 
         Assert.True(sim.TryGetState(1, out PlayerMoveState state));
         Assert.Equal(step, state.Position);
+        Assert.True(state.Moving); // strafe-only input still counts as moving
     }
 
     [Fact]

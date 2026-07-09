@@ -14,6 +14,7 @@ public struct PlayerMoveState
     public float Yaw;   // view yaw in degrees; movement is relative to it
     public float Pitch;
     public UnturnedGodot.Player.EPlayerStance Stance;
+    public bool Moving; // input-derived (keys held), NOT position-derived: drives remote walk/idle animation
 }
 
 // How the server resolves one input frame into movement. The pure heightfield solver below covers open
@@ -43,8 +44,9 @@ public sealed class HeightfieldMoveSolver : IMoveSolver
         next.Yaw = NetAngles.DequantizeYaw(input.Yaw);
         next.Pitch = NetAngles.DequantizePitch(input.Pitch);
         next.Stance = input.Stance;
+        next.Moving = input.InputX != 0 || input.InputY != 0;
 
-        bool moving = input.InputX != 0 || input.InputY != 0;
+        bool moving = next.Moving;
         Vector3 wishDir = Vector3.Zero;
         if (moving)
         {
@@ -172,7 +174,7 @@ public sealed class ServerSimulation
 
             states.Add(new PlayerSnapshotState(id, entry.State.Position,
                 NetAngles.QuantizePitch(entry.State.Pitch), NetAngles.QuantizeYaw(entry.State.Yaw),
-                entry.State.Stance));
+                entry.State.Stance, entry.State.Moving));
         }
         return states;
     }
@@ -186,6 +188,7 @@ public sealed class ServerSimulation
         entry.State.Yaw = NetAngles.DequantizeYaw(input.Yaw);
         entry.State.Pitch = NetAngles.DequantizePitch(input.Pitch);
         entry.State.Stance = input.Stance;
+        entry.State.Moving = input.InputX != 0 || input.InputY != 0;
 
         if (!entry.HasVerifiedPosition)
         {

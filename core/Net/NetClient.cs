@@ -15,8 +15,9 @@ public sealed class RemotePlayer
 
     public string Name { get; }
 
-    // Latest replicated stance: discrete, so it snaps rather than interpolates.
+    // Latest replicated stance and input-derived moving flag: discrete, so they snap (no interpolation).
     public UnturnedGodot.Player.EPlayerStance Stance { get; private set; }
+    public bool Moving { get; private set; }
 
     public RemotePlayer(string name, in PoseSnapshot initial, double now)
     {
@@ -25,9 +26,10 @@ public sealed class RemotePlayer
         _lastUpdatePos = initial.Position;
     }
 
-    public void Push(in PoseSnapshot pose, UnturnedGodot.Player.EPlayerStance stance, double now)
+    public void Push(in PoseSnapshot pose, UnturnedGodot.Player.EPlayerStance stance, bool moving, double now)
     {
         Stance = stance;
+        Moving = moving;
         bool largeDelta = (pose.Position - _lastUpdatePos).LengthSquared() > LargeDistance * LargeDistance;
         _lastUpdatePos = pose.Position;
         if (largeDelta)
@@ -128,7 +130,7 @@ public sealed class NetClient
                         if (s.PlayerId == PlayerId)
                             LocalServerState = s;
                         else if (_remotes.TryGetValue(s.PlayerId, out RemotePlayer? remote))
-                            remote.Push(Pose(s.Position, s.Pitch, s.Yaw), s.Stance, now);
+                            remote.Push(Pose(s.Position, s.Pitch, s.Yaw), s.Stance, s.Moving, now);
                     }
                     break;
                 }
@@ -138,7 +140,7 @@ public sealed class NetClient
     private static RemotePlayer SpawnRemote(PlayerListing p, double now)
     {
         var remote = new RemotePlayer(p.Name, Pose(p.Position, p.Pitch, p.Yaw), now);
-        remote.Push(Pose(p.Position, p.Pitch, p.Yaw), p.Stance, now);
+        remote.Push(Pose(p.Position, p.Pitch, p.Yaw), p.Stance, moving: false, now);
         return remote;
     }
 
