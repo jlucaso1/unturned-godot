@@ -53,6 +53,10 @@ public partial class DayNightController : Node
             // shows no shadows either. 4 cascades was ~10% frame time for no visible gain here (#6).
             DirectionalShadowMode = DirectionalLight3D.ShadowMode.Parallel2Splits,
             DirectionalShadowMaxDistance = 64f,
+            // Near split out to 16 m (0.25 * 64): thin casters (fence wires, goal nets) hold their shadow
+            // well past walking distance instead of popping in at ~6 m, while the near texel density stays
+            // ample for the player's own shadow.
+            DirectionalShadowSplit1 = 0.25f,
         };
 
         controller._sky = new ProceduralSkyMaterial();

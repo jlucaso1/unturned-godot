@@ -158,6 +158,8 @@ public static class ModelLibrary
             // Many object meshes (rocks, foliage) are single-sided shells; render both sides so they
             // don't show culling holes up close.
             CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+            // Walls/roofs/roads seen at grazing angles blur into their mips without anisotropy.
+            TextureFilter = BaseMaterial3D.TextureFilterEnum.LinearWithMipmapsAnisotropic,
         };
         registry.Register(sm.TextureKey, material);
         material.Transparency = sm.Blend switch
