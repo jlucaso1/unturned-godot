@@ -132,6 +132,11 @@ public sealed class ZombieSystem
 
     public const float RepathRate = 0.5f;               // LegacyAIPath.repathRate
     public const float PickNextWaypointDist = 1f;       // LegacyAIPathNoRedist.pickNextWaypointDist
+    // The A* Pathfinding Project computes paths on a time budget per frame (AstarPath.maxFrameTime),
+    // queueing the rest — a horde alerted by the same detect pass never recalculates in one burst.
+    // Same shape here: at most this many queries per tick (~0.3-1.6 ms each against PEI's map);
+    // zombies over budget keep their expired timer and drain on the following ticks.
+    public const int MaxRepathsPerTick = 2;
     public const float MaxChaseDistanceSquared = 4096f; // Zombie.cs: target beyond 64 m -> leave
     public const float SwingInterval = 1f;              // Time.time - lastAttack > 1 starts a swing
     public const float AttackTime = 0.5f;               // dedicated-server Attack_0 fallback length
@@ -147,6 +152,7 @@ public sealed class ZombieSystem
     private readonly Dictionary<byte, int> _agro = new(); // Player.agro: how many zombies hunt each player
     private Random _random = new();
     private float _detectTimer;
+    private int _repathsThisTick; // path-query budget spent this tick (MaxRepathsPerTick)
 
     public IReadOnlyList<ZombieInstance> Zombies => _zombies;
 
@@ -263,6 +269,7 @@ public sealed class ZombieSystem
 
     public void Tick(IReadOnlyList<ZombiePlayerView> players, float dt)
     {
+        _repathsThisTick = 0;
         _detectTimer += dt;
         if (_detectTimer >= ZombieDetection.DetectInterval)
         {
@@ -445,8 +452,9 @@ public sealed class ZombieSystem
         }
 
         zombie.RepathTimer -= dt;
-        if (zombie.RepathTimer <= 0f)
+        if (zombie.RepathTimer <= 0f && _repathsThisTick < MaxRepathsPerTick)
         {
+            _repathsThisTick++;
             zombie.RepathTimer = RepathRate;
             zombie.PathPoints.Clear();
             zombie.PathIndex = 0;

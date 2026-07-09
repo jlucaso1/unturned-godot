@@ -15,6 +15,7 @@ public sealed class ZombieNavigation
 {
     private readonly Rid _map;
     private readonly List<Rid> _regions = new();
+    private bool _ready; // the map's FIRST (async) synchronization has completed
 
     public ZombiePathQuery Query { get; }
 
@@ -40,13 +41,17 @@ public sealed class ZombieNavigation
                 triangles++;
             }
             Rid region = NavigationServer3D.RegionCreate();
-            NavigationServer3D.RegionSetMap(region, _map);
             NavigationServer3D.RegionSetNavigationMesh(region, mesh);
+            NavigationServer3D.RegionSetMap(region, _map);
             _regions.Add(region);
         }
 
-        // Regions sync on the next physics step of the navigation server; until then queries come
-        // back empty and the brain's straight-line fallback covers the gap (one repath, 0.5 s).
+        // The map's first synchronization runs ASYNC and takes seconds at this triangle count
+        // (verified live: ~5 s for PEI's 42k triangles). Querying earlier fails with a console
+        // error per call, so queries are gated on the server's map_changed signal — until it fires
+        // the brain keeps its straight-line fallback, exactly like a map with no navmesh. In
+        // practice the world's streaming load outlasts the sync, so players never see the gap.
+        NavigationServer3D.Singleton.MapChanged += OnMapChanged;
         GD.Print($"[nav] navmesh up: {flags.Count} regions, {triangles} triangles (pre-baked)");
 
         Rid map = _map;
@@ -54,6 +59,8 @@ public sealed class ZombieNavigation
         bool loggedFirst = false;
         Query = (Vector3 from, Vector3 to, List<Vector3> path) =>
         {
+            if (!_ready)
+                return false; // first sync still building: the brain seeks straight for now
             Vector3[] points = NavigationServer3D.MapGetPath(map, from, to, optimize: true);
             if (points.Length < 2)
                 return false; // no route (start/target unreachable): the brain seeks straight
@@ -68,8 +75,17 @@ public sealed class ZombieNavigation
         };
     }
 
+    private void OnMapChanged(Rid map)
+    {
+        if (map != _map || _ready)
+            return;
+        _ready = true;
+        GD.Print("[nav] navmesh synchronized; zombie pathfinding live");
+    }
+
     public void Free()
     {
+        NavigationServer3D.Singleton.MapChanged -= OnMapChanged;
         foreach (Rid region in _regions)
             NavigationServer3D.FreeRid(region);
         _regions.Clear();

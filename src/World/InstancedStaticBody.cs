@@ -17,6 +17,11 @@ public partial class InstancedStaticBody : Node3D
     public IReadOnlyList<(int Shape, Transform3D Transform)> Placements { get; set; }
         = System.Array.Empty<(int, Transform3D)>();
 
+    // Layer bit 1 is the solid world (player movement, camera rays). Callers add extra bits for
+    // Unturned layer semantics — e.g. LARGE/MEDIUM objects carry the vision-blocker bit so alert
+    // raycasts can hit exactly what RayMasks.BLOCK_VISION masks in the original.
+    public uint CollisionLayer { get; set; } = 1;
+
     private Rid _body;
 
     public override void _Ready()
@@ -24,7 +29,7 @@ public partial class InstancedStaticBody : Node3D
         _body = PhysicsServer3D.BodyCreate();
         PhysicsServer3D.BodySetMode(_body, PhysicsServer3D.BodyMode.Static);
         PhysicsServer3D.BodySetSpace(_body, GetWorld3D().Space);
-        PhysicsServer3D.BodySetCollisionLayer(_body, 1); // the layer the player + rays collide with
+        PhysicsServer3D.BodySetCollisionLayer(_body, CollisionLayer);
         PhysicsServer3D.BodySetCollisionMask(_body, 1);
         foreach ((int shape, Transform3D transform) in Placements)
             PhysicsServer3D.BodyAddShape(_body, Shapes[shape].GetRid(), transform);

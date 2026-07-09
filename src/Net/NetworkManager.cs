@@ -90,13 +90,15 @@ public partial class NetworkManager : Node
             GD.PushWarning("[zombies] level ships no zombie data; skipping");
             return;
         }
-        // AlertTool's BLOCK_VISION raycast against the world's real colliders (terrain, objects,
-        // buildings): stealth detection fails when geometry hides the player. Stops at 95% of the
-        // distance exactly like the original so the ray never clips the target's own capsule. The
-        // ZombieHost ticks inside _PhysicsProcess, so querying the physics space here is safe.
+        // AlertTool's BLOCK_VISION raycast: stealth detection fails when geometry hides the player.
+        // BLOCK_VISION is exactly LARGE | MEDIUM (RayMasks.cs) — LARGE/MEDIUM object colliders and
+        // nothing else: not the terrain, not resources, and crucially not the players themselves
+        // (an unfiltered ray ends inside the target's own capsule at close range and blinds every
+        // nearby zombie). Stops at 95% of the distance exactly like the original. The ZombieHost
+        // ticks inside _PhysicsProcess, so querying the physics space here is safe.
         // Query-parameter objects are engine objects, so both closures reuse one instead of
         // allocating (and later finalizing) a fresh one per zombie step.
-        var ray = new PhysicsRayQueryParameters3D();
+        var ray = new PhysicsRayQueryParameters3D { CollisionMask = ObjectsBuilder.VisionBlockerLayer };
         zombies.VisionBlocked = (from, to) =>
         {
             PhysicsDirectSpaceState3D? space = GetViewport()?.World3D?.DirectSpaceState;

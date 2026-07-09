@@ -523,6 +523,41 @@ public class ZombieSystemTests
     }
 
     [Fact]
+    public void Repaths_AreBudgetedPerTick_LikeTheSchedulersFrameBudget()
+    {
+        // 20 spawnpoints x 0.25 spawn chance = 5 zombies, all alerted by the same detect pass, all
+        // with expired repath timers on the same tick. The AstarPath-style budget spreads the path
+        // queries across ticks (MaxRepathsPerTick each) instead of one synchronous burst.
+        var system = new ZombieSystem(new[] { Table() }, TwoBounds(), FlatGround);
+        var points = new List<ZombieSpawnpointData>();
+        for (int i = 0; i < 20; i++)
+            points.Add(At(i % 5, i / 5));
+        system.Spawn(points, new Random(1));
+        Assert.Equal(5, system.Zombies.Count);
+        foreach (ZombieInstance z in system.Zombies)
+            z.Yaw = 180f; // face away from +X so the sneak-behind rule hides nobody
+
+        int queries = 0;
+        system.PathQuery = (from, to, path) =>
+        {
+            queries++;
+            path.Add(to);
+            return true;
+        };
+
+        var player = new[] { Player(1, new Vector3(8, 5, 2), UnturnedGodot.Player.EPlayerStance.Sprint) };
+        system.Tick(player, 0.1f); // one detect pass alerts the whole pack
+        int awake = system.Zombies.Count(z => z.State == EZombieState.Chase);
+        Assert.Equal(5, awake);
+        Assert.Equal(ZombieSystem.MaxRepathsPerTick, queries); // the burst is capped at the budget
+
+        system.Tick(player, 0.1f);
+        Assert.Equal(ZombieSystem.MaxRepathsPerTick * 2, queries); // the queue drains...
+        system.Tick(player, 0.1f);
+        Assert.Equal(5, queries); // ...and every zombie has its route by the third tick
+    }
+
+    [Fact]
     public void PathQuery_WithNoRoute_FallsBackToTheStraightSeek()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);

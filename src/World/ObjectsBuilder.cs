@@ -10,6 +10,10 @@ namespace UnturnedGodot;
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class ObjectsBuilder
 {
+    // Collision layer bit for the bodies Unturned's RayMasks.BLOCK_VISION would hit (the LARGE and
+    // MEDIUM object layers). Zombie alert raycasts query exactly this bit.
+    public const uint VisionBlockerLayer = 1u << 1;
+
     // Instances real meshes (grouped per GUID into one MultiMesh each) where available; placed objects
     // without an extracted mesh fall back to colored placeholder boxes.
     //
@@ -58,9 +62,15 @@ public static class ObjectsBuilder
             // the Resource prefab with all of its colliders while the resource is alive — and at map load
             // every resource is alive. (Bushes pass through because their prefab simply has no collider.)
             // Felling/mining swaps a dead resource to its Stump prefab; that's a future damage system.
+            // LARGE/MEDIUM bodies also carry the vision-blocker layer bit: RayMasks.BLOCK_VISION is
+            // exactly LARGE | MEDIUM, so zombie alert rays must see these and nothing else.
+            EObjectType? type = colliderLibrary.ContainsKey(guid) ? db.Resolve(guid, 0)?.Type : null;
             if (colliderLibrary.TryGetValue(guid, out List<CachedCollider>? colliders)
-                && db.Resolve(guid, 0)?.Type is EObjectType.Large or EObjectType.Medium or EObjectType.Resource)
-                BuildCollision(collision, guid, colliders, transforms);
+                && type is EObjectType.Large or EObjectType.Medium or EObjectType.Resource)
+            {
+                uint layer = type is EObjectType.Resource ? 1u : 1u | VisionBlockerLayer;
+                BuildCollision(collision, guid, colliders, transforms, layer);
+            }
         }
         root.AddChild(collision);
 
@@ -76,7 +86,7 @@ public static class ObjectsBuilder
     // instances, where the world transform is baked into per-instance vertices — scale on a
     // ConcavePolygonShape3D is what trips Godot's physics.
     private static void BuildCollision(Node3D root, Guid guid, List<CachedCollider> colliders,
-        List<Transform3D> instances)
+        List<Transform3D> instances, uint collisionLayer)
     {
         var shapes = new List<Shape3D>();
         var placements = new List<(int, Transform3D)>();
@@ -135,7 +145,13 @@ public static class ObjectsBuilder
         if (placements.Count == 0)
             return;
 
-        root.AddChild(new InstancedStaticBody { Name = $"Col_{guid:N}", Shapes = shapes, Placements = placements });
+        root.AddChild(new InstancedStaticBody
+        {
+            Name = $"Col_{guid:N}",
+            Shapes = shapes,
+            Placements = placements,
+            CollisionLayer = collisionLayer,
+        });
     }
 
     // A primitive Unity collider as a Godot shape + its pose relative to the object root (Unity->Godot).

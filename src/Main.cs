@@ -143,9 +143,12 @@ public partial class Main : Node3D
             return;
         }
 
-        // Interactive: automation env flags (FREECAM/JOIN/OPEN_LAN) boot straight into the world; a
+        // Interactive: automation env flags (SOLO/FREECAM/JOIN/OPEN_LAN) boot straight into the world; a
         // normal launch lands on the main menu first — no map is loaded until the player picks an option.
-        bool autoStart = OS.GetEnvironment("FREECAM") == "1" || OS.GetEnvironment("OPEN_LAN") == "1"
+        // SOLO=1 is the local session WITHOUT the UDP listener — the right flag for single-player
+        // automation; OPEN_LAN is only for tests where a second client actually joins.
+        bool autoStart = OS.GetEnvironment("SOLO") == "1"
+            || OS.GetEnvironment("FREECAM") == "1" || OS.GetEnvironment("OPEN_LAN") == "1"
             || OS.GetEnvironment("OPEN_LAN_AFTER") is { Length: > 0 }
             || OS.GetEnvironment("JOIN") is { Length: > 0 };
         if (autoStart)

@@ -112,6 +112,11 @@ Two benchmark tiers print a JSON report and diff it against the previous run:
   desktop — `gamescope --backend headless -r 1000 -W 1152 -H 648 -- "$GODOT" -- --benchmark --gpu`.
   Real Vulkan, screenshots and VRAM all work; `-r 1000` lifts the compositor's 60 Hz vblank so
   `gpu.frameMs` is effectively uncapped too.
+- **No sound**: gamescope hides the window but the game's AUDIO still plays on the desktop — pass
+  `--audio-driver Dummy` to Godot in any automated/background run.
+- **Solo automation**: `SOLO=1` boots straight into the world with the loopback session (zombies and
+  all server systems live) WITHOUT binding the UDP port — only use `OPEN_LAN=1` when a second client
+  actually joins the test.
 
 `ObjectStreamer` prints a `post-load reclaim: RSS x -> y MB` line (Linux, from `/proc/self/status`) after
 the one-time load's transient heap is compacted back to the OS — a quick steady-state RSS check.
