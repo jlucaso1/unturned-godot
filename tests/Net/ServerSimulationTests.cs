@@ -147,6 +147,39 @@ public class ServerSimulationTests
     }
 
     [Fact]
+    public void TrustedPosition_IsAdopted_WithinTheSpeedBudget()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, new Vector3(0, 10f, 0));
+        sim.Step();
+
+        var step = new Vector3(0.3f, 10f, -0.2f); // a normal walking step, client-resolved
+        sim.QueueInput(1, new InputCommand(0, 0, -1, false, false, 0, 90,
+            UnturnedGodot.Player.EPlayerStance.Crouch, step));
+        sim.Step();
+
+        Assert.True(sim.TryGetState(1, out PlayerMoveState state));
+        Assert.Equal(step, state.Position);
+        Assert.Equal(UnturnedGodot.Player.EPlayerStance.Crouch, state.Stance);
+    }
+
+    [Fact]
+    public void TrustedPosition_TeleportBeyondTheBudget_IsHeldBack()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, new Vector3(0, 10f, 0));
+        sim.Step();
+        sim.TryGetState(1, out PlayerMoveState before);
+
+        sim.QueueInput(1, new InputCommand(0, 0, -1, false, false, 0, 90,
+            UnturnedGodot.Player.EPlayerStance.Stand, new Vector3(500f, 10f, 0))); // 500 m in one tick
+        sim.Step();
+
+        Assert.True(sim.TryGetState(1, out PlayerMoveState state));
+        Assert.Equal(before.Position, state.Position); // rubber-banded to the last verified position
+    }
+
+    [Fact]
     public void RemovePlayer_AndUnknownIds_AreSafe()
     {
         ServerSimulation sim = FlatSim();

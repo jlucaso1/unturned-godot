@@ -46,7 +46,7 @@ public partial class RemotePlayersView : Node3D
             bool moving = delta > 0 &&
                 (pose.Position - avatar.LastPosition).Length() / (float)delta > 0.5f;
             avatar.LastPosition = pose.Position;
-            avatar.Rig?.SetState(EPlayerStance.Stand, moving);
+            avatar.Rig?.SetState(remote.Stance, moving);
             avatar.Rig?.SetPitch(pose.Pitch - 90f); // wire pitch (0..180) -> Godot pitch (-90..+90)
         }
 

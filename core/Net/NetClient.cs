@@ -15,6 +15,9 @@ public sealed class RemotePlayer
 
     public string Name { get; }
 
+    // Latest replicated stance: discrete, so it snaps rather than interpolates.
+    public UnturnedGodot.Player.EPlayerStance Stance { get; private set; }
+
     public RemotePlayer(string name, in PoseSnapshot initial, double now)
     {
         Name = name;
@@ -22,8 +25,9 @@ public sealed class RemotePlayer
         _lastUpdatePos = initial.Position;
     }
 
-    public void Push(in PoseSnapshot pose, double now)
+    public void Push(in PoseSnapshot pose, UnturnedGodot.Player.EPlayerStance stance, double now)
     {
+        Stance = stance;
         bool largeDelta = (pose.Position - _lastUpdatePos).LengthSquared() > LargeDistance * LargeDistance;
         _lastUpdatePos = pose.Position;
         if (largeDelta)
@@ -84,14 +88,14 @@ public sealed class NetClient
                     PlayerId = id;
                     Joined = true;
                     foreach (PlayerListing p in players)
-                        _remotes[p.PlayerId] = new RemotePlayer(p.Name, Pose(p.Position, p.Pitch, p.Yaw), now);
+                        _remotes[p.PlayerId] = SpawnRemote(p, now);
                     break;
                 }
             case ENetMessage.PlayerJoined:
                 {
                     PlayerListing p = NetMessages.ReadPlayerJoined(payload);
                     if (p.PlayerId != PlayerId)
-                        _remotes[p.PlayerId] = new RemotePlayer(p.Name, Pose(p.Position, p.Pitch, p.Yaw), now);
+                        _remotes[p.PlayerId] = SpawnRemote(p, now);
                     break;
                 }
             case ENetMessage.PlayerLeft:
@@ -105,11 +109,18 @@ public sealed class NetClient
                         if (s.PlayerId == PlayerId)
                             LocalServerState = s;
                         else if (_remotes.TryGetValue(s.PlayerId, out RemotePlayer? remote))
-                            remote.Push(Pose(s.Position, s.Pitch, s.Yaw), now);
+                            remote.Push(Pose(s.Position, s.Pitch, s.Yaw), s.Stance, now);
                     }
                     break;
                 }
         }
+    }
+
+    private static RemotePlayer SpawnRemote(PlayerListing p, double now)
+    {
+        var remote = new RemotePlayer(p.Name, Pose(p.Position, p.Pitch, p.Yaw), now);
+        remote.Push(Pose(p.Position, p.Pitch, p.Yaw), p.Stance, now);
+        return remote;
     }
 
     private static PoseSnapshot Pose(Vector3 position, byte pitch, byte yaw) =>

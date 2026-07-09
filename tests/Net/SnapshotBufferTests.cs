@@ -85,8 +85,10 @@ public class SnapshotBufferTests
     public void RemotePlayer_TeleportResetsInterpolation_SmallStepsDoNot()
     {
         var remote = new RemotePlayer("R", At(0f), now: 0.0);
-        remote.Push(At(1f), now: 0.08);   // small step: buffered for interpolation
-        remote.Push(At(100f), now: 0.16); // 99 m skip (> 16 m): hard reset, no gliding
+        remote.Push(At(1f), UnturnedGodot.Player.EPlayerStance.Stand, now: 0.08);   // small step: buffered
+        remote.Push(At(100f), UnturnedGodot.Player.EPlayerStance.Crouch, now: 0.16); // 99 m skip: hard reset
+
+        Assert.Equal(UnturnedGodot.Player.EPlayerStance.Crouch, remote.Stance);
 
         Assert.Equal(100f, remote.Sample(0.2).Position.X);
     }

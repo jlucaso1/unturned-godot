@@ -56,10 +56,10 @@ public partial class PauseMenu : CanvasLayer
         column.AddThemeConstantOverride("separation", 8);
         center.AddChild(column);
 
-        column.AddChild(UnturnedUi.MakeBar("▶", "Continuar", UnturnedUi.Olive, Close));
-        _lanButton = UnturnedUi.MakeBar("⇄", "Abrir para LAN", UnturnedUi.Olive, OpenToLan);
+        column.AddChild(UnturnedUi.MakeBar("▶", "Resume", UnturnedUi.Olive, Close));
+        _lanButton = UnturnedUi.MakeBar("⇄", "Open to LAN", UnturnedUi.Olive, OpenToLan);
         column.AddChild(_lanButton);
-        column.AddChild(UnturnedUi.MakeBar("◀", "Sair do jogo", UnturnedUi.Brown, () => GetTree().Quit()));
+        column.AddChild(UnturnedUi.MakeBar("◀", "Quit game", UnturnedUi.Brown, () => GetTree().Quit()));
 
         _status = new Label
         {
@@ -104,12 +104,12 @@ public partial class PauseMenu : CanvasLayer
     {
         if (Network == null)
         {
-            _status.Text = "Rede indisponível neste modo.";
+            _status.Text = "Networking is unavailable in this mode.";
             return;
         }
         if (Network.IsActive)
         {
-            _status.Text = "Sessão de rede já ativa.";
+            _status.Text = "A network session is already active.";
             return;
         }
 
@@ -117,12 +117,12 @@ public partial class PauseMenu : CanvasLayer
         if (Network.StartListenServer(NetworkManager.DefaultPort, hostName))
         {
             _lanButton.Disabled = true;
-            _status.Text = $"Aberto para LAN na porta UDP {NetworkManager.DefaultPort}.";
+            _status.Text = $"Open to LAN on UDP port {NetworkManager.DefaultPort}.";
             OnSessionStarted?.Invoke();
         }
         else
         {
-            _status.Text = $"Falha ao abrir a porta UDP {NetworkManager.DefaultPort}.";
+            _status.Text = $"Failed to bind UDP port {NetworkManager.DefaultPort}.";
         }
     }
 }

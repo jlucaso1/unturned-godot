@@ -51,7 +51,7 @@ public partial class LoadingScreen : CanvasLayer
         column.AddThemeConstantOverride("separation", 14);
         center.AddChild(column);
 
-        var title = new Label { Text = "Carregando PEI", HorizontalAlignment = HorizontalAlignment.Center };
+        var title = new Label { Text = "Loading PEI", HorizontalAlignment = HorizontalAlignment.Center };
         title.AddThemeFontSizeOverride("font_size", 26);
         title.AddThemeColorOverride("font_shadow_color", new Color(0, 0, 0, 0.5f));
         title.AddThemeConstantOverride("shadow_offset_y", 2);
@@ -74,7 +74,7 @@ public partial class LoadingScreen : CanvasLayer
         track.AddChild(_sweep);
         column.AddChild(track);
 
-        _status = new Label { Text = "Preparando…", HorizontalAlignment = HorizontalAlignment.Center };
+        _status = new Label { Text = "Preparing…", HorizontalAlignment = HorizontalAlignment.Center };
         _status.AddThemeFontSizeOverride("font_size", 14);
         _status.AddThemeColorOverride("font_shadow_color", new Color(0, 0, 0, 0.5f));
         column.AddChild(_status);

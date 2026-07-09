@@ -3,7 +3,7 @@ using Godot;
 namespace UnturnedGodot;
 
 // The boot scene: no map loaded yet, just the Unturned-style menu over a sky gradient.
-// Jogar starts singleplayer, Conectar reveals a host:port field and joins, Sair quits.
+// Play starts singleplayer, Connect reveals a host:port field and joins, Quit exits.
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class MainMenu : CanvasLayer
 {
@@ -64,23 +64,23 @@ public partial class MainMenu : CanvasLayer
         column.AddChild(title);
         column.AddChild(new Control { CustomMinimumSize = new Vector2(0, 18) }); // spacing under the title
 
-        column.AddChild(UnturnedUi.MakeBar("▶", "Jogar", UnturnedUi.Olive, () => OnStart?.Invoke(null)));
-        column.AddChild(UnturnedUi.MakeBar("⇄", "Conectar", UnturnedUi.Olive, ToggleConnectRow));
-        column.AddChild(UnturnedUi.MakeBar("✕", "Sair", UnturnedUi.Brown, () => GetTree().Quit()));
+        column.AddChild(UnturnedUi.MakeBar("▶", "Play", UnturnedUi.Olive, () => OnStart?.Invoke(null)));
+        column.AddChild(UnturnedUi.MakeBar("⇄", "Connect", UnturnedUi.Olive, ToggleConnectRow));
+        column.AddChild(UnturnedUi.MakeBar("✕", "Quit", UnturnedUi.Brown, () => GetTree().Quit()));
 
-        // Hidden until Conectar: address field + confirm, in the same visual language.
+        // Hidden until Connect: address field + confirm, in the same visual language.
         _connectRow = new VBoxContainer { Visible = false };
         _connectRow.AddThemeConstantOverride("separation", 8);
         _address = new LineEdit
         {
             Text = "127.0.0.1:27015",
-            PlaceholderText = "host:porta",
+            PlaceholderText = "host:port",
             CustomMinimumSize = new Vector2(320, 36),
             Alignment = HorizontalAlignment.Center,
         };
         _address.TextSubmitted += _ => Connect();
         _connectRow.AddChild(_address);
-        _connectRow.AddChild(UnturnedUi.MakeBar("→", "Entrar no servidor", UnturnedUi.Olive, Connect));
+        _connectRow.AddChild(UnturnedUi.MakeBar("→", "Join server", UnturnedUi.Olive, Connect));
         column.AddChild(_connectRow);
 
         _status = new Label
@@ -105,10 +105,10 @@ public partial class MainMenu : CanvasLayer
         string address = _address.Text.Trim();
         if (address.Length == 0)
         {
-            _status.Text = "Informe um endereço (host:porta).";
+            _status.Text = "Enter an address (host:port).";
             return;
         }
-        _status.Text = $"Conectando a {address}...";
+        _status.Text = $"Connecting to {address}…";
         OnStart?.Invoke(address);
     }
 }

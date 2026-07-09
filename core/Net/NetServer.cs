@@ -73,8 +73,14 @@ public sealed class NetServer
         switch (NetMessages.TypeOf(payload))
         {
             case ENetMessage.Hello when !session.Joined:
-                AdmitPlayer(connection, session, NetMessages.ReadHello(payload));
-                break;
+                {
+                    (byte version, string name) = NetMessages.ReadHello(payload);
+                    if (version != NetMessages.ProtocolVersion)
+                        connection.Close(); // incompatible build: refuse cleanly instead of mis-parsing frames
+                    else
+                        AdmitPlayer(connection, session, name);
+                    break;
+                }
             case ENetMessage.Input when session.Joined:
                 _simulation.QueueInput(session.PlayerId, NetMessages.ReadInput(payload));
                 break;
@@ -125,5 +131,6 @@ public sealed class NetServer
         Position = state.Position,
         Pitch = NetAngles.QuantizePitch(state.Pitch),
         Yaw = NetAngles.QuantizeYaw(state.Yaw),
+        Stance = state.Stance,
     };
 }

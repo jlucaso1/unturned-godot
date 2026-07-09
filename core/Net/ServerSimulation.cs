@@ -13,6 +13,7 @@ public struct PlayerMoveState
     public bool Grounded;
     public float Yaw;   // view yaw in degrees; movement is relative to it
     public float Pitch;
+    public UnturnedGodot.Player.EPlayerStance Stance;
 }
 
 // How the server resolves one input frame into movement. The pure heightfield solver below covers open
@@ -41,6 +42,18 @@ public sealed class HeightfieldMoveSolver : IMoveSolver
         PlayerMoveState next = state;
         next.Yaw = NetAngles.DequantizeYaw(input.Yaw);
         next.Pitch = NetAngles.DequantizePitch(input.Pitch);
+        next.Stance = input.Stance;
+
+        // Client-simulated position (forceTrustClient): the client resolved collision against the full
+        // world; adopt its position when the step fits the speed budget, otherwise hold the last verified
+        // one (rubber-band) — a teleport can't be smuggled through a burst of inputs.
+        if (input.HasPosition)
+        {
+            float budget = (PlayerConfig.SpeedSprint - PlayerConfig.TerminalVelocity) * dt * 1.5f;
+            if ((input.Position - next.Position).Length() <= budget)
+                next.Position = input.Position;
+            return next;
+        }
 
         bool moving = input.InputX != 0 || input.InputY != 0;
         Vector3 wishDir = Vector3.Zero;
@@ -158,7 +171,8 @@ public sealed class ServerSimulation
             entry.State = _solver.Step(entry.State, input, TickRate);
 
             states.Add(new PlayerSnapshotState(id, entry.State.Position,
-                NetAngles.QuantizePitch(entry.State.Pitch), NetAngles.QuantizeYaw(entry.State.Yaw)));
+                NetAngles.QuantizePitch(entry.State.Pitch), NetAngles.QuantizeYaw(entry.State.Yaw),
+                entry.State.Stance));
         }
         return states;
     }

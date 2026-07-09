@@ -120,6 +120,28 @@ public class NetServerProtocolTests
     }
 
     [Fact]
+    public void MismatchedProtocolVersion_IsRefused()
+    {
+        (NetServer server, FakeServerTransport transport) = Build();
+        var conn = new FakeConnection();
+        transport.Connect(conn);
+
+        // A Hello from an older build: same shape, stale version byte.
+        using var ms = new System.IO.MemoryStream();
+        using (var w = new System.IO.BinaryWriter(ms))
+        {
+            w.Write((byte)ENetMessage.Hello);
+            w.Write((byte)(NetMessages.ProtocolVersion - 1));
+            w.Write("Old");
+        }
+        transport.Message(conn, ms.ToArray());
+        server.Update(0);
+
+        Assert.Equal(0, server.PlayerCount);
+        Assert.Empty(conn.Sent); // no Welcome; the connection was closed instead
+    }
+
+    [Fact]
     public void TickWithNoPlayers_SendsNothing()
     {
         (NetServer server, FakeServerTransport transport) = Build();

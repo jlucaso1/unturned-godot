@@ -160,10 +160,13 @@ public partial class PlayerController : CharacterBody3D
             {
                 _netInputTimer -= UnturnedGodot.Net.ServerSimulation.TickRate;
                 bool jumpHeld = inputCaptured && Input.IsKeyPressed(_settings.Jump);
+                // Trusted-client frame: our position already resolved collision against the full world
+                // (objects, buildings) that the server's heightfield solver doesn't know about.
                 Net.SendInput(new UnturnedGodot.Net.InputCommand(_netFrame++,
                     (sbyte)input.X, (sbyte)input.Y, jumpHeld, wantSprint,
                     UnturnedGodot.Net.NetAngles.QuantizeYaw(RotationDegrees.Y),
-                    UnturnedGodot.Net.NetAngles.QuantizePitch(_pitch + 90f)));
+                    UnturnedGodot.Net.NetAngles.QuantizePitch(_pitch + 90f),
+                    _stance, GlobalPosition));
             }
         }
 

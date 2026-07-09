@@ -21,7 +21,7 @@ public partial class LoadingOverlay : CanvasLayer
         _panel.AddThemeStyleboxOverride("panel", style);
         AddChild(_panel);
 
-        _label = new Label { Text = "Carregando mundo…" };
+        _label = new Label { Text = "Loading world…" };
         _label.AddThemeConstantOverride("outline_size", 3);
         _label.AddThemeColorOverride("font_outline_color", Colors.Black);
         _panel.AddChild(_label);
@@ -37,10 +37,10 @@ public partial class LoadingOverlay : CanvasLayer
     }
 
     private void OnMeshesReady(double elapsedMs) =>
-        _label.Text = $"Mundo pronto em {elapsedMs:0} ms · carregando texturas…";
+        _label.Text = $"World ready in {elapsedMs:0} ms · loading textures…";
 
     private void OnProgress(int applied, int total) =>
-        _label.Text = $"Carregando texturas… {applied}/{total}";
+        _label.Text = $"Loading textures… {applied}/{total}";
 
     private void OnFinished() => Visible = false;
 }

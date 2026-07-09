@@ -39,11 +39,13 @@ public class NetMessagesTests
     }
 
     [Fact]
-    public void Hello_RoundTrips()
+    public void Hello_RoundTrips_WithProtocolVersion()
     {
-        byte[] p = NetMessages.WriteHello("João");
+        byte[] p = NetMessages.WriteHello("Joao");
         Assert.Equal(ENetMessage.Hello, NetMessages.TypeOf(p));
-        Assert.Equal("João", NetMessages.ReadHello(p));
+        (byte version, string name) = NetMessages.ReadHello(p);
+        Assert.Equal(NetMessages.ProtocolVersion, version);
+        Assert.Equal("Joao", name);
     }
 
     [Fact]
@@ -51,7 +53,8 @@ public class NetMessagesTests
     {
         var players = new List<PlayerListing>
         {
-            new() { PlayerId = 2, Name = "Ana", Position = new Vector3(1, 2, 3), Pitch = 90, Yaw = 45 },
+            new() { PlayerId = 2, Name = "Ana", Position = new Vector3(1, 2, 3), Pitch = 90, Yaw = 45,
+                Stance = UnturnedGodot.Player.EPlayerStance.Prone },
             new() { PlayerId = 7, Name = "Bo", Position = new Vector3(-4, 5, -6), Pitch = 10, Yaw = 170 },
         };
         byte[] p = NetMessages.WriteWelcome(9, 1234, players);
@@ -61,6 +64,7 @@ public class NetMessagesTests
         Assert.Equal(1234u, tick);
         Assert.Equal(2, read.Count);
         Assert.Equal("Ana", read[0].Name);
+        Assert.Equal(UnturnedGodot.Player.EPlayerStance.Prone, read[0].Stance);
         Assert.Equal(new Vector3(-4, 5, -6), read[1].Position);
         Assert.Equal(170, read[1].Yaw);
     }
@@ -81,7 +85,8 @@ public class NetMessagesTests
     {
         foreach ((bool jump, bool sprint) in new[] { (false, false), (true, false), (false, true), (true, true) })
         {
-            var input = new InputCommand(42, -1, 1, jump, sprint, yaw: 100, pitch: 45);
+            var input = new InputCommand(42, -1, 1, jump, sprint, yaw: 100, pitch: 45,
+                UnturnedGodot.Player.EPlayerStance.Crouch);
             InputCommand read = NetMessages.ReadInput(NetMessages.WriteInput(input));
             Assert.Equal(42u, read.Frame);
             Assert.Equal(-1, read.InputX);
@@ -90,7 +95,20 @@ public class NetMessagesTests
             Assert.Equal(sprint, read.Sprint);
             Assert.Equal(100, read.Yaw);
             Assert.Equal(45, read.Pitch);
+            Assert.Equal(UnturnedGodot.Player.EPlayerStance.Crouch, read.Stance);
+            Assert.False(read.HasPosition);
         }
+    }
+
+    [Fact]
+    public void Input_RoundTrips_TrustedPosition()
+    {
+        var input = new InputCommand(7, 0, -1, false, true, 10, 90,
+            UnturnedGodot.Player.EPlayerStance.Prone, new Vector3(300.5f, 34.25f, -84f));
+        InputCommand read = NetMessages.ReadInput(NetMessages.WriteInput(input));
+        Assert.True(read.HasPosition);
+        Assert.Equal(new Vector3(300.5f, 34.25f, -84f), read.Position);
+        Assert.Equal(UnturnedGodot.Player.EPlayerStance.Prone, read.Stance);
     }
 
     [Fact]
@@ -98,7 +116,7 @@ public class NetMessagesTests
     {
         var states = new List<PlayerSnapshotState>
         {
-            new(1, new Vector3(10, 20, 30), 90, 0),
+            new(1, new Vector3(10, 20, 30), 90, 0, UnturnedGodot.Player.EPlayerStance.Crouch),
             new(2, new Vector3(-1.5f, 0.25f, 7f), 45, 128),
         };
         byte[] p = NetMessages.WriteStateUpdate(77, states);
@@ -109,5 +127,7 @@ public class NetMessagesTests
         Assert.Equal(1, read[0].PlayerId);
         Assert.Equal(new Vector3(-1.5f, 0.25f, 7f), read[1].Position);
         Assert.Equal(128, read[1].Yaw);
+        Assert.Equal(UnturnedGodot.Player.EPlayerStance.Crouch, read[0].Stance);
+        Assert.Equal(UnturnedGodot.Player.EPlayerStance.Stand, read[1].Stance);
     }
 }

@@ -180,18 +180,18 @@ public partial class Main : Node3D
         var streamer = new ObjectStreamer { Name = "ObjectStreamer" };
         streamer.StartPrepare(unturnedPath, level);
 
-        loading.SetStatus("Construindo terreno…");
+        loading.SetStatus("Building terrain…");
         (Node3D terrain, _, HeightmapSampler heights) = await WorldBuilder.BuildTerrainAsync(level, this);
         AddChild(terrain);
 
-        loading.SetStatus("Estradas e água…");
+        loading.SetStatus("Roads and water…");
         await NextFrame();
         AddChild(RoadsBuilder.Build(environmentDir, heights));
         AddChild(WaterBuilder.Build(lighting, out StandardMaterial3D waterMat));
         AddChild(NodesBuilder.Build(environmentDir));
         SetupEnvironment(lighting, waterMat);
 
-        loading.SetStatus("Personagem…");
+        loading.SetStatus("Character…");
         await NextFrame();
         // Feature flag: FREECAM=1 keeps the fly-through camera; otherwise the player character spawns and
         // walks the map (terrain collision is added on demand so free-cam runs don't pay for it).
@@ -200,7 +200,7 @@ public partial class Main : Node3D
         else
             SpawnPlayer(terrain, thirdPerson: false, unturnedPath, heights);
 
-        loading.SetStatus("Objetos do mundo…");
+        loading.SetStatus("World objects…");
         await NextFrame();
         var overlay = new LoadingOverlay { Name = "LoadingOverlay" };
         AddChild(streamer);
@@ -213,7 +213,7 @@ public partial class Main : Node3D
     private async System.Threading.Tasks.Task NextFrame() =>
         await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
 
-    // Set by the main menu's Conectar flow (or the JOIN env), consumed by SpawnPlayer.
+    // Set by the main menu's Connect flow (or the JOIN env), consumed by SpawnPlayer.
     private string? _pendingJoin;
 
     // Spawns the character over a town and gives each terrain tile a cheap heightfield collision so it can
@@ -247,7 +247,7 @@ public partial class Main : Node3D
             network.StartListenServer(NetworkManager.DefaultPort,
                 OS.GetEnvironment("PLAYER_NAME") is { Length: > 0 } hn ? hn : "Host");
 
-        // Conectar from the main menu, or JOIN=host[:port] from the environment.
+        // Connect from the main menu, or JOIN=host[:port] from the environment.
         if (_pendingJoin is { Length: > 0 } join)
         {
             string[] parts = join.Split(':');
