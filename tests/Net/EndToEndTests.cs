@@ -23,7 +23,9 @@ public class EndToEndTests
         public readonly LoopbackServerTransport ServerTransport = new();
         public readonly NetServer Server;
         public readonly List<NetClient> Clients = new();
-        public double Now;
+        // Starts at a big absolute clock on purpose: a reliable frame stamped "0" by a constructor-time
+        // send would instantly exceed ReliableChannel.GiveUpAfter (the listen-server admit/drop bug).
+        public double Now = 5000.0;
 
         public Harness(IServerTransport? transport = null)
         {
@@ -60,12 +62,12 @@ public class EndToEndTests
     {
         var h = new Harness();
         NetClient a = h.Join("A");
-        h.Pump();
+        h.Pump(2); // round 1: A's first Update sends the Hello; round 2: the server admits and replies
         Assert.True(a.Joined);
         Assert.Empty(a.Remotes);
 
         NetClient b = h.Join("B");
-        h.Pump();
+        h.Pump(2); // round 1: B's first Update sends the Hello; round 2: the server admits and replies
 
         Assert.True(b.Joined);
         Assert.NotEqual(a.PlayerId, b.PlayerId);

@@ -18,6 +18,10 @@ public partial class PauseMenu : CanvasLayer
     private Label _status = null!;
     private Button _lanButton = null!;
 
+    // Wired by Main: the session owner, and a callback to attach the input sender + remote view.
+    public NetworkManager? Network { get; set; }
+    public System.Action? OnSessionStarted { get; set; }
+
     public bool IsOpen => _root.Visible;
 
     public override void _Ready()
@@ -160,12 +164,30 @@ public partial class PauseMenu : CanvasLayer
         Input.MouseMode = Input.MouseModeEnum.Captured;
     }
 
-    // Placeholder until the UDP transport phase: the composite listen-server (host over loopback +
-    // LAN listener) is already built and tested in core/Net; this button will start it.
+    // Minecraft-style: the running singleplayer becomes a LAN server (loopback + UDP composite).
     private void OpenToLan()
     {
-        _lanButton.Disabled = true;
-        _status.Text = "Rede LAN chega na próxima fase (transporte UDP).";
-        GD.Print("[net] Open to LAN requested — UDP transport lands in the next phase.");
+        if (Network == null)
+        {
+            _status.Text = "Rede indisponível neste modo.";
+            return;
+        }
+        if (Network.IsActive)
+        {
+            _status.Text = "Sessão de rede já ativa.";
+            return;
+        }
+
+        string hostName = OS.GetEnvironment("PLAYER_NAME") is { Length: > 0 } pn ? pn : "Host";
+        if (Network.StartListenServer(NetworkManager.DefaultPort, hostName))
+        {
+            _lanButton.Disabled = true;
+            _status.Text = $"Aberto para LAN na porta UDP {NetworkManager.DefaultPort}.";
+            OnSessionStarted?.Invoke();
+        }
+        else
+        {
+            _status.Text = $"Falha ao abrir a porta UDP {NetworkManager.DefaultPort}.";
+        }
     }
 }

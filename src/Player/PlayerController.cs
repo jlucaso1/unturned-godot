@@ -27,6 +27,11 @@ public partial class PlayerController : CharacterBody3D
     // Movement audio (footsteps + landing), built by the caller with the map's terrain material data.
     public PlayerFootsteps? Footsteps { get; set; }
 
+    // Multiplayer session, when hosting or joined: the controller forwards inputs at the 12.5 Hz cadence.
+    public UnturnedGodot.Net.NetClient? Net { get; set; }
+    private double _netInputTimer;
+    private uint _netFrame;
+
     private Node3D _head = null!;
     private Camera3D _camera = null!;
     private CollisionShape3D _collider = null!;
@@ -145,6 +150,22 @@ public partial class PlayerController : CharacterBody3D
         if (!wasOnFloor && IsOnFloor())
             Footsteps?.OnLanded(_stance, GlobalPosition);
         Footsteps?.TickMovement(_stance, moving, IsOnFloor(), speed, GlobalPosition, dt);
+
+        // Multiplayer: forward one input frame per 0.08 s (PlayerInput.RATE). Idle frames still flow so
+        // the server keeps simulating (gravity) and other players see us stop.
+        if (Net != null)
+        {
+            _netInputTimer += dt;
+            if (_netInputTimer >= UnturnedGodot.Net.ServerSimulation.TickRate)
+            {
+                _netInputTimer -= UnturnedGodot.Net.ServerSimulation.TickRate;
+                bool jumpHeld = inputCaptured && Input.IsKeyPressed(_settings.Jump);
+                Net.SendInput(new UnturnedGodot.Net.InputCommand(_netFrame++,
+                    (sbyte)input.X, (sbyte)input.Y, jumpHeld, wantSprint,
+                    UnturnedGodot.Net.NetAngles.QuantizeYaw(RotationDegrees.Y),
+                    UnturnedGodot.Net.NetAngles.QuantizePitch(_pitch + 90f)));
+            }
+        }
 
         UpdateCamera(dt);
     }

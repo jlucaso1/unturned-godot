@@ -48,10 +48,13 @@ public sealed class NetClient
     public PlayerSnapshotState LocalServerState { get; private set; }
     public IReadOnlyDictionary<byte, RemotePlayer> Remotes => _remotes;
 
+    private readonly string _name;
+    private bool _helloSent;
+
     public NetClient(IClientTransport transport, string name)
     {
         _transport = transport;
-        _transport.Send(NetMessages.WriteHello(name), ESendType.Reliable);
+        _name = name;
     }
 
     public void SendInput(in InputCommand input) =>
@@ -59,7 +62,14 @@ public sealed class NetClient
 
     public void Update(double now)
     {
-        _transport.Update(now);
+        _transport.Update(now); // give the transport the clock BEFORE the first reliable send
+        if (!_helloSent)
+        {
+            // Deferred from the constructor: a reliable frame stamped before the transport ever saw the
+            // real clock would look GiveUpAfter-seconds old on the next Update and kill the channel.
+            _helloSent = true;
+            _transport.Send(NetMessages.WriteHello(_name), ESendType.Reliable);
+        }
         while (_transport.TryReceive(out byte[] payload))
             Handle(payload, now);
     }

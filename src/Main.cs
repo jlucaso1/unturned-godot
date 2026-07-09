@@ -59,6 +59,28 @@ public partial class Main : Node3D
         }
 
         string[] userArgs = OS.GetCmdlineUserArgs();
+
+        // Dedicated server: godot --headless -- --server [--port=27015]. Movement-sim only, raw UDP.
+        if (System.Array.IndexOf(userArgs, "--server") >= 0)
+        {
+            ushort serverPort = NetworkManager.DefaultPort;
+            foreach (string arg in userArgs)
+                if (arg.StartsWith("--port=") && ushort.TryParse(arg[7..], out ushort parsed))
+                    serverPort = parsed;
+            AddChild(DedicatedServer.Create(unturnedPath, MapName, PlayerSpawn, serverPort));
+            return;
+        }
+
+        // Scripted headless client for multiplayer verification: BOT_JOIN=host:port [BOT_SECONDS=20].
+        if (OS.GetEnvironment("BOT_JOIN") is { Length: > 0 } botTarget)
+        {
+            string[] parts = botTarget.Split(':');
+            float lifetime = OS.GetEnvironment("BOT_SECONDS") is { Length: > 0 } bs ? bs.ToFloat() : 20f;
+            AddChild(BotClient.Create(parts[0], parts.Length > 1 ? ushort.Parse(parts[1]) : NetworkManager.DefaultPort,
+                OS.GetEnvironment("BOT_NAME") is { Length: > 0 } bn ? bn : "Bot", lifetime));
+            return;
+        }
+
         if (System.Array.IndexOf(userArgs, "--benchmark") >= 0)
         {
             if (System.Array.IndexOf(userArgs, "--gpu") >= 0)
@@ -101,8 +123,9 @@ public partial class Main : Node3D
             // shoots from its (third-person) camera instead.
             if (OS.GetEnvironment("PLAYER") == "1")
             {
-                SpawnPlayer(world.Terrain, thirdPerson: true, unturnedPath);
-                _ = CaptureAndQuit(shot, settleFrames: 40);
+                SpawnPlayer(world.Terrain, thirdPerson: true, unturnedPath, world.Heights);
+                int settle = OS.GetEnvironment("SETTLE") is { Length: > 0 } sv ? int.Parse(sv) : 40;
+                _ = CaptureAndQuit(shot, settle);
             }
             else
             {
@@ -133,7 +156,7 @@ public partial class Main : Node3D
         if (OS.GetEnvironment("FREECAM") == "1")
             AddFreeCamera();
         else
-            SpawnPlayer(terrain, thirdPerson: false, unturnedPath);
+            SpawnPlayer(terrain, thirdPerson: false, unturnedPath, heights);
 
         var overlay = new LoadingOverlay { Name = "LoadingOverlay" };
         AddChild(streamer);
@@ -147,23 +170,53 @@ public partial class Main : Node3D
     // player clips buildings), which is fine for movement.
     private static readonly Vector3 PlayerSpawn = new(300, 60, 84); // above land near the central town
 
-    private void SpawnPlayer(Node3D terrain, bool thirdPerson, string unturnedPath)
+    private void SpawnPlayer(Node3D terrain, bool thirdPerson, string unturnedPath, HeightmapSampler? heights)
     {
         foreach (Node child in terrain.GetChildren())
             if (child is MeshInstance3D tile)
                 TerrainBuilder.AddHeightfieldCollision(tile);
 
-        AddChild(new PlayerController
+        var network = new NetworkManager { Name = "Network" };
+        if (heights != null)
+            network.Configure(heights, PlayerSpawn);
+        AddChild(network);
+
+        var player = new PlayerController
         {
             Name = "Player",
             Position = PlayerSpawn,
             StartThirdPerson = thirdPerson,
             BodyModel = CharacterModel.Build(unturnedPath), // real Unturned body, or null -> placeholder
             Footsteps = BuildFootsteps(unturnedPath),
-        });
+        };
+        AddChild(player);
+
+        // OPEN_LAN=1 hosts immediately (same path as the pause-menu button; used by the e2e scripts).
+        if (OS.GetEnvironment("OPEN_LAN") == "1")
+            network.StartListenServer(NetworkManager.DefaultPort,
+                OS.GetEnvironment("PLAYER_NAME") is { Length: > 0 } hn ? hn : "Host");
+
+        // JOIN=host[:port] connects straight into someone's server at startup.
+        if (OS.GetEnvironment("JOIN") is { Length: > 0 } join)
+        {
+            string[] parts = join.Split(':');
+            network.JoinServer(parts[0],
+                parts.Length > 1 ? ushort.Parse(parts[1]) : NetworkManager.DefaultPort,
+                OS.GetEnvironment("PLAYER_NAME") is { Length: > 0 } pn ? pn : "Player");
+        }
+        AttachSession(network, player, unturnedPath);
 
         if (DisplayServer.GetName() != "headless")
-            AddChild(new PauseMenu { Name = "PauseMenu" });
+            AddChild(new PauseMenu { Name = "PauseMenu", Network = network, OnSessionStarted = () => AttachSession(network, player, unturnedPath) });
+    }
+
+    // Once a session exists (hosted or joined), wire the input sender and the remote-player view.
+    private void AttachSession(NetworkManager network, PlayerController player, string unturnedPath)
+    {
+        if (network.Client == null || player.Net != null)
+            return;
+        player.Net = network.Client;
+        AddChild(RemotePlayersView.Create(network.Client, unturnedPath));
     }
 
     // Movement audio: the physics-material bank + terrain splat sampler feed PlayerFootsteps, and the
