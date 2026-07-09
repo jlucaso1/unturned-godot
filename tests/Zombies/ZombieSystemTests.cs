@@ -548,6 +548,65 @@ public class ZombieSystemTests
     }
 
     [Fact]
+    public void SidePathZombies_QueryTheRawTarget_NeverTheOffsetPoint()
+    {
+        // Offsetting the pathfinding DESTINATION made its navmesh snap flip between the two sides
+        // of a wall on every repath (zombies entering houses oscillated back out). The drift must
+        // live in the steering only: every query goes to the target's exact position.
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        var destinations = new List<Vector3>();
+        system.PathQuery = (from, to, path) =>
+        {
+            destinations.Add(to);
+            path.Add(from);
+            path.Add(to);
+            return true;
+        };
+
+        var player = Player(1, new Vector3(10, 5, 0));
+        system.Tick(new[] { player }, 0.1f);
+        zombie.Path = EZombiePath.Left; // force the drifting approach
+        for (int i = 0; i < 10; i++)
+            system.Tick(new[] { player }, 0.1f);
+
+        Assert.True(destinations.Count >= 2);
+        Assert.All(destinations, d => Assert.Equal(player.Position, d)); // raw, never ±1 m
+        // And the drift is visible in the motion: the zombie leaves the straight X-axis line.
+        Assert.NotEqual(0f, zombie.Position.Z);
+    }
+
+    [Fact]
+    public void CarrotFollowing_HoldsTheCorridorThroughTheCorner()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        // An L-route with the corner at (6, 0, 6): proper polyline following passes NEAR the
+        // corner instead of cutting the diagonal through the "wall".
+        var corner = new Vector3(6, 5, 6);
+        system.PathQuery = (from, to, path) =>
+        {
+            path.Add(from);
+            if (new Vector2(from.X - corner.X, from.Z - corner.Z).Length() > 1.2f && from.Z < 5f)
+                path.Add(corner);
+            path.Add(to);
+            return true;
+        };
+
+        // Sprinting: inside the 20 m radius and never shielded by the sneak-behind rule.
+        var player = Player(1, new Vector3(0, 5, 6), UnturnedGodot.Player.EPlayerStance.Sprint);
+        zombie.Position = new Vector3(6, 5, 0); // on the first leg of the L
+        zombie.Home = zombie.Position;
+        float closestToCorner = float.MaxValue;
+        for (int i = 0; i < 60; i++)
+        {
+            system.Tick(new[] { player }, 0.1f);
+            closestToCorner = MathF.Min(closestToCorner,
+                new Vector2(zombie.Position.X - corner.X, zombie.Position.Z - corner.Z).Length());
+        }
+        Assert.True(closestToCorner < 1.5f, $"cut the corner: nearest pass {closestToCorner:F2}m");
+        Assert.Equal(EZombieState.Attack, zombie.State); // and still reached the target
+    }
+
+    [Fact]
     public void PathQuery_WithNoRoute_FallsBackToTheStraightSeek()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);

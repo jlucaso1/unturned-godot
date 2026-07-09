@@ -215,6 +215,72 @@ public partial class NetworkManager : Node
             GetTree().CreateTimer(1.0).Timeout += Probe;
         }
 
+        // HUNT_PROBE="zx,zy,zz>px,py,pz": run the COMPLETE zombie brain (detection, pathfinding,
+        // carrot following, physics) with one synthetic zombie hunting a stationary player, and
+        // log its trajectory — the definitive end-to-end check for "does the zombie reach me here".
+        if (OS.GetEnvironment("HUNT_PROBE") is { Length: > 0 } huntProbe)
+        {
+            GetTree().CreateTimer(8.0).Timeout += () => // after the nav map sync
+            {
+                string[] ends = huntProbe.Split('>');
+                string[] a = ends[0].Split(',');
+                string[] b = ends[1].Split(',');
+                var zombieAt = new UnturnedGodot.Data.ZombieSpawnpointData(0,
+                    new Vector3(a[0].ToFloat(), a[1].ToFloat(), -a[2].ToFloat())); // unity z-flip
+                var playerAt = new Vector3(b[0].ToFloat(), b[1].ToFloat(), b[2].ToFloat());
+                // Optional third point: after 3 s the player "runs" there (aggro out in the open,
+                // then dive into the house/garage — the reported scenario shape).
+                Vector3? playerLater = null;
+                if (ends.Length > 2)
+                {
+                    string[] c = ends[2].Split(',');
+                    playerLater = new Vector3(c[0].ToFloat(), c[1].ToFloat(), c[2].ToFloat());
+                }
+
+                var probe = new UnturnedGodot.Zombies.ZombieSystem(
+                    new[] { new UnturnedGodot.Data.ZombieTable { Name = "Probe", Damage = 10 } },
+                    UnturnedGodot.Data.LevelNavigationData.Load(
+                        System.IO.Path.Combine(levelDir, "Environment")),
+                    _ground,
+                    zombies.Navmesh)
+                {
+                    PathQuery = zombies.PathQuery,
+                    MoveResolver = zombies.MoveResolver,
+                    GroundSnap = zombies.GroundSnap,
+                    VisionBlocked = zombies.VisionBlocked,
+                };
+                probe.Spawn(new[] { zombieAt }, new System.Random(1));
+                if (probe.Zombies.Count == 0)
+                {
+                    GD.Print("[nav] hunt probe: spawnpoint rejected (outside bounds/navmesh)");
+                    return;
+                }
+                UnturnedGodot.Zombies.ZombieInstance z = probe.Zombies[0];
+                z.Speciality = UnturnedGodot.Zombies.EZombieSpeciality.Normal;
+                Vector3 last = z.Position;
+                for (int tick = 0; tick < 500; tick++) // 40 s of hunting
+                {
+                    Vector3 where = playerLater != null && tick > 37 ? playerLater.Value : playerAt;
+                    var views = new[]
+                    {
+                        new UnturnedGodot.Zombies.ZombiePlayerView(1, where,
+                            UnturnedGodot.Player.EPlayerStance.Sprint, false),
+                    };
+                    probe.Tick(views, UnturnedGodot.Net.ServerSimulation.TickRate);
+                    if (tick % 25 == 0)
+                        GD.Print($"[nav] hunt t={tick * 0.08f:F1}s pos={z.Position} state={z.State}");
+                    bool phaseTwo = playerLater == null || tick > 37;
+                    if (z.State == UnturnedGodot.Zombies.EZombieState.Attack && phaseTwo)
+                    {
+                        GD.Print($"[nav] hunt probe: ATTACK reached at t={tick * 0.08f:F1}s pos={z.Position}");
+                        return;
+                    }
+                    last = z.Position;
+                }
+                GD.Print($"[nav] hunt probe: never reached attack; final pos={last} state={z.State}");
+            };
+        }
+
         // WALK_PROBE="x,y,z>x,y,z": march the zombie movement mechanics (MoveResolver + GroundSnap)
         // in a straight line between two points and log where they end up — the tool for "can a
         // zombie physically climb this stair/step" questions.
