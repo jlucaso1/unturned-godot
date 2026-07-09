@@ -21,8 +21,6 @@ public readonly struct MeshPart
     }
 }
 
-public enum EColliderKind : byte { Box, Sphere, Capsule, Mesh }
-
 // One collider on a prefab GameObject: its Unity primitive parameters (or a collision-mesh id) and its pose
 // relative to the prefab root. Values stay in Unity space; the Unity->Godot flip and shape construction
 // happen when the collision body is built.
