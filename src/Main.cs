@@ -146,6 +146,7 @@ public partial class Main : Node3D
         // Interactive: automation env flags (FREECAM/JOIN/OPEN_LAN) boot straight into the world; a
         // normal launch lands on the main menu first — no map is loaded until the player picks an option.
         bool autoStart = OS.GetEnvironment("FREECAM") == "1" || OS.GetEnvironment("OPEN_LAN") == "1"
+            || OS.GetEnvironment("OPEN_LAN_AFTER") is { Length: > 0 }
             || OS.GetEnvironment("JOIN") is { Length: > 0 };
         if (autoStart)
         {
@@ -253,10 +254,18 @@ public partial class Main : Node3D
         };
         AddChild(player);
 
-        // OPEN_LAN=1 hosts immediately (same path as the pause-menu button; used by the e2e scripts).
+        // OPEN_LAN=1 hosts immediately; OPEN_LAN_AFTER=seconds hosts later mid-game — the exact timing
+        // of a player pressing the pause-menu button after already moving around (e2e scripts use both).
         if (OS.GetEnvironment("OPEN_LAN") == "1")
             network.StartListenServer(NetworkManager.DefaultPort,
                 OS.GetEnvironment("PLAYER_NAME") is { Length: > 0 } hn ? hn : "Host");
+        else if (OS.GetEnvironment("OPEN_LAN_AFTER") is { Length: > 0 } delay)
+            GetTree().CreateTimer(delay.ToFloat()).Timeout += () =>
+            {
+                network.StartListenServer(NetworkManager.DefaultPort,
+                    OS.GetEnvironment("PLAYER_NAME") is { Length: > 0 } hn2 ? hn2 : "Host");
+                AttachSession(network, player, unturnedPath);
+            };
 
         // Connect from the main menu, or JOIN=host[:port] from the environment.
         if (_pendingJoin is { Length: > 0 } join)

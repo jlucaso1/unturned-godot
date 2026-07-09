@@ -147,20 +147,41 @@ public class ServerSimulationTests
     }
 
     [Fact]
-    public void TrustedPosition_IsAdopted_WithinTheSpeedBudget()
+    public void TrustedPosition_FirstClaimIsTheBaseline_EvenFarFromSpawn()
+    {
+        // The listen-server bug: the host walked and fell BEFORE opening to LAN, so the server spawned
+        // them ~26 m away from where they really are. The first client claim must become the baseline —
+        // there is no earlier claim to rate-limit against — or the host stays frozen at spawn forever.
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, new Vector3(300f, 60f, 84f)); // server-invented spawn, high in the air
+        sim.Step();
+
+        var real = new Vector3(287f, 34f, 61f); // where the host actually is by now
+        sim.QueueInput(1, new InputCommand(0, 0, -1, false, false, 0, 90,
+            UnturnedGodot.Player.EPlayerStance.Crouch, real));
+        sim.Step();
+
+        Assert.True(sim.TryGetState(1, out PlayerMoveState state));
+        Assert.Equal(real, state.Position);
+        Assert.Equal(UnturnedGodot.Player.EPlayerStance.Crouch, state.Stance);
+    }
+
+    [Fact]
+    public void TrustedPosition_ConsecutiveClaims_AdoptWithinTheSpeedBudget()
     {
         ServerSimulation sim = FlatSim();
         sim.AddPlayer(1, new Vector3(0, 10f, 0));
+        sim.QueueInput(1, new InputCommand(0, 0, 0, false, false, 0, 90,
+            UnturnedGodot.Player.EPlayerStance.Stand, new Vector3(0, 10f, 0))); // baseline at spawn
         sim.Step();
 
         var step = new Vector3(0.3f, 10f, -0.2f); // a normal walking step, client-resolved
-        sim.QueueInput(1, new InputCommand(0, 0, -1, false, false, 0, 90,
-            UnturnedGodot.Player.EPlayerStance.Crouch, step));
+        sim.QueueInput(1, new InputCommand(1, 0, -1, false, false, 0, 90,
+            UnturnedGodot.Player.EPlayerStance.Stand, step));
         sim.Step();
 
         Assert.True(sim.TryGetState(1, out PlayerMoveState state));
         Assert.Equal(step, state.Position);
-        Assert.Equal(UnturnedGodot.Player.EPlayerStance.Crouch, state.Stance);
     }
 
     [Fact]
@@ -168,15 +189,37 @@ public class ServerSimulationTests
     {
         ServerSimulation sim = FlatSim();
         sim.AddPlayer(1, new Vector3(0, 10f, 0));
+        sim.QueueInput(1, new InputCommand(0, 0, 0, false, false, 0, 90,
+            UnturnedGodot.Player.EPlayerStance.Stand, new Vector3(0, 10f, 0))); // baseline
         sim.Step();
-        sim.TryGetState(1, out PlayerMoveState before);
 
-        sim.QueueInput(1, new InputCommand(0, 0, -1, false, false, 0, 90,
+        sim.QueueInput(1, new InputCommand(1, 0, -1, false, false, 0, 90,
             UnturnedGodot.Player.EPlayerStance.Stand, new Vector3(500f, 10f, 0))); // 500 m in one tick
         sim.Step();
 
         Assert.True(sim.TryGetState(1, out PlayerMoveState state));
-        Assert.Equal(before.Position, state.Position); // rubber-banded to the last verified position
+        Assert.Equal(new Vector3(0, 10f, 0), state.Position); // rubber-banded to the last verified claim
+    }
+
+    [Fact]
+    public void TrustedPosition_BudgetScalesWithStarvation_NoPermanentDivergence()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, new Vector3(0, 10f, 0));
+        sim.QueueInput(1, new InputCommand(0, 0, 0, false, false, 0, 90,
+            UnturnedGodot.Player.EPlayerStance.Stand, new Vector3(0, 10f, 0))); // baseline
+        sim.Step();
+
+        for (int i = 0; i < 25; i++)
+            sim.Step(); // 2 s of dropped packets while the client keeps sprinting
+
+        var after = new Vector3(14f, 10f, 0); // 2 s of sprint: over one tick's budget, within 2 s' worth
+        sim.QueueInput(1, new InputCommand(2, 0, -1, false, true, 64, 90,
+            UnturnedGodot.Player.EPlayerStance.Sprint, after));
+        sim.Step();
+
+        Assert.True(sim.TryGetState(1, out PlayerMoveState state));
+        Assert.Equal(after, state.Position); // the widened window resynced instead of rejecting forever
     }
 
     [Fact]
