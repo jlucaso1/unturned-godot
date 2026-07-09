@@ -150,7 +150,7 @@ public partial class Main : Node3D
             || OS.GetEnvironment("JOIN") is { Length: > 0 };
         if (autoStart)
         {
-            StartInteractiveWorld(unturnedPath, environmentDir, lighting,
+            _ = StartInteractiveWorld(unturnedPath, environmentDir, lighting,
                 OS.GetEnvironment("JOIN") is { Length: > 0 } join ? join : null);
             return;
         }
@@ -250,8 +250,8 @@ public partial class Main : Node3D
             Position = PlayerSpawn,
             StartThirdPerson = thirdPerson,
             BodyModel = CharacterModel.Build(unturnedPath), // real Unturned body, or null -> placeholder
-            Footsteps = BuildFootsteps(unturnedPath),
         };
+        (player.Footsteps, _movementAudioFactory) = BuildMovementAudio(unturnedPath);
         AddChild(player);
 
         string playerName = OS.GetEnvironment("PLAYER_NAME") is { Length: > 0 } pn ? pn : "Player";
@@ -291,12 +291,16 @@ public partial class Main : Node3D
         if (network.Client == null || player.Net != null)
             return;
         player.Net = network.Client;
-        AddChild(RemotePlayersView.Create(network.Client, unturnedPath));
+        AddChild(RemotePlayersView.Create(network.Client, unturnedPath, _movementAudioFactory));
     }
 
-    // Movement audio: the physics-material bank + terrain splat sampler feed PlayerFootsteps, and the
+    // One MovementAudio per character; remote avatars get theirs from this factory (RemotePlayersView).
+    private System.Func<MovementAudio>? _movementAudioFactory;
+
+    // Movement audio infrastructure: the physics-material bank + terrain splat sampler resolve WHICH
+    // definition a step plays; the shared AudioDefLibrary + positional OneShotAudio pool play it. The
     // referenced OneShotAudioDefinitions extract from the masterbundle in the background on first run.
-    private PlayerFootsteps BuildFootsteps(string unturnedPath)
+    private (MovementAudio Local, System.Func<MovementAudio> Factory) BuildMovementAudio(string unturnedPath)
     {
         string bundlesAssets = System.IO.Path.Combine(unturnedPath, "Bundles", "Assets");
         PhysicsMaterialBank bank =
@@ -330,7 +334,11 @@ public partial class Main : Node3D
 
         GD.Print($"[audio] footsteps ready: {bank.Count} physics materials, {landscape.Count} landscape " +
             $"materials, {splat.TileCount} splat tiles");
-        return PlayerFootsteps.Create(bank, landscape, splat, audioCacheDir);
+
+        var oneShot = OneShotAudio.Create(new AudioDefLibrary(audioCacheDir));
+        AddChild(oneShot);
+        MovementAudio Factory(bool startGrounded) => new(bank, landscape, splat, oneShot, startGrounded);
+        return (Factory(startGrounded: false), () => Factory(startGrounded: true));
     }
 
     private void AddFreeCamera()
