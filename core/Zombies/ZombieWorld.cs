@@ -21,7 +21,11 @@ public static class ZombieWorld
         if (tables.Count == 0 || spawnpoints.Count == 0 || bounds.Count == 0)
             return null; // the map ships no zombie world
 
-        var system = new ZombieSystem(tables, bounds, ground);
+        // The pre-baked navmesh (Navigation_<N>.dat): exact checkNavigation boxes for the brain,
+        // triangles for the host's pathfinding regions. Optional — old maps may not ship it.
+        List<NavFlag> navmesh = LevelNavmesh.Load(Path.Combine(levelDir, "Environment"));
+
+        var system = new ZombieSystem(tables, bounds, ground, navmesh.Count > 0 ? navmesh : null);
         system.Spawn(spawnpoints, random);
         return system;
     }

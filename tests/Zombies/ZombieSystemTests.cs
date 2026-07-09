@@ -480,6 +480,125 @@ public class ZombieSystemTests
         Assert.True(separation >= 0.8f - 0.01f, $"zombies overlapped: {separation}");
     }
 
+    // ---- Navmesh pathfinding (the Seeker port) ----------------------------------------------------
+
+    [Fact]
+    public void PathQuery_FollowsWaypointsAroundACorner()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        // An L-shaped route: the navmesh sends the zombie 6 m sideways before turning to the
+        // target. Like a real navmesh, the corner only appears while the zombie is still on the
+        // first leg — a repath from beyond it routes straight.
+        var corner = new Vector3(0, 5, 6);
+        int queries = 0;
+        system.PathQuery = (from, to, path) =>
+        {
+            queries++;
+            path.Add(from);
+            if (new Vector2(from.X - corner.X, from.Z - corner.Z).Length() > 1.5f && from.X < 2f)
+                path.Add(corner);
+            path.Add(to);
+            return true;
+        };
+
+        var player = Player(1, new Vector3(10, 5, 0));
+        system.Tick(new[] { player }, 0.1f); // alert + first move (paths immediately)
+        Assert.Equal(1, queries);
+
+        for (int i = 0; i < 3; i++)
+            system.Tick(new[] { player }, 0.1f);
+        Assert.Equal(1, queries); // 0.3 s in: still inside the repath window
+        for (int i = 0; i < 3; i++)
+            system.Tick(new[] { player }, 0.1f);
+        // Past the 0.5 s repathRate: exactly one recalculation, not one per tick.
+        Assert.Equal(2, queries);
+
+        // Following the waypoint means walking TOWARD +Z (the corner), not straight down the X axis.
+        Assert.True(zombie.Position.Z > 1.5f, $"ignored the waypoint: {zombie.Position}");
+
+        // Long run: passes the corner, then heads to the player and reaches attack range.
+        for (int i = 0; i < 40; i++)
+            system.Tick(new[] { player }, 0.1f);
+        Assert.Equal(EZombieState.Attack, zombie.State);
+    }
+
+    [Fact]
+    public void PathQuery_WithNoRoute_FallsBackToTheStraightSeek()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        system.PathQuery = (from, to, path) => false; // nothing reachable on the navmesh
+
+        var player = Player(1, new Vector3(10, 5, 0));
+        system.Tick(new[] { player }, 0.1f);
+        float before = zombie.Position.DistanceTo(player.Position);
+        system.Tick(new[] { player }, 0.1f);
+        Assert.Equal(0.55f, before - zombie.Position.DistanceTo(player.Position), 2); // straight seek
+    }
+
+    [Fact]
+    public void Retargeting_RequestsAFreshPath()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        var destinations = new List<Vector3>();
+        system.PathQuery = (from, to, path) =>
+        {
+            destinations.Add(to);
+            path.Add(to);
+            return true;
+        };
+
+        system.Tick(new[] { Player(1, new Vector3(10, 5, 0)) }, 0.1f);
+        Assert.Single(destinations);
+
+        // A closer player steals the target: the path resets instead of waiting out the 0.5 s.
+        system.Tick(new[] { Player(1, new Vector3(10, 5, 0)), Player(2, new Vector3(4, 5, 0)) }, 0.1f);
+        Assert.Equal(2, destinations.Count);
+        Assert.Equal(4f, destinations[1].X, 1f);
+    }
+
+    // ---- Navmesh spawn filtering (checkNavigation) ------------------------------------------------
+
+    private static List<NavFlag> NavmeshBoxes() => new()
+    {
+        // The non-expanded box of bound 0: 64 m smaller, like the real files.
+        new NavFlag { Center = new Vector3(0, 140, 0), Size = new Vector3(136, 236, 136) },
+    };
+
+    [Fact]
+    public void Spawnpoints_OutsideTheNavmeshBox_AreDropped()
+    {
+        var system = new ZombieSystem(new[] { Table() }, TwoBounds(), FlatGround, NavmeshBoxes());
+        system.Spawn(new[]
+        {
+            At(0, 0),   // on the navmesh: kept
+            At(90, 0),  // inside the expanded bound (100) but outside the navmesh box (68): dropped
+            At(80, 0),
+            At(85, 0),
+        }, new Random(1));
+        Assert.Single(system.Zombies); // ceil(1 * 0.25): only the on-mesh point was eligible
+        Assert.Equal(0f, system.Zombies[0].Position.X);
+    }
+
+    [Fact]
+    public void RetreatValidation_UsesTheNavmeshBoxes()
+    {
+        var system = new ZombieSystem(new[] { Table() }, TwoBounds(), FlatGround, NavmeshBoxes());
+        system.Spawn(new[] { At(0, 0) }, new Random(1));
+        ZombieInstance zombie = Assert.Single(system.Zombies);
+        zombie.Speciality = EZombieSpeciality.Normal;
+        zombie.Yaw = 0f;
+        zombie.Position = new Vector3(60, 5, 0); // 8 m shy of the navmesh edge at 68
+
+        system.Tick(new[] { Player(1, new Vector3(50, 5, 0)) }, 0.1f);
+        Assert.Equal(EZombieState.Chase, zombie.State);
+        system.Tick(new[] { Player(1, new Vector3(400, 5, 0)) }, 0.1f); // escapes: leave(true)
+
+        // Retreating away from the escapee (+X, off the mesh) must flip inward instead.
+        Assert.Equal(EZombieState.Idle, zombie.State);
+        Assert.True(zombie.LeaveTo.X < zombie.Position.X);
+        Assert.True(MathF.Abs(zombie.LeaveTo.X) <= 68f && MathF.Abs(zombie.LeaveTo.Z) <= 68f);
+    }
+
     // ---- Attacking -----------------------------------------------------------------------------
 
     [Fact]

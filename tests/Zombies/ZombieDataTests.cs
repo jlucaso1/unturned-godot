@@ -296,12 +296,35 @@ public class ZombieDataTests : IDisposable
             foreach (float v in new[] { 0f, 140f, 0f, 100f, 300f, 100f })
                 w.Write(v);
         }
+        // Without navigation files the brain runs on the expanded bounds alone.
+        UnturnedGodot.Zombies.ZombieSystem? withoutNavmesh =
+            UnturnedGodot.Zombies.ZombieWorld.Load(_dir, Flat, new Random(1));
+        Assert.NotNull(withoutNavmesh);
+        Assert.Null(withoutNavmesh!.Navmesh);
+
+        // A pre-baked navmesh for the flag (the non-expanded 36 m box), so the loader wires it up.
+        using (var w = new BinaryWriter(File.Create(Path.Combine(_dir, "Environment", "Navigation_0.dat"))))
+        {
+            w.Write((byte)1);
+            foreach (float v in new[] { 0f, 140f, 0f, 36f, 236f, 36f })
+                w.Write(v);
+            w.Write((byte)1); // 1x1 tiles
+            w.Write((byte)1);
+            w.Write((ushort)3); // one triangle
+            foreach (ushort t in new ushort[] { 0, 1, 2 })
+                w.Write(t);
+            w.Write((ushort)3);
+            foreach (int v in new[] { 0, 0, 0, 1000, 0, 1000, 1000, 0, 0 })
+                w.Write(v);
+        }
 
         UnturnedGodot.Zombies.ZombieSystem? system =
             UnturnedGodot.Zombies.ZombieWorld.Load(_dir, Flat, new Random(1));
         Assert.NotNull(system);
         Assert.Single(system!.Zombies); // ceil(4 * 0.25)
         Assert.Equal(7f, system.Zombies[0].Position.Y); // ground-clamped by the sampler
+        Assert.NotNull(system.Navmesh); // the pre-baked navmesh reached the brain
+        Assert.Single(system.Navmesh!);
     }
 
     // Real PEI data (self-skips without the game): 19 zombie tables, 1456 spawnpoints, 19 nav bounds.

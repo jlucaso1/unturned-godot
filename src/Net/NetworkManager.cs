@@ -140,6 +140,12 @@ public partial class NetworkManager : Node
             float[] slideCast = space.CastMotion(query);
             return safe + (slide * slideCast[0]);
         };
+        // The pre-baked navmesh drives the Seeker port: zombies path around buildings and props
+        // exactly over the triangles the original game baked.
+        _zombieNavigation = ZombieNavigation.Build(zombies.Navmesh);
+        if (_zombieNavigation != null)
+            zombies.PathQuery = _zombieNavigation.Query;
+
         _ = new UnturnedGodot.Zombies.ZombieHost(zombies, _server);
         GD.Print($"[zombies] {zombies.Zombies.Count} zombies spawned from the level's spawnpoints");
     }
@@ -160,9 +166,12 @@ public partial class NetworkManager : Node
         _client?.Update(now);
     }
 
+    private ZombieNavigation? _zombieNavigation;
+
     public override void _ExitTree()
     {
         _clientTransport?.Close();
         _serverTransport?.Close();
+        _zombieNavigation?.Free();
     }
 }

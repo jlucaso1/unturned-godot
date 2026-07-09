@@ -61,6 +61,9 @@ public sealed class ZombieInstance
     public float LeaveDelay;          // Zombie.leave: stand still this long, then walk to LeaveTo
     public Vector3 LeaveTo;
     public sbyte DetourSide;          // while blocked head-on, hug the obstacle on this side (0 = none)
+    public readonly List<Vector3> PathPoints = new(); // the Seeker's current route over the navmesh
+    public int PathIndex;
+    public float RepathTimer;         // counts down to the next path recalculation
 
     // ZombieManager.getZombieSpeed with Slow_Movement=false (NORMAL difficulty).
     public float Speed => Speciality switch
@@ -110,6 +113,11 @@ public delegate bool VisionBlocked(Vector3 from, Vector3 to);
 // Null means an unobstructed world (the heightfield-only dedicated server).
 public delegate Vector3 ZombieMoveResolver(Vector3 from, Vector3 to, float radius);
 
+// Finds a walkable route over the level's pre-baked navmesh (the Seeker's A* + funnel). Fills
+// waypoints from start to destination and returns whether any path exists; the caller falls back
+// to the straight-line seek when there is none. Null means no navmesh (maps without nav data).
+public delegate bool ZombiePathQuery(Vector3 from, Vector3 to, List<Vector3> path);
+
 // The server-side zombie brain: spawning per ZombieManager.generateZombies, aggro per AlertTool,
 // hunting per Zombie.cs (approach paths, 64 m give-up, leave retreats, swing cadence). Movement is
 // Unturned's NonPathfindingZombieMovementComponent — straight-line seek, 720°/s turning, and the
@@ -122,6 +130,8 @@ public sealed class ZombieSystem
     public const float CrawlerChance = 0.15f;
     public const float SprinterChance = 0.15f;
 
+    public const float RepathRate = 0.5f;               // LegacyAIPath.repathRate
+    public const float PickNextWaypointDist = 1f;       // LegacyAIPathNoRedist.pickNextWaypointDist
     public const float MaxChaseDistanceSquared = 4096f; // Zombie.cs: target beyond 64 m -> leave
     public const float SwingInterval = 1f;              // Time.time - lastAttack > 1 starts a swing
     public const float AttackTime = 0.5f;               // dedicated-server Attack_0 fallback length
@@ -130,6 +140,7 @@ public sealed class ZombieSystem
 
     private readonly IReadOnlyList<ZombieTable> _tables;
     private readonly IReadOnlyList<NavBound> _bounds;
+    private readonly IReadOnlyList<NavFlag>? _navmesh; // pre-baked navmesh flags (null: none shipped)
     private readonly GroundSampler _ground;
     private readonly List<ZombieInstance> _zombies = new();
     private readonly List<ZombieInstance>[] _byBound;
@@ -145,17 +156,24 @@ public sealed class ZombieSystem
     // The CharacterController's world collision, wired to real colliders by the host (optional).
     public ZombieMoveResolver? MoveResolver;
 
+    // The Seeker's navmesh pathfinding, wired to the NavigationServer by the host (optional).
+    public ZombiePathQuery? PathQuery;
+
     // Fires when a zombie's swing lands (attackTime/2 after it starts): (zombie, player id, damage).
     public Action<ZombieInstance, byte, byte>? OnAttack;
+
+    public IReadOnlyList<NavFlag>? Navmesh => _navmesh; // for the host's NavigationServer regions
 
     public ZombieSystem(
         IReadOnlyList<ZombieTable> tables,
         IReadOnlyList<NavBound> bounds,
-        GroundSampler ground)
+        GroundSampler ground,
+        IReadOnlyList<NavFlag>? navmesh = null)
     {
         _tables = tables;
         _bounds = bounds;
         _ground = ground;
+        _navmesh = navmesh;
         _byBound = new List<ZombieInstance>[bounds.Count];
         for (int i = 0; i < _byBound.Length; i++)
             _byBound[i] = new List<ZombieInstance>();
@@ -174,7 +192,9 @@ public sealed class ZombieSystem
         {
             Vector3 godotPoint = new(spawn.Point.X, spawn.Point.Y, -spawn.Point.Z);
             byte bound = LevelNavigationData.TryGetBound(_bounds, godotPoint);
-            if (bound != LevelNavigationData.NoBound)
+            // LevelZombies.load keeps a spawnpoint only when tryGetBounds AND checkNavigation
+            // pass — inside the expanded territory and the non-expanded navmesh box.
+            if (bound != LevelNavigationData.NoBound && CheckNavigation(godotPoint))
                 perBound[bound].Add(new ZombieSpawnpointData(spawn.Type, godotPoint));
         }
 
@@ -304,6 +324,9 @@ public sealed class ZombieSystem
         zombie.TargetPlayer = player.Id;
         zombie.LeaveDelay = 0f; // isLeaving = false
         zombie.Path = RollPath(zombie, player.Id);
+        zombie.RepathTimer = 0f; // fresh target: path on the next move
+        zombie.PathPoints.Clear();
+        zombie.PathIndex = 0;
         AdjustAgro(player.Id, +1);
         if (zombie.State is EZombieState.Idle or EZombieState.Return)
             zombie.State = EZombieState.Chase;
@@ -343,7 +366,7 @@ public sealed class ZombieSystem
                 break;
 
             case EZombieState.Return:
-                MoveTowards(zombie, zombie.LeaveTo, dt);
+                Seek(zombie, zombie.LeaveTo, dt);
                 if (HorizontalDistanceSquared(zombie.Position, zombie.LeaveTo) <= ArriveDistanceSquared)
                     zombie.State = EZombieState.Idle; // stop() — the zombie settles where it is
                 break;
@@ -403,7 +426,40 @@ public sealed class ZombieSystem
             var right = new Vector3(forward.Z, 0f, -forward.X);
             seekTarget += zombie.Path == EZombiePath.Left ? -right : right;
         }
-        MoveTowards(zombie, seekTarget, dt);
+        Seek(zombie, seekTarget, dt);
+    }
+
+    // The Seeker + FunnelModifier + LegacyAIPath port: recalculate the navmesh route every
+    // repathRate seconds, advance past waypoints within pickNextWaypointDist, and steer at the
+    // current waypoint. Without a navmesh (or with no route at all) this decays into the
+    // straight-line NonPathfinding seek, safety-netted by MoveResolver as before.
+    private void Seek(ZombieInstance zombie, Vector3 destination, float dt)
+    {
+        if (PathQuery == null)
+        {
+            MoveTowards(zombie, destination, dt);
+            return;
+        }
+
+        zombie.RepathTimer -= dt;
+        if (zombie.RepathTimer <= 0f)
+        {
+            zombie.RepathTimer = RepathRate;
+            zombie.PathPoints.Clear();
+            zombie.PathIndex = 0;
+            if (!PathQuery(zombie.Position, destination, zombie.PathPoints))
+                zombie.PathPoints.Clear();
+        }
+
+        while (zombie.PathIndex < zombie.PathPoints.Count
+            && HorizontalDistanceSquared(zombie.Position, zombie.PathPoints[zombie.PathIndex])
+                < PickNextWaypointDist * PickNextWaypointDist)
+            zombie.PathIndex++;
+
+        Vector3 target = zombie.PathIndex < zombie.PathPoints.Count
+            ? zombie.PathPoints[zombie.PathIndex]
+            : destination; // no (or exhausted) route: head straight for the destination
+        MoveTowards(zombie, target, dt);
     }
 
     private void LandHit(ZombieInstance zombie)
@@ -433,16 +489,28 @@ public sealed class ZombieSystem
             ? Vector3.Zero
             : (targetPosition - zombie.Position).Normalized() * 16f;
         Vector3 retreat = zombie.Position - away + Scatter();
-        if (LevelNavigationData.TryGetBound(_bounds, retreat) != zombie.Bound)
+        if (!CheckNavigation(retreat))
             retreat = zombie.Position + away + Scatter();
-        if (LevelNavigationData.TryGetBound(_bounds, retreat) != zombie.Bound)
+        if (!CheckNavigation(retreat))
             retreat = zombie.Position;
 
+        zombie.RepathTimer = 0f; // the retreat is a new destination
+        zombie.PathPoints.Clear();
+        zombie.PathIndex = 0;
         zombie.LeaveTo = retreat;
         zombie.LeaveDelay = quick
             ? 0.5f + (_random.NextSingle() * 0.5f)
             : 3f + (_random.NextSingle() * 3f);
         zombie.State = EZombieState.Idle;
+    }
+
+    // LevelNavigation.checkNavigation: the non-expanded navmesh boxes when the map ships them,
+    // otherwise fall back to the expanded territory bounds (maps without navigation data).
+    private bool CheckNavigation(Vector3 point)
+    {
+        if (_navmesh != null)
+            return LevelNavmesh.CheckNavigation(_navmesh, point);
+        return LevelNavigationData.TryGetBound(_bounds, point) != LevelNavigationData.NoBound;
     }
 
     private Vector3 Scatter() =>
