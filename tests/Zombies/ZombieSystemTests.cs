@@ -496,10 +496,10 @@ public class ZombieSystemTests
         // queries across ticks (MaxRepathsPerTick each) instead of one synchronous burst.
         var system = new ZombieSystem(new[] { Table() }, TwoBounds(), FlatGround);
         var points = new List<ZombieSpawnpointData>();
-        for (int i = 0; i < 20; i++)
-            points.Add(At(i % 5, i / 5));
+        for (int i = 0; i < 48; i++)
+            points.Add(At(i % 8, i / 8));
         system.Spawn(points, new Random(1));
-        Assert.Equal(5, system.Zombies.Count);
+        Assert.Equal(12, system.Zombies.Count);
         foreach (ZombieInstance z in system.Zombies)
             z.Yaw = 180f; // face away from +X so the sneak-behind rule hides nobody
 
@@ -513,14 +513,12 @@ public class ZombieSystemTests
 
         var player = new[] { Player(1, new Vector3(8, 5, 2), UnturnedGodot.Player.EPlayerStance.Sprint) };
         system.Tick(player, 0.1f); // one detect pass alerts the whole pack
-        int awake = system.Zombies.Count(z => z.State == EZombieState.Chase);
-        Assert.Equal(5, awake);
+        int awake = system.Zombies.Count(z => z.State is EZombieState.Chase or EZombieState.Attack);
+        Assert.Equal(12, awake);
         Assert.Equal(ZombieSystem.MaxRepathsPerTick, queries); // the burst is capped at the budget
 
         system.Tick(player, 0.1f);
-        Assert.Equal(ZombieSystem.MaxRepathsPerTick * 2, queries); // the queue drains...
-        system.Tick(player, 0.1f);
-        Assert.Equal(5, queries); // ...and every zombie has its route by the third tick
+        Assert.Equal(12, queries); // the queue drains: everyone routed by the second tick
     }
 
     [Fact]
@@ -867,6 +865,46 @@ public class ZombieSystemTests
         Assert.Equal(EZombieState.Attack, zombie.State);
         Assert.Equal(yaw, zombie.Yaw); // a zero direction never spins or NaNs the body
         Assert.False(float.IsNaN(zombie.Yaw));
+    }
+
+    [Fact]
+    public void TickWithNoZombies_IsANoOp()
+    {
+        var system = new ZombieSystem(new[] { Table() }, TwoBounds(), FlatGround);
+        system.Tick(new[] { Player(1, new Vector3(0, 5, 0)) }, 0.1f); // empty population: no work
+        Assert.Empty(system.Zombies);
+    }
+
+    [Fact]
+    public void RepathBudget_IsSharedFairlyAcrossAHorde()
+    {
+        // Twelve concurrent hunters, a per-tick query budget: the rotating iteration start must
+        // hand every zombie a fresh route within the official repath cadence — a fixed order let
+        // the first few monopolize the budget while the rest chased stale routes.
+        var system = new ZombieSystem(new[] { Table() }, TwoBounds(), FlatGround);
+        system.Spawn(Enumerable.Range(0, 48).Select(i => At((i % 8) * 2 - 8, (i / 8) * 2 - 4)).ToList(),
+            new Random(9));
+        Assert.Equal(12, system.Zombies.Count);
+        foreach (ZombieInstance z in system.Zombies)
+        {
+            z.Speciality = EZombieSpeciality.Normal;
+            z.Yaw = -90f;
+        }
+
+        var queriedFrom = new HashSet<(float, float)>();
+        system.PathQuery = (from, to, path) =>
+        {
+            queriedFrom.Add((from.X, from.Z));
+            path.Add(from);
+            path.Add(to);
+            return true;
+        };
+
+        var player = Player(1, new Vector3(10, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
+        // Two ticks: with a budget of 8/tick, all 12 hunters must have queried at least once.
+        system.Tick(new[] { player }, 0.1f);
+        system.Tick(new[] { player }, 0.1f);
+        Assert.True(queriedFrom.Count >= 12, $"only {queriedFrom.Count}/12 hunters ever got a route");
     }
 
     [Fact]
