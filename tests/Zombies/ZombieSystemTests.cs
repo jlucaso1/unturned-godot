@@ -804,6 +804,34 @@ public class ZombieSystemTests
     }
 
     [Fact]
+    public void GroundSnap_OverridesTheHeightfieldWithTheRealSurface()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        Vector3 sampledAt = default;
+        system.GroundSnap = (Vector3 position, out float y) =>
+        {
+            sampledAt = position; // receives the full position: stacked floors need the height
+            y = 9.25f;            // a sidewalk top, above the flat heightfield at 5
+            return true;
+        };
+
+        var player = Player(1, new Vector3(10, 5, 0));
+        system.Tick(new[] { player }, 0.1f);
+        Assert.Equal(9.25f, zombie.Position.Y);
+        Assert.NotEqual(default, sampledAt);
+
+        // When physics finds nothing (a hole), the sampler's own fallback decides; a false return
+        // keeps the previous height rather than teleporting anywhere.
+        system.GroundSnap = (Vector3 position, out float y) =>
+        {
+            y = 0f;
+            return false;
+        };
+        system.Tick(new[] { player }, 0.1f);
+        Assert.Equal(9.25f, zombie.Position.Y);
+    }
+
+    [Fact]
     public void Chase_WithoutGroundSample_KeepsHeight()
     {
         var system = new ZombieSystem(new[] { Table() },

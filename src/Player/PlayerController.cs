@@ -59,6 +59,11 @@ public partial class PlayerController : CharacterBody3D
     {
         _thirdPerson = StartThirdPerson;
 
+        // The body lives on layer 2 so the zombie brain's world queries (ground rays, vision rays,
+        // movement sweeps — all mask 1) never treat the player as static geometry; the body itself
+        // still collides against the layer-1 world via its mask.
+        CollisionLayer = 2;
+
         FloorMaxAngle = Mathf.DegToRad(PlayerConfig.MaxWalkableSlopeDegrees);
         FloorSnapLength = 0.5f;
         FloorStopOnSlope = true;

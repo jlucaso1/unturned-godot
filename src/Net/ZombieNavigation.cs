@@ -25,10 +25,36 @@ public sealed class ZombieNavigation
         return new ZombieNavigation(flags);
     }
 
+    // The navigation map syncs asynchronously over a few seconds after its regions appear; kicked
+    // off at the START of the world load, the sync finishes long before the player can aggro
+    // anything, so no zombie ever falls back to the straight-line seek.
+    private static ZombieNavigation? _preloaded;
+
+    public static void Preload(string levelDir)
+    {
+        if (_preloaded != null)
+            return;
+        List<NavFlag> flags = LevelNavmesh.Load(System.IO.Path.Combine(levelDir, "Environment"));
+        _preloaded = Build(flags);
+    }
+
+    public static ZombieNavigation? TakePreloaded()
+    {
+        ZombieNavigation? nav = _preloaded;
+        _preloaded = null;
+        return nav;
+    }
+
     private ZombieNavigation(IReadOnlyList<NavFlag> flags)
     {
         _map = NavigationServer3D.MapCreate();
         NavigationServer3D.MapSetActive(_map, true);
+        // The pre-baked mesh was recast at cellSize 0.1 (doorways and dense clutter produce edges
+        // that close together); the map's default 0.25 rasterization cell collapses distinct edges
+        // into the same cell and DROPS their connections — houses lost their doorway link and
+        // zombies pushed at windows. Match the map grid to the source data's resolution.
+        NavigationServer3D.MapSetCellSize(_map, 0.1f);
+        NavigationServer3D.MapSetCellHeight(_map, 0.1f);
 
         int triangles = 0;
         foreach (NavFlag flag in flags)

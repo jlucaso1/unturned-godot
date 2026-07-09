@@ -118,6 +118,11 @@ public delegate Vector3 ZombieMoveResolver(Vector3 from, Vector3 to, float radiu
 // to the straight-line seek when there is none. Null means no navmesh (maps without nav data).
 public delegate bool ZombiePathQuery(Vector3 from, Vector3 to, List<Vector3> path);
 
+// Samples the REAL walking surface near a position — object floors, sidewalks, stairs — the way a
+// CharacterController's grounding does, using the current height as the reference so stacked floors
+// resolve to the right one. Null falls back to the terrain heightfield alone.
+public delegate bool ZombieGroundSnap(Vector3 position, out float y);
+
 // The server-side zombie brain: spawning per ZombieManager.generateZombies, aggro per AlertTool,
 // hunting per Zombie.cs (approach paths, 64 m give-up, leave retreats, swing cadence). Movement is
 // Unturned's NonPathfindingZombieMovementComponent — straight-line seek, 720°/s turning, and the
@@ -158,6 +163,9 @@ public sealed class ZombieSystem
 
     // The Seeker's navmesh pathfinding, wired to the NavigationServer by the host (optional).
     public ZombiePathQuery? PathQuery;
+
+    // Real ground (object floors, sidewalks) via physics on the host; heightfield otherwise.
+    public ZombieGroundSnap? GroundSnap;
 
     // Fires when a zombie's swing lands (attackTime/2 after it starts): (zombie, player id, damage).
     public Action<ZombieInstance, byte, byte>? OnAttack;
@@ -571,8 +579,17 @@ public sealed class ZombieSystem
             next.Z = other.Position.Z + (dz / dist * minDist);
         }
 
-        if (_ground(next.X, next.Z, out float y))
+        // Ground: the real surface underfoot (sidewalks, house floors, stairs) when the host wires
+        // physics in; the bare terrain heightfield otherwise.
+        if (GroundSnap != null)
+        {
+            if (GroundSnap(next, out float gy))
+                next.Y = gy;
+        }
+        else if (_ground(next.X, next.Z, out float y))
+        {
             next.Y = y;
+        }
         zombie.Position = next;
     }
 
