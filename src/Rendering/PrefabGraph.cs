@@ -21,6 +21,45 @@ public readonly struct MeshPart
     }
 }
 
+public enum EColliderKind : byte { Box, Sphere, Capsule, Mesh }
+
+// One collider on a prefab GameObject: its Unity primitive parameters (or a collision-mesh id) and its pose
+// relative to the prefab root. Values stay in Unity space; the Unity->Godot flip and shape construction
+// happen when the collision body is built.
+public readonly struct ColliderPart
+{
+    public readonly EColliderKind Kind;
+    public readonly Transform3D LocalToRoot;
+    public readonly Vector3 Center; // Box/Sphere/Capsule, local to the collider
+    public readonly Vector3 Size;   // Box
+    public readonly float Radius;   // Sphere/Capsule
+    public readonly float Height;   // Capsule
+    public readonly int Direction;  // Capsule axis: 0=X, 1=Y, 2=Z
+    public readonly long MeshId;    // Mesh (collision mesh, distinct from the render Model_0)
+
+    private ColliderPart(EColliderKind kind, Transform3D localToRoot, Vector3 center, Vector3 size,
+        float radius, float height, int direction, long meshId)
+    {
+        Kind = kind;
+        LocalToRoot = localToRoot;
+        Center = center;
+        Size = size;
+        Radius = radius;
+        Height = height;
+        Direction = direction;
+        MeshId = meshId;
+    }
+
+    public static ColliderPart Box(Transform3D t, Vector3 center, Vector3 size)
+        => new(EColliderKind.Box, t, center, size, 0f, 0f, 0, 0);
+    public static ColliderPart Sphere(Transform3D t, Vector3 center, float radius)
+        => new(EColliderKind.Sphere, t, center, Vector3.Zero, radius, 0f, 0, 0);
+    public static ColliderPart Capsule(Transform3D t, Vector3 center, float radius, float height, int direction)
+        => new(EColliderKind.Capsule, t, center, Vector3.Zero, radius, height, direction, 0);
+    public static ColliderPart Mesh(Transform3D t, long meshId)
+        => new(EColliderKind.Mesh, t, Vector3.Zero, Vector3.Zero, 0f, 0f, 0, meshId);
+}
+
 // Reads a masterbundle SerializedFile's prefab structure: every object by path id, the asset container,
 // and each prefab's LOD-0 renderable mesh parts grouped by key (objects/<folder> or trees/<folder>). This
 // is the shape ModelExtractor walks; material/texture resolution layers on top via MaterialResolver.
@@ -32,16 +71,19 @@ public sealed class PrefabGraph
     public IReadOnlyDictionary<string, long> ContainerByPath { get; }
     public string AssetPrefix { get; }
     public IReadOnlyDictionary<string, List<MeshPart>> PartsByKey { get; }
+    public IReadOnlyDictionary<string, List<ColliderPart>> CollidersByKey { get; }
 
     private PrefabGraph(SerializedFile file, Dictionary<long, SerializedObject> objectsByPathId,
         Dictionary<string, long> containerByPath, string assetPrefix,
-        Dictionary<string, List<MeshPart>> partsByKey)
+        Dictionary<string, List<MeshPart>> partsByKey,
+        Dictionary<string, List<ColliderPart>> collidersByKey)
     {
         File = file;
         ObjectsByPathId = objectsByPathId;
         ContainerByPath = containerByPath;
         AssetPrefix = assetPrefix;
         PartsByKey = partsByKey;
+        CollidersByKey = collidersByKey;
     }
 
     public static PrefabGraph Read(SerializedFile file)
@@ -56,8 +98,10 @@ public sealed class PrefabGraph
             out var localById);
         Dictionary<string, List<MeshPart>> partsByKey = MapObjectKeysToMeshes(
             file, objectsByPathId, pathByRootGo, goToTransform, transformFather, transformGo, localById);
+        Dictionary<string, List<ColliderPart>> collidersByKey = MapObjectKeysToColliders(
+            file, objectsByPathId, pathByRootGo, goToTransform, transformFather, transformGo, localById);
 
-        return new PrefabGraph(file, objectsByPathId, containerByPath, assetPrefix, partsByKey);
+        return new PrefabGraph(file, objectsByPathId, containerByPath, assetPrefix, partsByKey, collidersByKey);
     }
 
     private static Dictionary<string, long> ReadContainer(SerializedFile file, out string assetPrefix,
@@ -186,6 +230,73 @@ public sealed class PrefabGraph
                 ? parts
                 : new List<MeshPart> { kv.Value };
         return result;
+    }
+
+    // Each prefab's collision colliders, keyed like PartsByKey. Colliders on the server-only navmesh ("Nav")
+    // or the editor placement blocker ("Block") are skipped — the player-blocking colliders sit on the
+    // object root (and "Door" children). Values are Unity-space; shape building happens later.
+    private static Dictionary<string, List<ColliderPart>> MapObjectKeysToColliders(SerializedFile file,
+        Dictionary<long, SerializedObject> objectsByPathId, Dictionary<long, string> pathByRootGo,
+        Dictionary<long, long> goToTransform, Dictionary<long, long> transformFather,
+        Dictionary<long, long> transformGo, Dictionary<long, Transform3D> localById)
+    {
+        var byKey = new Dictionary<string, List<ColliderPart>>();
+        var nameCache = new Dictionary<long, string>();
+
+        foreach (SerializedObject o in file.Objects)
+        {
+            EColliderKind kind;
+            switch (o.ClassId)
+            {
+                case 65: kind = EColliderKind.Box; break;     // BoxCollider
+                case 135: kind = EColliderKind.Sphere; break; // SphereCollider
+                case 136: kind = EColliderKind.Capsule; break; // CapsuleCollider
+                case 64: kind = EColliderKind.Mesh; break;    // MeshCollider
+                default: continue;
+            }
+
+            Dictionary<string, object> c = TypeTreeReader.Read(o.TypeTree, file.ReaderFor(o));
+            long goId = PathId((Dictionary<string, object>)c["m_GameObject"]);
+            if (GameObjectName(file, objectsByPathId, nameCache, goId) is "Nav" or "Block")
+                continue;
+            if (!goToTransform.TryGetValue(goId, out long tId))
+                continue;
+
+            // Walk up to the prefab root, composing each level's local pose (not the root's — that is the
+            // world placement).
+            Transform3D localToRoot = Transform3D.Identity;
+            long cur = tId;
+            while (transformFather.TryGetValue(cur, out long father) && father != 0)
+            {
+                if (localById.TryGetValue(cur, out Transform3D local))
+                    localToRoot = local * localToRoot;
+                cur = father;
+            }
+            if (!transformGo.TryGetValue(cur, out long rootGo) || !pathByRootGo.TryGetValue(rootGo, out string? path))
+                continue;
+
+            string key = PrefabKey(path);
+            if (!byKey.TryGetValue(key, out List<ColliderPart>? list))
+                byKey[key] = list = new List<ColliderPart>();
+            list.Add(ReadCollider(kind, c, localToRoot));
+        }
+        return byKey;
+    }
+
+    private static ColliderPart ReadCollider(EColliderKind kind, Dictionary<string, object> c, Transform3D t)
+        => kind switch
+        {
+            EColliderKind.Box => ColliderPart.Box(t, Vec(c["m_Center"]), Vec(c["m_Size"])),
+            EColliderKind.Sphere => ColliderPart.Sphere(t, Vec(c["m_Center"]), F(c["m_Radius"])),
+            EColliderKind.Capsule => ColliderPart.Capsule(t, Vec(c["m_Center"]), F(c["m_Radius"]),
+                F(c["m_Height"]), Convert.ToInt32(c["m_Direction"])),
+            _ => ColliderPart.Mesh(t, PathId((Dictionary<string, object>)c["m_Mesh"])),
+        };
+
+    private static Vector3 Vec(object value)
+    {
+        var d = (Dictionary<string, object>)value;
+        return new Vector3(F(d["x"]), F(d["y"]), F(d["z"]));
     }
 
     // The material path ids on the GameObject's MeshRenderer, in submesh order.
