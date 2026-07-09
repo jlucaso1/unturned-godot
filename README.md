@@ -102,7 +102,10 @@ Two benchmark tiers print a JSON report and diff it against the previous run:
   `heaptrack_print /tmp/ht.zst` for the peak/leaked totals. The shipped Godot binary is stripped, so
   call stacks don't symbolicate — read `/proc/<pid>/smaps_rollup` (RSS, `Private_Dirty`) for a live
   breakdown, and attribute per-subsystem by differencing runs rather than by stack.
-- **CPU** (.NET): `dotnet-trace collect -- "$GODOT" -- --benchmark`.
+- **CPU** (.NET): `dotnet-trace collect -- "$GODOT" -- --benchmark`. (Godot's built-in script profiler
+  covers GDScript only — it does not see C#.)
+- **GPU per render pass**: add `--gpu-profile` to any run (works in release builds) — prints each pass's
+  GPU time (shadows, depth prepass, opaque, sky, transparent, tonemap) to stdout every frame.
 - **No window** (Wayland/X): wrap a GPU run in a headless nested compositor so nothing shows on your
   desktop — `gamescope --backend headless -W 1152 -H 648 -- "$GODOT" -- --benchmark --gpu`. Real Vulkan,
   screenshots and VRAM all work; frame time is vsync-capped under it, so use a normal window for
