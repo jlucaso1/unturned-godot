@@ -99,22 +99,21 @@ public partial class PauseMenu : CanvasLayer
         Input.MouseMode = Input.MouseModeEnum.Captured;
     }
 
-    // Minecraft-style: the running singleplayer becomes a LAN server (loopback + UDP composite).
+    // Minecraft-style: the always-on local session simply gains a UDP listener.
     private void OpenToLan()
     {
-        if (Network == null)
+        if (Network == null || !Network.IsHosting)
         {
             _status.Text = "Networking is unavailable in this mode.";
             return;
         }
-        if (Network.IsActive)
+        if (Network.IsLanOpen)
         {
-            _status.Text = "A network session is already active.";
+            _status.Text = "Already open to LAN.";
             return;
         }
 
-        string hostName = OS.GetEnvironment("PLAYER_NAME") is { Length: > 0 } pn ? pn : "Host";
-        if (Network.StartListenServer(NetworkManager.DefaultPort, hostName))
+        if (Network.OpenToLan(NetworkManager.DefaultPort))
         {
             _lanButton.Disabled = true;
             _status.Text = $"Open to LAN on UDP port {NetworkManager.DefaultPort}.";

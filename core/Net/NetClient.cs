@@ -50,6 +50,10 @@ public sealed class NetClient
     private readonly Dictionary<byte, RemotePlayer> _remotes = new();
 
     public byte PlayerId { get; private set; }
+
+    // Extension seam: message types this client doesn't handle (future replicated systems) land here
+    // instead of being dropped, so a feature module can subscribe without editing NetClient.
+    public Action<byte[]>? OnUnhandledMessage;
     public bool Joined { get; private set; }
     public PlayerSnapshotState LocalServerState { get; private set; }
     public IReadOnlyDictionary<byte, RemotePlayer> Remotes => _remotes;
@@ -101,6 +105,9 @@ public sealed class NetClient
     {
         switch (NetMessages.TypeOf(payload))
         {
+            default:
+                OnUnhandledMessage?.Invoke(payload);
+                break;
             case ENetMessage.Welcome:
                 {
                     (byte id, _, List<PlayerListing> players) = NetMessages.ReadWelcome(payload);

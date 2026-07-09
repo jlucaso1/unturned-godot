@@ -16,12 +16,14 @@ public partial class NetworkManager : Node
     public const ushort DefaultPort = 27015;
 
     private NetServer? _server;
-    private IServerTransport? _serverTransport;
+    private CompositeServerTransport? _serverTransport;
     private NetClient? _client;
     private IClientTransport? _clientTransport;
 
     public NetClient? Client => _client;
+    public NetServer? Server => _server; // extension seam owner: future systems hook OnTick/Broadcast
     public bool IsHosting => _server != null;
+    public bool IsLanOpen { get; private set; }
     public bool IsActive => _client != null || _server != null;
 
     private GroundSampler _ground = FlatFallback;
@@ -41,29 +43,37 @@ public partial class NetworkManager : Node
         _ground = (float x, float z, out float y) => heights.TrySampleHeight(x, -z, out y);
     }
 
-    // Minecraft-style "open to LAN": the running singleplayer becomes a server without a restart.
-    public bool StartListenServer(ushort port, string hostName)
+    // The always-on session, Unturned's Provider shape: singleplayer IS a loopback server with the local
+    // player as its first client. Every gameplay feature is then written once as server logic +
+    // replication and works identically solo, LAN and dedicated.
+    public void StartSingleplayer(string hostName)
     {
         if (IsActive)
+            return;
+        var loopback = new LoopbackServerTransport();
+        _serverTransport = new CompositeServerTransport(loopback);
+        _server = new NetServer(_serverTransport, new ServerSimulation(new HeightfieldMoveSolver(_ground)), _spawn);
+        _clientTransport = loopback.CreateClient();
+        _client = new NetClient(_clientTransport, hostName);
+        GD.Print($"[net] local session up; '{hostName}' joined via loopback");
+    }
+
+    // Minecraft-style "open to LAN": attach a UDP listener to the ALREADY-RUNNING local server.
+    public bool OpenToLan(ushort port)
+    {
+        if (_server == null || _serverTransport == null || IsLanOpen)
             return false;
-        UdpServerTransport udp;
         try
         {
-            udp = new UdpServerTransport(port);
+            _serverTransport.Add(new UdpServerTransport(port));
         }
         catch (System.Net.Sockets.SocketException e)
         {
             GD.PushWarning($"[net] failed to bind UDP port {port}: {e.Message}");
             return false;
         }
-
-        var loopback = new LoopbackServerTransport();
-        _serverTransport = new CompositeServerTransport(loopback, udp);
-        _server = new NetServer(_serverTransport, new ServerSimulation(new HeightfieldMoveSolver(_ground)), _spawn);
-
-        _clientTransport = loopback.CreateClient();
-        _client = new NetClient(_clientTransport, hostName);
-        GD.Print($"[net] listen server on UDP {port}; host '{hostName}' joined via loopback");
+        IsLanOpen = true;
+        GD.Print($"[net] open to LAN on UDP {port}");
         return true;
     }
 

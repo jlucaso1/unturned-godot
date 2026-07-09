@@ -27,6 +27,10 @@ public sealed class NetServer
 
     public int PlayerCount { get; private set; }
 
+    // Extension seam for future replicated systems (zombies, resources, doors): hook the fixed tick to
+    // run server logic and use Broadcast to ship your own ENetMessage — no NetServer edits required.
+    public Action<uint>? OnTick;
+
     public NetServer(IServerTransport transport, ServerSimulation simulation, Vector3 spawnPosition)
     {
         _transport = transport;
@@ -61,6 +65,7 @@ public sealed class NetServer
             List<PlayerSnapshotState> states = _simulation.Step();
             if (states.Count > 0)
                 Broadcast(NetMessages.WriteStateUpdate(_simulation.Tick, states), ESendType.Unreliable);
+            OnTick?.Invoke(_simulation.Tick);
             _nextTick += ServerSimulation.TickRate;
         }
     }
@@ -132,7 +137,7 @@ public sealed class NetServer
         Broadcast(NetMessages.WritePlayerLeft(session.PlayerId), ESendType.Reliable);
     }
 
-    private void Broadcast(byte[] payload, ESendType sendType)
+    public void Broadcast(byte[] payload, ESendType sendType)
     {
         foreach ((ITransportConnection conn, Session session) in _sessions)
             if (session.Joined)

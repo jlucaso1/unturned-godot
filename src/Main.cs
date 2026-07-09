@@ -254,27 +254,31 @@ public partial class Main : Node3D
         };
         AddChild(player);
 
-        // OPEN_LAN=1 hosts immediately; OPEN_LAN_AFTER=seconds hosts later mid-game — the exact timing
-        // of a player pressing the pause-menu button after already moving around (e2e scripts use both).
-        if (OS.GetEnvironment("OPEN_LAN") == "1")
-            network.StartListenServer(NetworkManager.DefaultPort,
-                OS.GetEnvironment("PLAYER_NAME") is { Length: > 0 } hn ? hn : "Host");
-        else if (OS.GetEnvironment("OPEN_LAN_AFTER") is { Length: > 0 } delay)
-            GetTree().CreateTimer(delay.ToFloat()).Timeout += () =>
-            {
-                network.StartListenServer(NetworkManager.DefaultPort,
-                    OS.GetEnvironment("PLAYER_NAME") is { Length: > 0 } hn2 ? hn2 : "Host");
-                AttachSession(network, player, unturnedPath);
-            };
+        string playerName = OS.GetEnvironment("PLAYER_NAME") is { Length: > 0 } pn ? pn : "Player";
 
-        // Connect from the main menu, or JOIN=host[:port] from the environment.
+        // Connect from the main menu (or JOIN=host[:port]) joins someone else's server; otherwise the
+        // always-on local session starts — singleplayer IS a loopback server (Unturned's Provider shape),
+        // so every gameplay feature is written once as server logic + replication and works identically
+        // solo, LAN and dedicated. Solo cost is microseconds per tick: one in-memory queue exchange and a
+        // one-player simulation step; the lone StateUpdate doubles as the self-healing keepalive.
         if (_pendingJoin is { Length: > 0 } join)
         {
             string[] parts = join.Split(':');
             network.JoinServer(parts[0],
                 parts.Length > 1 && ushort.TryParse(parts[1], out ushort p) ? p : NetworkManager.DefaultPort,
-                OS.GetEnvironment("PLAYER_NAME") is { Length: > 0 } pn ? pn : "Player");
+                playerName);
         }
+        else
+        {
+            network.StartSingleplayer(playerName);
+        }
+
+        // OPEN_LAN=1 opens the UDP listener immediately; OPEN_LAN_AFTER=seconds opens it mid-game — the
+        // timing of a player pressing the pause-menu button after already moving (e2e scripts use both).
+        if (OS.GetEnvironment("OPEN_LAN") == "1")
+            network.OpenToLan(NetworkManager.DefaultPort);
+        else if (OS.GetEnvironment("OPEN_LAN_AFTER") is { Length: > 0 } delay)
+            GetTree().CreateTimer(delay.ToFloat()).Timeout += () => network.OpenToLan(NetworkManager.DefaultPort);
         AttachSession(network, player, unturnedPath);
 
         if (DisplayServer.GetName() != "headless")
