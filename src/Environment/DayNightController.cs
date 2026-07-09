@@ -26,9 +26,9 @@ public partial class DayNightController : Node
 
     private const float DefaultAzimuth = 281.74f;
 
-    // Unturned's exponential-squared fog is far lighter than Godot's per-metre exponential fog reads at
-    // the same coefficient; this factor matches the on-screen haze depth to Unturned across the map.
-    private const float FogDensityScale = 2f;
+    // Where the Exp2->exponential fog conversion is opacity-matched (LightingCycle.GodotFogDensity): the
+    // default camera far plane, i.e. the horizon — the distance where haze depth is most visible.
+    private const float FogCalibrationDistance = 4000f;
 
     private LevelLighting? _lighting;
     private DirectionalLight3D _sun = null!;
@@ -144,15 +144,14 @@ public partial class DayNightController : Node
         _sky.GroundHorizonColor = k.SkyHorizon;
         _sky.GroundBottomColor = k.SkyGround;
 
-        // Godot has no trilight ambient, so average Unturned's sky/equator/ground into one flat color.
-        _env.AmbientLightColor = new Color(
-            (k.AmbientSky.R + k.AmbientEquator.R + k.AmbientGround.R) / 3f,
-            (k.AmbientSky.G + k.AmbientEquator.G + k.AmbientGround.G) / 3f,
-            (k.AmbientSky.B + k.AmbientEquator.B + k.AmbientGround.B) / 3f);
+        // Godot has no trilight ambient; use the upper-hemisphere solid-angle average of Unturned's
+        // trilight (see LightingCycle.FlatAmbient) so up-facing surfaces keep the warm sky bounce.
+        _env.AmbientLightColor = LightingCycle.FlatAmbient(k.AmbientSky, k.AmbientEquator);
 
-        // Fog fades the distance into the horizon haze. Unturned: RenderSettings.fogDensity = FOG^3 * 0.025.
+        // Fog fades the distance into the horizon haze, opacity-matched to Unturned's Exp2 fog at the
+        // calibration distance (see LightingCycle.GodotFogDensity for the derivation).
         _env.FogLightColor = k.Fog;
-        _env.FogDensity = Mathf.Pow(k.FogDensity, 3f) * 0.025f * FogDensityScale;
+        _env.FogDensity = LightingCycle.GodotFogDensity(k.FogDensity, FogCalibrationDistance);
 
         if (_water != null)
             _water.AlbedoColor = new Color(k.Sea.R, k.Sea.G, k.Sea.B, _water.AlbedoColor.A);

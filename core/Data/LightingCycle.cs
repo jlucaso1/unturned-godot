@@ -41,6 +41,28 @@ public static class LightingCycle
             ? time / bias * 180f
             : 180f + ((time - bias) / (1f - bias) * 180f);
 
+    // Unturned sets RenderSettings.fogDensity = FOG^3 * 0.025 (LevelLighting.updateLighting) and leaves
+    // Unity on its default Exponential-Squared fog: opacity(z) = 1 - exp(-(d*z)^2). Godot's exponential
+    // fog computes opacity(z) = 1 - exp(-D*z) — a different curve, so no single density reproduces Exp2 at
+    // every distance. Matching the opacities at a calibration distance gives D = d^2 * zRef exactly:
+    // 1 - exp(-D*zRef) = 1 - exp(-(d*zRef)^2)  =>  D*zRef = d^2*zRef^2  =>  D = d^2*zRef.
+    // Calibrated at the horizon (the far plane), the haze depth matches Unturned's exactly there; between,
+    // Godot's linear curve is slightly denser than Unity's quadratic one — the closest single-parameter fit.
+    public static float GodotFogDensity(float fogSetting, float calibrationDistance)
+    {
+        float unityDensity = fogSetting * fogSetting * fogSetting * 0.025f;
+        return unityDensity * unityDensity * calibrationDistance;
+    }
+
+    // Unity's trilight ambient lights each surface by its normal: up-facing gets the sky color, horizontal
+    // the equator color, down-facing the ground color (a hemisphere blend). Godot's flat ambient has no
+    // normal term, so translate by the solid-angle average of the trilight over the UPPER hemisphere —
+    // integrating lerp(equator, sky, cos(theta)) over the hemisphere gives exactly (sky + equator) / 2.
+    // Up-facing surfaces (terrain, roads — the bulk of every frame) keep the warm sky bounce this way;
+    // walls sit half a step off, and rarely-seen down-facing surfaces lose the ground color entirely.
+    public static Color FlatAmbient(Color sky, Color equator)
+        => new((sky.R + equator.R) / 2f, (sky.G + equator.G) / 2f, (sky.B + equator.B) / 2f);
+
     // The fully blended lighting state at a moment of the cycle (updateLighting's Color.Lerp block).
     public static LightingKeyframe Evaluate(System.Collections.Generic.IReadOnlyList<LightingKeyframe> times,
         float time, float bias, float fade)

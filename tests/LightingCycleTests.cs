@@ -87,4 +87,53 @@ public class LightingCycleTests
         Assert.Equal(0.5f, k.FogDensity, 4);
         Assert.Equal(0.5f, k.Shadows, 4);
     }
+
+    // The defining property of the Exp2->exponential conversion: at the calibration distance, Godot's
+    // exponential fog opacity (1 - e^(-D*z)) equals Unity's Exp2 opacity (1 - e^(-(d*z)^2)) for the same
+    // authored FOG setting. Uses PEI's real midday FOG density (0.1467) plus a denser synthetic case.
+    [Theory]
+    [InlineData(0.1467f, 4000f)] // PEI midday, horizon-calibrated
+    [InlineData(0.5f, 4000f)]
+    [InlineData(0.1467f, 1000f)]
+    public void GodotFogDensity_MatchesUnityExp2OpacityAtCalibrationDistance(float fog, float zRef)
+    {
+        float unityDensity = fog * fog * fog * 0.025f;
+        double unityOpacity = 1.0 - System.Math.Exp(-System.Math.Pow(unityDensity * zRef, 2));
+
+        float godotDensity = LightingCycle.GodotFogDensity(fog, zRef);
+        double godotOpacity = 1.0 - System.Math.Exp(-(double)godotDensity * zRef);
+
+        Assert.Equal(unityOpacity, godotOpacity, 6);
+    }
+
+    // The upper-hemisphere solid-angle average of Unity's trilight: integrating lerp(equator, sky,
+    // cos(theta)) over the hemisphere gives (sky + equator) / 2 exactly — verified here against a
+    // numerical integration of the trilight itself, so the closed form can't silently drift.
+    [Fact]
+    public void FlatAmbient_EqualsHemisphereIntegralOfTrilight()
+    {
+        var sky = new Color(0.8f, 0.627f, 0.388f);      // PEI midday ambient sky
+        var equator = new Color(0.722f, 0.62f, 0.467f); // PEI midday ambient equator
+
+        // Numerical solid-angle integral over the upper hemisphere: weight sin(theta), blend cos(theta).
+        double num = 0, den = 0;
+        for (int i = 0; i < 10000; i++)
+        {
+            double theta = (i + 0.5) / 10000.0 * (System.Math.PI / 2.0);
+            double w = System.Math.Sin(theta);
+            num += w * System.Math.Cos(theta);
+            den += w;
+        }
+        float blend = (float)(num / den); // = 0.5 analytically
+
+        Color expected = new(
+            equator.R + ((sky.R - equator.R) * blend),
+            equator.G + ((sky.G - equator.G) * blend),
+            equator.B + ((sky.B - equator.B) * blend));
+        Color got = LightingCycle.FlatAmbient(sky, equator);
+
+        Assert.Equal(expected.R, got.R, 3);
+        Assert.Equal(expected.G, got.G, 3);
+        Assert.Equal(expected.B, got.B, 3);
+    }
 }
