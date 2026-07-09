@@ -28,6 +28,19 @@ public static class UnityMath
     public static Quaternion UnityToGodotRotation(Quaternion unity) =>
         new(-unity.X, -unity.Y, unity.Z, unity.W);
 
+    // A whole Unity-space transform reflected into Godot space by F = diag(1,1,-1): F*M*F. The origin's Z
+    // flips; the basis reflects (each column's Z component flips, and the Z column's X/Y flip). Used to place
+    // object colliders, whose pose comes as a composed Unity transform rather than raw TRS.
+    public static Transform3D ReflectZ(Transform3D m)
+    {
+        Basis b = m.Basis;
+        var basis = new Basis(
+            new Vector3(b.X.X, b.X.Y, -b.X.Z),
+            new Vector3(b.Y.X, b.Y.Y, -b.Y.Z),
+            new Vector3(-b.Z.X, -b.Z.Y, b.Z.Z));
+        return new Transform3D(basis, new Vector3(m.Origin.X, m.Origin.Y, -m.Origin.Z));
+    }
+
     // A Unity local transform (position/rotation/scale) converted to Godot space by the Z-mirror F: the
     // position's Z flips, the rotation is conjugated by F, and scale is unchanged. Scale multiplies the
     // rotated columns (Unity's R*S order). This is the F*M*F reflection expressed via TRS, and is how bone

@@ -84,6 +84,39 @@ public class UnityMathTests
     }
 
     [Fact]
+    public void ReflectZ_MatchesLocalToGodot_ForATRS()
+    {
+        var pos = new Vector3(1, 2, 3);
+        var rot = new Quaternion(0.1f, 0.2f, 0.3f, 0.9273f).Normalized();
+        var scale = new Vector3(2, 3, 4);
+        var b = new Basis(rot);
+        var trs = new Transform3D(new Basis(b.X * scale.X, b.Y * scale.Y, b.Z * scale.Z), pos);
+
+        Transform3D reflected = UnityMath.ReflectZ(trs);
+        Transform3D expected = UnityMath.LocalToGodot(pos, rot, scale); // the raw-TRS path
+
+        Assert.True((reflected.Origin - expected.Origin).Length() < 1e-4f);
+        Assert.True((reflected.Basis.X - expected.Basis.X).Length() < 1e-4f);
+        Assert.True((reflected.Basis.Y - expected.Basis.Y).Length() < 1e-4f);
+        Assert.True((reflected.Basis.Z - expected.Basis.Z).Length() < 1e-4f);
+    }
+
+    [Fact]
+    public void ReflectZ_CommutesWithPointReflection()
+    {
+        // ReflectZ(M) applied to a Z-mirrored point equals the Z-mirror of M applied to the point.
+        var m = new Transform3D(new Basis(new Quaternion(new Vector3(1, 1, 0).Normalized(), 0.7f)),
+            new Vector3(5, -2, 7));
+        var v = new Vector3(3, -1, 4);
+
+        Vector3 lhs = UnityMath.ReflectZ(m) * new Vector3(v.X, v.Y, -v.Z);
+        Vector3 mv = m * v;
+        var rhs = new Vector3(mv.X, mv.Y, -mv.Z);
+
+        Assert.True((lhs - rhs).Length() < 1e-4f, $"{lhs} vs {rhs}");
+    }
+
+    [Fact]
     public void ComputeTransform_AppliesScaleTranslationRotation()
     {
         var obj = new PlacedObject(

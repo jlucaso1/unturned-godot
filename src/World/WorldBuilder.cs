@@ -133,11 +133,12 @@ public static class WorldBuilder
 
         var registry = new TextureRegistry(textureCacheDir);
         var meshLibrary = ModelLibrary.Load(cacheDir, registry);
+        var colliderLibrary = ColliderLibrary.Load(cacheDir);
 
         ObjectAssetDatabase db = dbTask.Result; // the scan ran concurrently with ModelLibrary.Load above
         int withMesh = 0;
         Node3D objectsRoot = objects.Count > 0
-            ? ObjectsBuilder.Build(objects, db, meshLibrary, out withMesh)
+            ? ObjectsBuilder.Build(objects, db, meshLibrary, colliderLibrary, out withMesh)
             : new Node3D { Name = "Objects" };
 
         Node3D foliageRoot = FoliageBuilder.Build(foliageData, meshLibrary);
