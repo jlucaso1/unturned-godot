@@ -523,6 +523,31 @@ public class ZombieSystemTests
     }
 
     [Fact]
+    public void PartialRoute_HoldsAtItsEndInsteadOfBeeliningThroughWalls()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        // The target is unreachable (a raised porch): the navmesh route ends at the doorway,
+        // 5 m short of the player. The zombie must hold at the route's end — walking straight at
+        // the raw destination from there means pushing into the wall.
+        var doorway = new Vector3(5, 5, 0);
+        system.PathQuery = (from, to, path) =>
+        {
+            path.Add(from);
+            path.Add(doorway);
+            return true;
+        };
+
+        var player = Player(1, new Vector3(10, 5, 0));
+        for (int i = 0; i < 40; i++)
+            system.Tick(new[] { player }, 0.1f);
+
+        Assert.Equal(EZombieState.Chase, zombie.State); // never in attack range
+        Assert.True(zombie.Position.X <= doorway.X + 0.05f,
+            $"beelined past the route's end: {zombie.Position}");
+        Assert.True(zombie.Position.X > 4f, "never reached the route's end");
+    }
+
+    [Fact]
     public void PathQuery_WithNoRoute_FallsBackToTheStraightSeek()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);

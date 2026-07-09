@@ -467,9 +467,23 @@ public sealed class ZombieSystem
                 < PickNextWaypointDist * PickNextWaypointDist)
             zombie.PathIndex++;
 
-        Vector3 target = zombie.PathIndex < zombie.PathPoints.Count
-            ? zombie.PathPoints[zombie.PathIndex]
-            : destination; // no (or exhausted) route: head straight for the destination
+        Vector3 target;
+        if (zombie.PathIndex < zombie.PathPoints.Count)
+        {
+            target = zombie.PathPoints[zombie.PathIndex];
+        }
+        else if (zombie.PathPoints.Count > 0)
+        {
+            // A route existed but is exhausted. A PARTIAL route (an unreachable target: a raised
+            // porch, the far side of a wall the destination snap crossed) ends at the closest
+            // reachable point — hold there like the original's end-of-path, instead of decaying
+            // into a straight beeline through the wall.
+            target = zombie.PathPoints[^1];
+        }
+        else
+        {
+            target = destination; // no route at all: the straight-line NonPathfinding seek
+        }
         MoveTowards(zombie, target, dt);
     }
 
