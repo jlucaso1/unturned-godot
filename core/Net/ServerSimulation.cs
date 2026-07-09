@@ -174,7 +174,7 @@ public sealed class ServerSimulation
 
             states.Add(new PlayerSnapshotState(id, entry.State.Position,
                 NetAngles.QuantizePitch(entry.State.Pitch), NetAngles.QuantizeYaw(entry.State.Yaw),
-                entry.State.Stance, entry.State.Moving));
+                entry.State.Stance, entry.State.Moving, entry.State.Grounded));
         }
         return states;
     }
@@ -189,6 +189,7 @@ public sealed class ServerSimulation
         entry.State.Pitch = NetAngles.DequantizePitch(input.Pitch);
         entry.State.Stance = input.Stance;
         entry.State.Moving = input.InputX != 0 || input.InputY != 0;
+        entry.State.Grounded = input.Grounded; // the owner's real IsOnFloor (trusted like the position)
 
         if (!entry.HasVerifiedPosition)
         {
