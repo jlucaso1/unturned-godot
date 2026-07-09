@@ -340,7 +340,8 @@ public static class ModelExtractor
                 for (int si = 0; si < mesh.Submeshes.Count; si++)
                 {
                     (Color color, string texKey, UnityMaterial.Blend blend, long texId,
-                        float metallic, float smoothness) = materials.Resolve(si, palette, part.Materials);
+                        float metallic, float smoothness, EShaderCull cull) =
+                        materials.Resolve(si, palette, part.Materials);
                     if (neededTextures != null && texId != 0 && !neededTextures.ContainsKey(texId) &&
                         graph.ObjectsByPathId.TryGetValue(texId, out SerializedObject? texObj))
                         neededTextures[texId] = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, file.ReaderFor(texObj)));
@@ -349,7 +350,7 @@ public static class ModelExtractor
                     var indices = new int[src.Length];
                     for (int k = 0; k < src.Length; k++)
                         indices[k] = src[k] + baseVertex;
-                    submeshes.Add(new CachedSubmesh(indices, color, texKey, blend, metallic, smoothness));
+                    submeshes.Add(new CachedSubmesh(indices, color, texKey, blend, metallic, smoothness, cull));
                 }
             }
 
@@ -453,7 +454,8 @@ public static class ModelExtractor
             // Standard shader's _Mode (GetBlendMode would misread them as opaque and break the grass cards).
             var submeshes = new List<CachedSubmesh>();
             foreach (int[] src in mesh.Submeshes)
-                submeshes.Add(new CachedSubmesh((int[])src.Clone(), color, texKey, UnityMaterial.Blend.Cutout));
+                submeshes.Add(new CachedSubmesh((int[])src.Clone(), color, texKey, UnityMaterial.Blend.Cutout,
+                    cull: EShaderCull.TwoSided)); // the Grass/Leaves shader family authors Cull Off
 
             using var stream = File.Create(outPath);
             MeshCache.Write(stream, mesh.Vertices, normals, uvs, submeshes);

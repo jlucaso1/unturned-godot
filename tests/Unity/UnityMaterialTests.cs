@@ -92,6 +92,19 @@ public class UnityMaterialTests
     }
 
     [Fact]
+    public void GetShader_FoundAndMissing()
+    {
+        var mat = new Dictionary<string, object>
+        {
+            ["m_Shader"] = new Dictionary<string, object> { ["m_FileID"] = 0, ["m_PathID"] = 42L },
+        };
+        Assert.Equal((0, 42L), UnityMaterial.GetShader(mat));
+        Assert.Equal((0, 0L), UnityMaterial.GetShader(new Dictionary<string, object>()));
+        Assert.Equal((0, 0L), UnityMaterial.GetShader(
+            new Dictionary<string, object> { ["m_Shader"] = "not a pptr" }));
+    }
+
+    [Fact]
     public void GetTexture_Found()
     {
         var mat = Material(null, new List<object> { TexEntry("_MainTex", 0, 555) });

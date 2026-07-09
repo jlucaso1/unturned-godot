@@ -21,7 +21,7 @@ public static class RoadsBuilder
     {
         Code = """
         shader_type spatial;
-        render_mode cull_disabled;
+        render_mode cull_back; // Standard/Diffuse (the road shader) serializes Cull Back
         uniform bool paved = true;
         void fragment() {
             vec3 asphalt = vec3(0.11, 0.11, 0.12);
@@ -118,7 +118,9 @@ public static class RoadsBuilder
         {
             AlbedoTexture = texture,
             Roughness = 1f,
-            CullMode = BaseMaterial3D.CullModeEnum.Disabled, // seen from above; winding varies with curves
+            // Standard/Diffuse — the shader RoadMaterial instantiates — serializes Cull Back in the
+            // game data, and the RoadMesh port keeps the source winding, so back-face culling is exact.
+            CullMode = BaseMaterial3D.CullModeEnum.Back,
             // Roads are viewed at grazing angles; plain trilinear collapses to blurry mips ~10 m out.
             TextureFilter = BaseMaterial3D.TextureFilterEnum.LinearWithMipmapsAnisotropic,
         };

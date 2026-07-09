@@ -74,6 +74,15 @@ public static class UnityMaterial
         return Blend.Opaque;
     }
 
+    // The material's shader reference (top-level m_Shader PPtr): (0, pathId) for a shader serialized in
+    // the same file, a non-zero file id for external/built-in shaders (e.g. Unity's Standard).
+    public static (int fileId, long pathId) GetShader(Dictionary<string, object> material)
+    {
+        if (!material.TryGetValue("m_Shader", out object? sh) || sh is not Dictionary<string, object> pptr)
+            return (0, 0);
+        return (System.Convert.ToInt32(pptr["m_FileID"]), System.Convert.ToInt64(pptr["m_PathID"]));
+    }
+
     // The internal file id and path id of the texture bound to a property, (0, 0) when unset.
     public static (int fileId, long pathId) GetTexture(Dictionary<string, object> material, string property)
     {

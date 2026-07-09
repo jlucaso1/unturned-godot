@@ -52,7 +52,7 @@ public sealed class TextureRegistry
                     break;
                 case ShaderMaterial cutout: // the foliage-family cutout shader (ModelLibrary.CutoutShader)
                     if (filterMode == 0)
-                        cutout.Shader = ModelLibrary.CutoutNearest;
+                        cutout.Shader = ModelLibrary.CutoutAsNearest(cutout.Shader);
                     cutout.SetShaderParameter("albedo_texture", tex);
                     cutout.SetShaderParameter("has_texture", true);
                     break;

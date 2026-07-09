@@ -29,7 +29,7 @@ public static class ModelLibrary
         if (!Directory.Exists(cacheDir))
             return library;
 
-        var materials = new Dictionary<(string, Color, UnityMaterial.Blend, float, float), Material>();
+        var materials = new Dictionary<(string, Color, UnityMaterial.Blend, float, float, EShaderCull), Material>();
         int sinceYield = 0;
         foreach (string path in Directory.GetFiles(cacheDir, "*.mesh"))
         {
@@ -64,7 +64,7 @@ public static class ModelLibrary
         // Deduplicate materials across every mesh: submeshes sharing a texture key, color and blend share
         // one StandardMaterial3D (fewer material objects + GPU parameter buffers, fewer render-state
         // changes). Scoped to this load so nothing leaks between calls.
-        var materials = new Dictionary<(string, Color, UnityMaterial.Blend, float, float), Material>();
+        var materials = new Dictionary<(string, Color, UnityMaterial.Blend, float, float, EShaderCull), Material>();
         foreach (string path in Directory.GetFiles(cacheDir, "*.mesh"))
         {
             if (!Guid.TryParseExact(Path.GetFileNameWithoutExtension(path), "N", out Guid guid))
@@ -82,7 +82,7 @@ public static class ModelLibrary
 
     private static ArrayMesh? Build(Vector3[] verts, Vector3[] normals, Vector2[] uvs,
         List<CachedSubmesh> submeshes, TextureRegistry registry,
-        Dictionary<(string, Color, UnityMaterial.Blend, float, float), Material> materials)
+        Dictionary<(string, Color, UnityMaterial.Blend, float, float, EShaderCull), Material> materials)
     {
         if (verts.Length == 0 || submeshes.Count == 0)
             return null;
@@ -194,11 +194,11 @@ public static class ModelLibrary
     // deliberately up-bent foliage normals downward on every card's reverse side (dark inner blades). This
     // spatial shader undoes that flip, matching Unity's surface-shader behavior. Two variants only differ
     // in the sampler filter, mirroring the texture's own Unity filter mode.
-    private static Shader CutoutShader(string filterHint) => new()
+    private static Shader CutoutShader(string filterHint, string cullMode) => new()
     {
         Code = $$"""
         shader_type spatial;
-        render_mode cull_disabled, specular_disabled;
+        render_mode {{cullMode}}, specular_disabled;
         uniform vec4 tint : source_color = vec4(1.0);
         uniform sampler2D albedo_texture : source_color, {{filterHint}};
         uniform bool has_texture = false;
@@ -215,19 +215,47 @@ public static class ModelLibrary
         """,
     };
 
-    internal static readonly Shader CutoutLinear = CutoutShader("filter_linear_mipmap_anisotropic");
-    internal static readonly Shader CutoutNearest = CutoutShader("filter_nearest_mipmap");
+    // One shader per (filter, cull) combination, lazily built: the filter mirrors the texture's Unity
+    // filter mode and the cull is the material's shader-authored culling (EShaderCull).
+    private static readonly Dictionary<(bool Nearest, EShaderCull Cull), Shader> CutoutShaders = new();
+
+    internal static Shader CutoutVariant(bool nearest, EShaderCull cull)
+    {
+        var key = (nearest, cull);
+        if (CutoutShaders.TryGetValue(key, out Shader? shader))
+            return shader;
+        string filter = nearest ? "filter_nearest_mipmap" : "filter_linear_mipmap_anisotropic";
+        string mode = cull switch
+        {
+            EShaderCull.TwoSided => "cull_disabled",
+            EShaderCull.Front => "cull_front",
+            _ => "cull_back",
+        };
+        shader = CutoutShader(filter, mode);
+        CutoutShaders[key] = shader;
+        return shader;
+    }
+
+    // The nearest-filter twin of a cutout material's current shader, keeping its culling (used when the
+    // streamed texture turns out to be point-filtered).
+    internal static Shader CutoutAsNearest(Shader current)
+    {
+        foreach (((bool nearest, EShaderCull cull), Shader shader) in CutoutShaders)
+            if (!nearest && shader == current)
+                return CutoutVariant(nearest: true, cull);
+        return current; // already nearest (or unknown): keep as is
+    }
 
     private static Material MaterialFor(CachedSubmesh sm, TextureRegistry registry,
-        Dictionary<(string, Color, UnityMaterial.Blend, float, float), Material> cache)
+        Dictionary<(string, Color, UnityMaterial.Blend, float, float, EShaderCull), Material> cache)
     {
-        var key = (sm.TextureKey, sm.Color, sm.Blend, sm.Metallic, sm.Smoothness);
+        var key = (sm.TextureKey, sm.Color, sm.Blend, sm.Metallic, sm.Smoothness, sm.Cull);
         if (cache.TryGetValue(key, out Material? shared))
             return shared; // already built and registered under this texture key
 
         if (sm.Blend == UnityMaterial.Blend.Cutout)
         {
-            var foliage = new ShaderMaterial { Shader = CutoutLinear };
+            var foliage = new ShaderMaterial { Shader = CutoutVariant(nearest: false, sm.Cull) };
             foliage.SetShaderParameter("tint", sm.Color);
             registry.Register(sm.TextureKey, foliage);
             cache[key] = foliage;
@@ -247,9 +275,15 @@ public static class ModelLibrary
             SpecularMode = matte
                 ? BaseMaterial3D.SpecularModeEnum.Disabled
                 : BaseMaterial3D.SpecularModeEnum.SchlickGgx,
-            // Many object meshes (rocks, foliage) are single-sided shells; render both sides so they
-            // don't show culling holes up close.
-            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+            // The shader-authored culling, straight from the bundle data: the Standard family (nearly
+            // every prop) back-face culls exactly like the game; only foliage/card/flag shaders author
+            // Cull Off, and decal projectors author Cull Front.
+            CullMode = sm.Cull switch
+            {
+                EShaderCull.TwoSided => BaseMaterial3D.CullModeEnum.Disabled,
+                EShaderCull.Front => BaseMaterial3D.CullModeEnum.Front,
+                _ => BaseMaterial3D.CullModeEnum.Back,
+            },
             // Walls/roofs/roads seen at grazing angles blur into their mips without anisotropy.
             TextureFilter = BaseMaterial3D.TextureFilterEnum.LinearWithMipmapsAnisotropic,
         };

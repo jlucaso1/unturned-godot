@@ -18,9 +18,10 @@ public readonly struct CachedSubmesh
     public readonly UnityMaterial.Blend Blend; // opaque / cutout (alpha clip) / alpha blend
     public readonly float Metallic;            // Unity _Metallic (0..1)
     public readonly float Smoothness;          // Unity _Glossiness; Godot roughness = 1 - this
+    public readonly EShaderCull Cull;          // the material's shader-authored culling
 
     public CachedSubmesh(int[] indices, Color color, string textureKey, UnityMaterial.Blend blend,
-        float metallic = 0f, float smoothness = 0f)
+        float metallic = 0f, float smoothness = 0f, EShaderCull cull = EShaderCull.Back)
     {
         Indices = indices;
         Color = color;
@@ -28,6 +29,7 @@ public readonly struct CachedSubmesh
         Blend = blend;
         Metallic = metallic;
         Smoothness = smoothness;
+        Cull = cull;
     }
 }
 
@@ -35,7 +37,7 @@ public readonly struct CachedSubmesh
 // texture keys), so the 1.4 GB bundle is parsed once and runtime loads only the small meshes it needs.
 public static class MeshCache
 {
-    private const uint Magic = 0x354D4755; // "UGM5": authored normals now reflected by F (winding re-reversed)
+    private const uint Magic = 0x364D4755; // "UGM6": per-submesh shader culling added
 
     // True when the file starts with the current format magic; false for stale formats, short files or a
     // missing path. Cold-load detection uses this so a format bump re-extracts instead of crashing on Read.
@@ -78,6 +80,7 @@ public static class MeshCache
             w.Write((byte)sm.Blend);
             w.Write(sm.Metallic);
             w.Write(sm.Smoothness);
+            w.Write((byte)sm.Cull);
             w.Write(sm.Indices.Length);
             foreach (int i in sm.Indices)
                 w.Write(i);
@@ -119,9 +122,10 @@ public static class MeshCache
             var blend = (UnityMaterial.Blend)data[pos++];
             float metallic = ReadSingle(data, ref pos);
             float smoothness = ReadSingle(data, ref pos);
+            var cull = (EShaderCull)data[pos++];
             int indexCount = ReadInt32(data, ref pos);
             int[] indices = ReadIntArray(data, ref pos, indexCount);
-            submeshes.Add(new CachedSubmesh(indices, color, textureKey, blend, metallic, smoothness));
+            submeshes.Add(new CachedSubmesh(indices, color, textureKey, blend, metallic, smoothness, cull));
         }
 
         return (vertices, normals, uvs, submeshes);

@@ -17,7 +17,7 @@ public class MeshCacheTests
         var submeshes = new List<CachedSubmesh>
         {
             new(new[] { 0, 1, 2 }, new Color(0.5f, 0.4f, 0.3f, 1f), "abc", UnityMaterial.Blend.Opaque,
-                metallic: 0.8f, smoothness: 0.6f),
+                metallic: 0.8f, smoothness: 0.6f, cull: EShaderCull.TwoSided),
             new(new[] { 2, 1, 0 }, Colors.White, "", UnityMaterial.Blend.Alpha),
         };
 
@@ -36,10 +36,12 @@ public class MeshCacheTests
         Assert.Equal(UnityMaterial.Blend.Opaque, sm[0].Blend);
         Assert.Equal(0.8f, sm[0].Metallic);
         Assert.Equal(0.6f, sm[0].Smoothness);
+        Assert.Equal(EShaderCull.TwoSided, sm[0].Cull);
         Assert.Equal("", sm[1].TextureKey);
         Assert.Equal(UnityMaterial.Blend.Alpha, sm[1].Blend);
         Assert.Equal(0f, sm[1].Metallic);   // defaults: fully matte
         Assert.Equal(0f, sm[1].Smoothness);
+        Assert.Equal(EShaderCull.Back, sm[1].Cull); // default: the engine's back-face culling
     }
 
     [Fact]
