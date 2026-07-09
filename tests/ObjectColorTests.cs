@@ -19,6 +19,7 @@ public class ObjectColorTests
     [InlineData("Large")]
     [InlineData("NPC")]
     [InlineData("Decal")]
+    [InlineData("Resource")]
     [InlineData("Structure")] // -> Unknown
     public void DistinctColorPerType(string type)
     {

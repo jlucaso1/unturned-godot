@@ -54,9 +54,12 @@ public static class ObjectsBuilder
             withMesh += transforms.Count;
 
             // Only LARGE/MEDIUM objects block the player (SMALL objects have their collider stripped in
-            // Unturned); give each such GUID's instances the object's real colliders.
+            // Unturned). Resources (trees/rocks/bushes) have no such gate: ResourceSpawnpoint instantiates
+            // the Resource prefab with all of its colliders while the resource is alive — and at map load
+            // every resource is alive. (Bushes pass through because their prefab simply has no collider.)
+            // Felling/mining swaps a dead resource to its Stump prefab; that's a future damage system.
             if (colliderLibrary.TryGetValue(guid, out List<CachedCollider>? colliders)
-                && db.Resolve(guid, 0)?.Type is EObjectType.Large or EObjectType.Medium)
+                && db.Resolve(guid, 0)?.Type is EObjectType.Large or EObjectType.Medium or EObjectType.Resource)
                 BuildCollision(collision, guid, colliders, transforms);
         }
         root.AddChild(collision);

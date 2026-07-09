@@ -3,7 +3,7 @@ using UnturnedGodot.Dat;
 
 namespace UnturnedGodot.Assets;
 
-public enum EObjectType { Small, Medium, Large, Npc, Decal, Unknown }
+public enum EObjectType { Small, Medium, Large, Npc, Decal, Resource, Unknown }
 
 // Mirrors how Unturned's Assets loader pulls GUID/ID/Type off an object .dat (Assets.cs, ObjectAsset.cs).
 public sealed class ObjectAsset
@@ -74,6 +74,9 @@ public sealed class ObjectAsset
         "large" => EObjectType.Large,
         "npc" => EObjectType.Npc,
         "decal" => EObjectType.Decal,
+        // Bundles/Trees assets (trees, rocks, bushes) — Unturned routes "Resource" .dats to ResourceAsset,
+        // a separate class from ObjectAsset; this minimal port keeps them in the same table, tagged.
+        "resource" => EObjectType.Resource,
         _ => EObjectType.Unknown,
     };
 }

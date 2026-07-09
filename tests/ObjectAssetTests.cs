@@ -88,6 +88,7 @@ public class ObjectAssetTests
     [InlineData("large", EObjectType.Large)]
     [InlineData("NPC", EObjectType.Npc)]
     [InlineData("Decal", EObjectType.Decal)]
+    [InlineData("Resource", EObjectType.Resource)]
     [InlineData("Structure", EObjectType.Unknown)]
     public void ClassifyType(string raw, EObjectType expected)
     {
