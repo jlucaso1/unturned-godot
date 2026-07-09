@@ -18,7 +18,10 @@ public partial class CharacterSkeleton : Skeleton3D
     private readonly Dictionary<string, AnimationClipData> _clips = new();
     private string _current = "";
     private float _time;
-    private Dictionary<int, BonePose>? _fromPose; // frozen snapshot the crossfade blends out of
+    private Dictionary<int, BonePose>? _fromPose; // frozen snapshot the crossfade blends out of (own copy)
+    // Reused sample/blend buffers so the per-frame pose path allocates nothing (the sampler refills them).
+    private readonly Dictionary<int, BonePose> _poseBuf = new();
+    private readonly Dictionary<int, BonePose> _blendBuf = new();
     private float _blend = 1f;
     private float _pitchBend; // Godot pitch degrees, split across spine + skull
     private int _spine = -1;
@@ -44,7 +47,8 @@ public partial class CharacterSkeleton : Skeleton3D
     {
         if (clip == _current || !_clips.ContainsKey(clip))
             return; // already playing, or the clip isn't present -> keep going
-        _fromPose = _current.Length > 0 ? CurrentPose() : null; // snapshot to blend out of
+        // Snapshot to blend out of — an owned copy, since CurrentPose refills the shared buffer every frame.
+        _fromPose = _current.Length > 0 ? new Dictionary<int, BonePose>(CurrentPose()) : null;
         _current = clip;
         _time = 0f;
         _blend = _fromPose == null ? 1f : 0f;
@@ -72,7 +76,8 @@ public partial class CharacterSkeleton : Skeleton3D
         if (_blend < 1f && _fromPose != null)
         {
             _blend = Mathf.Min(1f, _blend + ((float)delta / BlendDuration));
-            pose = AnimationSampler.Blend(_fromPose, pose, _blend);
+            AnimationSampler.Blend(_fromPose, pose, _blend, _blendBuf);
+            pose = _blendBuf;
         }
         Apply(pose);
     }
@@ -81,7 +86,8 @@ public partial class CharacterSkeleton : Skeleton3D
     {
         AnimationClipData clip = _clips[_current];
         float t = clip.Length > 0f ? _time % clip.Length : 0f; // loop
-        return AnimationSampler.Sample(clip, t);
+        AnimationSampler.Sample(clip, t, _poseBuf);
+        return _poseBuf;
     }
 
     private void Apply(Dictionary<int, BonePose> pose)

@@ -85,16 +85,28 @@ public partial class DayNightController : Node
         return controller;
     }
 
+    // Re-apply the lighting only after the clock has moved this far through the cycle: 1/7200 is half a
+    // second of cycle time (the sun sweeps ~0.05°) — visually indistinguishable from per-frame updates.
+    // Applying every frame did ~15 marshaled property writes and dirtied the ProceduralSkyMaterial (a sky +
+    // radiance-map redraw) hundreds of times per second for a color delta the eye can't see. The threshold
+    // lives in cycle space, so a cranked DAY_SPEED automatically re-applies at the same *visual* cadence.
+    private const float ApplyStep = 1f / 7200f;
+    private float _appliedTime = float.NaN;
+
     public override void _Process(double delta)
     {
         if (_frozen || _lighting == null)
             return;
         _time = Mathf.PosMod(_time + ((float)delta * _speed / LightingCycle.DefaultCycleSeconds), 1f);
-        Apply();
+
+        float sinceApplied = Mathf.Abs(Mathf.PosMod(_time - _appliedTime + 0.5f, 1f) - 0.5f); // circular
+        if (float.IsNaN(_appliedTime) || sinceApplied >= ApplyStep)
+            Apply();
     }
 
     private void Apply()
     {
+        _appliedTime = _time;
         LightingKeyframe k;
         float pitch;
         if (_lighting != null)

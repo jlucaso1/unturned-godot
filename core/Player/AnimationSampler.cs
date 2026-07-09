@@ -11,15 +11,23 @@ public static class AnimationSampler
     public static Dictionary<int, BonePose> Sample(AnimationClipData clip, float time)
     {
         var pose = new Dictionary<int, BonePose>(clip.Bones.Count);
+        Sample(clip, time, pose);
+        return pose;
+    }
+
+    // Buffer-reusing variant: clears and refills dest, so a per-frame caller keeps one dictionary alive
+    // instead of allocating a fresh one every sampled frame.
+    public static void Sample(AnimationClipData clip, float time, Dictionary<int, BonePose> dest)
+    {
+        dest.Clear();
         foreach (KeyValuePair<int, BoneCurves> b in clip.Bones)
         {
             BoneCurves c = b.Value;
-            pose[b.Key] = new BonePose(b.Key,
+            dest[b.Key] = new BonePose(b.Key,
                 c.Rotation.Length > 0 ? SampleRotation(c.Rotation, time) : null,
                 c.Position.Length > 0 ? SampleVector(c.Position, time) : null,
                 c.Scale.Length > 0 ? SampleVector(c.Scale, time) : null);
         }
-        return pose;
     }
 
     public static Quaternion SampleRotation((float Time, Quaternion Value)[] keys, float time)
@@ -54,18 +62,31 @@ public static class AnimationSampler
         Dictionary<int, BonePose> from, Dictionary<int, BonePose> to, float t)
     {
         var result = new Dictionary<int, BonePose>(to.Count);
-        var bones = new HashSet<int>(from.Keys);
-        bones.UnionWith(to.Keys);
-        foreach (int bone in bones)
-        {
-            from.TryGetValue(bone, out BonePose a);
-            to.TryGetValue(bone, out BonePose b);
-            result[bone] = new BonePose(bone,
-                BlendRotation(a.Rotation, b.Rotation, t),
-                BlendVector(a.Position, b.Position, t),
-                BlendVector(a.Scale, b.Scale, t));
-        }
+        Blend(from, to, t, result);
         return result;
+    }
+
+    // Buffer-reusing variant: clears and refills dest. Two passes replace the old key-union HashSet — first
+    // every bone in `to` (blended against `from` when present), then the `from`-only bones carried as-is
+    // (their `to` side is the all-null default, so the channel blend passes the `from` values through).
+    public static void Blend(
+        Dictionary<int, BonePose> from, Dictionary<int, BonePose> to, float t, Dictionary<int, BonePose> dest)
+    {
+        dest.Clear();
+        foreach (KeyValuePair<int, BonePose> kv in to)
+        {
+            from.TryGetValue(kv.Key, out BonePose a);
+            dest[kv.Key] = new BonePose(kv.Key,
+                BlendRotation(a.Rotation, kv.Value.Rotation, t),
+                BlendVector(a.Position, kv.Value.Position, t),
+                BlendVector(a.Scale, kv.Value.Scale, t));
+        }
+        foreach (KeyValuePair<int, BonePose> kv in from)
+            if (!to.ContainsKey(kv.Key))
+                dest[kv.Key] = new BonePose(kv.Key,
+                    BlendRotation(kv.Value.Rotation, null, t),
+                    BlendVector(kv.Value.Position, null, t),
+                    BlendVector(kv.Value.Scale, null, t));
     }
 
     private static Quaternion? BlendRotation(Quaternion? a, Quaternion? b, float t)

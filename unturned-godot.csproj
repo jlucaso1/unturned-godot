@@ -6,6 +6,11 @@
     <!-- Every parser in this project uses InvariantCulture explicitly, and there is no locale-facing UI, so
          drop the ICU globalization data: smaller/faster startup and no libicu dependency in the AOT build. -->
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- AOT codegen: favor throughput over binary size (a game, not a size-constrained deploy), and raise
+         the x64 baseline to v2 (SSE4.2/POPCNT, CPUs ~2008+) so span/MemoryMarshal parsing paths vectorize.
+         Deliberately not v3 (AVX2) to keep pre-2013 CPUs working. -->
+    <OptimizationPreference>Speed</OptimizationPreference>
+    <IlcInstructionSet>sse4.2</IlcInstructionSet>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
