@@ -117,7 +117,7 @@ public partial class Main : Node3D
             AddChild(RoadsBuilder.Build(environmentDir, world.Heights));
             AddChild(WaterBuilder.Build(lighting, out StandardMaterial3D water));
             AddChild(NodesBuilder.Build(environmentDir));
-            SetupEnvironment(lighting, water);
+            SetupEnvironment(lighting, water, unturnedPath);
 
             if (headless)
             {
@@ -191,7 +191,7 @@ public partial class Main : Node3D
         AddChild(RoadsBuilder.Build(environmentDir, heights));
         AddChild(WaterBuilder.Build(lighting, out StandardMaterial3D waterMat));
         AddChild(NodesBuilder.Build(environmentDir));
-        SetupEnvironment(lighting, waterMat);
+        SetupEnvironment(lighting, waterMat, unturnedPath);
 
         loading.SetStatus("Character…");
         await NextFrame();
@@ -390,9 +390,9 @@ public partial class Main : Node3D
 
     // Sun + sky/ambient from the map lighting, plus the debug overlay (windowed only). The camera/player is
     // added separately by the caller so the free-cam and character paths can differ.
-    private void SetupEnvironment(LevelLighting? lighting, StandardMaterial3D waterMaterial)
+    private void SetupEnvironment(LevelLighting? lighting, StandardMaterial3D waterMaterial, string unturnedPath)
     {
-        AddChild(DayNightController.Build(lighting, waterMaterial));
+        AddChild(DayNightController.Build(lighting, waterMaterial, SkyboxAssets.Load(unturnedPath)));
 
         if (DisplayServer.GetName() != "headless")
             AddChild(new DebugOverlay { Name = "DebugOverlay" });

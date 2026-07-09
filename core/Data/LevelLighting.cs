@@ -28,6 +28,7 @@ public readonly struct LightingKeyframe
     public readonly Color AmbientSky;
     public readonly Color AmbientEquator;
     public readonly Color AmbientGround;
+    public readonly Color CloudColor; // ELightingColor.CLOUDS: the skybox's cloud rim/body tint
     public readonly float Intensity; // sun brightness
     public readonly float FogDensity;
     public readonly float Clouds;
@@ -36,7 +37,7 @@ public readonly struct LightingKeyframe
 
     public LightingKeyframe(Color sun, Color sea, Color fog, Color skyTop, Color skyHorizon, Color skyGround,
         Color ambientSky, Color ambientEquator, Color ambientGround, float intensity, float fogDensity,
-        float clouds, float shadows, float rays)
+        float clouds, float shadows, float rays, Color cloudColor = default)
     {
         Sun = sun;
         Sea = sea;
@@ -47,6 +48,7 @@ public readonly struct LightingKeyframe
         AmbientSky = ambientSky;
         AmbientEquator = ambientEquator;
         AmbientGround = ambientGround;
+        CloudColor = cloudColor;
         Intensity = intensity;
         FogDensity = fogDensity;
         Clouds = clouds;
@@ -71,12 +73,13 @@ public sealed class LevelLighting
     public float Fade { get; }        // scales the dawn/dusk transition width (see LightingCycle.Transition)
     public float TimeOfDay { get; }   // 0..1 fraction of the day the map was saved at
     public float SeaLevel { get; }    // fraction of Level.TERRAIN (256): water surface Y = SeaLevel * 256
+    public byte MoonPhase { get; }    // saved LevelLighting.moon index; advances each night, 2 = full moon
     public IReadOnlyList<LightingKeyframe> Times { get; }
 
     public LightingKeyframe Midday => Times[(int)LightingTime.Midday];
 
     private LevelLighting(byte version, float azimuth, float bias, float fade, float timeOfDay, float seaLevel,
-        LightingKeyframe[] times)
+        LightingKeyframe[] times, byte moonPhase)
     {
         Version = version;
         Azimuth = azimuth;
@@ -84,6 +87,7 @@ public sealed class LevelLighting
         Fade = fade;
         TimeOfDay = timeOfDay;
         SeaLevel = seaLevel;
+        MoonPhase = moonPhase;
         Times = times;
     }
 
@@ -108,7 +112,7 @@ public sealed class LevelLighting
         float bias = r.ReadSingle();
         float fade = r.ReadSingle();
         float timeOfDay = r.ReadSingle();
-        r.ReadByte();                 // moon phase (unused)
+        byte moonPhase = r.ReadByte(); // saved LevelLighting.moon index (0..MOON_CYCLES-1)
         float seaLevel = r.ReadSingle();
         r.ReadSingle();               // snow level (unused)
         if (version > 6)
@@ -133,7 +137,7 @@ public sealed class LevelLighting
         for (int i = 0; i < TimeCount; i++)
             times[i] = ReadKeyframe(r);
 
-        return new LevelLighting(version, azimuth, bias, fade, timeOfDay, seaLevel, times);
+        return new LevelLighting(version, azimuth, bias, fade, timeOfDay, seaLevel, times, moonPhase);
     }
 
     // A keyframe is the 12 ELightingColor entries (RGB) followed by the 5 ELightingSingle scalars.
@@ -153,7 +157,8 @@ public sealed class LevelLighting
             sun: colors[0], sea: colors[1], fog: colors[2],
             skyTop: colors[3], skyHorizon: colors[4], skyGround: colors[5],
             ambientSky: colors[6], ambientEquator: colors[7], ambientGround: colors[8],
-            intensity, fogDensity, clouds, shadows, rays);
+            intensity, fogDensity, clouds, shadows, rays,
+            cloudColor: colors[9]); // colors[10]/[11] (RAYS, PARTICLE_LIGHTING) feed legacy sun shafts
     }
 
     private static Color ReadColor(BinaryReader r)

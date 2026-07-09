@@ -87,6 +87,39 @@ public static class LightingCycle
             fogDensity: Mathf.Lerp(a.FogDensity, b.FogDensity, alpha),
             clouds: Mathf.Lerp(a.Clouds, b.Clouds, alpha),
             shadows: Mathf.Lerp(a.Shadows, b.Shadows, alpha),
-            rays: Mathf.Lerp(a.Rays, b.Rays, alpha));
+            rays: Mathf.Lerp(a.Rays, b.Rays, alpha),
+            cloudColor: a.CloudColor.Lerp(b.CloudColor, alpha));
     }
+
+    // How much of the stars texture's alpha is cut away (the skybox's _StarsCutoff). updateLighting holds
+    // 1.0 all day (no star survives the alpha test), ramps to 0.05 across dusk->midnight, holds 0.05 at
+    // midnight (full stars) and ramps back to 1.0 across midnight->dawn (LevelLighting.cs 895/917/933/951).
+    public const float StarsCutoffDay = 1f;
+    public const float StarsCutoffMidnight = 0.05f;
+
+    public static float StarsCutoff(LightingTime from, LightingTime to, float alpha)
+    {
+        if (from == LightingTime.Dusk && to == LightingTime.Midnight)
+            return Mathf.Lerp(StarsCutoffDay, StarsCutoffMidnight, alpha);
+        if (from == LightingTime.Midnight && to == LightingTime.Dawn)
+            return Mathf.Lerp(StarsCutoffMidnight, StarsCutoffDay, alpha);
+        if (from == LightingTime.Midnight) // steady midnight (to == Midnight, alpha 0)
+            return StarsCutoffMidnight;
+        return StarsCutoffDay;
+    }
+
+    // The skybox's sun-disc tint: updateLighting sends Color.Lerp(sunLight.color, white, 0.5), keeping the
+    // disc brighter than the light itself (LevelLighting.cs line 1148).
+    public static Color SkyboxSunColor(Color sun)
+        => sun.Lerp(new Color(1f, 1f, 1f), 0.5f);
+
+    // The moon's phase is which MoonLightDirection_N child transform lights the skybox's moon sphere. The
+    // game's Lighting.prefab authors five of them at Unity local Y-euler -120, -60, 0 (full moon), +60,
+    // +120 — i.e. (phase - 2) * 60 degrees. LightingManager advances the phase at each new night, wrapping
+    // at MOON_CYCLES = 5; phase 2 is the full moon.
+    public const int MoonPhaseCount = 5;
+    public const int FullMoonPhase = 2;
+
+    public static float MoonPhaseYawDegrees(int phase)
+        => (phase - FullMoonPhase) * 60f;
 }

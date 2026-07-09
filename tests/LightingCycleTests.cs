@@ -60,7 +60,7 @@ public class LightingCycleTests
         sun: new Color(v, v, v), sea: new Color(v, v, v), fog: new Color(v, v, v),
         skyTop: new Color(v, v, v), skyHorizon: new Color(v, v, v), skyGround: new Color(v, v, v),
         ambientSky: new Color(v, v, v), ambientEquator: new Color(v, v, v), ambientGround: new Color(v, v, v),
-        intensity: v, fogDensity: v, clouds: v, shadows: v, rays: v);
+        intensity: v, fogDensity: v, clouds: v, shadows: v, rays: v, cloudColor: new Color(v, v, v));
 
     private static readonly IReadOnlyList<LightingKeyframe> Times = new[]
     {
@@ -86,6 +86,53 @@ public class LightingCycleTests
         Assert.Equal(0.5f, k.AmbientSky.G, 4);
         Assert.Equal(0.5f, k.FogDensity, 4);
         Assert.Equal(0.5f, k.Shadows, 4);
+        Assert.Equal(0.5f, k.CloudColor.R, 4); // ELightingColor.CLOUDS blends like every other channel
+    }
+
+    // updateLighting's stars ramp (LevelLighting.cs 895/917/933/951): held at 1.0 all day, lerped to 0.05
+    // across dusk->midnight, held at 0.05 through midnight, lerped back to 1.0 across midnight->dawn.
+    [Theory]
+    [InlineData(LightingTime.Dawn, LightingTime.Midday, 0.5f, 1f)]
+    [InlineData(LightingTime.Midday, LightingTime.Midday, 0f, 1f)]
+    [InlineData(LightingTime.Midday, LightingTime.Dusk, 0.9f, 1f)]
+    [InlineData(LightingTime.Dusk, LightingTime.Midnight, 0f, 1f)]
+    [InlineData(LightingTime.Dusk, LightingTime.Midnight, 0.5f, 0.525f)]
+    [InlineData(LightingTime.Dusk, LightingTime.Midnight, 1f, 0.05f)]
+    [InlineData(LightingTime.Midnight, LightingTime.Midnight, 0f, 0.05f)]
+    [InlineData(LightingTime.Midnight, LightingTime.Dawn, 0.5f, 0.525f)]
+    [InlineData(LightingTime.Midnight, LightingTime.Dawn, 1f, 1f)]
+    public void StarsCutoff_RampsAcrossTheNight(LightingTime from, LightingTime to, float alpha, float expected)
+    {
+        Assert.Equal(expected, LightingCycle.StarsCutoff(from, to, alpha), 4);
+    }
+
+    [Fact]
+    public void SkyboxSunColor_IsHalfwayToWhite()
+    {
+        // updateLighting: skybox _SunColor = Color.Lerp(sunLight.color, white, 0.5).
+        Color sun = LightingCycle.SkyboxSunColor(new Color(1f, 0f, 0f));
+        Assert.Equal(1f, sun.R, 4);
+        Assert.Equal(0.5f, sun.G, 4);
+        Assert.Equal(0.5f, sun.B, 4);
+    }
+
+    // The Lighting.prefab authors MoonLightDirection_0..4 at Unity Y-euler -120, -60, 0, +60, +120; index 2
+    // (yaw 0: light along the moon direction) is the full moon.
+    [Theory]
+    [InlineData(0, -120f)]
+    [InlineData(1, -60f)]
+    [InlineData(2, 0f)]
+    [InlineData(4, 120f)]
+    public void MoonPhaseYaw_MatchesTheAuthoredPrefabTransforms(int phase, float yaw)
+    {
+        Assert.Equal(yaw, LightingCycle.MoonPhaseYawDegrees(phase), 4);
+    }
+
+    [Fact]
+    public void FullMoon_IsPhaseTwoOfFive()
+    {
+        Assert.Equal(5, LightingCycle.MoonPhaseCount);
+        Assert.Equal(0f, LightingCycle.MoonPhaseYawDegrees(LightingCycle.FullMoonPhase), 4);
     }
 
     // The defining property of the Exp2->exponential conversion: at the calibration distance, Godot's

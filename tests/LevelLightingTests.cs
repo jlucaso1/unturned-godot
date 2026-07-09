@@ -60,6 +60,7 @@ public class LevelLightingTests
         Assert.Equal(0.2f, lighting.Fade);
         Assert.Equal(0.32f, lighting.TimeOfDay);
         Assert.Equal(0.5f, lighting.SeaLevel);
+        Assert.Equal(3, lighting.MoonPhase);
         Assert.Equal(4, lighting.Times.Count);
 
         // Midday is keyframe index 1 (not 0), so its encoded keyframe byte is 1.
@@ -74,6 +75,7 @@ public class LevelLightingTests
         Assert.Equal(new Color(1f / 255f, 6f / 255f, 12f / 255f), day.AmbientSky);  // color 6
         Assert.Equal(new Color(1f / 255f, 7f / 255f, 14f / 255f), day.AmbientEquator); // color 7
         Assert.Equal(new Color(1f / 255f, 8f / 255f, 16f / 255f), day.AmbientGround);  // color 8
+        Assert.Equal(new Color(1f / 255f, 9f / 255f, 18f / 255f), day.CloudColor);     // color 9 (CLOUDS)
         Assert.Equal(1.5f, day.Intensity);
         Assert.Equal(0.1f, day.FogDensity);
         Assert.Equal(0.2f, day.Clouds);
