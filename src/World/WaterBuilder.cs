@@ -23,12 +23,13 @@ public static class WaterBuilder
 
         material = new StandardMaterial3D
         {
-            AlbedoColor = new Color(seaColor.R, seaColor.G, seaColor.B, 0.88f),
+            // Alpha, smoothness and metallic are the authored values from the game's water shader
+            // (Water_Fallback.shader: Albedo = _BaseColor.rgb, Metallic = 0, Smoothness = 0.9,
+            // Alpha = 0.9) — a glossy translucent surface that mirrors the sky, not a matte tint.
+            AlbedoColor = new Color(seaColor.R, seaColor.G, seaColor.B, 0.9f),
             Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
-            // Read as the flat blue SEA color: a glossy surface just mirrors the grey sky and the sun.
-            Roughness = 0.6f,
+            Roughness = 0.1f, // Godot roughness = 1 - Unity smoothness
             Metallic = 0.0f,
-            SpecularMode = BaseMaterial3D.SpecularModeEnum.Disabled,
             CullMode = BaseMaterial3D.CullModeEnum.Disabled, // visible from above and from underwater
             // Shadows fall through onto the seabed, not onto the surface — Unturned's translucent water
             // doesn't catch shadows, and a tree shadow floating on the sea reads wrong.
