@@ -13,19 +13,19 @@ namespace UnturnedGodot;
 public sealed class TextureRegistry
 {
     private readonly string _textureCacheDir;
-    private readonly Dictionary<string, List<StandardMaterial3D>> _pending = new();
+    private readonly Dictionary<string, List<Material>> _pending = new();
     private readonly Dictionary<string, (ImageTexture? tex, int filterMode)> _loaded = new();
 
     public TextureRegistry(string textureCacheDir) => _textureCacheDir = textureCacheDir;
 
     public int PendingKeyCount => _pending.Count;
 
-    public void Register(string textureKey, StandardMaterial3D material)
+    public void Register(string textureKey, Material material)
     {
         if (textureKey.Length == 0)
             return;
-        if (!_pending.TryGetValue(textureKey, out List<StandardMaterial3D>? mats))
-            _pending[textureKey] = mats = new List<StandardMaterial3D>();
+        if (!_pending.TryGetValue(textureKey, out List<Material>? mats))
+            _pending[textureKey] = mats = new List<Material>();
         mats.Add(material);
     }
 
@@ -33,19 +33,30 @@ public sealed class TextureRegistry
     // ImageTexture), so it MUST run on the main thread. Returns true if a texture was applied.
     public bool Apply(string textureKey)
     {
-        if (!_pending.TryGetValue(textureKey, out List<StandardMaterial3D>? mats))
+        if (!_pending.TryGetValue(textureKey, out List<Material>? mats))
             return false;
         (ImageTexture? tex, int filterMode) = Load(textureKey);
         if (tex == null)
             return false;
-        foreach (StandardMaterial3D material in mats)
+        foreach (Material material in mats)
         {
-            material.AlbedoTexture = tex;
             // Unturned's tiny palette textures are point-filtered (FilterMode.Point): the mesh UVs park on
             // solid texels, and bilinear/aniso sampling bleeds neighbouring palette colors into smears
             // (a stop sign's face mottling). Nearest+mips reproduces Unity's Point mode.
-            if (filterMode == 0)
-                material.TextureFilter = BaseMaterial3D.TextureFilterEnum.NearestWithMipmaps;
+            switch (material)
+            {
+                case StandardMaterial3D standard:
+                    standard.AlbedoTexture = tex;
+                    if (filterMode == 0)
+                        standard.TextureFilter = BaseMaterial3D.TextureFilterEnum.NearestWithMipmaps;
+                    break;
+                case ShaderMaterial cutout: // the foliage-family cutout shader (ModelLibrary.CutoutShader)
+                    if (filterMode == 0)
+                        cutout.Shader = ModelLibrary.CutoutNearest;
+                    cutout.SetShaderParameter("albedo_texture", tex);
+                    cutout.SetShaderParameter("has_texture", true);
+                    break;
+            }
         }
         _pending.Remove(textureKey);
         return true;

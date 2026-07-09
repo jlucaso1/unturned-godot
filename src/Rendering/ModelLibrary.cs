@@ -32,7 +32,7 @@ public static class ModelLibrary
         // Deduplicate materials across every mesh: submeshes sharing a texture key, color and blend share
         // one StandardMaterial3D (fewer material objects + GPU parameter buffers, fewer render-state
         // changes). Scoped to this load so nothing leaks between calls.
-        var materials = new Dictionary<(string, Color, UnityMaterial.Blend, float, float), StandardMaterial3D>();
+        var materials = new Dictionary<(string, Color, UnityMaterial.Blend, float, float), Material>();
         foreach (string path in Directory.GetFiles(cacheDir, "*.mesh"))
         {
             if (!Guid.TryParseExact(Path.GetFileNameWithoutExtension(path), "N", out Guid guid))
@@ -50,7 +50,7 @@ public static class ModelLibrary
 
     private static ArrayMesh? Build(Vector3[] verts, Vector3[] normals, Vector2[] uvs,
         List<CachedSubmesh> submeshes, TextureRegistry registry,
-        Dictionary<(string, Color, UnityMaterial.Blend, float, float), StandardMaterial3D> materials)
+        Dictionary<(string, Color, UnityMaterial.Blend, float, float), Material> materials)
     {
         if (verts.Length == 0 || submeshes.Count == 0)
             return null;
@@ -163,12 +163,51 @@ public static class ModelLibrary
     // Flat material tinted with the palette color; glass/blended submeshes get alpha transparency. A
     // textured submesh's material starts untextured and is registered under its texture key — the texture
     // is applied later (immediately for a warm cache, progressively while a cold load streams).
-    private static StandardMaterial3D MaterialFor(CachedSubmesh sm, TextureRegistry registry,
-        Dictionary<(string, Color, UnityMaterial.Blend, float, float), StandardMaterial3D> cache)
+    // Cutout surfaces (grass cards, tree leaves, garlands) render with Unturned's own foliage-family
+    // shaders: alpha-clipped, specular off, and — crucially — lit with the authored normal on BOTH sides.
+    // Godot's built-in materials negate the normal on backfaces of two-sided geometry, which turns the
+    // deliberately up-bent foliage normals downward on every card's reverse side (dark inner blades). This
+    // spatial shader undoes that flip, matching Unity's surface-shader behavior. Two variants only differ
+    // in the sampler filter, mirroring the texture's own Unity filter mode.
+    private static Shader CutoutShader(string filterHint) => new()
+    {
+        Code = $$"""
+        shader_type spatial;
+        render_mode cull_disabled, specular_disabled;
+        uniform vec4 tint : source_color = vec4(1.0);
+        uniform sampler2D albedo_texture : source_color, {{filterHint}};
+        uniform bool has_texture = false;
+        void fragment() {
+            vec4 c = (has_texture ? texture(albedo_texture, UV) : vec4(1.0)) * tint;
+            ALBEDO = c.rgb;
+            ALPHA = c.a;
+            ALPHA_SCISSOR_THRESHOLD = 0.5;
+            ROUGHNESS = 1.0;
+            if (!FRONT_FACING) {
+                NORMAL = -NORMAL;
+            }
+        }
+        """,
+    };
+
+    internal static readonly Shader CutoutLinear = CutoutShader("filter_linear_mipmap_anisotropic");
+    internal static readonly Shader CutoutNearest = CutoutShader("filter_nearest_mipmap");
+
+    private static Material MaterialFor(CachedSubmesh sm, TextureRegistry registry,
+        Dictionary<(string, Color, UnityMaterial.Blend, float, float), Material> cache)
     {
         var key = (sm.TextureKey, sm.Color, sm.Blend, sm.Metallic, sm.Smoothness);
-        if (cache.TryGetValue(key, out StandardMaterial3D? shared))
+        if (cache.TryGetValue(key, out Material? shared))
             return shared; // already built and registered under this texture key
+
+        if (sm.Blend == UnityMaterial.Blend.Cutout)
+        {
+            var foliage = new ShaderMaterial { Shader = CutoutLinear };
+            foliage.SetShaderParameter("tint", sm.Color);
+            registry.Register(sm.TextureKey, foliage);
+            cache[key] = foliage;
+            return foliage;
+        }
 
         bool matte = sm.Metallic <= 0f && sm.Smoothness <= 0f; // the overwhelmingly common case in the data
         var material = new StandardMaterial3D
@@ -190,12 +229,8 @@ public static class ModelLibrary
             TextureFilter = BaseMaterial3D.TextureFilterEnum.LinearWithMipmapsAnisotropic,
         };
         registry.Register(sm.TextureKey, material);
-        material.Transparency = sm.Blend switch
-        {
-            UnityMaterial.Blend.Cutout => BaseMaterial3D.TransparencyEnum.AlphaScissor, // alpha clip (garlands, foliage)
-            UnityMaterial.Blend.Alpha => BaseMaterial3D.TransparencyEnum.Alpha,          // blend (glass)
-            _ => BaseMaterial3D.TransparencyEnum.Disabled,
-        };
+        if (sm.Blend == UnityMaterial.Blend.Alpha)
+            material.Transparency = BaseMaterial3D.TransparencyEnum.Alpha; // blend (glass)
         cache[key] = material;
         return material;
     }
