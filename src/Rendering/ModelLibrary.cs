@@ -63,9 +63,13 @@ public static class ModelLibrary
         for (int i = 0; i < uvs.Length; i++)
             guvs[i] = new Vector2(uvs[i].X, 1f - uvs[i].Y); // Godot's texture origin is top-left
 
+        // Winding is KEPT: Unity fronts are clockwise, and reflecting Z while keeping the index order
+        // leaves them clockwise for Godot's clockwise front faces. (Reversing here put every face's front
+        // on the inside; with cull disabled the two-sided shading then flipped the correct authored
+        // normals, which is why the city streets read permanently in shade.)
         var reversed = new int[submeshes.Count][];
         for (int s = 0; s < submeshes.Count; s++)
-            reversed[s] = ReverseWinding(submeshes[s].Indices);
+            reversed[s] = submeshes[s].Indices;
 
         // Prefer the mesh's authored normals — Unturned's own hard and soft edges (a stop sign's face stays
         // dead flat; deriving smooth normals there bends the face's shading into its bevel). Authored normals
@@ -148,17 +152,6 @@ public static class ModelLibrary
         return normals;
     }
 
-    private static int[] ReverseWinding(int[] indices)
-    {
-        var r = new int[indices.Length];
-        for (int i = 0; i + 2 < indices.Length; i += 3)
-        {
-            r[i] = indices[i];
-            r[i + 1] = indices[i + 2];
-            r[i + 2] = indices[i + 1];
-        }
-        return r;
-    }
 
     // Flat material tinted with the palette color; glass/blended submeshes get alpha transparency. A
     // textured submesh's material starts untextured and is registered under its texture key — the texture
