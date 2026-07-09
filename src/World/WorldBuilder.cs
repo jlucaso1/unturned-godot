@@ -121,7 +121,7 @@ public static class WorldBuilder
         // synchronous full build (used by the benchmark and the warm path); the interactive cold load
         // streams the two phases separately via ObjectStreamer.
         bool foliageMissing = foliageAssets.Keys.Any(
-            g => !System.IO.File.Exists(System.IO.Path.Combine(cacheDir, g.ToString("N") + ".mesh")));
+            g => !UnturnedGodot.Unity.MeshCache.IsCurrent(System.IO.Path.Combine(cacheDir, g.ToString("N") + ".mesh")));
         if ((ModelLibrary.CachedMeshCount(cacheDir) == 0 || foliageMissing) && System.IO.File.Exists(bundlePath))
         {
             GD.Print("[unturned-godot] Extracting models + textures from masterbundle (one-time)...");

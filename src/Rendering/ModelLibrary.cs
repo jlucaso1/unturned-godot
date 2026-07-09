@@ -13,8 +13,12 @@ namespace UnturnedGodot;
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class ModelLibrary
 {
+    // Counts only current-format caches: after a format bump the stale files don't count, so the cold-load
+    // check re-extracts instead of loading nothing.
     public static int CachedMeshCount(string cacheDir) =>
-        Directory.Exists(cacheDir) ? Directory.GetFiles(cacheDir, "*.mesh").Length : 0;
+        Directory.Exists(cacheDir)
+            ? Array.FindAll(Directory.GetFiles(cacheDir, "*.mesh"), MeshCache.IsCurrent).Length
+            : 0;
 
     // Builds the meshes and their materials, registering each textured submesh's material under its
     // texture key so the caller can apply textures later (registry.ApplyAllAvailable for a warm cache, or
@@ -28,11 +32,13 @@ public static class ModelLibrary
         // Deduplicate materials across every mesh: submeshes sharing a texture key, color and blend share
         // one StandardMaterial3D (fewer material objects + GPU parameter buffers, fewer render-state
         // changes). Scoped to this load so nothing leaks between calls.
-        var materials = new Dictionary<(string, Color, UnityMaterial.Blend), StandardMaterial3D>();
+        var materials = new Dictionary<(string, Color, UnityMaterial.Blend, float, float), StandardMaterial3D>();
         foreach (string path in Directory.GetFiles(cacheDir, "*.mesh"))
         {
             if (!Guid.TryParseExact(Path.GetFileNameWithoutExtension(path), "N", out Guid guid))
                 continue;
+            if (!MeshCache.IsCurrent(path))
+                continue; // stale format; the extraction pass rewrites it
 
             var (verts, normals, uvs, submeshes) = MeshCache.Read(File.ReadAllBytes(path));
             ArrayMesh? mesh = Build(verts, normals, uvs, submeshes, registry, materials);
@@ -44,7 +50,7 @@ public static class ModelLibrary
 
     private static ArrayMesh? Build(Vector3[] verts, Vector3[] normals, Vector2[] uvs,
         List<CachedSubmesh> submeshes, TextureRegistry registry,
-        Dictionary<(string, Color, UnityMaterial.Blend), StandardMaterial3D> materials)
+        Dictionary<(string, Color, UnityMaterial.Blend, float, float), StandardMaterial3D> materials)
     {
         if (verts.Length == 0 || submeshes.Count == 0)
             return null;
@@ -143,18 +149,25 @@ public static class ModelLibrary
     // textured submesh's material starts untextured and is registered under its texture key — the texture
     // is applied later (immediately for a warm cache, progressively while a cold load streams).
     private static StandardMaterial3D MaterialFor(CachedSubmesh sm, TextureRegistry registry,
-        Dictionary<(string, Color, UnityMaterial.Blend), StandardMaterial3D> cache)
+        Dictionary<(string, Color, UnityMaterial.Blend, float, float), StandardMaterial3D> cache)
     {
-        var key = (sm.TextureKey, sm.Color, sm.Blend);
+        var key = (sm.TextureKey, sm.Color, sm.Blend, sm.Metallic, sm.Smoothness);
         if (cache.TryGetValue(key, out StandardMaterial3D? shared))
             return shared; // already built and registered under this texture key
 
+        bool matte = sm.Metallic <= 0f && sm.Smoothness <= 0f; // the overwhelmingly common case in the data
         var material = new StandardMaterial3D
         {
             AlbedoColor = sm.Color,
-            Roughness = 1f,
-            // Fully-rough dielectric: the GGX specular term is not visible, so skip its per-fragment ALU.
-            SpecularMode = BaseMaterial3D.SpecularModeEnum.Disabled,
+            // The Unity Standard values straight from the material data: most objects are fully matte
+            // (_Metallic/_Glossiness 0); metal/gloss props (signs, vehicles, roofs) keep their response.
+            Metallic = sm.Metallic,
+            Roughness = 1f - sm.Smoothness,
+            // Fully-rough matte dielectric: the GGX specular term is not visible, so skip its per-fragment
+            // ALU; anything with real gloss or metal keeps the specular path.
+            SpecularMode = matte
+                ? BaseMaterial3D.SpecularModeEnum.Disabled
+                : BaseMaterial3D.SpecularModeEnum.SchlickGgx,
             // Many object meshes (rocks, foliage) are single-sided shells; render both sides so they
             // don't show culling holes up close.
             CullMode = BaseMaterial3D.CullModeEnum.Disabled,

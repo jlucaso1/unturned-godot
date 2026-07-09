@@ -72,7 +72,7 @@ public partial class ObjectStreamer : Node
         // Cold-load if the object meshes aren't cached, or if the foliage meshes were never extracted
         // (e.g. an older cache from before foliage support) — both come from the same decode pass.
         bool foliageMissing = _foliageAssets.Keys.Any(
-            g => !File.Exists(Path.Combine(_cacheDir, g.ToString("N") + ".mesh")));
+            g => !UnturnedGodot.Unity.MeshCache.IsCurrent(Path.Combine(_cacheDir, g.ToString("N") + ".mesh")));
         bool cold = (ModelLibrary.CachedMeshCount(_cacheDir) == 0 || foliageMissing) && File.Exists(_bundlePath);
         SetProcess(cold);
         if (cold)

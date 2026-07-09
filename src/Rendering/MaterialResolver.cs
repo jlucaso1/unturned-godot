@@ -28,23 +28,26 @@ public sealed class MaterialResolver
     public MaterialPalette? PaletteFor(Guid guid) =>
         _palettes.TryGetValue(guid, out MaterialPalette? p) ? p : null;
 
-    // Reads a submesh's flat color, blend mode and (optional) _MainTex texture KEY — the texture path id in
-    // hex — without reading pixels (that needs the .resS stream). Also returns the raw texture path id
-    // (0 when none) so the caller can grab the texture's metadata for later streaming.
-    public (Color color, string texKey, UnityMaterial.Blend blend, long texId) Resolve(
-        int submeshIndex, MaterialPalette? palette, List<long> rendererMaterials)
+    // Reads a submesh's flat color, blend mode, Standard-shader surface response (_Metallic/_Glossiness)
+    // and (optional) _MainTex texture KEY — the texture path id in hex — without reading pixels (that needs
+    // the .resS stream). Also returns the raw texture path id (0 when none) so the caller can grab the
+    // texture's metadata for later streaming.
+    public (Color color, string texKey, UnityMaterial.Blend blend, long texId, float metallic, float smoothness)
+        Resolve(int submeshIndex, MaterialPalette? palette, List<long> rendererMaterials)
     {
         long matId = MaterialForSubmesh(submeshIndex, palette, rendererMaterials);
         if (matId == 0 || !_graph.ObjectsByPathId.TryGetValue(matId, out SerializedObject? matObj))
-            return (Colors.White, string.Empty, UnityMaterial.Blend.Opaque, 0);
+            return (Colors.White, string.Empty, UnityMaterial.Blend.Opaque, 0, 0f, 0f);
 
         Dictionary<string, object> matDict = TypeTreeReader.Read(matObj.TypeTree, _graph.File.ReaderFor(matObj));
         Color color = UnityMaterial.GetColor(matDict, "_Color") ?? Colors.White;
         UnityMaterial.Blend blend = UnityMaterial.GetBlendMode(matDict);
+        float metallic = UnityMaterial.GetFloat(matDict, "_Metallic") ?? 0f;
+        float smoothness = UnityMaterial.GetFloat(matDict, "_Glossiness") ?? 0f;
 
         (int fileId, long texId) = UnityMaterial.GetTexture(matDict, "_MainTex");
         bool has = fileId == 0 && texId != 0 && _graph.ObjectsByPathId.ContainsKey(texId);
-        return (color, has ? texId.ToString("x") : string.Empty, blend, has ? texId : 0);
+        return (color, has ? texId.ToString("x") : string.Empty, blend, has ? texId : 0, metallic, smoothness);
     }
 
     // Picks the material id: the palette's material (batched objects) if it covers this submesh, otherwise

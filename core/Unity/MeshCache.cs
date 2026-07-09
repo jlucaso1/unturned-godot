@@ -7,21 +7,27 @@ using Godot;
 
 namespace UnturnedGodot.Unity;
 
-// One submesh of a cached model: its triangle indices plus the material's flat color and (optional)
-// texture cache key. Unturned objects are mostly flat-colored, with textures on some props.
+// One submesh of a cached model: its triangle indices plus the material's flat color, (optional) texture
+// cache key and the Standard shader's surface response. Unturned objects are mostly flat-colored and fully
+// matte (_Metallic/_Glossiness 0), with textures and the occasional gloss/metal on some props.
 public readonly struct CachedSubmesh
 {
     public readonly int[] Indices;
     public readonly Color Color;
     public readonly string TextureKey;         // "" when the submesh has no resolved texture
     public readonly UnityMaterial.Blend Blend; // opaque / cutout (alpha clip) / alpha blend
+    public readonly float Metallic;            // Unity _Metallic (0..1)
+    public readonly float Smoothness;          // Unity _Glossiness; Godot roughness = 1 - this
 
-    public CachedSubmesh(int[] indices, Color color, string textureKey, UnityMaterial.Blend blend)
+    public CachedSubmesh(int[] indices, Color color, string textureKey, UnityMaterial.Blend blend,
+        float metallic = 0f, float smoothness = 0f)
     {
         Indices = indices;
         Color = color;
         TextureKey = textureKey;
         Blend = blend;
+        Metallic = metallic;
+        Smoothness = smoothness;
     }
 }
 
@@ -29,7 +35,20 @@ public readonly struct CachedSubmesh
 // texture keys), so the 1.4 GB bundle is parsed once and runtime loads only the small meshes it needs.
 public static class MeshCache
 {
-    private const uint Magic = 0x324D4755; // "UGM2"
+    private const uint Magic = 0x334D4755; // "UGM3"
+
+    // True when the file starts with the current format magic; false for stale formats, short files or a
+    // missing path. Cold-load detection uses this so a format bump re-extracts instead of crashing on Read.
+    public static bool IsCurrent(string path)
+    {
+        try
+        {
+            using FileStream s = File.OpenRead(path);
+            Span<byte> head = stackalloc byte[4];
+            return s.Read(head) == 4 && BinaryPrimitives.ReadUInt32LittleEndian(head) == Magic;
+        }
+        catch (IOException) { return false; }
+    }
 
     public static void Write(Stream stream, Vector3[] vertices, Vector3[] normals, Vector2[] uvs,
         IReadOnlyList<CachedSubmesh> submeshes)
@@ -57,6 +76,8 @@ public static class MeshCache
             w.Write(sm.Color.B);
             w.Write(sm.Color.A);
             w.Write((byte)sm.Blend);
+            w.Write(sm.Metallic);
+            w.Write(sm.Smoothness);
             w.Write(sm.Indices.Length);
             foreach (int i in sm.Indices)
                 w.Write(i);
@@ -96,9 +117,11 @@ public static class MeshCache
             var color = new Color(ReadSingle(data, ref pos), ReadSingle(data, ref pos),
                 ReadSingle(data, ref pos), ReadSingle(data, ref pos));
             var blend = (UnityMaterial.Blend)data[pos++];
+            float metallic = ReadSingle(data, ref pos);
+            float smoothness = ReadSingle(data, ref pos);
             int indexCount = ReadInt32(data, ref pos);
             int[] indices = ReadIntArray(data, ref pos, indexCount);
-            submeshes.Add(new CachedSubmesh(indices, color, textureKey, blend));
+            submeshes.Add(new CachedSubmesh(indices, color, textureKey, blend, metallic, smoothness));
         }
 
         return (vertices, normals, uvs, submeshes);

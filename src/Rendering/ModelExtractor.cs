@@ -331,8 +331,8 @@ public static class ModelExtractor
 
                 for (int si = 0; si < mesh.Submeshes.Count; si++)
                 {
-                    (Color color, string texKey, UnityMaterial.Blend blend, long texId) =
-                        materials.Resolve(si, palette, part.Materials);
+                    (Color color, string texKey, UnityMaterial.Blend blend, long texId,
+                        float metallic, float smoothness) = materials.Resolve(si, palette, part.Materials);
                     if (neededTextures != null && texId != 0 && !neededTextures.ContainsKey(texId) &&
                         graph.ObjectsByPathId.TryGetValue(texId, out SerializedObject? texObj))
                         neededTextures[texId] = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, file.ReaderFor(texObj)));
@@ -341,7 +341,7 @@ public static class ModelExtractor
                     var indices = new int[src.Length];
                     for (int k = 0; k < src.Length; k++)
                         indices[k] = src[k] + baseVertex;
-                    submeshes.Add(new CachedSubmesh(indices, color, texKey, blend));
+                    submeshes.Add(new CachedSubmesh(indices, color, texKey, blend, metallic, smoothness));
                 }
             }
 
@@ -417,7 +417,7 @@ public static class ModelExtractor
         foreach (FoliageAsset fa in foliageAssets)
         {
             string outPath = Path.Combine(cacheDir, fa.Guid.ToString("N") + ".mesh");
-            if (File.Exists(outPath))
+            if (File.Exists(outPath) && MeshCache.IsCurrent(outPath))
                 continue;
 
             string meshKey = graph.AssetPrefix + fa.MeshPath.Replace('\\', '/').ToLowerInvariant();
@@ -429,7 +429,8 @@ public static class ModelExtractor
             if (!mesh.Usable || mesh.Submeshes.Count == 0)
                 continue;
 
-            (string texKey, Color color) = ResolveMaterialByPath(graph, fa.MaterialPath, neededTextures);
+            (string texKey, Color color, float metallic, float smoothness) =
+                ResolveMaterialByPath(graph, fa.MaterialPath, neededTextures);
 
             var uvs = new Vector2[mesh.Vertices.Length];
             for (int i = 0; i < uvs.Length; i++)
@@ -440,7 +441,8 @@ public static class ModelExtractor
             // Standard shader's _Mode (GetBlendMode would misread them as opaque and break the grass cards).
             var submeshes = new List<CachedSubmesh>();
             foreach (int[] src in mesh.Submeshes)
-                submeshes.Add(new CachedSubmesh((int[])src.Clone(), color, texKey, UnityMaterial.Blend.Cutout));
+                submeshes.Add(new CachedSubmesh((int[])src.Clone(), color, texKey, UnityMaterial.Blend.Cutout,
+                    metallic, smoothness));
 
             using var stream = File.Create(outPath);
             MeshCache.Write(stream, mesh.Vertices, normals, uvs, submeshes);
@@ -452,26 +454,28 @@ public static class ModelExtractor
     // Resolves a material named by its masterbundle container path into the _MainTex hex key (recorded for
     // the texture-streaming pass) and the _Color tint. Mirrors MaterialResolver's per-submesh lookup — some
     // foliage (the pebbles) has no texture at all and renders purely from _Color, exactly as in Unturned.
-    private static (string texKey, Color color) ResolveMaterialByPath(PrefabGraph graph, string materialPath,
-        Dictionary<long, UnityTexture>? neededTextures)
+    private static (string texKey, Color color, float metallic, float smoothness) ResolveMaterialByPath(
+        PrefabGraph graph, string materialPath, Dictionary<long, UnityTexture>? neededTextures)
     {
         if (materialPath.Length == 0)
-            return (string.Empty, Colors.White);
+            return (string.Empty, Colors.White, 0f, 0f);
         string matKey = graph.AssetPrefix + materialPath.Replace('\\', '/').ToLowerInvariant();
         if (!graph.ContainerByPath.TryGetValue(matKey, out long matId) ||
             !graph.ObjectsByPathId.TryGetValue(matId, out SerializedObject? matObj))
-            return (string.Empty, Colors.White);
+            return (string.Empty, Colors.White, 0f, 0f);
 
         Dictionary<string, object> matDict = TypeTreeReader.Read(matObj.TypeTree, graph.File.ReaderFor(matObj));
         Color color = UnityMaterial.GetColor(matDict, "_Color") ?? Colors.White;
+        float metallic = UnityMaterial.GetFloat(matDict, "_Metallic") ?? 0f;
+        float smoothness = UnityMaterial.GetFloat(matDict, "_Glossiness") ?? 0f;
 
         (int fileId, long texId) = UnityMaterial.GetTexture(matDict, "_MainTex");
         if (fileId != 0 || texId == 0 || !graph.ObjectsByPathId.TryGetValue(texId, out SerializedObject? texObj))
-            return (string.Empty, color);
+            return (string.Empty, color, metallic, smoothness);
 
         if (neededTextures != null && !neededTextures.ContainsKey(texId))
             neededTextures[texId] = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, graph.File.ReaderFor(texObj)));
-        return (texId.ToString("x"), color);
+        return (texId.ToString("x"), color, metallic, smoothness);
     }
 
     // Phase 2: decode the full bundle (now including the ~1.18 GB .resS pixel stream) and write the

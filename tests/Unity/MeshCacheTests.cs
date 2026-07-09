@@ -16,7 +16,8 @@ public class MeshCacheTests
         var uvs = new[] { new Vector2(0, 0), new Vector2(1, 0), new Vector2(1, 1) };
         var submeshes = new List<CachedSubmesh>
         {
-            new(new[] { 0, 1, 2 }, new Color(0.5f, 0.4f, 0.3f, 1f), "abc", UnityMaterial.Blend.Opaque),
+            new(new[] { 0, 1, 2 }, new Color(0.5f, 0.4f, 0.3f, 1f), "abc", UnityMaterial.Blend.Opaque,
+                metallic: 0.8f, smoothness: 0.6f),
             new(new[] { 2, 1, 0 }, Colors.White, "", UnityMaterial.Blend.Alpha),
         };
 
@@ -33,8 +34,41 @@ public class MeshCacheTests
         Assert.Equal(new Color(0.5f, 0.4f, 0.3f, 1f), sm[0].Color);
         Assert.Equal(new[] { 0, 1, 2 }, sm[0].Indices);
         Assert.Equal(UnityMaterial.Blend.Opaque, sm[0].Blend);
+        Assert.Equal(0.8f, sm[0].Metallic);
+        Assert.Equal(0.6f, sm[0].Smoothness);
         Assert.Equal("", sm[1].TextureKey);
         Assert.Equal(UnityMaterial.Blend.Alpha, sm[1].Blend);
+        Assert.Equal(0f, sm[1].Metallic);   // defaults: fully matte
+        Assert.Equal(0f, sm[1].Smoothness);
+    }
+
+    [Fact]
+    public void IsCurrent_TrueForFreshCache_FalseForStaleOrMissing()
+    {
+        string dir = Directory.CreateTempSubdirectory("meshcache").FullName;
+        try
+        {
+            string fresh = Path.Combine(dir, "fresh.mesh");
+            using (FileStream f = File.Create(fresh))
+                MeshCache.Write(f, new[] { new Vector3(1, 1, 1) }, System.Array.Empty<Vector3>(),
+                    System.Array.Empty<Vector2>(),
+                    new List<CachedSubmesh> { new(new[] { 0 }, Colors.Red, "", UnityMaterial.Blend.Opaque) });
+            Assert.True(MeshCache.IsCurrent(fresh));
+
+            string stale = Path.Combine(dir, "stale.mesh");
+            File.WriteAllBytes(stale, new byte[] { 0x55, 0x47, 0x4D, 0x32, 0, 0 }); // "UGM2" (old format)
+            Assert.False(MeshCache.IsCurrent(stale));
+
+            string shortFile = Path.Combine(dir, "short.mesh");
+            File.WriteAllBytes(shortFile, new byte[] { 0x55 });
+            Assert.False(MeshCache.IsCurrent(shortFile));
+
+            Assert.False(MeshCache.IsCurrent(Path.Combine(dir, "missing.mesh")));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
     }
 
     [Fact]
