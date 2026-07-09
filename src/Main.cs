@@ -100,6 +100,13 @@ public partial class Main : Node3D
         bool headless = DisplayServer.GetName() == "headless";
         string shot = OS.GetEnvironment("SCREENSHOT_PATH");
 
+        if (!string.IsNullOrEmpty(shot) && OS.GetEnvironment("MENU_SHOT") == "1")
+        {
+            AddChild(new MainMenu { Name = "MainMenu" }); // screenshot of the boot menu, no world
+            _ = CaptureAndQuit(shot, settleFrames: 10);
+            return;
+        }
+
         if (headless || !string.IsNullOrEmpty(shot))
         {
             // Complete synchronous build — headless validation, or a screenshot that must be finished.
@@ -135,8 +142,32 @@ public partial class Main : Node3D
             return;
         }
 
-        // Interactive: terrain, roads, water and environment up front; objects stream in (mesh-first,
-        // textures hot-swapped as they decode) so a cold load is playable in ~3 s instead of ~10 s.
+        // Interactive: automation env flags (FREECAM/JOIN/OPEN_LAN) boot straight into the world; a
+        // normal launch lands on the main menu first — no map is loaded until the player picks an option.
+        bool autoStart = OS.GetEnvironment("FREECAM") == "1" || OS.GetEnvironment("OPEN_LAN") == "1"
+            || OS.GetEnvironment("JOIN") is { Length: > 0 };
+        if (autoStart)
+        {
+            StartInteractiveWorld(unturnedPath, environmentDir, lighting,
+                OS.GetEnvironment("JOIN") is { Length: > 0 } join ? join : null);
+            return;
+        }
+
+        var menu = new MainMenu { Name = "MainMenu" };
+        menu.OnStart = joinTarget =>
+        {
+            menu.QueueFree();
+            StartInteractiveWorld(unturnedPath, environmentDir, lighting, joinTarget);
+        };
+        AddChild(menu);
+    }
+
+    // Builds the streamed interactive world; joinTarget != null also connects to that server.
+    private void StartInteractiveWorld(string unturnedPath, string environmentDir, LevelLighting? lighting,
+        string? joinTarget)
+    {
+        _pendingJoin = joinTarget;
+
         var level = new LevelInfo(System.IO.Path.Combine(unturnedPath, "Maps", MapName));
 
         // Start the object placement/asset IO now so it runs on a worker while the terrain builds on this
@@ -164,6 +195,9 @@ public partial class Main : Node3D
         overlay.Track(streamer); // connect before Begin so a warm cache's instant signals are caught
         streamer.Begin();
     }
+
+    // Set by the main menu's Conectar flow (or the JOIN env), consumed by SpawnPlayer.
+    private string? _pendingJoin;
 
     // Spawns the character over a town and gives each terrain tile a cheap heightfield collision so it can
     // stand on the ground (vs a 2.1M-triangle concave trimesh). Objects stay non-colliding for now (the
@@ -196,12 +230,12 @@ public partial class Main : Node3D
             network.StartListenServer(NetworkManager.DefaultPort,
                 OS.GetEnvironment("PLAYER_NAME") is { Length: > 0 } hn ? hn : "Host");
 
-        // JOIN=host[:port] connects straight into someone's server at startup.
-        if (OS.GetEnvironment("JOIN") is { Length: > 0 } join)
+        // Conectar from the main menu, or JOIN=host[:port] from the environment.
+        if (_pendingJoin is { Length: > 0 } join)
         {
             string[] parts = join.Split(':');
             network.JoinServer(parts[0],
-                parts.Length > 1 ? ushort.Parse(parts[1]) : NetworkManager.DefaultPort,
+                parts.Length > 1 && ushort.TryParse(parts[1], out ushort p) ? p : NetworkManager.DefaultPort,
                 OS.GetEnvironment("PLAYER_NAME") is { Length: > 0 } pn ? pn : "Player");
         }
         AttachSession(network, player, unturnedPath);
