@@ -114,6 +114,12 @@ public partial class Main : Node3D
         // Interactive: terrain, roads, water and environment up front; objects stream in (mesh-first,
         // textures hot-swapped as they decode) so a cold load is playable in ~3 s instead of ~10 s.
         var level = new LevelInfo(System.IO.Path.Combine(unturnedPath, "Maps", MapName));
+
+        // Start the object placement/asset IO now so it runs on a worker while the terrain builds on this
+        // thread; Begin() below joins it. (The streamer joins the tree later, just before Begin.)
+        var streamer = new ObjectStreamer { Name = "ObjectStreamer" };
+        streamer.StartPrepare(unturnedPath, level);
+
         (Node3D terrain, _, HeightmapSampler heights) = WorldBuilder.BuildTerrain(level);
         AddChild(terrain);
         AddChild(RoadsBuilder.Build(environmentDir, heights));
@@ -128,12 +134,11 @@ public partial class Main : Node3D
         else
             SpawnPlayer(terrain, thirdPerson: false, unturnedPath);
 
-        var streamer = new ObjectStreamer { Name = "ObjectStreamer" };
         var overlay = new LoadingOverlay { Name = "LoadingOverlay" };
         AddChild(streamer);
         AddChild(overlay);
         overlay.Track(streamer); // connect before Begin so a warm cache's instant signals are caught
-        streamer.Begin(unturnedPath, level);
+        streamer.Begin();
     }
 
     // Spawns the character over a town and gives each terrain tile a cheap heightfield collision so it can

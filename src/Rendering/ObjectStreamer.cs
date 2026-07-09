@@ -46,8 +46,12 @@ public partial class ObjectStreamer : Node
     private bool _sceneBuilt;
     private bool _drainedFinal;
     private Stopwatch _cold = new();
+    private Task _prepTask = Task.CompletedTask;
 
-    public void Begin(string unturnedPath, LevelInfo level)
+    // Kicks off the placement/asset IO — LevelObjects/Trees/Foliage.Load and the two asset-DB scans, all
+    // pure file reads + parsing with no Godot objects — on a worker so it overlaps the caller's main-thread
+    // terrain build. Call this before building terrain; then Begin() once the streamer is in the tree.
+    public void StartPrepare(string unturnedPath, LevelInfo level)
     {
         _level = level;
         _objectBundlesDir = Path.Combine(unturnedPath, "Bundles", "Objects");
@@ -57,8 +61,12 @@ public partial class ObjectStreamer : Node
         _cacheDir = ProjectSettings.GlobalizePath("user://model_cache");
         _textureCacheDir = ProjectSettings.GlobalizePath("user://texture_cache");
         _registry = new TextureRegistry(_textureCacheDir);
+        _prepTask = Task.Run(LoadPlacements);
+    }
 
-        LoadPlacements();
+    public void Begin()
+    {
+        _prepTask.Wait(); // join the placement/asset IO that ran alongside the terrain build
 
         // Cold-load if the object meshes aren't cached, or if the foliage meshes were never extracted
         // (e.g. an older cache from before foliage support) — both come from the same decode pass.
