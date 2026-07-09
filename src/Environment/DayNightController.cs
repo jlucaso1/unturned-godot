@@ -66,6 +66,12 @@ public partial class DayNightController : Node
             Sky = new Sky { SkyMaterial = controller._sky },
             AmbientLightSource = Godot.Environment.AmbientSource.Color,
             AmbientLightEnergy = 1.0f,
+            // Specular reflections come from the sky radiance map — Unturned's counterpart is its custom
+            // skybox reflection probe (LevelLighting.updateSkyboxReflections). Only materials whose data
+            // carries _Metallic/_Glossiness have a specular path, so matte objects are unaffected, and the
+            // map is already generated for the sky background: no added cost. The probe naturally dims at
+            // night as the sky darkens, standing in for Unturned's animated reflectionIntensity.
+            ReflectedLightSource = Godot.Environment.ReflectionSource.Sky,
             FogEnabled = true,
             FogMode = Godot.Environment.FogModeEnum.Exponential,
             FogSkyAffect = 0.3f, // keep the sky mostly readable; fog mainly grounds the terrain
