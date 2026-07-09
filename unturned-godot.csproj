@@ -21,6 +21,7 @@
     <Compile Remove="core/**/*.cs" />
     <Compile Remove="tests/**/*.cs" />
     <Compile Remove="build/**/*.cs" />
+    <Compile Remove="tools/**/*.cs" />
     <!-- Root the assemblies to avoid trimming. -->
     <TrimmerRootAssembly Include="GodotSharp" />
     <TrimmerRootAssembly Include="$(TargetName)" />

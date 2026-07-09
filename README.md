@@ -104,6 +104,8 @@ Two benchmark tiers print a JSON report and diff it against the previous run:
   breakdown, and attribute per-subsystem by differencing runs rather than by stack.
 - **CPU** (.NET): `dotnet-trace collect -- "$GODOT" -- --benchmark`. (Godot's built-in script profiler
   covers GDScript only — it does not see C#.)
+- **Parsers in isolation**: `dotnet run -c Release --project tools/PerfHarness` micro-benchmarks the Core
+  parsers against the real game data (see `tools/PerfHarness/README.md`).
 - **GPU per render pass**: add `--gpu-profile` to any run (works in release builds) — prints each pass's
   GPU time (shadows, depth prepass, opaque, sky, transparent, tonemap) to stdout every frame.
 - **No window** (Wayland/X): wrap a GPU run in a headless nested compositor so nothing shows on your
