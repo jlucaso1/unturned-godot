@@ -137,6 +137,7 @@ public sealed class ZombieSystem
 
     public const float RepathRate = 0.5f;               // LegacyAIPath.repathRate
     public const float PickNextWaypointDist = 1f;       // LegacyAIPathNoRedist.pickNextWaypointDist
+    public const float ForwardLook = 4f;                // LegacyAIPathNoRedist.forwardLook
     // The A* Pathfinding Project computes paths on a time budget per frame (AstarPath.maxFrameTime),
     // queueing the rest — a horde alerted by the same detect pass never recalculates in one burst.
     // Same shape here: at most this many queries per tick (~0.3-1.6 ms each against PEI's map);
@@ -435,6 +436,13 @@ public sealed class ZombieSystem
         }
 
         zombie.State = EZombieState.Chase;
+        if (sqrHorizontal <= 4f)
+        {
+            // Zombie.cs inside 2 m: steer directly at the player (seeker.TargetDirection), no
+            // route, no drift — the final approach never dances around the carrot.
+            MoveTowards(zombie, target.Position, dt);
+            return;
+        }
         Vector3 steerOffset = Vector3.Zero;
         if (zombie.Path != EZombiePath.Rush && sqrHorizontal > 4f)
         {
@@ -480,7 +488,16 @@ public sealed class ZombieSystem
         bool onRoute = zombie.PathPoints.Count >= 2;
         if (onRoute)
         {
-            target = Carrot(zombie);
+            // Adaptive lookahead: aim forwardLook (4 m) ahead when the physical line is open —
+            // the original's smooth, far-sighted steering — but fall back toward the corridor
+            // (2 m, then 1 m) when a wall or doorway corner blocks the line, so narrow openings
+            // are threaded precisely instead of leaning on the collision slide.
+            target = Carrot(zombie, ForwardLook);
+            if (MoveResolver != null && !LineOpen(zombie, target))
+            {
+                Vector3 mid = Carrot(zombie, 2f);
+                target = LineOpen(zombie, mid) ? mid : Carrot(zombie, PickNextWaypointDist);
+            }
         }
         else if (zombie.PathPoints.Count == 1)
         {
@@ -498,9 +515,17 @@ public sealed class ZombieSystem
         MoveTowards(zombie, atRouteEnd || !onRoute ? target : target + steerOffset, dt);
     }
 
+    // The physical line test behind the adaptive lookahead: sweep the actual movement collider
+    // along the straight line and see whether it arrives (within a shoulder of tolerance).
+    private bool LineOpen(ZombieInstance zombie, Vector3 point)
+    {
+        Vector3 resolved = MoveResolver!(zombie.Position, point, zombie.Radius);
+        return HorizontalDistanceSquared(resolved, point) < 0.25f;
+    }
+
     // Projects the zombie onto its route near its current segment (monotonic: it never jumps to a
     // later fold of a route that loops back), then walks one lookahead ahead along the polyline.
-    private static Vector3 Carrot(ZombieInstance zombie)
+    private static Vector3 Carrot(ZombieInstance zombie, float lookahead)
     {
         List<Vector3> pts = zombie.PathPoints;
 
@@ -530,9 +555,8 @@ public sealed class ZombieSystem
         }
         zombie.PathSegment = bestSegment;
 
-        // Walk pickNextWaypointDist ahead along the polyline from the projection.
         Vector3 point = pts[bestSegment].Lerp(pts[bestSegment + 1], bestT);
-        float remaining = PickNextWaypointDist;
+        float remaining = lookahead;
         int segment = bestSegment;
         while (segment < pts.Count - 1)
         {
@@ -629,14 +653,40 @@ public sealed class ZombieSystem
             float progress = HorizontalDistanceSquared(resolved, zombie.Position);
             if (progress < step * step * 0.0625f) // under 25% of the step: blocked head-on
             {
-                // The real game's navmesh routes around obstacles; without one, hug the obstacle:
-                // walk the tangent on a sticky side (like a CharacterController skirting a trunk).
-                // The side is rolled once and kept for good — re-rolling whenever the direct line
-                // briefly opened made zombies orbit back and forth on a curved trunk.
-                if (zombie.DetourSide == 0)
-                    zombie.DetourSide = _random.NextSingle() < 0.5f ? (sbyte)-1 : (sbyte)1;
-                var tangent = new Vector3(-direction.Z * zombie.DetourSide, 0f, direction.X * zombie.DetourSide);
-                Vector3 detour = MoveResolver(zombie.Position, zombie.Position + (tangent * step), zombie.Radius);
+                // Blocked dead-on (the slide was degenerate): skirt the obstacle along the tangent,
+                // trying BOTH sides and keeping whichever ends closer to the target — the side a
+                // CharacterController slide picks naturally. Near-ties keep the previous side so a
+                // curved trunk is rounded consistently instead of orbited.
+                var tangent = new Vector3(-direction.Z, 0f, direction.X);
+                Vector3 plus = MoveResolver(zombie.Position,
+                    zombie.Position + (tangent * step), zombie.Radius);
+                Vector3 minus = MoveResolver(zombie.Position,
+                    zombie.Position - (tangent * step), zombie.Radius);
+                float blockedStep = step * step * 0.0625f;
+                bool plusMoves = HorizontalDistanceSquared(plus, zombie.Position) > blockedStep;
+                bool minusMoves = HorizontalDistanceSquared(minus, zombie.Position) > blockedStep;
+                sbyte side;
+                if (plusMoves && minusMoves)
+                {
+                    // Both sides are open: prefer the one that ends closer to the target
+                    // (rounding an obstacle momentarily moves away on both — near-ties keep the
+                    // previous side so a curved trunk is rounded consistently, never orbited).
+                    float plusGain = HorizontalDistanceSquared(minus, targetPosition)
+                        - HorizontalDistanceSquared(plus, targetPosition);
+                    side = MathF.Abs(plusGain) < 0.01f
+                        ? (zombie.DetourSide != 0 ? zombie.DetourSide : (sbyte)1)
+                        : (plusGain > 0f ? (sbyte)1 : (sbyte)-1);
+                }
+                else if (plusMoves || minusMoves)
+                {
+                    side = plusMoves ? (sbyte)1 : (sbyte)-1; // only one way physically opens
+                }
+                else
+                {
+                    side = zombie.DetourSide != 0 ? zombie.DetourSide : (sbyte)1; // walled in
+                }
+                zombie.DetourSide = side;
+                Vector3 detour = side > 0 ? plus : minus;
                 if (HorizontalDistanceSquared(detour, zombie.Position) > progress)
                     resolved = detour;
             }
