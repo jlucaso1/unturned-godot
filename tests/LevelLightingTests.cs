@@ -56,6 +56,8 @@ public class LevelLightingTests
 
         Assert.Equal(12, lighting.Version);
         Assert.Equal(281.74f, lighting.Azimuth);
+        Assert.Equal(0.1f, lighting.Bias);
+        Assert.Equal(0.2f, lighting.Fade);
         Assert.Equal(0.32f, lighting.TimeOfDay);
         Assert.Equal(0.5f, lighting.SeaLevel);
         Assert.Equal(4, lighting.Times.Count);

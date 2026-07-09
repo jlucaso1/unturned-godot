@@ -85,9 +85,9 @@ public partial class Main : Node3D
             AddChild(world.Objects);
             AddChild(world.Foliage);
             AddChild(RoadsBuilder.Build(environmentDir, world.Heights));
-            AddChild(WaterBuilder.Build(lighting));
+            AddChild(WaterBuilder.Build(lighting, out StandardMaterial3D water));
             AddChild(NodesBuilder.Build(environmentDir));
-            SetupEnvironment(lighting);
+            SetupEnvironment(lighting, water);
 
             if (headless)
             {
@@ -123,9 +123,9 @@ public partial class Main : Node3D
         (Node3D terrain, _, HeightmapSampler heights) = WorldBuilder.BuildTerrain(level);
         AddChild(terrain);
         AddChild(RoadsBuilder.Build(environmentDir, heights));
-        AddChild(WaterBuilder.Build(lighting));
+        AddChild(WaterBuilder.Build(lighting, out StandardMaterial3D waterMat));
         AddChild(NodesBuilder.Build(environmentDir));
-        SetupEnvironment(lighting);
+        SetupEnvironment(lighting, waterMat);
 
         // Feature flag: FREECAM=1 keeps the fly-through camera; otherwise the player character spawns and
         // walks the map (terrain collision is added on demand so free-cam runs don't pay for it).
@@ -210,11 +210,9 @@ public partial class Main : Node3D
 
     // Sun + sky/ambient from the map lighting, plus the debug overlay (windowed only). The camera/player is
     // added separately by the caller so the free-cam and character paths can differ.
-    private void SetupEnvironment(LevelLighting? lighting)
+    private void SetupEnvironment(LevelLighting? lighting, StandardMaterial3D waterMaterial)
     {
-        (DirectionalLight3D sun, WorldEnvironment world) = SceneEnvironment.Build(lighting);
-        AddChild(sun);
-        AddChild(world);
+        AddChild(DayNightController.Build(lighting, waterMaterial));
 
         if (DisplayServer.GetName() != "headless")
             AddChild(new DebugOverlay { Name = "DebugOverlay" });
