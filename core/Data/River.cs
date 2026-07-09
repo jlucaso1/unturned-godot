@@ -1,84 +1,59 @@
 using System;
+using System.Buffers.Binary;
 using System.IO;
 using System.Text;
 using Godot;
 
 namespace UnturnedGodot.Data;
 
-// Ports Unturned's stream-backed River reader (Unturned/Files/River.cs). Little-endian.
+// Ports Unturned's stream-backed River reader (Unturned/Files/River.cs). Little-endian. Reads the whole
+// (small) file into memory once and walks a byte cursor, so each primitive is a span read instead of a
+// virtual FileStream.Read plus a scratch-buffer copy — the object/tree/node/road loaders pull hundreds of
+// thousands of these per map.
 public sealed class River : IDisposable
 {
-    private readonly FileStream _stream;
-    private readonly byte[] _buffer = new byte[16];
+    private readonly byte[] _data;
+    private int _pos;
 
-    public River(string path)
+    public River(string path) => _data = File.ReadAllBytes(path);
+
+    private void EnsureAvailable(int count)
     {
-        _stream = new FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite);
+        if (_pos + count > _data.Length)
+            throw new EndOfStreamException();
     }
 
-    private void Fill(int count)
-    {
-        int read = 0;
-        while (read < count)
-        {
-            int r = _stream.Read(_buffer, read, count - read);
-            if (r <= 0) throw new EndOfStreamException();
-            read += r;
-        }
-    }
-
-    public byte ReadByte()
-    {
-        int b = _stream.ReadByte();
-        return (byte)(b < 0 ? 0 : b);
-    }
+    // Lenient like the source: past end-of-file returns 0 without advancing (the Fill-based reads throw).
+    public byte ReadByte() => _pos < _data.Length ? _data[_pos++] : (byte)0;
 
     public bool ReadBoolean() => ReadByte() != 0;
 
-    public ushort ReadUInt16() { Fill(2); return BitConverter.ToUInt16(_buffer, 0); }
-    public short ReadInt16() { Fill(2); return BitConverter.ToInt16(_buffer, 0); }
-    public uint ReadUInt32() { Fill(4); return BitConverter.ToUInt32(_buffer, 0); }
-    public int ReadInt32() { Fill(4); return BitConverter.ToInt32(_buffer, 0); }
-    public ulong ReadUInt64() { Fill(8); return BitConverter.ToUInt64(_buffer, 0); }
-    public float ReadSingle() { Fill(4); return BitConverter.ToSingle(_buffer, 0); }
+    public ushort ReadUInt16() { EnsureAvailable(2); ushort v = BinaryPrimitives.ReadUInt16LittleEndian(_data.AsSpan(_pos)); _pos += 2; return v; }
+    public short ReadInt16() { EnsureAvailable(2); short v = BinaryPrimitives.ReadInt16LittleEndian(_data.AsSpan(_pos)); _pos += 2; return v; }
+    public uint ReadUInt32() { EnsureAvailable(4); uint v = BinaryPrimitives.ReadUInt32LittleEndian(_data.AsSpan(_pos)); _pos += 4; return v; }
+    public int ReadInt32() { EnsureAvailable(4); int v = BinaryPrimitives.ReadInt32LittleEndian(_data.AsSpan(_pos)); _pos += 4; return v; }
+    public ulong ReadUInt64() { EnsureAvailable(8); ulong v = BinaryPrimitives.ReadUInt64LittleEndian(_data.AsSpan(_pos)); _pos += 8; return v; }
+    public float ReadSingle() { EnsureAvailable(4); float v = BinaryPrimitives.ReadSingleLittleEndian(_data.AsSpan(_pos)); _pos += 4; return v; }
 
     public string ReadString()
     {
         byte length = ReadByte();
         if (length == 0) return string.Empty;
-        var bytes = new byte[length];
-        int read = 0;
-        while (read < length)
-        {
-            int r = _stream.Read(bytes, read, length - read);
-            if (r <= 0) throw new EndOfStreamException();
-            read += r;
-        }
-        return Encoding.UTF8.GetString(bytes);
+        EnsureAvailable(length);
+        string s = Encoding.UTF8.GetString(_data, _pos, length);
+        _pos += length;
+        return s;
     }
 
-    // River's stream mode prefixes byte arrays with a uint16 length (Block uses a byte).
-    public byte[] ReadBytes()
-    {
-        ushort count = ReadUInt16();
-        var bytes = new byte[count];
-        int read = 0;
-        while (read < count)
-        {
-            int r = _stream.Read(bytes, read, count - read);
-            if (r <= 0) throw new EndOfStreamException();
-            read += r;
-        }
-        return bytes;
-    }
-
-    // On-disk GUID is the raw 16-byte MS mixed-endian layout, which new Guid(byte[16]) reproduces.
+    // River's stream mode prefixes the GUID's byte array with a uint16 length. The on-disk GUID is the raw
+    // 16-byte MS mixed-endian layout, which new Guid(16 bytes) reproduces; read the span directly.
     public Guid ReadGuid()
     {
-        byte[] bytes = ReadBytes();
-        if (bytes.Length != 16)
-            return Guid.Empty;
-        return new Guid(bytes);
+        ushort count = ReadUInt16();
+        EnsureAvailable(count);
+        Guid g = count == 16 ? new Guid(_data.AsSpan(_pos, 16)) : Guid.Empty;
+        _pos += count;
+        return g;
     }
 
     public Vector3 ReadSingleVector3()
@@ -98,5 +73,5 @@ public sealed class River : IDisposable
         return new Vector3(x, y, z);
     }
 
-    public void Dispose() => _stream.Dispose();
+    public void Dispose() { } // the whole file is already in memory; nothing to release
 }

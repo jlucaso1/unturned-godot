@@ -56,9 +56,21 @@ public sealed class UnityMesh
         result.BoneIndices = ReadInt4Channel(channels, 13, buffer, vertexCount, strides, streamOffsets);
         result.BindPoses = ReadBindPoses(mesh);
         result.Submeshes = ReadSubmeshes(mesh);
+        // Flatten the submesh index arrays into one buffer in a single pass. The old running Concat
+        // reallocated and recopied the whole growing array once per submesh — O(submeshes * total
+        // indices), quadratic in submesh count.
+        int totalIndices = 0;
         foreach (int[] sm in result.Submeshes)
-            result.Indices = Concat(result.Indices, sm);
-        result.Usable = result.Vertices.Length > 0 && result.Indices.Length > 0;
+            totalIndices += sm.Length;
+        var flat = new int[totalIndices];
+        int flatOffset = 0;
+        foreach (int[] sm in result.Submeshes)
+        {
+            Array.Copy(sm, 0, flat, flatOffset, sm.Length);
+            flatOffset += sm.Length;
+        }
+        result.Indices = flat;
+        result.Usable = result.Vertices.Length > 0 && totalIndices > 0;
         return result;
     }
 
@@ -263,14 +275,6 @@ public sealed class UnityMesh
             result.Add(indices);
         }
         return result;
-    }
-
-    private static int[] Concat(int[] a, int[] b)
-    {
-        var r = new int[a.Length + b.Length];
-        Array.Copy(a, r, a.Length);
-        Array.Copy(b, 0, r, a.Length, b.Length);
-        return r;
     }
 
     private static int ToInt(object value) => Convert.ToInt32(value);

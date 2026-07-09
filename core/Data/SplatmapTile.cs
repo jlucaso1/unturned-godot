@@ -10,6 +10,17 @@ public sealed class SplatmapTile
 {
     public const int LAYERS = 8; // SPLATMAP_COUNT(2) * SPLATMAP_CHANNELS(4)
 
+    // byte / 255 for all 256 byte values, precomputed once — the splatmap has ~524k of these per tile.
+    private static readonly float[] ByteToUnitFloat = BuildByteToUnitFloat();
+
+    private static float[] BuildByteToUnitFloat()
+    {
+        var lut = new float[256];
+        for (int i = 0; i < 256; i++)
+            lut[i] = i / 255f;
+        return lut;
+    }
+
     public readonly int CoordX;
     public readonly int CoordY;
     public readonly float[] Weights; // flat; address with WeightIndex / WeightAt
@@ -33,10 +44,11 @@ public sealed class SplatmapTile
         if (data.Length < expected)
             throw new IOException($"Splatmap has {data.Length} bytes, expected {expected}");
 
-        // The source byte order (x-outer, y-inner, layer-innermost) is exactly the flat layout.
+        // The source byte order (x-outer, y-inner, layer-innermost) is exactly the flat layout. A 256-entry
+        // lookup turns each of the ~524k per-tile normalizations from a float divide into a table load.
         var weights = new float[expected];
         for (int i = 0; i < expected; i++)
-            weights[i] = data[i] / 255f;
+            weights[i] = ByteToUnitFloat[data[i]];
 
         return new SplatmapTile(coordX, coordY, weights);
     }
