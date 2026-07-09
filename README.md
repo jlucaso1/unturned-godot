@@ -107,9 +107,9 @@ Two benchmark tiers print a JSON report and diff it against the previous run:
 - **GPU per render pass**: add `--gpu-profile` to any run (works in release builds) — prints each pass's
   GPU time (shadows, depth prepass, opaque, sky, transparent, tonemap) to stdout every frame.
 - **No window** (Wayland/X): wrap a GPU run in a headless nested compositor so nothing shows on your
-  desktop — `gamescope --backend headless -W 1152 -H 648 -- "$GODOT" -- --benchmark --gpu`. Real Vulkan,
-  screenshots and VRAM all work; frame time is vsync-capped under it, so use a normal window for
-  uncapped `gpu.frameMs`.
+  desktop — `gamescope --backend headless -r 1000 -W 1152 -H 648 -- "$GODOT" -- --benchmark --gpu`.
+  Real Vulkan, screenshots and VRAM all work; `-r 1000` lifts the compositor's 60 Hz vblank so
+  `gpu.frameMs` is effectively uncapped too.
 
 `ObjectStreamer` prints a `post-load reclaim: RSS x -> y MB` line (Linux, from `/proc/self/status`) after
 the one-time load's transient heap is compacted back to the OS — a quick steady-state RSS check.
