@@ -32,8 +32,10 @@ public partial class OneShotAudio : Node3D
 
     // Plays a random clip of the definition at a world position. volumeScale is the caller's gameplay
     // volume (e.g. FootstepConfig's 0.125), multiplied by the def's own volumeMultiplier; pitch is
-    // randomized in the def's range. Returns false when the definition isn't extracted yet.
-    public bool Play(string defName, Vector3 position, float volumeScale, float maxDistance)
+    // randomized in the def's range unless the caller overrides it (zombie roars pitch by speciality:
+    // megas growl at 0.5-0.7). Returns false when the definition isn't extracted yet.
+    public bool Play(string defName, Vector3 position, float volumeScale, float maxDistance,
+        float? minPitch = null, float? maxPitch = null)
     {
         AudioDefLibrary.Entry? entry = _library.Resolve(defName);
         if (entry == null)
@@ -44,7 +46,8 @@ public partial class OneShotAudio : Node3D
         voice.GlobalPosition = position;
         voice.MaxDistance = maxDistance;
         voice.VolumeDb = Mathf.LinearToDb(volumeScale * entry.Def.VolumeMultiplier);
-        voice.PitchScale = Mathf.Lerp(entry.Def.MinPitch, entry.Def.MaxPitch, (float)_random.NextDouble());
+        voice.PitchScale = Mathf.Lerp(minPitch ?? entry.Def.MinPitch, maxPitch ?? entry.Def.MaxPitch,
+            (float)_random.NextDouble());
         voice.Play();
         if (OS.GetEnvironment("AUDIO_DEBUG") == "1")
         {

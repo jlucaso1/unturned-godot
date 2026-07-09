@@ -27,20 +27,33 @@ public partial class ZombiesView : Node3D
         public byte Move;
         public byte Idle;
         public EZombieState State;
-        public bool Streaming; // any ZombieStates received yet (idle zombies never stream)
+        public bool Streaming;     // any ZombieStates received yet (idle zombies never stream)
+        public double StartleUntil; // while set, the wake-up roar plays before the state clip
+        public double NextGroan;    // Zombie.cs's groan loop clock
     }
 
     private string _unturnedPath = "";
+    private OneShotAudio? _audio;
     private readonly Dictionary<ushort, ZombieAvatar> _avatars = new();
     private Node3D? _normalTemplate;
     private Node3D? _megaTemplate;
     private readonly RandomNumberGenerator _rng = new();
 
-    public static ZombiesView Create(NetClient client, string unturnedPath)
+    public static ZombiesView Create(NetClient client, string unturnedPath, OneShotAudio? audio)
     {
-        var view = new ZombiesView { Name = "Zombies", _unturnedPath = unturnedPath };
+        var view = new ZombiesView { Name = "Zombies", _unturnedPath = unturnedPath, _audio = audio };
         client.OnUnhandledMessage += view.Handle;
         return view;
+    }
+
+    // Zombie.PlayOneShot: volume 0.5, linear rolloff to 32 m, pitch by speciality (megas growl low).
+    private void PlayVoice(ZombieAvatar avatar, string group)
+    {
+        (float minPitch, float maxPitch) = avatar.Speciality == EZombieSpeciality.Mega
+            ? (0.5f, 0.7f)
+            : (0.9f, 1.1f);
+        _audio?.Play(group, avatar.Root.Position + Vector3.Up, volumeScale: 0.5f, maxDistance: 32f,
+            minPitch, maxPitch);
     }
 
     private void Handle(byte[] payload)
@@ -113,8 +126,24 @@ public partial class ZombiesView : Node3D
 
         if (state.State != avatar.State)
         {
+            bool wokeUp = avatar.State == EZombieState.Idle && state.State == EZombieState.Chase;
             avatar.State = state.State;
-            avatar.Rig?.Play(ClipFor(avatar));
+            if (wokeUp && avatar.Rig is { } rig)
+            {
+                // Zombie.alert's startle: the wake-up roar plays first (the body already moves —
+                // the server never pauses for it), then the state clip takes over.
+                string startle = StartleClip(avatar);
+                rig.Play(startle);
+                avatar.StartleUntil = now
+                    + (rig.Clips.TryGetValue(startle, out var clip) && clip.Length > 0f ? clip.Length : 0.5f);
+                PlayVoice(avatar, "ZombieRoars");
+            }
+            else if (avatar.StartleUntil <= 0)
+            {
+                avatar.Rig?.Play(ClipFor(avatar));
+                if (avatar.State == EZombieState.Attack)
+                    PlayVoice(avatar, "ZombieRoars"); // askAttack's swing roar
+            }
         }
     }
 
@@ -130,6 +159,28 @@ public partial class ZombiesView : Node3D
                 PoseSnapshot pose = avatar.Buffer.GetCurrentSnapshot(now);
                 avatar.Root.Position = pose.Position;
                 avatar.Root.RotationDegrees = new Vector3(0, pose.Yaw, 0);
+            }
+
+            if (avatar.StartleUntil > 0 && now >= avatar.StartleUntil)
+            {
+                avatar.StartleUntil = 0;
+                avatar.Rig?.Play(ClipFor(avatar)); // the roar ended: pick up the current state clip
+            }
+
+            // Zombie.cs's groan loop, only for visible (nearby) zombies: every 4-8 s (megas 2-4 s),
+            // a standing zombie has a 20% chance to groan while a moving one always roars.
+            bool nearby = eye is { } cam
+                && avatar.Root.Position.DistanceSquaredTo(cam) <= AnimateWithin * AnimateWithin;
+            if (nearby && now >= avatar.NextGroan)
+            {
+                avatar.NextGroan = now + (avatar.Speciality == EZombieSpeciality.Mega
+                    ? _rng.RandfRange(2f, 4f)
+                    : _rng.RandfRange(4f, 8f));
+                bool moving = avatar.State is EZombieState.Chase or EZombieState.Return;
+                if (moving)
+                    PlayVoice(avatar, "ZombieRoars");
+                else if (_rng.Randf() > 0.8f)
+                    PlayVoice(avatar, "ZombieGroans");
             }
 
             // Far zombies keep their pose but stop sampling animation, like Unturned's inactive regions.
@@ -161,6 +212,14 @@ public partial class ZombiesView : Node3D
         EZombieSpeciality.Crawler => "Idle_3",
         EZombieSpeciality.Sprinter => "Idle_4",
         _ => $"Idle_{avatar.Idle}",
+    };
+
+    // Zombie.alert's startle roll: crawlers roar with 3/6, sprinters with 4/5, everyone else 0..2.
+    private string StartleClip(ZombieAvatar avatar) => avatar.Speciality switch
+    {
+        EZombieSpeciality.Crawler => _rng.Randf() < 0.5f ? "Startle_3" : "Startle_6",
+        EZombieSpeciality.Sprinter => _rng.Randf() < 0.5f ? "Startle_4" : "Startle_5",
+        _ => $"Startle_{_rng.RandiRange(0, 2)}",
     };
 
     private static Node3D Placeholder() => new MeshInstance3D

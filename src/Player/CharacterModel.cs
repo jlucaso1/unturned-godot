@@ -52,7 +52,7 @@ public static class CharacterModel
             "Move_0", "Move_1", "Move_2", "Move_3", "Move_4", "Move_5",
             "Attack_0", "Attack_1", "Attack_2", "Attack_3", "Attack_4",
             "Attack_5", "Attack_6", "Attack_7", "Attack_8",
-            "Startle_0", "Startle_1", "Startle_2",
+            "Startle_0", "Startle_1", "Startle_2", "Startle_3", "Startle_4", "Startle_5", "Startle_6",
             "Stun_0", "Stun_1", "Stun_2", "Stun_3", "Stun_4",
         },
         PrimaryIdle = "Idle_0",

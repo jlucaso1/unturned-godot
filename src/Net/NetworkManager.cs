@@ -90,6 +90,56 @@ public partial class NetworkManager : Node
             GD.PushWarning("[zombies] level ships no zombie data; skipping");
             return;
         }
+        // AlertTool's BLOCK_VISION raycast against the world's real colliders (terrain, objects,
+        // buildings): stealth detection fails when geometry hides the player. Stops at 95% of the
+        // distance exactly like the original so the ray never clips the target's own capsule. The
+        // ZombieHost ticks inside _PhysicsProcess, so querying the physics space here is safe.
+        zombies.VisionBlocked = (from, to) =>
+        {
+            PhysicsDirectSpaceState3D? space = GetViewport()?.World3D?.DirectSpaceState;
+            if (space == null)
+                return false;
+            var query = PhysicsRayQueryParameters3D.Create(from, from + ((to - from) * 0.95f));
+            return space.IntersectRay(query).Count > 0;
+        };
+        // The CharacterController's collide-and-slide against real world colliders: sweep a sphere
+        // at chest height along the step; when it hits, advance to the safe fraction and slide the
+        // remainder along the contact plane (one slide iteration, like a CC's per-frame resolve).
+        var sweep = new SphereShape3D();
+        zombies.MoveResolver = (from, to, radius) =>
+        {
+            PhysicsDirectSpaceState3D? space = GetViewport()?.World3D?.DirectSpaceState;
+            if (space == null)
+                return to;
+            sweep.Radius = radius;
+            Vector3 chest = Vector3.Up; // sweep at capsule-middle height, above ground clutter
+            Vector3 motion = to - from;
+            var query = new PhysicsShapeQueryParameters3D
+            {
+                Shape = sweep,
+                Transform = new Transform3D(Basis.Identity, from + chest),
+                Motion = motion,
+            };
+            float[] cast = space.CastMotion(query);
+            if (cast[0] >= 1f)
+                return to; // clear path
+            Vector3 safe = from + (motion * cast[0]);
+
+            // Contact normal at the blocked spot -> slide the remaining motion along the surface.
+            query.Transform = new Transform3D(Basis.Identity, safe + chest);
+            query.Motion = Vector3.Zero;
+            Vector3 normal = space.GetRestInfo(query) is { Count: > 0 } rest
+                ? (Vector3)rest["normal"]
+                : Vector3.Zero;
+            if (normal == Vector3.Zero)
+                return safe;
+            Vector3 remaining = motion * (1f - cast[0]);
+            Vector3 slide = remaining - (normal * remaining.Dot(normal));
+            query.Transform = new Transform3D(Basis.Identity, safe + chest);
+            query.Motion = slide;
+            float[] slideCast = space.CastMotion(query);
+            return safe + (slide * slideCast[0]);
+        };
         _ = new UnturnedGodot.Zombies.ZombieHost(zombies, _server);
         GD.Print($"[zombies] {zombies.Zombies.Count} zombies spawned from the level's spawnpoints");
     }

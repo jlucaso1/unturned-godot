@@ -263,14 +263,15 @@ public class ZombieHostTests
         Assert.NotEmpty(batchesA); // both spectators see the chase
         Assert.NotEmpty(batchesB);
 
-        // Every player disconnects: with no target left the zombie walks home and settles down.
+        // Every player disconnects: with no target left the zombie gives up (leave: stand for the
+        // 3-6 s delay, walk to the retreat point, settle) and eventually falls silent.
         foreach (LoopbackClientTransport transport in h.Transports)
             transport.Close();
         h.Clients.Clear();
-        Pump(h, 40);
+        Pump(h, 160); // > 6 s delay + the retreat walk at 12.5 Hz
         Assert.Equal(EZombieState.Idle, zombie.State);
         Assert.Equal(byte.MaxValue, zombie.TargetPlayer);
-        Assert.True(zombie.Position.DistanceTo(zombie.Home) <= ZombieSystem.ArriveRadius + 0.01f);
+        Assert.Equal(0f, zombie.LeaveDelay);
     }
 
     [Fact]
@@ -283,10 +284,11 @@ public class ZombieHostTests
         (_, _, List<List<ZombieSnapshotState>> batches) = Join(h, "A");
         Pump(h, 2); // admitted first, so the client actually witnesses the edge
 
-        // Wake the zombie a couple of meters from home: it walks back streaming Return states,
-        // then the host must replicate exactly the Return -> Idle edge and go quiet.
+        // Wake the zombie a couple of meters from its retreat point: it walks there streaming
+        // Return states, then the host must replicate exactly the Return -> Idle edge and go quiet.
         zombie.State = EZombieState.Return;
-        zombie.Position = zombie.Home + new Vector3(2f, 0, 0);
+        zombie.LeaveTo = zombie.Position;
+        zombie.Position = zombie.Position + new Vector3(2f, 0, 0);
         Pump(h, 10);
         List<ZombieSnapshotState> flat = batches.SelectMany(b => b).ToList();
         Assert.Contains(flat, s => s.Id == zombie.Id && s.State == EZombieState.Return);
@@ -308,9 +310,10 @@ public class ZombieHostTests
         Pump(h, 2); // admitted first, so the wake-up below is actually witnessed
         foreach (ZombieInstance z in h.System.Zombies)
         {
-            // Wake the entire map at once, several meters from home so everyone keeps walking.
+            // Wake the entire map at once, several meters from their retreat point so everyone
+            // keeps walking.
             z.State = EZombieState.Return;
-            z.Position = z.Home + new Vector3(0, 0, 30f);
+            z.LeaveTo = z.Position + new Vector3(0, 0, 30f);
         }
         Pump(h, 1);
 

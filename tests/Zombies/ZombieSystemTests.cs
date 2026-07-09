@@ -57,6 +57,8 @@ public class ZombieSystemTests
         UnturnedGodot.Player.EPlayerStance stance = UnturnedGodot.Player.EPlayerStance.Stand,
         bool moving = false) => new(id, pos, stance, moving);
 
+    // ---- Spawning ----------------------------------------------------------------------------
+
     [Fact]
     public void Spawn_TakesSpawnChanceOfEligiblePoints()
     {
@@ -155,6 +157,8 @@ public class ZombieSystemTests
         Assert.Equal(5f, Assert.Single(system.Zombies).Position.Y);
     }
 
+    // ---- Detection ---------------------------------------------------------------------------
+
     [Fact]
     public void UnalertedZombie_StaysIdle()
     {
@@ -210,6 +214,25 @@ public class ZombieSystemTests
     }
 
     [Fact]
+    public void BlockedLineOfSight_PreventsDetection()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        Vector3 rayFrom = default;
+        system.VisionBlocked = (from, to) =>
+        {
+            rayFrom = from;
+            return true; // a wall between every zombie and everyone
+        };
+        system.Tick(new[] { Player(1, new Vector3(10, 5, 0)) }, 0.1f);
+        Assert.Equal(EZombieState.Idle, zombie.State);
+        Assert.Equal(zombie.Position + Vector3.Up, rayFrom); // the ray leaves from the zombie's eyes
+
+        system.VisionBlocked = (from, to) => false; // wall gone: the alert lands
+        system.Tick(new[] { Player(1, new Vector3(10, 5, 0)) }, 0.1f);
+        Assert.Equal(EZombieState.Chase, zombie.State);
+    }
+
+    [Fact]
     public void PlayerOutsideEveryBound_NeverAlerts()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
@@ -241,23 +264,47 @@ public class ZombieSystemTests
         Assert.Equal(2, zombie.TargetPlayer);
     }
 
+    // ---- Approach paths ------------------------------------------------------------------------
+
     [Fact]
-    public void ReAlertBySamePlayer_IsStable()
+    public void ApproachPaths_SpreadTheHordeByAgro()
     {
-        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
-        var player = Player(1, new Vector3(10, 5, 0));
-        system.Tick(new[] { player }, 0.1f);
-        system.Tick(new[] { player }, 0.1f);
-        Assert.Equal(1, zombie.TargetPlayer);
-        Assert.Equal(EZombieState.Chase, zombie.State);
+        var system = new ZombieSystem(new[] { Table() }, TwoBounds(), FlatGround);
+        system.Spawn(Enumerable.Range(0, 24).Select(i => At(i - 3, 0)).ToList(), new Random(5));
+        foreach (ZombieInstance z in system.Zombies)
+        {
+            z.Speciality = EZombieSpeciality.Normal;
+            z.Yaw = 0f;
+        }
+
+        system.Tick(new[] { Player(1, new Vector3(0, 5, 0)) }, 0.1f);
+
+        List<ZombieInstance> hunting = system.Zombies.Where(z => z.TargetPlayer == 1).ToList();
+        Assert.True(hunting.Count >= 3);
+        // player.agro % 3: every third alerted zombie rushes; the rest drift to a side.
+        Assert.Contains(hunting, z => z.Path == EZombiePath.Rush);
+        Assert.Contains(hunting, z => z.Path is EZombiePath.Left or EZombiePath.Right);
+        int rushes = hunting.Count(z => z.Path == EZombiePath.Rush);
+        Assert.InRange(rushes, hunting.Count / 3, (hunting.Count / 3) + 1);
     }
+
+    [Fact]
+    public void MegaZombie_AlwaysRushes()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie, table: Table(mega: true));
+        zombie.Speciality = EZombieSpeciality.Mega;
+        system.Tick(new[] { Player(1, new Vector3(10, 5, 0)) }, 0.1f);
+        Assert.Equal(EZombiePath.Rush, zombie.Path);
+    }
+
+    // ---- Chasing -------------------------------------------------------------------------------
 
     [Fact]
     public void Chase_MovesStraightAtTheTargetAtSpeed()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         var player = Player(1, new Vector3(10, 5, 0));
-        system.Tick(new[] { player }, 0.1f);
+        system.Tick(new[] { player }, 0.1f); // first zombie on the player: agro 0 -> RUSH path
 
         float before = zombie.Position.DistanceTo(player.Position);
         system.Tick(new[] { player }, 0.1f);
@@ -265,7 +312,22 @@ public class ZombieSystemTests
 
         Assert.Equal(0.55f, before - after, 2); // normal zombie: 5.5 m/s x 0.1 s
         Assert.Equal(0f, zombie.Position.Z, 3); // dead straight along the X axis
-        Assert.Equal(-90f, zombie.Yaw, 3); // facing the +X target in the player yaw convention
+    }
+
+    [Fact]
+    public void Turning_IsRateLimitedTo720DegreesPerSecond()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = 90f; // facing away; the target direction sits at yaw -90
+        // Sprinting: never sneaking, so facing away cannot shield the player from detection.
+        var player = Player(1, new Vector3(10, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
+        system.Tick(new[] { player }, 0.05f); // below the detection cadence: still idle
+        system.Tick(new[] { player }, 0.05f); // 0.1 s accumulated: alert + first move step
+        // One 0.05 s step turns at most 36°: nowhere near the 180° flip yet.
+        Assert.True(MathF.Abs(Mathf.Wrap(zombie.Yaw - -90f, -180f, 180f)) > 30f);
+        for (int i = 0; i < 10; i++)
+            system.Tick(new[] { player }, 0.05f);
+        Assert.Equal(-90f, Mathf.Wrap(zombie.Yaw, -180f, 180f), 1); // converged on the target
     }
 
     [Theory]
@@ -278,90 +340,296 @@ public class ZombieSystemTests
         Assert.Equal(speed, new ZombieInstance { Speciality = speciality }.Speed);
     }
 
+    [Theory]
+    [InlineData(EZombieSpeciality.Normal, 1f, 2.1f)]  // dedicated NORMAL: half range
+    [InlineData(EZombieSpeciality.Crawler, 2f, 2.1f)]
+    [InlineData(EZombieSpeciality.Sprinter, 2f, 2.1f)]
+    [InlineData(EZombieSpeciality.Mega, 4f, 3.15f)]   // x2 horizontal, x1.5 vertical
+    public void AttackRanges_MatchZombieCs(EZombieSpeciality speciality, float horizontal, float vertical)
+    {
+        var zombie = new ZombieInstance { Speciality = speciality };
+        Assert.Equal(horizontal, zombie.AttackRange, 4);
+        Assert.Equal(vertical, zombie.VerticalAttackRange, 4);
+    }
+
+    [Theory]
+    [InlineData(EZombieSpeciality.Normal, 0.4f)]
+    [InlineData(EZombieSpeciality.Crawler, 0.4f)]
+    [InlineData(EZombieSpeciality.Mega, 0.75f)]
+    public void CapsuleRadii_MatchTheCharacterController(EZombieSpeciality speciality, float radius)
+    {
+        Assert.Equal(radius, new ZombieInstance { Speciality = speciality }.Radius);
+    }
+
     [Fact]
-    public void WithinAttackRange_AttacksAtTheAttackCadence()
+    public void SidePathZombie_VeersInsteadOfTakingTheStraightLine()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        system.Tick(new[] { Player(1, new Vector3(10, 5, 0)) }, 0.1f); // alert inside the 12 m radius
+        Assert.Equal(EZombieState.Chase, zombie.State);
+        zombie.Path = EZombiePath.Left; // force the side-approach branch
+
+        var player = Player(1, new Vector3(20, 5, 0)); // target ahead along the X axis
+        for (int i = 0; i < 5; i++)
+            system.Tick(new[] { player }, 0.1f);
+        Assert.NotEqual(0f, zombie.Position.Z); // drifts off the straight X-axis line
+
+        ZombieSystem rightSystem = SpawnOne(out ZombieInstance rightZombie, seed: 3);
+        rightSystem.Tick(new[] { Player(1, new Vector3(10, 5, 0)) }, 0.1f);
+        rightZombie.Path = EZombiePath.Right;
+        for (int i = 0; i < 5; i++)
+            rightSystem.Tick(new[] { player }, 0.1f);
+        Assert.NotEqual(0f, rightZombie.Position.Z);
+        // The two side paths drift to opposite sides of the rush line.
+        Assert.True(zombie.Position.Z * rightZombie.Position.Z < 0f);
+    }
+
+    [Fact]
+    public void WorldColliders_BlockAndSlideTheStep()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        // A wall at x = 0.25: the host's resolver clamps any step that would cross it (the
+        // CharacterController slide), so the chase can never pass through world geometry.
+        system.MoveResolver = (from, to, radius) =>
+        {
+            Assert.Equal(0.4f, radius); // the zombie's capsule radius reaches the resolver
+            return to.X > 0.25f ? new Vector3(0.25f, to.Y, to.Z) : to;
+        };
+
+        var player = Player(1, new Vector3(10, 5, 0));
+        for (int i = 0; i < 30; i++)
+            system.Tick(new[] { player }, 0.1f);
+        Assert.True(zombie.Position.X <= 0.25f + 0.001f, $"walked through the wall: {zombie.Position.X}");
+    }
+
+    [Fact]
+    public void ZombiesQueue_InsteadOfStackingInsideEachOther()
+    {
+        var system = new ZombieSystem(new[] { Table() }, TwoBounds(), FlatGround);
+        // Eight points around the same spot roll ceil(8 x 0.25) = 2 zombies.
+        system.Spawn(Enumerable.Range(0, 8).Select(i => At(4 + (i * 0.01f), 0)).ToList(), new Random(2));
+        Assert.Equal(2, system.Zombies.Count);
+        ZombieInstance mover = system.Zombies[0];
+        ZombieInstance blocker = system.Zombies[1];
+        mover.Speciality = EZombieSpeciality.Normal;
+        mover.Yaw = 0f;
+        mover.Position = new Vector3(8, 5, 0);
+        blocker.Speciality = EZombieSpeciality.Normal;
+        blocker.Yaw = 0f;
+        blocker.Position = new Vector3(1.5f, 5, 0); // parked between the mover and the player
+
+        var player = Player(1, new Vector3(0, 5, 0));
+        for (int i = 0; i < 60; i++)
+            system.Tick(new[] { player }, 0.1f);
+
+        // CharacterController semantics: the mover is pushed out of the blocker's capsule, so the
+        // two keep at least 0.4 + 0.4 m between centres — a queue, not a stack.
+        float separation = new Vector2(
+            mover.Position.X - blocker.Position.X, mover.Position.Z - blocker.Position.Z).Length();
+        Assert.True(separation >= 0.8f - 0.01f, $"zombies overlapped: {separation}");
+    }
+
+    // ---- Attacking -----------------------------------------------------------------------------
+
+    [Fact]
+    public void WithinAttackRange_SwingsOnTheOneSecondCadence()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         var hits = new List<(ushort Zombie, byte Player, byte Damage)>();
         system.OnAttack += (z, player, damage) => hits.Add((z.Id, player, damage));
-        var player = Player(1, new Vector3(1.5f, 5, 0));
+        var player = Player(1, new Vector3(0.8f, 5, 0)); // inside the dedicated NORMAL 1 m range
 
-        system.Tick(new[] { player }, 0.1f); // alerted and already in range: first swing
+        system.Tick(new[] { player }, 0.1f); // alert + the first swing starts
         Assert.Equal(EZombieState.Attack, zombie.State);
+        Assert.Empty(hits); // the hit lands attackTime/2 = 0.25 s after the swing starts
+
+        for (int i = 0; i < 3; i++)
+            system.Tick(new[] { player }, 0.1f); // 0.3 s: the swing connects
         Assert.Equal((zombie.Id, (byte)1, (byte)10), Assert.Single(hits));
 
-        for (int i = 0; i < 4; i++)
-            system.Tick(new[] { player }, 0.1f); // 0.4 s: still inside the 0.5 s swing
+        for (int i = 0; i < 7; i++)
+            system.Tick(new[] { player }, 0.1f); // the 1 s cadence: next swing barely starting
         Assert.Single(hits);
-
-        system.Tick(new[] { player }, 0.1f); // the 0.5 s cadence elapses here or one float-rounding
-        system.Tick(new[] { player }, 0.1f); // tick later: exactly one more swing either way
+        for (int i = 0; i < 5; i++)
+            system.Tick(new[] { player }, 0.1f); // and its hit lands attackTime/2 later
         Assert.Equal(2, hits.Count);
+    }
+
+    [Fact]
+    public void CrawlerAndSprinter_ApplyTheirDamageMultipliers()
+    {
+        foreach ((EZombieSpeciality speciality, byte expected) in new[]
+                 { (EZombieSpeciality.Crawler, (byte)20), (EZombieSpeciality.Sprinter, (byte)7) })
+        {
+            ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+            zombie.Speciality = speciality;
+            var hits = new List<byte>();
+            system.OnAttack += (z, player, damage) => hits.Add(damage);
+
+            var player = Player(1, new Vector3(1.5f, 5, 0)); // inside their 2 m range
+            for (int i = 0; i < 5; i++)
+                system.Tick(new[] { player }, 0.1f);
+            Assert.Equal(expected, Assert.Single(hits)); // 10 x2 crawler / 10 x0.75 sprinter
+        }
+    }
+
+    [Fact]
+    public void HyperTerritory_Amplifies_Damage()
+    {
+        List<NavBound> bounds = TwoBounds();
+        bounds[0].HyperAgro = true;
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie, bounds: bounds);
+        var hits = new List<byte>();
+        system.OnAttack += (z, p, damage) => hits.Add(damage);
+
+        var player = Player(1, new Vector3(0.8f, 5, 0));
+        for (int i = 0; i < 5; i++)
+            system.Tick(new[] { player }, 0.1f);
+        Assert.Equal(15, Assert.Single(hits)); // 10 x 1.5 hyper
+    }
+
+    [Fact]
+    public void PlayerAboveTheVerticalRange_IsSafe()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        var hits = new List<byte>();
+        system.OnAttack += (z, p, damage) => hits.Add(damage);
+        var rooftop = Player(1, new Vector3(0.5f, 8.5f, 0)); // 3.5 m overhead: beyond the 2.1 m reach
+        for (int i = 0; i < 10; i++)
+            system.Tick(new[] { rooftop }, 0.1f);
+        Assert.Empty(hits);
+        Assert.NotEqual(EZombieState.Attack, zombie.State);
     }
 
     [Fact]
     public void TargetSteppingOutOfRange_ResumesTheChase()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
-        system.Tick(new[] { Player(1, new Vector3(1.5f, 5, 0)) }, 0.1f);
+        system.Tick(new[] { Player(1, new Vector3(0.8f, 5, 0)) }, 0.1f);
         Assert.Equal(EZombieState.Attack, zombie.State);
 
         system.Tick(new[] { Player(1, new Vector3(8, 5, 0)) }, 0.1f);
         Assert.Equal(EZombieState.Chase, zombie.State);
     }
 
+    // ---- Giving up (Zombie.leave) ---------------------------------------------------------------
+
     [Fact]
-    public void TargetLeavingTheBound_SendsTheZombieHome()
+    public void TargetBeyond64Metres_MakesTheZombieGiveUp()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         system.Tick(new[] { Player(1, new Vector3(10, 5, 0)) }, 0.1f);
-        Vector3 home = zombie.Home;
+        Assert.Equal(EZombieState.Chase, zombie.State);
 
-        // Drag the zombie away from home, then the player escapes the bound entirely.
-        for (int i = 0; i < 10; i++)
-            system.Tick(new[] { Player(1, new Vector3(10, 5, 0)) }, 0.1f);
-        Assert.True(zombie.Position.X > 1f);
-
-        system.Tick(new[] { Player(1, new Vector3(400, 5, 0)) }, 0.1f);
-        Assert.Equal(EZombieState.Return, zombie.State);
-        Assert.Equal(byte.MaxValue, zombie.TargetPlayer);
-
-        for (int i = 0; i < 30; i++)
-            system.Tick(Array.Empty<ZombiePlayerView>(), 0.1f);
+        // Still inside the bound, but beyond the 64 m hunt range.
+        system.Tick(new[] { Player(1, new Vector3(90, 5, 0)) }, 0.1f);
         Assert.Equal(EZombieState.Idle, zombie.State);
-        Assert.True(zombie.Position.DistanceTo(home) <= ZombieSystem.ArriveRadius + 0.01f);
+        Assert.Equal(byte.MaxValue, zombie.TargetPlayer);
+        Assert.InRange(zombie.LeaveDelay, 3f, 6f); // leave(false): stand 3-6 s before retreating
     }
 
     [Fact]
-    public void TargetDisconnecting_SendsTheZombieHome()
+    public void TargetLeavingEveryBound_MakesTheZombieGiveUpQuickly()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        system.Tick(new[] { Player(1, new Vector3(10, 5, 0)) }, 0.1f);
+
+        system.Tick(new[] { Player(1, new Vector3(400, 5, 0)) }, 0.1f); // nav == 255
+        Assert.Equal(EZombieState.Idle, zombie.State);
+        Assert.InRange(zombie.LeaveDelay, 0.5f, 1f); // leave(true)
+    }
+
+    [Fact]
+    public void AfterTheLeaveDelay_TheZombieRetreatsAndSettles()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        for (int i = 0; i < 6; i++)
+            system.Tick(new[] { Player(1, new Vector3(10, 5, 0)) }, 0.1f); // drag it off its spawn
+
+        system.Tick(new[] { Player(1, new Vector3(400, 5, 0)) }, 0.1f); // target escapes the bounds
+        Assert.Equal(EZombieState.Idle, zombie.State);
+        Vector3 retreat = zombie.LeaveTo;
+        // The retreat point lies ~16 m away from the escapee (+-8 m scatter), inside the territory.
+        Assert.Equal(0, LevelNavigationData.TryGetBound(TwoBounds(), retreat));
+
+        for (int i = 0; i < 200; i++)
+            system.Tick(Array.Empty<ZombiePlayerView>(), 0.1f); // delay elapses, the walk completes
+        Assert.Equal(EZombieState.Idle, zombie.State);
+        // Settled at the retreat point (the isMoving threshold), NOT back at its spawn home.
+        float toRetreat = new Vector2(zombie.Position.X - retreat.X, zombie.Position.Z - retreat.Z).Length();
+        Assert.True(toRetreat <= MathF.Sqrt(ZombieSystem.ArriveDistanceSquared) + 0.01f);
+    }
+
+    [Fact]
+    public void RetreatPointOutsideTheTerritory_FlipsTowardTheTarget()
+    {
+        // The zombie hunts from x≈95, 5 m shy of its bound's edge at x=100, with the target deeper
+        // inside: retreating 16 m AWAY from the target always exits the territory (103..119), so
+        // the retreat flips toward the target instead.
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Position = new Vector3(95, 5, 0);
+        system.Tick(new[] { Player(1, new Vector3(85, 5, 0)) }, 0.1f);
+        Assert.Equal(EZombieState.Chase, zombie.State);
+
+        // The target blinks 75 m away (still in the bound): the 64 m rule fires leave(false).
+        system.Tick(new[] { Player(1, new Vector3(20, 5, 0)) }, 0.1f);
+        Assert.Equal(EZombieState.Idle, zombie.State);
+        Assert.Equal(0, LevelNavigationData.TryGetBound(TwoBounds(), zombie.LeaveTo));
+        Assert.True(zombie.LeaveTo.X < zombie.Position.X); // flipped inward, toward the target
+    }
+
+    [Fact]
+    public void RetreatWithNoRoomAtAll_StaysPut()
+    {
+        // A territory too small for any 16 m retreat: the zombie gives up in place.
+        var bounds = new List<NavBound>
+        {
+            new() { Center = new Vector3(0, 140, 0), Size = new Vector3(8, 300, 8) },
+        };
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie, bounds: bounds);
+        system.Tick(new[] { Player(1, new Vector3(2, 5, 0)) }, 0.1f);
+        Assert.Equal(EZombieState.Chase, zombie.State);
+
+        system.Tick(new[] { Player(1, new Vector3(400, 5, 0)) }, 0.1f);
+        Assert.Equal(zombie.Position, zombie.LeaveTo);
+    }
+
+    [Fact]
+    public void TargetDisconnecting_MakesTheZombieGiveUp()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         system.Tick(new[] { Player(1, new Vector3(10, 5, 0)) }, 0.1f);
         Assert.Equal(EZombieState.Chase, zombie.State);
 
         system.Tick(Array.Empty<ZombiePlayerView>(), 0.1f);
-        Assert.Equal(EZombieState.Return, zombie.State);
+        Assert.Equal(EZombieState.Idle, zombie.State);
+        Assert.InRange(zombie.LeaveDelay, 3f, 6f); // leave(false)
     }
 
     [Fact]
-    public void ReturningZombie_CanBeReAlerted()
+    public void ALeavingZombie_CanBeReAlerted()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        system.Tick(new[] { Player(1, new Vector3(10, 5, 0)) }, 0.1f);
+        system.Tick(Array.Empty<ZombiePlayerView>(), 0.1f); // gives up, stands in the leave delay
+        Assert.True(zombie.LeaveDelay > 0f);
+
+        system.Tick(new[] { Player(2, new Vector3(8, 5, 0)) }, 0.1f);
+        Assert.Equal(EZombieState.Chase, zombie.State);
+        Assert.Equal(2, zombie.TargetPlayer);
+        Assert.Equal(0f, zombie.LeaveDelay); // isLeaving = false
+    }
+
+    [Fact]
+    public void ReturningZombie_ArrivingStops()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         zombie.State = EZombieState.Return;
-        zombie.Position = new Vector3(5, 5, 0);
-        system.Tick(new[] { Player(1, new Vector3(8, 5, 0)) }, 0.1f);
-        Assert.Equal(EZombieState.Chase, zombie.State);
-    }
-
-    [Fact]
-    public void MoveTowards_AtTheExactTarget_DoesNotJitter()
-    {
-        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
-        zombie.State = EZombieState.Return; // already standing at home
+        zombie.LeaveTo = zombie.Position; // already there
         float yaw = zombie.Yaw;
         system.Tick(Array.Empty<ZombiePlayerView>(), 0.1f);
         Assert.Equal(EZombieState.Idle, zombie.State);
-        Assert.Equal(zombie.Home, zombie.Position);
+        Assert.Equal(zombie.LeaveTo, zombie.Position);
         Assert.Equal(yaw, zombie.Yaw); // a degenerate direction must not spin the zombie
     }
 
@@ -380,6 +648,8 @@ public class ZombieSystemTests
         system.Tick(new[] { player }, 0.1f);
         Assert.Equal(5f, zombie.Position.Y); // authored height sticks when there is no heightfield
     }
+
+    // ---- Detection radii -------------------------------------------------------------------------
 
     [Theory]
     [InlineData(UnturnedGodot.Player.EPlayerStance.Sprint, false, 20f)]
