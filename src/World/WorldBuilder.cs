@@ -48,6 +48,50 @@ public static class WorldBuilder
             terrainSw.Elapsed.TotalMilliseconds, objectsSw.Elapsed.TotalMilliseconds);
     }
 
+    // Interactive-load variant of BuildTerrain: the pure-CPU tile/LOD generation runs on the thread pool
+    // (the main thread keeps rendering the loading screen), and the RenderingServer-touching FinishTile
+    // calls yield to the render loop every few tiles so no single frame swallows all 16.
+    public static async System.Threading.Tasks.Task<(Node3D root, int tileCount, HeightmapSampler heights)>
+        BuildTerrainAsync(LevelInfo level, Node yieldOn)
+    {
+        var tiles = level.EnumerateTiles();
+        GD.Print($"[unturned-godot] Terrain tiles: {tiles.Count}");
+        var heightTiles = new HeightmapTile[tiles.Count];
+
+        // Texture decode + tile/LOD generation all happen off the main thread; only FinishTile below
+        // touches the RenderingServer. Semantics match the sync variant exactly (textured needs layers).
+        System.Collections.Generic.Dictionary<string, ImageTexture> textures =
+            await System.Threading.Tasks.Task.Run(() =>
+                TerrainTextures.Load(System.IO.Path.Combine(level.Path, "Terrain")));
+        ImageTexture[]? layers = TerrainBuilder.MapLayerTextures(textures);
+        GD.Print($"[unturned-godot] Terrain textures: {textures.Count} loaded, " +
+            (layers != null ? "8 layers textured" : "flat-color fallback"));
+
+        bool textured = layers != null;
+        var meshes = new TerrainBuilder.TileMesh[tiles.Count];
+        await System.Threading.Tasks.Task.Run(() => System.Threading.Tasks.Parallel.For(0, tiles.Count, i =>
+        {
+            (int x, int y) = tiles[i];
+            HeightmapTile tile = HeightmapTile.Read(level.HeightmapPath(x, y), x, y);
+            heightTiles[i] = tile;
+            SplatmapTile? splat = SplatmapTile.TryRead(level.SplatmapPath(x, y), x, y);
+            meshes[i] = TerrainBuilder.BuildTileMesh(tile, splat, textured && splat != null);
+        }));
+
+        var terrainRoot = new Node3D { Name = "Terrain" };
+        int sinceYield = 0;
+        foreach (TerrainBuilder.TileMesh tm in meshes)
+        {
+            terrainRoot.AddChild(TerrainBuilder.FinishTile(tm, layers));
+            if (++sinceYield >= 4)
+            {
+                sinceYield = 0;
+                await yieldOn.ToSignal(yieldOn.GetTree(), SceneTree.SignalName.ProcessFrame);
+            }
+        }
+        return (terrainRoot, tiles.Count, new HeightmapSampler(heightTiles));
+    }
+
     public static (Node3D root, int tileCount, HeightmapSampler heights) BuildTerrain(LevelInfo level)
     {
         var tiles = level.EnumerateTiles();

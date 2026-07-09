@@ -20,6 +20,38 @@ public static class ModelLibrary
             ? Array.FindAll(Directory.GetFiles(cacheDir, "*.mesh"), MeshCache.IsCurrent).Length
             : 0;
 
+    // Staged variant for interactive loads: identical to Load, but yields to the render loop every
+    // `batch` meshes so the loading screen keeps animating while the ~400 ArrayMeshes are realised.
+    public static async System.Threading.Tasks.Task<Dictionary<Guid, ArrayMesh>> LoadStagedAsync(
+        string cacheDir, TextureRegistry registry, Node yieldOn, int batch = 48)
+    {
+        var library = new Dictionary<Guid, ArrayMesh>();
+        if (!Directory.Exists(cacheDir))
+            return library;
+
+        var materials = new Dictionary<(string, Color, UnityMaterial.Blend, float, float), Material>();
+        int sinceYield = 0;
+        foreach (string path in Directory.GetFiles(cacheDir, "*.mesh"))
+        {
+            if (!Guid.TryParseExact(Path.GetFileNameWithoutExtension(path), "N", out Guid guid))
+                continue;
+            if (!MeshCache.IsCurrent(path))
+                continue;
+
+            var (verts, normals, uvs, submeshes) = MeshCache.Read(File.ReadAllBytes(path));
+            ArrayMesh? mesh = Build(verts, normals, uvs, submeshes, registry, materials);
+            if (mesh != null)
+                library[guid] = mesh;
+
+            if (++sinceYield >= batch)
+            {
+                sinceYield = 0;
+                await yieldOn.ToSignal(yieldOn.GetTree(), SceneTree.SignalName.ProcessFrame);
+            }
+        }
+        return library;
+    }
+
     // Builds the meshes and their materials, registering each textured submesh's material under its
     // texture key so the caller can apply textures later (registry.ApplyAllAvailable for a warm cache, or
     // progressively as ExtractTextures streams them in on a cold load).

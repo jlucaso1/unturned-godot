@@ -157,31 +157,42 @@ public partial class Main : Node3D
         menu.OnStart = joinTarget =>
         {
             menu.QueueFree();
-            StartInteractiveWorld(unturnedPath, environmentDir, lighting, joinTarget);
+            _ = StartInteractiveWorld(unturnedPath, environmentDir, lighting, joinTarget);
         };
         AddChild(menu);
     }
 
-    // Builds the streamed interactive world; joinTarget != null also connects to that server.
-    private void StartInteractiveWorld(string unturnedPath, string environmentDir, LevelLighting? lighting,
-        string? joinTarget)
+    // Builds the streamed interactive world behind a loading screen, yielding to the render loop between
+    // stages (and inside the heavy ones) so the UI never freezes; joinTarget != null also connects there.
+    private async System.Threading.Tasks.Task StartInteractiveWorld(string unturnedPath, string environmentDir,
+        LevelLighting? lighting, string? joinTarget)
     {
         _pendingJoin = joinTarget;
 
+        var loading = new LoadingScreen { Name = "LoadingScreen" };
+        AddChild(loading);
+        await NextFrame(); // paint the loading screen before any heavy work
+
         var level = new LevelInfo(System.IO.Path.Combine(unturnedPath, "Maps", MapName));
 
-        // Start the object placement/asset IO now so it runs on a worker while the terrain builds on this
-        // thread; Begin() below joins it. (The streamer joins the tree later, just before Begin.)
+        // Start the object placement/asset IO now so it runs on a worker while the terrain builds; the
+        // streamer joins the tree later, just before Begin().
         var streamer = new ObjectStreamer { Name = "ObjectStreamer" };
         streamer.StartPrepare(unturnedPath, level);
 
-        (Node3D terrain, _, HeightmapSampler heights) = WorldBuilder.BuildTerrain(level);
+        loading.SetStatus("Construindo terreno…");
+        (Node3D terrain, _, HeightmapSampler heights) = await WorldBuilder.BuildTerrainAsync(level, this);
         AddChild(terrain);
+
+        loading.SetStatus("Estradas e água…");
+        await NextFrame();
         AddChild(RoadsBuilder.Build(environmentDir, heights));
         AddChild(WaterBuilder.Build(lighting, out StandardMaterial3D waterMat));
         AddChild(NodesBuilder.Build(environmentDir));
         SetupEnvironment(lighting, waterMat);
 
+        loading.SetStatus("Personagem…");
+        await NextFrame();
         // Feature flag: FREECAM=1 keeps the fly-through camera; otherwise the player character spawns and
         // walks the map (terrain collision is added on demand so free-cam runs don't pay for it).
         if (OS.GetEnvironment("FREECAM") == "1")
@@ -189,12 +200,18 @@ public partial class Main : Node3D
         else
             SpawnPlayer(terrain, thirdPerson: false, unturnedPath, heights);
 
+        loading.SetStatus("Objetos do mundo…");
+        await NextFrame();
         var overlay = new LoadingOverlay { Name = "LoadingOverlay" };
         AddChild(streamer);
         AddChild(overlay);
         overlay.Track(streamer); // connect before Begin so a warm cache's instant signals are caught
+        streamer.Finished += loading.Finish; // fade out once the scene (and warm textures) are in
         streamer.Begin();
     }
+
+    private async System.Threading.Tasks.Task NextFrame() =>
+        await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
 
     // Set by the main menu's Conectar flow (or the JOIN env), consumed by SpawnPlayer.
     private string? _pendingJoin;
