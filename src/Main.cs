@@ -161,6 +161,9 @@ public partial class Main : Node3D
             BodyModel = CharacterModel.Build(unturnedPath), // real Unturned body, or null -> placeholder
             Footsteps = BuildFootsteps(unturnedPath),
         });
+
+        if (DisplayServer.GetName() != "headless")
+            AddChild(new PauseMenu { Name = "PauseMenu" });
     }
 
     // Movement audio: the physics-material bank + terrain splat sampler feed PlayerFootsteps, and the

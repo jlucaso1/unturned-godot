@@ -90,15 +90,13 @@ public partial class PlayerController : CharacterBody3D
             return;
         }
 
-        if (@event is InputEventKey { Pressed: true, Echo: false } key)
+        if (@event is InputEventKey { Pressed: true, Echo: false } key
+            && Input.MouseMode == Input.MouseModeEnum.Captured)
         {
             if (key.Keycode == _settings.Perspective || key.Keycode == Key.F5) { _thirdPerson = !_thirdPerson; ApplyPerspective(); }
             else if (key.Keycode == _settings.Crouch) { _wantCrouch = !_wantCrouch; if (_wantCrouch) _wantProne = false; }
             else if (key.Keycode == _settings.Prone) { _wantProne = !_wantProne; if (_wantProne) _wantCrouch = false; }
-            else if (key.Keycode == Key.Escape)
-                Input.MouseMode = Input.MouseMode == Input.MouseModeEnum.Captured
-                    ? Input.MouseModeEnum.Visible
-                    : Input.MouseModeEnum.Captured;
+            // Escape belongs to PauseMenu, which owns mouse capture.
         }
     }
 
@@ -106,13 +104,17 @@ public partial class PlayerController : CharacterBody3D
     {
         float dt = (float)delta;
 
-        var input = new Vector2(
-            (Input.IsKeyPressed(_settings.Right) ? 1f : 0f) - (Input.IsKeyPressed(_settings.Left) ? 1f : 0f),
-            (Input.IsKeyPressed(_settings.Back) ? 1f : 0f) - (Input.IsKeyPressed(_settings.Forward) ? 1f : 0f));
+        // Mouse released = a menu owns the input (PauseMenu): freeze movement keys; physics still runs.
+        bool inputCaptured = Input.MouseMode == Input.MouseModeEnum.Captured;
+        var input = inputCaptured
+            ? new Vector2(
+                (Input.IsKeyPressed(_settings.Right) ? 1f : 0f) - (Input.IsKeyPressed(_settings.Left) ? 1f : 0f),
+                (Input.IsKeyPressed(_settings.Back) ? 1f : 0f) - (Input.IsKeyPressed(_settings.Forward) ? 1f : 0f))
+            : Vector2.Zero;
         bool moving = input != Vector2.Zero;
         Vector3 wishDir = moving ? (Transform.Basis * new Vector3(input.X, 0f, input.Y)).Normalized() : Vector3.Zero;
 
-        bool wantSprint = Input.IsKeyPressed(_settings.Sprint);
+        bool wantSprint = inputCaptured && Input.IsKeyPressed(_settings.Sprint);
         UpdateStance(moving, wantSprint);
         _rig?.SetState(_stance, moving); // crossfades to Idle_/Move_<stance>
         _rig?.SetPitch(_pitch);          // bends the upper body toward the look
@@ -125,7 +127,7 @@ public partial class PlayerController : CharacterBody3D
             Vector3 ground = PlayerMovement.GroundVelocity(wishDir, speed);
             velocity.X = ground.X;
             velocity.Z = ground.Z;
-            bool canJump = Input.IsKeyPressed(_settings.Jump)
+            bool canJump = inputCaptured && Input.IsKeyPressed(_settings.Jump)
                 && _stance is EPlayerStance.Stand or EPlayerStance.Sprint;
             velocity.Y = canJump ? PlayerConfig.JumpSpeed : -2f; // small downward keeps us snapped to the floor
         }
