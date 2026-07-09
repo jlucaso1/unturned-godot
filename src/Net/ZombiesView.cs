@@ -85,6 +85,14 @@ public partial class ZombiesView : Node3D
         {
             case ENetMessage.ZombieList:
                 (byte bound, List<ZombieListing> listings) = ZombieNetMessages.ReadZombieList(payload);
+                // A reliable list can outrun the player: if it names a region the local player is NOT
+                // standing in right now (computed fresh — the cached bound lags a frame), it is a late
+                // delivery for a region already left. Drop it: instancing it would resurrect avatars
+                // nobody prunes until the next transition. A dropped edge-flicker list self-heals — the
+                // server resends on its next observed transition.
+                if (_localPosition != null
+                    && bound != LevelNavigationData.TryGetBound(_navBounds, _localPosition()))
+                    break;
                 foreach (ZombieListing listing in listings)
                     SpawnOrReset(listing, bound);
                 break;

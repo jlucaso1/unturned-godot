@@ -155,12 +155,7 @@ public class NetMessagesTests
         expected.AddRange(System.BitConverter.GetBytes(0.5f));
         expected.Add(9);
         expected.Add(7);
-        // PackStanceFlags: stance low nibble, moving bit 4? — recompute via a round trip instead of
-        // hardcoding the packing here.
-        (uint _, List<PlayerSnapshotState> read) = NetMessages.ReadStateUpdate(payload);
-        Assert.Equal(expected.Count + 1, payload.Length);
-        Assert.Equal(expected.ToArray(), payload[..expected.Count]);
-        Assert.Equal(UnturnedGodot.Player.EPlayerStance.Stand, read[0].Stance);
-        Assert.True(read[0].Grounded);
+        expected.Add(0x43); // stance Stand (3) | grounded (0x40); moving (0x80) unset
+        Assert.Equal(expected.ToArray(), payload);
     }
 }

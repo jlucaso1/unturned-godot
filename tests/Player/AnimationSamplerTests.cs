@@ -57,6 +57,31 @@ public class AnimationSamplerTests
     }
 
     [Fact]
+    public void SampleOverwrite_UpdatesInPlace_AndKeepsForeignKeys()
+    {
+        // The steady-playback variant rewrites the clip's own bones but does NOT clear: keys from a
+        // previous clip survive (which is exactly why Play() flushes the buffer on a clip switch),
+        // while the clearing Sample removes them.
+        var clip = new AnimationClipData
+        {
+            Length = 1f,
+            Bones = new Dictionary<int, BoneCurves>
+            {
+                [1] = new BoneCurves { Position = new[] { (0f, Vector3.Zero), (1f, new Vector3(10, 0, 0)) } },
+            },
+        };
+        var buf = new Dictionary<int, BonePose> { [9] = new(9, null, new Vector3(5, 5, 5), null) };
+
+        AnimationSampler.SampleOverwrite(clip, 0.5f, buf);
+        Assert.Equal(new Vector3(5, 0, 0), buf[1].Position);
+        Assert.True(buf.ContainsKey(9)); // stale key survives the overwrite...
+
+        AnimationSampler.Sample(clip, 0.5f, buf);
+        Assert.False(buf.ContainsKey(9)); // ...and the clearing variant flushes it
+        Assert.Equal(new Vector3(5, 0, 0), buf[1].Position);
+    }
+
+    [Fact]
     public void Blend_CarriesChannelPresentInOnlyOnePose()
     {
         var from = new Dictionary<int, BonePose> { [1] = new(1, null, new Vector3(3, 0, 0), null) };

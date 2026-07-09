@@ -16,11 +16,20 @@ public static class AnimationSampler
     }
 
     // Buffer-reusing variant: clears and refills dest, so a per-frame caller keeps one dictionary alive
-    // instead of allocating a fresh one every sampled frame. Walks the clip's dense track array — an
-    // indexed loop with no enumerator allocation, unlike iterating the read-only dictionary view.
+    // instead of allocating a fresh one every sampled frame.
     public static void Sample(AnimationClipData clip, float time, Dictionary<int, BonePose> dest)
     {
         dest.Clear();
+        SampleOverwrite(clip, time, dest);
+    }
+
+    // Steady-playback variant: overwrites the clip's bones in place WITHOUT clearing — a clip's bone
+    // set never changes while it plays, and zeroing the dictionary's buckets every sampled frame was
+    // a measurable slice of the animation path. The caller must clear the buffer when the CLIP
+    // changes (its keys differ), or stale bones would leak into the pose. Walks the clip's dense
+    // track array — an indexed loop with no enumerator allocation.
+    public static void SampleOverwrite(AnimationClipData clip, float time, Dictionary<int, BonePose> dest)
+    {
         (int Bone, BoneCurves Curves)[] tracks = clip.Tracks;
         for (int i = 0; i < tracks.Length; i++)
         {

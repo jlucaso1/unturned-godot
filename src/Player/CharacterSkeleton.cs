@@ -86,6 +86,7 @@ public partial class CharacterSkeleton : Skeleton3D
         // Snapshot to blend out of — an owned copy, since CurrentPose refills the shared buffer every frame.
         _fromPose = _current.Length > 0 ? new Dictionary<int, BonePose>(CurrentPose()) : null;
         _current = clip;
+        _poseBuf.Clear(); // the new clip's bone set differs: flush before the overwrite sampling
         _time = 0f;
         _blend = _fromPose == null ? 1f : 0f;
         UpdateProcessing();
@@ -130,7 +131,9 @@ public partial class CharacterSkeleton : Skeleton3D
     {
         AnimationClipData clip = _clips[_current];
         float t = clip.Length > 0f ? _time % clip.Length : 0f; // loop
-        AnimationSampler.Sample(clip, t, _poseBuf);
+        // Overwrite in place: the buffer holds exactly this clip's bones (Play clears it on switch),
+        // so the per-frame dictionary Clear (bucket zeroing) is skipped entirely.
+        AnimationSampler.SampleOverwrite(clip, t, _poseBuf);
         return _poseBuf;
     }
 
