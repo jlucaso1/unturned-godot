@@ -27,6 +27,11 @@ public partial class PlayerController : CharacterBody3D
     // Movement audio (footsteps + landing), built by the caller with the map's terrain material data.
     public PlayerFootsteps? Footsteps { get; set; }
 
+    // Multiplayer session, when hosting or joined: the controller forwards inputs at the 12.5 Hz cadence.
+    public UnturnedGodot.Net.NetClient? Net { get; set; }
+    private double _netInputTimer;
+    private uint _netFrame;
+
     private Node3D _head = null!;
     private Camera3D _camera = null!;
     private CollisionShape3D _collider = null!;
@@ -90,15 +95,13 @@ public partial class PlayerController : CharacterBody3D
             return;
         }
 
-        if (@event is InputEventKey { Pressed: true, Echo: false } key)
+        if (@event is InputEventKey { Pressed: true, Echo: false } key
+            && Input.MouseMode == Input.MouseModeEnum.Captured)
         {
             if (key.Keycode == _settings.Perspective || key.Keycode == Key.F5) { _thirdPerson = !_thirdPerson; ApplyPerspective(); }
             else if (key.Keycode == _settings.Crouch) { _wantCrouch = !_wantCrouch; if (_wantCrouch) _wantProne = false; }
             else if (key.Keycode == _settings.Prone) { _wantProne = !_wantProne; if (_wantProne) _wantCrouch = false; }
-            else if (key.Keycode == Key.Escape)
-                Input.MouseMode = Input.MouseMode == Input.MouseModeEnum.Captured
-                    ? Input.MouseModeEnum.Visible
-                    : Input.MouseModeEnum.Captured;
+            // Escape belongs to PauseMenu, which owns mouse capture.
         }
     }
 
@@ -106,13 +109,17 @@ public partial class PlayerController : CharacterBody3D
     {
         float dt = (float)delta;
 
-        var input = new Vector2(
-            (Input.IsKeyPressed(_settings.Right) ? 1f : 0f) - (Input.IsKeyPressed(_settings.Left) ? 1f : 0f),
-            (Input.IsKeyPressed(_settings.Back) ? 1f : 0f) - (Input.IsKeyPressed(_settings.Forward) ? 1f : 0f));
+        // Mouse released = a menu owns the input (PauseMenu): freeze movement keys; physics still runs.
+        bool inputCaptured = Input.MouseMode == Input.MouseModeEnum.Captured;
+        var input = inputCaptured
+            ? new Vector2(
+                (Input.IsKeyPressed(_settings.Right) ? 1f : 0f) - (Input.IsKeyPressed(_settings.Left) ? 1f : 0f),
+                (Input.IsKeyPressed(_settings.Back) ? 1f : 0f) - (Input.IsKeyPressed(_settings.Forward) ? 1f : 0f))
+            : Vector2.Zero;
         bool moving = input != Vector2.Zero;
         Vector3 wishDir = moving ? (Transform.Basis * new Vector3(input.X, 0f, input.Y)).Normalized() : Vector3.Zero;
 
-        bool wantSprint = Input.IsKeyPressed(_settings.Sprint);
+        bool wantSprint = inputCaptured && Input.IsKeyPressed(_settings.Sprint);
         UpdateStance(moving, wantSprint);
         _rig?.SetState(_stance, moving); // crossfades to Idle_/Move_<stance>
         _rig?.SetPitch(_pitch);          // bends the upper body toward the look
@@ -125,7 +132,7 @@ public partial class PlayerController : CharacterBody3D
             Vector3 ground = PlayerMovement.GroundVelocity(wishDir, speed);
             velocity.X = ground.X;
             velocity.Z = ground.Z;
-            bool canJump = Input.IsKeyPressed(_settings.Jump)
+            bool canJump = inputCaptured && Input.IsKeyPressed(_settings.Jump)
                 && _stance is EPlayerStance.Stand or EPlayerStance.Sprint;
             velocity.Y = canJump ? PlayerConfig.JumpSpeed : -2f; // small downward keeps us snapped to the floor
         }
@@ -143,6 +150,25 @@ public partial class PlayerController : CharacterBody3D
         if (!wasOnFloor && IsOnFloor())
             Footsteps?.OnLanded(_stance, GlobalPosition);
         Footsteps?.TickMovement(_stance, moving, IsOnFloor(), speed, GlobalPosition, dt);
+
+        // Multiplayer: forward one input frame per 0.08 s (PlayerInput.RATE). Idle frames still flow so
+        // the server keeps simulating (gravity) and other players see us stop.
+        if (Net != null)
+        {
+            _netInputTimer += dt;
+            if (_netInputTimer >= UnturnedGodot.Net.ServerSimulation.TickRate)
+            {
+                _netInputTimer -= UnturnedGodot.Net.ServerSimulation.TickRate;
+                bool jumpHeld = inputCaptured && Input.IsKeyPressed(_settings.Jump);
+                // Trusted-client frame: our position already resolved collision against the full world
+                // (objects, buildings) that the server's heightfield solver doesn't know about.
+                Net.SendInput(new UnturnedGodot.Net.InputCommand(_netFrame++,
+                    (sbyte)input.X, (sbyte)input.Y, jumpHeld, wantSprint,
+                    UnturnedGodot.Net.NetAngles.QuantizeYaw(RotationDegrees.Y),
+                    UnturnedGodot.Net.NetAngles.QuantizePitch(_pitch + 90f),
+                    _stance, GlobalPosition));
+            }
+        }
 
         UpdateCamera(dt);
     }

@@ -97,11 +97,16 @@ public partial class ObjectStreamer : Node
             _foliageAssets = FoliageAsset.ScanForGuids(_assetsDir, new HashSet<Guid>(_foliage.AssetGuids));
     }
 
-    // Warm path: meshes and textures are already cached — build synchronously and apply all textures now.
-    private void BuildAndFinish()
+    // Warm path: meshes and textures are already cached. Staged across frames so the loading screen
+    // stays fluid: the ~400 ArrayMeshes realise in batches, then the scene builds, then textures apply.
+    private async void BuildAndFinish()
     {
-        BuildObjects();
+        var meshLibrary = await ModelLibrary.LoadStagedAsync(_cacheDir, _registry, this);
+        await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+        BuildObjects(meshLibrary);
+        await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
         _registry.ApplyAllAvailable();
+        await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
         ReclaimLoadMemory();
         EmitSignal(SignalName.MeshesReady, 0.0);
         EmitSignal(SignalName.Finished);
@@ -137,9 +142,10 @@ public partial class ObjectStreamer : Node
         return 0;
     }
 
-    private void BuildObjects()
+    private void BuildObjects() => BuildObjects(ModelLibrary.Load(_cacheDir, _registry));
+
+    private void BuildObjects(Dictionary<Guid, ArrayMesh> meshLibrary)
     {
-        var meshLibrary = ModelLibrary.Load(_cacheDir, _registry);
         // The freecam mode never spawns the player, so collision bodies would sit unused — skip the collider
         // library entirely there and build the objects render-only (saves the shape/BVH build + its memory).
         var colliderLibrary = OS.GetEnvironment("FREECAM") == "1"
@@ -182,6 +188,10 @@ public partial class ObjectStreamer : Node
             catch (Exception e)
             {
                 Callable.From(() => GD.PrintErr($"[stream] extraction failed: {e}")).CallDeferred();
+                // Unblock the pipeline: build whatever the cache holds so MeshesReady/Finished still fire
+                // (otherwise the loading screen would wait forever on a signal that never comes).
+                if (!_sceneBuilt)
+                    Callable.From(OnMeshesExtracted).CallDeferred();
             }
             _texturesDone = true;
         });
