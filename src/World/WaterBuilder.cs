@@ -33,6 +33,12 @@ public static class WaterBuilder
             // Shadows fall through onto the seabed, not onto the surface — Unturned's translucent water
             // doesn't catch shadows, and a tree shadow floating on the sea reads wrong.
             DisableReceiveShadows = true,
+            // Write depth even though the surface alpha-blends: foliage chunks in their VisibilityRange
+            // dither-fade temporarily render through the transparent pipeline, and per-object sorting
+            // against this map-sized plane is ambiguous — underwater pebbles in fade drew ON TOP of the
+            // sea. With the surface in the depth buffer, submerged fading geometry fails the depth test in
+            // either draw order, while foliage on land (in front of the water) still fades normally.
+            DepthDrawMode = BaseMaterial3D.DepthDrawModeEnum.Always,
         };
 
         return new MeshInstance3D
