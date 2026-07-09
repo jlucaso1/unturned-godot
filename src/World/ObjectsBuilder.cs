@@ -71,9 +71,10 @@ public static class ObjectsBuilder
     }
 
     // One physics body per GUID holding every instance's shapes (no per-instance nodes) so thousands of
-    // instances stay light. Primitive shapes are shared and placed by a per-instance transform; mesh colliders
-    // instead bake the full world transform into their vertices and are placed at identity — Godot's physics
-    // hangs on a scaled/transformed ConcavePolygonShape3D, so baking keeps every trimesh axis-aligned + unit.
+    // instances stay light. Primitive shapes are shared and placed by a per-instance transform. Mesh
+    // colliders are shared too (geometry baked to root space once, placed per instance) except for SCALED
+    // instances, where the world transform is baked into per-instance vertices — scale on a
+    // ConcavePolygonShape3D is what trips Godot's physics.
     private static void BuildCollision(Node3D root, Guid guid, List<CachedCollider> colliders,
         List<Transform3D> instances)
     {
@@ -95,16 +96,41 @@ public static class ObjectsBuilder
             }
         }
 
+        // Mesh colliders: ~98% of placed instances carry no scale, so bake each collider's geometry to ROOT
+        // space once (LocalToRoot + the Z reflection folded into the vertices) and share that one shape
+        // across those instances, placed by the instance transform — a plain rotation+translation the physics
+        // engine handles natively. Only SCALED instances keep the per-instance world-space bake, since scale
+        // on a ConcavePolygonShape3D is what trips Godot's physics. The geometry is identical either way:
+        // (instance * A) * v == instance * (A * v).
+        var sharedMesh = new int[meshes.Count];
+        for (int m = 0; m < meshes.Count; m++)
+        {
+            sharedMesh[m] = -1;
+            if (MeshShape(meshes[m], UnityMath.ReflectZ(meshes[m].LocalToRoot)) is { } shared)
+            {
+                shapes.Add(shared);
+                sharedMesh[m] = shapes.Count - 1;
+            }
+        }
+
         foreach (Transform3D instance in instances)
         {
             foreach ((int index, Transform3D local) in primitives)
                 placements.Add((index, instance * local));
-            foreach (CachedCollider m in meshes)
-                if (BakedMeshShape(m, instance) is { } shape)
+
+            Vector3 sc = instance.Basis.Scale;
+            bool unscaled = Mathf.IsEqualApprox(sc.X, 1f, 0.001f)
+                && Mathf.IsEqualApprox(sc.Y, 1f, 0.001f) && Mathf.IsEqualApprox(sc.Z, 1f, 0.001f);
+            for (int m = 0; m < meshes.Count; m++)
+            {
+                if (unscaled && sharedMesh[m] >= 0)
+                    placements.Add((sharedMesh[m], instance));
+                else if (MeshShape(meshes[m], instance * UnityMath.ReflectZ(meshes[m].LocalToRoot)) is { } baked)
                 {
-                    shapes.Add(shape);
+                    shapes.Add(baked);
                     placements.Add((shapes.Count - 1, Transform3D.Identity));
                 }
+            }
         }
         if (placements.Count == 0)
             return;
@@ -125,13 +151,13 @@ public static class ObjectsBuilder
             _ => null,
         };
 
-    // A MeshCollider as a ConcavePolygonShape3D with each triangle vertex baked to its final world position
-    // (instance * collider-in-root * F-vertex), so the shape needs no placement transform.
-    private static ConcavePolygonShape3D? BakedMeshShape(CachedCollider c, Transform3D instance)
+    // A MeshCollider as a ConcavePolygonShape3D with each triangle vertex baked through the given transform
+    // (F-reflected first: negate Z). Callers pass ReflectZ(LocalToRoot) for the shared root-space shape, or
+    // instance * ReflectZ(LocalToRoot) for a per-instance world-space bake.
+    private static ConcavePolygonShape3D? MeshShape(CachedCollider c, Transform3D toTarget)
     {
         if (c.Indices.Length < 3 || c.Indices.Length % 3 != 0)
             return null;
-        Transform3D toWorld = instance * UnityMath.ReflectZ(c.LocalToRoot);
         var faces = new Vector3[c.Indices.Length];
         for (int i = 0; i < c.Indices.Length; i++)
         {
@@ -141,7 +167,7 @@ public static class ObjectsBuilder
             Vector3 v = c.Vertices[idx];
             if (!float.IsFinite(v.X) || !float.IsFinite(v.Y) || !float.IsFinite(v.Z))
                 return null;
-            faces[i] = toWorld * new Vector3(v.X, v.Y, -v.Z); // F: negate Z, then to world
+            faces[i] = toTarget * new Vector3(v.X, v.Y, -v.Z); // F: negate Z, then to target space
         }
         return new ConcavePolygonShape3D { Data = faces };
     }
