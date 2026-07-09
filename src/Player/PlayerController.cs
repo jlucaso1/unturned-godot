@@ -63,6 +63,7 @@ public partial class PlayerController : CharacterBody3D
         // movement sweeps — all mask 1) never treat the player as static geometry; the body itself
         // still collides against the layer-1 world via its mask.
         CollisionLayer = 2;
+        CollisionMask = 1 | ObjectsBuilder.MediumFurnitureLayer; // world + furniture
 
         FloorMaxAngle = Mathf.DegToRad(PlayerConfig.MaxWalkableSlopeDegrees);
         FloorSnapLength = 0.5f;
