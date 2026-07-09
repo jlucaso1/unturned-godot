@@ -129,6 +129,23 @@ public partial class NetworkManager : Node
             float[] cast = space.CastMotion(query);
             if (cast[0] >= 1f)
                 return to; // clear path
+
+            // Step-up, like the CharacterController's stepOffset (the original's walkableClimb is
+            // 0.75): retry the sweep from 0.75 higher — stairs and porch steps pass, walls do not.
+            // The ground snap settles the final height onto the actual step afterwards.
+            query.Transform = new Transform3D(Basis.Identity, from + chest + new Vector3(0f, 0.75f, 0f));
+            float[] stepCast = space.CastMotion(query);
+            if (stepCast[0] >= 1f)
+            {
+                // Only a real step: the raised destination must have ground within the climb
+                // height, or this would hop through window openings and float over gaps.
+                var stepDown = PhysicsRayQueryParameters3D.Create(
+                    new Vector3(to.X, from.Y + 1.5f, to.Z), new Vector3(to.X, from.Y + 0.05f, to.Z), 1);
+                Godot.Collections.Dictionary ground = space.IntersectRay(stepDown);
+                if (ground.Count > 0)
+                    return new Vector3(to.X, ((Vector3)ground["position"]).Y, to.Z);
+            }
+
             Vector3 safe = from + (motion * cast[0]);
 
             // Contact normal at the blocked spot -> slide the remaining motion along the surface.
@@ -196,6 +213,38 @@ public partial class NetworkManager : Node
                     GetTree().CreateTimer(1.0).Timeout += Probe;
             }
             GetTree().CreateTimer(1.0).Timeout += Probe;
+        }
+
+        // WALK_PROBE="x,y,z>x,y,z": march the zombie movement mechanics (MoveResolver + GroundSnap)
+        // in a straight line between two points and log where they end up — the tool for "can a
+        // zombie physically climb this stair/step" questions.
+        if (OS.GetEnvironment("WALK_PROBE") is { Length: > 0 } walkProbe)
+        {
+            GetTree().CreateTimer(2.0).Timeout += () =>
+            {
+                string[] ends = walkProbe.Split('>');
+                string[] a = ends[0].Split(',');
+                string[] b = ends[1].Split(',');
+                var at = new Vector3(a[0].ToFloat(), a[1].ToFloat(), a[2].ToFloat());
+                var goal = new Vector3(b[0].ToFloat(), b[1].ToFloat(), b[2].ToFloat());
+                for (int i = 0; i < 120; i++)
+                {
+                    Vector3 flat = new(goal.X - at.X, 0, goal.Z - at.Z);
+                    if (flat.Length() < 0.2f)
+                        break;
+                    Vector3 next = at + (flat.Normalized() * 0.44f); // one 5.5 m/s tick
+                    next = zombies.MoveResolver!(at, next, 0.4f);
+                    if (zombies.GroundSnap!(next, out float gy))
+                        next.Y = gy;
+                    if ((next - at).Length() < 0.02f)
+                    {
+                        GD.Print($"[nav] walk probe STUCK at {at} (step {i})");
+                        return;
+                    }
+                    at = next;
+                }
+                GD.Print($"[nav] walk probe reached {at} (goal {goal})");
+            };
         }
 
         // GROUND_PROBE="x,y,z;x,y,z": log the sampled ground at reference points (the pre-baked
