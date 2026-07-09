@@ -16,6 +16,7 @@ public sealed class UnityTexture
     public long StreamOffset;
     public int StreamSize;
     public byte[] InlineData = Array.Empty<byte>();
+    public int FilterMode = 1; // Unity FilterMode: 0 = Point (palette textures), 1 = Bilinear, 2 = Trilinear
 
     public static UnityTexture Read(Dictionary<string, object> tex)
     {
@@ -28,6 +29,10 @@ public sealed class UnityTexture
             MipCount = Convert.ToInt32(tex["m_MipCount"]),
             InlineData = tex.TryGetValue("image data", out object? d) ? (byte[])d : Array.Empty<byte>(),
         };
+
+        if (tex.TryGetValue("m_TextureSettings", out object? ts) && ts is Dictionary<string, object> settings &&
+            settings.TryGetValue("m_FilterMode", out object? fm))
+            result.FilterMode = Convert.ToInt32(fm);
 
         // Older textures (Unity 5.x per-map bundles) store pixels inline with no m_StreamData field.
         if (tex.TryGetValue("m_StreamData", out object? sd) && sd is Dictionary<string, object> stream)

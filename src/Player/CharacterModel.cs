@@ -296,7 +296,7 @@ public static class CharacterModel
     private static ImageTexture? LoadFace(string bundlePath, int faceIndex)
     {
         string cachePath = ProjectSettings.GlobalizePath($"user://face_{faceIndex}.tex");
-        if (File.Exists(cachePath))
+        if (File.Exists(cachePath) && TextureCache.IsCurrent(cachePath))
         {
             try
             {

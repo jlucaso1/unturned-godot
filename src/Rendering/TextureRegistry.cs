@@ -14,7 +14,7 @@ public sealed class TextureRegistry
 {
     private readonly string _textureCacheDir;
     private readonly Dictionary<string, List<StandardMaterial3D>> _pending = new();
-    private readonly Dictionary<string, ImageTexture?> _loaded = new();
+    private readonly Dictionary<string, (ImageTexture? tex, int filterMode)> _loaded = new();
 
     public TextureRegistry(string textureCacheDir) => _textureCacheDir = textureCacheDir;
 
@@ -35,11 +35,18 @@ public sealed class TextureRegistry
     {
         if (!_pending.TryGetValue(textureKey, out List<StandardMaterial3D>? mats))
             return false;
-        ImageTexture? tex = Load(textureKey);
+        (ImageTexture? tex, int filterMode) = Load(textureKey);
         if (tex == null)
             return false;
         foreach (StandardMaterial3D material in mats)
+        {
             material.AlbedoTexture = tex;
+            // Unturned's tiny palette textures are point-filtered (FilterMode.Point): the mesh UVs park on
+            // solid texels, and bilinear/aniso sampling bleeds neighbouring palette colors into smears
+            // (a stop sign's face mottling). Nearest+mips reproduces Unity's Point mode.
+            if (filterMode == 0)
+                material.TextureFilter = BaseMaterial3D.TextureFilterEnum.NearestWithMipmaps;
+        }
         _pending.Remove(textureKey);
         return true;
     }
@@ -54,19 +61,20 @@ public sealed class TextureRegistry
         return applied;
     }
 
-    private ImageTexture? Load(string textureKey)
+    private (ImageTexture? tex, int filterMode) Load(string textureKey)
     {
-        if (_loaded.TryGetValue(textureKey, out ImageTexture? cached))
+        if (_loaded.TryGetValue(textureKey, out (ImageTexture? tex, int filterMode) cached))
             return cached;
 
-        ImageTexture? tex = null;
+        (ImageTexture? tex, int filterMode) loaded = (null, 1);
         string path = Path.Combine(_textureCacheDir, textureKey + ".tex");
-        if (File.Exists(path))
+        if (File.Exists(path) && TextureCache.IsCurrent(path)) // stale formats re-extract on the next pass
         {
             using FileStream stream = File.OpenRead(path);
-            tex = ModelLibrary.BuildTexture(TextureCache.Read(stream));
+            CachedTexture ct = TextureCache.Read(stream);
+            loaded = (ModelLibrary.BuildTexture(ct), ct.FilterMode);
         }
-        _loaded[textureKey] = tex;
-        return tex;
+        _loaded[textureKey] = loaded;
+        return loaded;
     }
 }

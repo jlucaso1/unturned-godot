@@ -31,7 +31,16 @@ public class UnityTextureTests
         Assert.Equal(32, t.Height);
         Assert.Equal(10, t.Format);
         Assert.Equal(2, t.MipCount);
+        Assert.Equal(1, t.FilterMode); // no m_TextureSettings -> bilinear default
         Assert.Equal("CAB-y.resS", t.StreamFileName); // last path segment
+    }
+
+    [Fact]
+    public void ParsesFilterMode_Point()
+    {
+        Dictionary<string, object> dict = TextureDict("archive:/x/CAB-y.resS", 0, 0, System.Array.Empty<byte>());
+        dict["m_TextureSettings"] = new Dictionary<string, object> { ["m_FilterMode"] = 0 };
+        Assert.Equal(0, UnityTexture.Read(dict).FilterMode);
     }
 
     [Fact]
