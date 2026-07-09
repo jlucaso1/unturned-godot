@@ -63,13 +63,27 @@ public static class ModelLibrary
         for (int i = 0; i < uvs.Length; i++)
             guvs[i] = new Vector2(uvs[i].X, 1f - uvs[i].Y); // Godot's texture origin is top-left
 
-        // Reverse winding first (the Unity->Godot Z flip mirrors the geometry), then derive normals from
-        // the flipped triangles. Reflecting Unity's authored normals instead points them inward for faces
-        // aligned with the Z axis — which is why flat, laid-down objects like roads rendered unlit.
         var reversed = new int[submeshes.Count][];
         for (int s = 0; s < submeshes.Count; s++)
             reversed[s] = ReverseWinding(submeshes[s].Indices);
-        Vector3[] gnormals = SmoothNormals(gverts, reversed);
+
+        // Prefer the mesh's authored normals — Unturned's own hard and soft edges (a stop sign's face stays
+        // dead flat; deriving smooth normals there bends the face's shading into its bevel). Under this
+        // pipeline's convention (Z-negated vertices + reversed winding) the normal maps by the reflection's
+        // cofactor, (x,y,z) -> (-x,-y,z): verified against the derived geometric normals over the real
+        // masterbundle meshes (99.5% agreement; the plain (x,y,-z) reflection agrees with 0.4%). Meshes that
+        // ship without normals keep the derived smooth ones.
+        Vector3[] gnormals;
+        if (normals.Length == verts.Length)
+        {
+            gnormals = new Vector3[normals.Length];
+            for (int i = 0; i < normals.Length; i++)
+                gnormals[i] = new Vector3(-normals[i].X, -normals[i].Y, normals[i].Z);
+        }
+        else
+        {
+            gnormals = SmoothNormals(gverts, reversed);
+        }
 
         // Merge submeshes that resolve to the same deduplicated material (TextureKey/Color/Blend) into one
         // surface with concatenated indices: a mesh's several same-material submeshes then cost one

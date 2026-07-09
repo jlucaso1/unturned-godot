@@ -226,7 +226,7 @@ public static class ModelExtractor
     {
         string texKey = texId.ToString("x");
         string outPath = Path.Combine(textureCacheDir, texKey + ".tex");
-        if (File.Exists(outPath))
+        if (File.Exists(outPath) && TextureCache.IsCurrent(outPath))
         {
             onTextureWritten(texKey);
             return;
@@ -235,7 +235,7 @@ public static class ModelExtractor
         if (pixels == null || pixels.Length == 0)
             return;
         using (var stream = File.Create(outPath))
-            TextureCache.Write(stream, new CachedTexture(tex.Format, tex.Width, tex.Height, tex.MipCount, pixels));
+            TextureCache.Write(stream, new CachedTexture(tex.Format, tex.Width, tex.Height, tex.MipCount, pixels, tex.FilterMode));
         onTextureWritten(texKey);
     }
 
@@ -246,7 +246,7 @@ public static class ModelExtractor
     {
         string texKey = texId.ToString("x");
         string outPath = Path.Combine(textureCacheDir, texKey + ".tex");
-        if (File.Exists(outPath))
+        if (File.Exists(outPath) && TextureCache.IsCurrent(outPath))
         {
             onTextureWritten(texKey);
             return;
@@ -254,7 +254,7 @@ public static class ModelExtractor
         if (pixels.Length == 0)
             return;
         using (var stream = File.Create(outPath))
-            TextureCache.Write(stream, new CachedTexture(tex.Format, tex.Width, tex.Height, tex.MipCount, pixels));
+            TextureCache.Write(stream, new CachedTexture(tex.Format, tex.Width, tex.Height, tex.MipCount, pixels, tex.FilterMode));
         onTextureWritten(texKey);
     }
 
@@ -308,8 +308,10 @@ public static class ModelExtractor
 
             MaterialPalette? palette = materials.PaletteFor(asset.MaterialPaletteGuid);
             var verts = new List<Vector3>();
+            var normals = new List<Vector3>();
             var uvs = new List<Vector2>();
             var submeshes = new List<CachedSubmesh>();
+            bool allNormals = true; // authored normals are only usable when every part carries them
 
             // A prefab's renderable geometry can span several child GameObjects (a tree is a trunk plus a
             // separate foliage mesh, each with its own material and local pose). Bake each part's
@@ -323,9 +325,15 @@ public static class ModelExtractor
                     continue;
 
                 int baseVertex = verts.Count;
+                // Normals transform by the inverse-transpose of the part's basis (correct under the
+                // non-uniform scales some prefab children carry), stored in Unity space like the vertices.
+                Basis normalBasis = part.LocalToRoot.Basis.Inverse().Transposed();
+                bool hasNormals = mesh.Normals.Length == mesh.Vertices.Length;
+                allNormals &= hasNormals;
                 for (int i = 0; i < mesh.Vertices.Length; i++)
                 {
                     verts.Add(part.LocalToRoot * mesh.Vertices[i]);
+                    normals.Add(hasNormals ? (normalBasis * mesh.Normals[i]).Normalized() : Vector3.Up);
                     uvs.Add(i < mesh.Uvs.Length ? mesh.Uvs[i] : Vector2.Zero);
                 }
 
@@ -348,10 +356,11 @@ public static class ModelExtractor
             if (submeshes.Count == 0)
                 continue;
 
-            // Runtime derives smooth normals from the winding-corrected geometry (ModelLibrary.SmoothNormals),
-            // so the extracted per-vertex normals are never read — don't compute or store them.
+            // Cache the authored per-vertex normals (Unturned's own hard/soft edges); ModelLibrary falls
+            // back to deriving smooth normals only when a part shipped without them.
             using (var stream = File.Create(Path.Combine(cacheDir, asset.Guid.ToString("N") + ".mesh")))
-                MeshCache.Write(stream, verts.ToArray(), Array.Empty<Vector3>(), uvs.ToArray(), submeshes);
+                MeshCache.Write(stream, verts.ToArray(),
+                    allNormals ? normals.ToArray() : Array.Empty<Vector3>(), uvs.ToArray(), submeshes);
             extracted++;
 
             // Cache the object's colliders next to its mesh (Unity units; converted when the body is built).
@@ -506,7 +515,7 @@ public static class ModelExtractor
         {
             string texKey = texId.ToString("x");
             string outPath = Path.Combine(textureCacheDir, texKey + ".tex");
-            if (File.Exists(outPath))
+            if (File.Exists(outPath) && TextureCache.IsCurrent(outPath))
             {
                 onTextureWritten?.Invoke(texKey); // already cached (resume) — still let the caller apply it
                 written++;
@@ -521,7 +530,7 @@ public static class ModelExtractor
                 continue;
 
             using (var stream = File.Create(outPath))
-                TextureCache.Write(stream, new CachedTexture(tex.Format, tex.Width, tex.Height, tex.MipCount, pixels));
+                TextureCache.Write(stream, new CachedTexture(tex.Format, tex.Width, tex.Height, tex.MipCount, pixels, tex.FilterMode));
             written++;
             onTextureWritten?.Invoke(texKey);
         }

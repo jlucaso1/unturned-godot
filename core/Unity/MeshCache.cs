@@ -35,7 +35,7 @@ public readonly struct CachedSubmesh
 // texture keys), so the 1.4 GB bundle is parsed once and runtime loads only the small meshes it needs.
 public static class MeshCache
 {
-    private const uint Magic = 0x334D4755; // "UGM3"
+    private const uint Magic = 0x344D4755; // "UGM4": object caches now carry authored normals
 
     // True when the file starts with the current format magic; false for stale formats, short files or a
     // missing path. Cold-load detection uses this so a format bump re-extracts instead of crashing on Read.
