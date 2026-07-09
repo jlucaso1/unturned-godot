@@ -27,9 +27,20 @@ public sealed class NetServer
 
     public int PlayerCount { get; private set; }
 
-    // Extension seam for future replicated systems (zombies, resources, doors): hook the fixed tick to
-    // run server logic and use Broadcast to ship your own ENetMessage — no NetServer edits required.
+    // Extension seams for replicated systems (zombies, resources, doors): hook the fixed tick to run
+    // server logic and use Broadcast to ship your own ENetMessage; hook OnPlayerAdmitted to send a
+    // freshly admitted (or re-admitted) player your system's full state, the way Welcome carries the
+    // player roster. No NetServer edits required.
     public Action<uint>? OnTick;
+    public Action<byte, ITransportConnection>? OnPlayerAdmitted;
+
+    // Every joined player id with its live simulation state — what a replicated system ticks against.
+    public void ForEachJoinedPlayer(Action<byte, PlayerMoveState> visit)
+    {
+        foreach (Session session in _sessions.Values)
+            if (session.Joined)
+                visit(session.PlayerId, _simulation.GetState(session.PlayerId));
+    }
 
     public NetServer(IServerTransport transport, ServerSimulation simulation, Vector3 spawnPosition)
     {
@@ -98,6 +109,7 @@ public sealed class NetServer
                                 roster.Add(Listing(other, _simulation.GetState(other.PlayerId)));
                         connection.Send(NetMessages.WriteWelcome(session.PlayerId, _simulation.Tick, roster),
                             ESendType.Reliable);
+                        OnPlayerAdmitted?.Invoke(session.PlayerId, connection);
                     }
                     break;
                 }
@@ -126,6 +138,8 @@ public sealed class NetServer
         foreach ((ITransportConnection conn, Session other) in _sessions)
             if (other.Joined && other != session)
                 conn.Send(joined, ESendType.Reliable);
+
+        OnPlayerAdmitted?.Invoke(session.PlayerId, connection);
     }
 
     private void HandleDisconnect(ITransportConnection connection)

@@ -22,6 +22,8 @@ public enum ENetMessage : byte
     PlayerLeft,   // server -> all, reliable
     Input,        // client -> server, unreliable: one 12.5 Hz input frame (+ trusted position + stance)
     StateUpdate,  // server -> all, unreliable: every player's position, view angles and stance
+    ZombieList,   // server -> client, reliable: a chunk of the zombie population (sent on admission)
+    ZombieStates, // server -> all, unreliable: the zombies that moved or changed state this tick
 }
 
 public static class NetAngles
@@ -128,7 +130,7 @@ public sealed class PlayerListing
 public static class NetMessages
 {
     // Bump whenever a message layout changes; the server refuses mismatched clients at the handshake.
-    public const byte ProtocolVersion = 4;
+    public const byte ProtocolVersion = 5;
 
     public static ENetMessage TypeOf(byte[] payload) => (ENetMessage)payload[0];
 
