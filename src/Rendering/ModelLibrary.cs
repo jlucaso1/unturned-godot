@@ -68,17 +68,18 @@ public static class ModelLibrary
             reversed[s] = ReverseWinding(submeshes[s].Indices);
 
         // Prefer the mesh's authored normals — Unturned's own hard and soft edges (a stop sign's face stays
-        // dead flat; deriving smooth normals there bends the face's shading into its bevel). Under this
-        // pipeline's convention (Z-negated vertices + reversed winding) the normal maps by the reflection's
-        // cofactor, (x,y,z) -> (-x,-y,z): verified against the derived geometric normals over the real
-        // masterbundle meshes (99.5% agreement; the plain (x,y,-z) reflection agrees with 0.4%). Meshes that
-        // ship without normals keep the derived smooth ones.
+        // dead flat; deriving smooth normals there bends the face's shading into its bevel). Authored normals
+        // map by the plain reflection (x,y,-z): both the scene and the sun are mirrored by the same Z flip,
+        // so this preserves every dot(N, L) — Unity's lighting exactly. That also holds for foliage-style
+        // normals that are deliberately decoupled from the geometry (grass cards author up-bent normals to
+        // light like the terrain; the cofactor map (-x,-y,z) would point them at the ground and shade half
+        // the blades dark). Meshes that ship without normals keep the derived smooth ones.
         Vector3[] gnormals;
         if (normals.Length == verts.Length)
         {
             gnormals = new Vector3[normals.Length];
             for (int i = 0; i < normals.Length; i++)
-                gnormals[i] = new Vector3(-normals[i].X, -normals[i].Y, normals[i].Z);
+                gnormals[i] = new Vector3(normals[i].X, normals[i].Y, -normals[i].Z);
         }
         else
         {
