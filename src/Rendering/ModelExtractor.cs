@@ -144,22 +144,77 @@ public static class ModelExtractor
                         pending.Add((kv.Key, kv.Value));
                 pending.Sort((a, b) => a.tex.StreamOffset.CompareTo(b.tex.StreamOffset));
 
-                var buffer = new byte[node.Size];
-                long filled = 0;
-                int next = 0;
-                while (filled < node.Size)
-                {
-                    int want = (int)Math.Min(chunkSize, node.Size - filled);
-                    int got = stream.Read(buffer, (int)filled, want); // straight into buffer, no chunk copy
-                    if (got == 0)
-                        break;
-                    filled += got;
-                    while (next < pending.Count &&
-                        pending[next].tex.StreamOffset + pending[next].tex.StreamSize <= filled)
+                // Do any two needed regions overlap (content-identical textures could share bytes)? A
+                // forward-only window can't re-read shared bytes, so in that rare case retain the whole node.
+                bool overlap = false;
+                for (int i = 1; i < pending.Count; i++)
+                    if (pending[i].tex.StreamOffset <
+                        pending[i - 1].tex.StreamOffset + pending[i - 1].tex.StreamSize)
                     {
-                        WriteStreamedTexture(pending[next].texId, pending[next].tex, fileName, buffer,
-                            textureCacheDir, onTextureWritten);
-                        next++;
+                        overlap = true;
+                        break;
+                    }
+
+                if (overlap)
+                {
+                    var buffer = new byte[node.Size];
+                    long filled = 0;
+                    int next = 0;
+                    while (filled < node.Size)
+                    {
+                        int want = (int)Math.Min(chunkSize, node.Size - filled);
+                        int got = stream.Read(buffer, (int)filled, want);
+                        if (got == 0)
+                            break;
+                        filled += got;
+                        while (next < pending.Count &&
+                            pending[next].tex.StreamOffset + pending[next].tex.StreamSize <= filled)
+                        {
+                            WriteStreamedTexture(pending[next].texId, pending[next].tex, fileName, buffer,
+                                textureCacheDir, onTextureWritten);
+                            next++;
+                        }
+                    }
+                }
+                else
+                {
+                    // Sliding window: keep only the current texture's bytes resident. The .resS is ~1.18 GB;
+                    // this bounds peak to one texture (+ a reused scratch for the gaps) instead of the whole
+                    // node. A streamed texture's pixels ARE its [StreamOffset, +StreamSize) bytes (GetPixels
+                    // just copies that region), so the read buffer is the pixel data directly.
+                    long pos = 0;
+                    var scratch = new byte[chunkSize];
+                    foreach ((long texId, UnityTexture tex) in pending)
+                    {
+                        while (pos < tex.StreamOffset) // skip-read the gap up to this texture
+                        {
+                            int want = (int)Math.Min(scratch.Length, tex.StreamOffset - pos);
+                            int got = stream.Read(scratch, 0, want);
+                            if (got == 0)
+                                goto drained;
+                            pos += got;
+                        }
+                        var texBuf = new byte[tex.StreamSize];
+                        int read = 0;
+                        while (read < texBuf.Length)
+                        {
+                            int got = stream.Read(texBuf, read, texBuf.Length - read);
+                            if (got == 0)
+                                break;
+                            read += got;
+                        }
+                        pos += read;
+                        if (read == texBuf.Length)
+                            WriteStreamedTextureBytes(texId, tex, texBuf, textureCacheDir, onTextureWritten);
+                    }
+                drained:
+                    while (pos < node.Size) // drain the remainder so any following node stays aligned
+                    {
+                        int want = (int)Math.Min(scratch.Length, node.Size - pos);
+                        int got = stream.Read(scratch, 0, want);
+                        if (got == 0)
+                            break;
+                        pos += got;
                     }
                 }
             }
@@ -178,6 +233,25 @@ public static class ModelExtractor
         }
         byte[]? pixels = tex.GetPixels(name => name == fileName ? fileBytes : null);
         if (pixels == null || pixels.Length == 0)
+            return;
+        using (var stream = File.Create(outPath))
+            TextureCache.Write(stream, new CachedTexture(tex.Format, tex.Width, tex.Height, tex.MipCount, pixels));
+        onTextureWritten(texKey);
+    }
+
+    // Writes an already-extracted streamed texture — its bytes are exactly the pixel region (the sliding
+    // window read them directly), so no GetPixels region-copy is needed.
+    private static void WriteStreamedTextureBytes(long texId, UnityTexture tex, byte[] pixels,
+        string textureCacheDir, Action<string> onTextureWritten)
+    {
+        string texKey = texId.ToString("x");
+        string outPath = Path.Combine(textureCacheDir, texKey + ".tex");
+        if (File.Exists(outPath))
+        {
+            onTextureWritten(texKey);
+            return;
+        }
+        if (pixels.Length == 0)
             return;
         using (var stream = File.Create(outPath))
             TextureCache.Write(stream, new CachedTexture(tex.Format, tex.Width, tex.Height, tex.MipCount, pixels));
