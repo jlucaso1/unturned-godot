@@ -185,12 +185,18 @@ public partial class CharacterSkeleton : Skeleton3D
     }
 
     // One-time engine read of every bone's rest transform (the clone starts empty, so each instance
-    // fills its own copy on first apply).
+    // fills its own copy on first apply). The flag keeps the per-frame check free of interop:
+    // GetBoneCount itself is a C#->Godot call and measured at several percent of the trace.
+    private bool _restCached;
+
     private void EnsureRestCache()
     {
-        int count = GetBoneCount();
-        if (_restRotations.Length == count)
+        if (_restCached)
             return;
+        int count = GetBoneCount();
+        if (count == 0)
+            return; // rig not assembled yet; try again next apply
+        _restCached = true;
         _restRotations = new Quaternion[count];
         _restPositions = new Vector3[count];
         _restScales = new Vector3[count];
