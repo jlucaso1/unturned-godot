@@ -182,10 +182,12 @@ public class ServerSimulationTests
         for (int i = 1; i <= 12; i++) // a full in-place jump arc, trusted positions rising and falling
         {
             float y = 10f + Mathf.Max(0f, 1f - Mathf.Abs(i - 6) / 6f);
+            bool airborne = i is > 1 and < 11;
             sim.QueueInput(1, new InputCommand((uint)i, 0, 0, jump: i == 1, sprint: false, 0, 90,
-                UnturnedGodot.Player.EPlayerStance.Stand, new Vector3(0, y, 0)));
+                UnturnedGodot.Player.EPlayerStance.Stand, new Vector3(0, y, 0), grounded: !airborne));
             List<PlayerSnapshotState> states = sim.Step();
             Assert.False(states[0].Moving, $"tick {i} flickered Moving on");
+            Assert.Equal(!airborne, states[0].Grounded); // the owner's real IsOnFloor passes through
         }
     }
 

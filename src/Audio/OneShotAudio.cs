@@ -46,6 +46,13 @@ public partial class OneShotAudio : Node3D
         voice.VolumeDb = Mathf.LinearToDb(volumeScale * entry.Def.VolumeMultiplier);
         voice.PitchScale = Mathf.Lerp(entry.Def.MinPitch, entry.Def.MaxPitch, (float)_random.NextDouble());
         voice.Play();
+        if (OS.GetEnvironment("AUDIO_DEBUG") == "1")
+        {
+            Camera3D? cam = GetViewport().GetCamera3D();
+            float dist = cam != null ? cam.GlobalPosition.DistanceTo(position) : -1f;
+            GD.Print($"[audio] play '{defName}' at {position} listenerDist={dist:F1} " +
+                $"maxDist={maxDistance} vol={voice.VolumeDb:F1}dB playing={voice.Playing} inTree={voice.IsInsideTree()}");
+        }
         return true;
     }
 
@@ -65,7 +72,16 @@ public partial class OneShotAudio : Node3D
 
         if (_voices.Count < MaxVoices)
         {
-            var voice = new AudioStreamPlayer3D { UnitSize = 6f };
+            var voice = new AudioStreamPlayer3D
+            {
+                // Godot has no linear rolloff (Unturned's SetLinearRolloff); inverse-distance with this
+                // unit size tracks it closely through the mid range, and MaxDistance still silences the
+                // tail. MaxDb 0 removes Godot's near-field boost (Unity linear caps at unity gain), and
+                // the distance lowpass is disabled — Unity doesn't muffle with distance, only attenuates.
+                UnitSize = 6f,
+                MaxDb = 0f,
+                AttenuationFilterCutoffHz = 20500,
+            };
             _voices.Add(voice);
             AddChild(voice);
             return voice;

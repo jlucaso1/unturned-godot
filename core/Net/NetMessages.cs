@@ -50,6 +50,10 @@ public readonly struct InputCommand
     public readonly byte Pitch;
     public readonly EPlayerStance Stance;
 
+    // The client's real IsOnFloor: replicated (not inferred) so every client derives landings from the
+    // same state the owner saw — interpolation stalls can't fake touchdowns.
+    public readonly bool Grounded;
+
     // Client-simulated position (Unturned's forceTrustClient shape): the real client resolves collision
     // against the full world (buildings, trees) that the server's heightfield solver can't; the server
     // validates the delta against a speed budget and adopts it. Absent (bots), the server simulates.
@@ -57,7 +61,7 @@ public readonly struct InputCommand
     public readonly Vector3 Position;
 
     public InputCommand(uint frame, sbyte inputX, sbyte inputY, bool jump, bool sprint, byte yaw, byte pitch,
-        EPlayerStance stance = EPlayerStance.Stand)
+        EPlayerStance stance = EPlayerStance.Stand, bool grounded = true)
     {
         Frame = frame;
         InputX = inputX;
@@ -67,13 +71,14 @@ public readonly struct InputCommand
         Yaw = yaw;
         Pitch = pitch;
         Stance = stance;
+        Grounded = grounded;
         HasPosition = false;
         Position = Vector3.Zero;
     }
 
     public InputCommand(uint frame, sbyte inputX, sbyte inputY, bool jump, bool sprint, byte yaw, byte pitch,
-        EPlayerStance stance, Vector3 position)
-        : this(frame, inputX, inputY, jump, sprint, yaw, pitch, stance)
+        EPlayerStance stance, Vector3 position, bool grounded = true)
+        : this(frame, inputX, inputY, jump, sprint, yaw, pitch, stance, grounded)
     {
         HasPosition = true;
         Position = position;
@@ -93,8 +98,11 @@ public readonly struct PlayerSnapshotState
     // vertical motion flicker the walk state on and off, restarting the crossfade mid-air.
     public readonly bool Moving;
 
+    // The owner's real grounded state, for remote landing sounds (see InputCommand.Grounded).
+    public readonly bool Grounded;
+
     public PlayerSnapshotState(byte playerId, Vector3 position, byte pitch, byte yaw,
-        EPlayerStance stance = EPlayerStance.Stand, bool moving = false)
+        EPlayerStance stance = EPlayerStance.Stand, bool moving = false, bool grounded = true)
     {
         PlayerId = playerId;
         Position = position;
@@ -102,6 +110,7 @@ public readonly struct PlayerSnapshotState
         Yaw = yaw;
         Stance = stance;
         Moving = moving;
+        Grounded = grounded;
     }
 }
 
@@ -119,7 +128,7 @@ public sealed class PlayerListing
 public static class NetMessages
 {
     // Bump whenever a message layout changes; the server refuses mismatched clients at the handshake.
-    public const byte ProtocolVersion = 3;
+    public const byte ProtocolVersion = 4;
 
     public static ENetMessage TypeOf(byte[] payload) => (ENetMessage)payload[0];
 
@@ -194,7 +203,8 @@ public static class NetMessages
         w.Write(input.Frame);
         w.Write(input.InputX);
         w.Write(input.InputY);
-        w.Write((byte)((input.Jump ? 1 : 0) | (input.Sprint ? 2 : 0) | (input.HasPosition ? 4 : 0)));
+        w.Write((byte)((input.Jump ? 1 : 0) | (input.Sprint ? 2 : 0) | (input.HasPosition ? 4 : 0)
+            | (input.Grounded ? 8 : 0)));
         w.Write(input.Yaw);
         w.Write(input.Pitch);
         w.Write((byte)input.Stance);
@@ -219,10 +229,11 @@ public static class NetMessages
         var stance = (EPlayerStance)r.ReadByte();
         bool jump = (flags & 1) != 0;
         bool sprint = (flags & 2) != 0;
+        bool grounded = (flags & 8) != 0;
         if ((flags & 4) == 0)
-            return new InputCommand(frame, x, y, jump, sprint, yaw, pitch, stance);
+            return new InputCommand(frame, x, y, jump, sprint, yaw, pitch, stance, grounded);
         var position = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
-        return new InputCommand(frame, x, y, jump, sprint, yaw, pitch, stance, position);
+        return new InputCommand(frame, x, y, jump, sprint, yaw, pitch, stance, position, grounded);
     }
 
     public static byte[] WriteStateUpdate(uint tick, IReadOnlyList<PlayerSnapshotState> states)
@@ -240,7 +251,7 @@ public static class NetMessages
             w.Write(s.Position.Z);
             w.Write(s.Pitch);
             w.Write(s.Yaw);
-            w.Write(PackStanceMoving(s.Stance, s.Moving));
+            w.Write(PackStanceFlags(s.Stance, s.Moving, s.Grounded));
         }
         return ms.ToArray();
     }
@@ -257,8 +268,8 @@ public static class NetMessages
             var pos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
             byte pitch = r.ReadByte();
             byte yaw = r.ReadByte();
-            (EPlayerStance stance, bool moving) = UnpackStanceMoving(r.ReadByte());
-            states.Add(new PlayerSnapshotState(id, pos, pitch, yaw, stance, moving));
+            (EPlayerStance stance, bool moving, bool grounded) = UnpackStanceFlags(r.ReadByte());
+            states.Add(new PlayerSnapshotState(id, pos, pitch, yaw, stance, moving, grounded));
         }
         return (tick, states);
     }
@@ -285,12 +296,12 @@ public static class NetMessages
         Stance = (EPlayerStance)r.ReadByte(),
     };
 
-    // Stance fits in the low bits; bit 7 carries the input-derived Moving flag.
-    private static byte PackStanceMoving(EPlayerStance stance, bool moving) =>
-        (byte)((byte)stance | (moving ? 0x80 : 0));
+    // Stance fits in the low bits; bit 6 carries the owner's Grounded and bit 7 the Moving flag.
+    private static byte PackStanceFlags(EPlayerStance stance, bool moving, bool grounded) =>
+        (byte)((byte)stance | (grounded ? 0x40 : 0) | (moving ? 0x80 : 0));
 
-    private static (EPlayerStance Stance, bool Moving) UnpackStanceMoving(byte value) =>
-        ((EPlayerStance)(value & 0x7F), (value & 0x80) != 0);
+    private static (EPlayerStance Stance, bool Moving, bool Grounded) UnpackStanceFlags(byte value) =>
+        ((EPlayerStance)(value & 0x3F), (value & 0x80) != 0, (value & 0x40) != 0);
 
     // Positions the reader just past the message-type byte.
     private static BinaryReader Reader(byte[] payload)

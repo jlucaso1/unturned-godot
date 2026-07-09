@@ -161,7 +161,7 @@ public partial class PlayerController : CharacterBody3D
                     (sbyte)input.X, (sbyte)input.Y, jumpHeld, wantSprint,
                     UnturnedGodot.Net.NetAngles.QuantizeYaw(RotationDegrees.Y),
                     UnturnedGodot.Net.NetAngles.QuantizePitch(_pitch + 90f),
-                    _stance, GlobalPosition));
+                    _stance, GlobalPosition, IsOnFloor()));
             }
         }
 

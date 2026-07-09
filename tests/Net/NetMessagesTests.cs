@@ -104,11 +104,12 @@ public class NetMessagesTests
     public void Input_RoundTrips_TrustedPosition()
     {
         var input = new InputCommand(7, 0, -1, false, true, 10, 90,
-            UnturnedGodot.Player.EPlayerStance.Prone, new Vector3(300.5f, 34.25f, -84f));
+            UnturnedGodot.Player.EPlayerStance.Prone, new Vector3(300.5f, 34.25f, -84f), grounded: false);
         InputCommand read = NetMessages.ReadInput(NetMessages.WriteInput(input));
         Assert.True(read.HasPosition);
         Assert.Equal(new Vector3(300.5f, 34.25f, -84f), read.Position);
         Assert.Equal(UnturnedGodot.Player.EPlayerStance.Prone, read.Stance);
+        Assert.False(read.Grounded);
     }
 
     [Fact]
@@ -116,7 +117,8 @@ public class NetMessagesTests
     {
         var states = new List<PlayerSnapshotState>
         {
-            new(1, new Vector3(10, 20, 30), 90, 0, UnturnedGodot.Player.EPlayerStance.Crouch, moving: true),
+            new(1, new Vector3(10, 20, 30), 90, 0, UnturnedGodot.Player.EPlayerStance.Crouch,
+                moving: true, grounded: false),
             new(2, new Vector3(-1.5f, 0.25f, 7f), 45, 128),
         };
         byte[] p = NetMessages.WriteStateUpdate(77, states);
@@ -128,8 +130,10 @@ public class NetMessagesTests
         Assert.Equal(new Vector3(-1.5f, 0.25f, 7f), read[1].Position);
         Assert.Equal(128, read[1].Yaw);
         Assert.Equal(UnturnedGodot.Player.EPlayerStance.Crouch, read[0].Stance);
-        Assert.True(read[0].Moving);  // the moving bit shares the stance byte and must not corrupt it
+        Assert.True(read[0].Moving);   // moving and grounded share the stance byte without corrupting it
+        Assert.False(read[0].Grounded); // airborne mid-jump
         Assert.Equal(UnturnedGodot.Player.EPlayerStance.Stand, read[1].Stance);
         Assert.False(read[1].Moving);
+        Assert.True(read[1].Grounded);
     }
 }

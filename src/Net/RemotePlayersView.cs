@@ -17,13 +17,10 @@ public partial class RemotePlayersView : Node3D
         public CharacterSkeleton? Rig;
         public Vector3 LastPosition;
 
-        // State-derived movement audio (footsteps/landings computed locally, never networked) plus the
-        // vertical-motion bookkeeping that stands in for a grounded flag we don't replicate: rising or
-        // falling fast marks the avatar airborne, and it only lands again after an actual FALL — the
-        // near-zero vertical speed at a jump's apex must not read as a landing.
+        // State-derived movement audio: footsteps/landings computed locally from the REPLICATED stance,
+        // moving and grounded flags — never inferred from interpolated motion (stalled interpolation used
+        // to fake mid-air touchdowns and double-thud jumps).
         public MovementAudio? Audio;
-        public bool Airborne;
-        public bool WasFalling;
     }
 
     private NetClient _client = null!;
@@ -59,24 +56,7 @@ public partial class RemotePlayersView : Node3D
             avatar.Rig?.SetState(remote.Stance, remote.Moving);
             avatar.Rig?.SetPitch(pose.Pitch - 90f); // wire pitch (0..180) -> Godot pitch (-90..+90)
 
-            if (avatar.Audio != null && delta > 0)
-            {
-                float dy = (pose.Position.Y - avatar.LastPosition.Y) / (float)delta;
-                if (Mathf.Abs(dy) >= 1.5f)
-                {
-                    avatar.Airborne = true;
-                    if (dy < -1.5f)
-                        avatar.WasFalling = true;
-                }
-                else if (avatar.Airborne && avatar.WasFalling)
-                {
-                    avatar.Airborne = false; // touched down after a real fall -> the clock sees the edge
-                    avatar.WasFalling = false;
-                }
-                // else: a jump's apex (slow but never fell yet) stays airborne; flat ground stays grounded.
-
-                avatar.Audio.Tick(remote.Stance, remote.Moving, !avatar.Airborne, pose.Position, (float)delta);
-            }
+            avatar.Audio?.Tick(remote.Stance, remote.Moving, remote.Grounded, pose.Position, (float)delta);
             avatar.LastPosition = pose.Position;
         }
 
