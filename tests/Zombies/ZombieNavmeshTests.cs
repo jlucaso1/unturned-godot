@@ -130,6 +130,76 @@ public class ZombieNavmeshTests : IDisposable
         Assert.False(LevelNavmesh.CheckNavigation(flags, new Vector3(0, 0, 60)));
     }
 
+    private static NavFlag Flag(Vector3 center, Vector3 size, Vector3[] verts, int[] tris) =>
+        new() { Center = center, Size = size, Vertices = verts, Triangles = tris };
+
+    [Fact]
+    public void SnapXZ_PrefersTheClosestLevel_NeverTheBasement()
+    {
+        // Two stacked floors under the same XZ: a street at y=34 and a basement at y=30.5.
+        var flags = new List<NavFlag>
+        {
+            Flag(new Vector3(0, 32, 0), new Vector3(40, 20, 40), new[]
+            {
+                new Vector3(-10, 34, -10), new Vector3(10, 34, -10), new Vector3(0, 34, 10),   // street
+                new Vector3(-10, 30.5f, -10), new Vector3(10, 30.5f, -10), new Vector3(0, 30.5f, 10), // basement
+            }, new[] { 0, 1, 2, 3, 4, 5 }),
+        };
+
+        Assert.True(LevelNavmesh.SnapXZ(flags, new Vector3(0, 34.2f, 0), out Vector3 snapped));
+        Assert.Equal(34f, snapped.Y, 2);   // the player's own floor, 3.5 m above the basement
+        Assert.Equal(0f, snapped.X, 3);    // XZ preserved when contained
+        Assert.True(LevelNavmesh.SnapXZ(flags, new Vector3(0, 30.4f, 0), out snapped));
+        Assert.Equal(30.5f, snapped.Y, 2); // someone actually IN the basement snaps down there
+    }
+
+    [Fact]
+    public void SnapXZ_OffMesh_TakesTheSameLevelEdge_WithVerticalPenalty()
+    {
+        // The point sits off the mesh; a same-level edge 1.5 m away must beat a basement edge
+        // 1.2 m away in XZ but 3 m below.
+        var flags = new List<NavFlag>
+        {
+            Flag(new Vector3(0, 32, 0), new Vector3(40, 20, 40), new[]
+            {
+                new Vector3(1.5f, 34, -5), new Vector3(1.5f, 34, 5), new Vector3(6, 34, 0),      // same level
+                new Vector3(-1.2f, 31, -5), new Vector3(-1.2f, 31, 5), new Vector3(-6, 31, 0),   // below
+                new Vector3(8, 34, 8), new Vector3(8, 34, 8), new Vector3(9, 34, 9),             // degenerate: skipped
+            }, new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8 }),
+        };
+
+        Assert.True(LevelNavmesh.SnapXZ(flags, new Vector3(0, 34f, 0), out Vector3 snapped));
+        Assert.Equal(1.5f, snapped.X, 2);
+        Assert.Equal(34f, snapped.Y, 2);
+    }
+
+    [Fact]
+    public void SnapXZ_FarFromEveryFlag_ReturnsFalse()
+    {
+        var flags = new List<NavFlag>
+        {
+            Flag(new Vector3(0, 32, 0), new Vector3(10, 20, 10),
+                new[] { new Vector3(-1, 34, -1), new Vector3(1, 34, -1), new Vector3(0, 34, 1) },
+                new[] { 0, 1, 2 }),
+        };
+        Assert.False(LevelNavmesh.SnapXZ(flags, new Vector3(500, 34, 500), out _));
+    }
+
+    [Fact]
+    public void RealPei_TheReportedOffMeshSpot_SnapsToTheStreetNotTheBasement()
+    {
+        string pei = "/home/jlucaso/.local/share/Steam/steamapps/common/Unturned/Maps/PEI";
+        if (!Directory.Exists(pei))
+            return;
+        List<NavFlag> flags = LevelNavmesh.Load(Path.Combine(pei, "Environment"));
+        // The reported zigzag spot: a player standing off-mesh at street level (y~34) with a
+        // basement mesh ~3 m below. The stable snap must pick the street.
+        Assert.True(LevelNavmesh.SnapXZ(flags, new Vector3(333.28f, 34.0f, 99.94f), out Vector3 snapped));
+        Assert.True(snapped.Y > 33f, $"snapped into the basement: {snapped}");
+        Assert.True(new Vector2(snapped.X - 333.28f, snapped.Z - 99.94f).Length() < 6f,
+            $"snapped too far: {snapped}");
+    }
+
     // Real PEI data (self-skips without the game): 19 pre-baked navmeshes; every flag's box must
     // match its Bounds.dat entry minus the BOUNDS_SIZE (64 m) expansion.
     [Fact]

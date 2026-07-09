@@ -123,4 +123,89 @@ public static class LevelNavmesh
                 return true;
         return false;
     }
+
+    // Projects a point onto the navmesh with an XZ-first rule: prefer the triangle directly under
+    // or over the point on the closest LEVEL (smallest |dy|); when no triangle contains the XZ,
+    // take the closest triangle edge in XZ. A hunt target standing just off the mesh then snaps to
+    // a stable nearby point on its own floor — a raw 3D closest-point query flips between the
+    // street beside it and a basement three metres below as things move, which zigzags the route.
+    public static bool SnapXZ(IReadOnlyList<NavFlag> flags, Vector3 point, out Vector3 snapped)
+    {
+        snapped = point;
+        float bestContainedDy = float.MaxValue;
+        float bestEdgeScore = float.MaxValue;
+        Vector3 bestEdge = point;
+        bool contained = false;
+
+        foreach (NavFlag flag in flags)
+        {
+            // Cheap reject: outside the flag's box (with a margin for the tile overhang).
+            if (Mathf.Abs(point.X - flag.Center.X) > (flag.Size.X * 0.5f) + 16f
+                || Mathf.Abs(point.Z - flag.Center.Z) > (flag.Size.Z * 0.5f) + 16f)
+                continue;
+
+            Vector3[] v = flag.Vertices;
+            int[] t = flag.Triangles;
+            for (int i = 0; i + 2 < t.Length; i += 3)
+            {
+                Vector3 a = v[t[i]], b = v[t[i + 1]], c = v[t[i + 2]];
+                // Degenerate (zero-area) triangles "contain" every point under the sign rule and
+                // would hijack the snap; with them gone, every remaining edge has real length.
+                float area2 = (((b.X - a.X) * (c.Z - a.Z)) - ((c.X - a.X) * (b.Z - a.Z)));
+                if (MathF.Abs(area2) < 1e-6f)
+                    continue;
+                float d1 = ((point.X - b.X) * (a.Z - b.Z)) - ((a.X - b.X) * (point.Z - b.Z));
+                float d2 = ((point.X - c.X) * (b.Z - c.Z)) - ((b.X - c.X) * (point.Z - c.Z));
+                float d3 = ((point.X - a.X) * (c.Z - a.Z)) - ((c.X - a.X) * (point.Z - a.Z));
+                bool neg = d1 < 0f || d2 < 0f || d3 < 0f;
+                bool pos = d1 > 0f || d2 > 0f || d3 > 0f;
+                if (!(neg && pos))
+                {
+                    float y = (a.Y + b.Y + c.Y) / 3f;
+                    float dy = Mathf.Abs(y - point.Y);
+                    if (dy < bestContainedDy)
+                    {
+                        bestContainedDy = dy;
+                        snapped = new Vector3(point.X, y, point.Z);
+                        contained = true;
+                    }
+                }
+                else if (!contained)
+                {
+                    // Closest point on the triangle's edges in XZ, with a light vertical penalty
+                    // so same-level geometry wins over floors above/below.
+                    ClosestOnEdge(a, b, point, ref bestEdgeScore, ref bestEdge);
+                    ClosestOnEdge(b, c, point, ref bestEdgeScore, ref bestEdge);
+                    ClosestOnEdge(c, a, point, ref bestEdgeScore, ref bestEdge);
+                }
+            }
+        }
+
+        if (contained)
+            return true;
+        if (bestEdgeScore < float.MaxValue)
+        {
+            snapped = bestEdge;
+            return true;
+        }
+        return false;
+    }
+
+    private static void ClosestOnEdge(Vector3 a, Vector3 b, Vector3 point,
+        ref float bestScore, ref Vector3 best)
+    {
+        float dx = b.X - a.X, dz = b.Z - a.Z;
+        // Non-degenerate triangles (the caller filters them) can't have zero-length edges.
+        float lengthSquared = (dx * dx) + (dz * dz);
+        float t = Mathf.Clamp((((point.X - a.X) * dx) + ((point.Z - a.Z) * dz)) / lengthSquared, 0f, 1f);
+        Vector3 candidate = a.Lerp(b, t);
+        float ddx = point.X - candidate.X, ddz = point.Z - candidate.Z;
+        float dy = point.Y - candidate.Y;
+        float score = (ddx * ddx) + (ddz * ddz) + (0.25f * dy * dy);
+        if (score < bestScore)
+        {
+            bestScore = score;
+            best = candidate;
+        }
+    }
 }

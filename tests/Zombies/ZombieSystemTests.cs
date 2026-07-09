@@ -773,6 +773,44 @@ public class ZombieSystemTests
         Assert.Equal(4f, destinations[1].X, 1f);
     }
 
+    [Fact]
+    public void SeekDestination_IsSnappedToTheNavmeshBeforeQuerying()
+    {
+        // The brain owns the navmesh triangles: the query destination must arrive pre-snapped
+        // (XZ-first) so the host's 3D closest-point lookup can never flip floors.
+        var flags = new List<NavFlag>
+        {
+            new()
+            {
+                Center = new Vector3(0, 140, 0), Size = new Vector3(136, 236, 136),
+                Vertices = new[]
+                {
+                    new Vector3(-20, 5.4f, -20), new Vector3(20, 5.4f, -20), new Vector3(0, 5.4f, 20),
+                },
+                Triangles = new[] { 0, 1, 2 },
+            },
+        };
+        var system = new ZombieSystem(new[] { Table() }, TwoBounds(), FlatGround, flags);
+        system.Spawn(new[] { At(0, 0) }, new Random(1));
+        ZombieInstance zombie = Assert.Single(system.Zombies);
+        zombie.Speciality = EZombieSpeciality.Normal;
+        zombie.Yaw = 0f;
+
+        var destinations = new List<Vector3>();
+        system.PathQuery = (from, to, path) =>
+        {
+            destinations.Add(to);
+            path.Add(from);
+            path.Add(to);
+            return true;
+        };
+
+        system.Tick(new[] { Player(1, new Vector3(10, 5, 0)) }, 0.1f);
+        Vector3 to = Assert.Single(destinations);
+        Assert.Equal(5.4f, to.Y, 2); // lifted onto the triangle's level, not the player's raw 5.0
+        Assert.Equal(10f, to.X, 2);  // XZ preserved (the point is contained)
+    }
+
     // ---- Navmesh spawn filtering (checkNavigation) ------------------------------------------------
 
     private static List<NavFlag> NavmeshBoxes() => new()

@@ -447,12 +447,14 @@ public sealed class ZombieSystem
         if (zombie.Path != EZombiePath.Rush && sqrHorizontal > 4f)
         {
             // Zombie.cs LEFT/RIGHT paths: drift one metre beside the approach line until within
-            // 2 m. The offset shifts the STEERING target only — offsetting the pathfinding
-            // destination made its navmesh snap flip between the two sides of a wall on every
-            // repath, so zombies entering houses oscillated back out.
-            float yawRad = Mathf.DegToRad(zombie.Yaw);
-            Vector3 forward = new(-MathF.Sin(yawRad), 0f, -MathF.Cos(yawRad));
-            var right = new Vector3(forward.Z, 0f, -forward.X);
+            // 2 m. The offset shifts the STEERING target only (offsetting the pathfinding
+            // destination flip-flopped its wall-side snap), and its side vector derives from the
+            // TO-TARGET line rather than the zombie's own yaw — a yaw-based right rotates as the
+            // zombie turns toward the drifted point, feeding back into itself as a weave.
+            float invDist = 1f / MathF.Sqrt(sqrHorizontal);
+            var right = new Vector3(
+                (target.Position.Z - zombie.Position.Z) * invDist, 0f,
+                (zombie.Position.X - target.Position.X) * invDist);
             steerOffset = zombie.Path == EZombiePath.Left ? -right : right;
         }
         Seek(zombie, target.Position, steerOffset, dt);
@@ -480,7 +482,14 @@ public sealed class ZombieSystem
             zombie.RepathTimer = RepathRate;
             zombie.PathPoints.Clear();
             zombie.PathSegment = 0;
-            if (!PathQuery(zombie.Position, destination, zombie.PathPoints))
+            // Stabilize the query's destination: project it onto the navmesh XZ-first (its own
+            // floor). A target standing just off the mesh otherwise snaps to whichever polygon is
+            // closest in 3D — flipping between a street edge and the basement below on every
+            // repath, which zigzags the whole route.
+            Vector3 queryTo = destination;
+            if (_navmesh != null && LevelNavmesh.SnapXZ(_navmesh, destination, out Vector3 snapped))
+                queryTo = snapped;
+            if (!PathQuery(zombie.Position, queryTo, zombie.PathPoints))
                 zombie.PathPoints.Clear();
         }
 
