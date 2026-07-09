@@ -55,4 +55,35 @@ public sealed class SplatmapTile
 
     public static SplatmapTile? TryRead(string filePath, int coordX, int coordY) =>
         File.Exists(filePath) ? Parse(File.ReadAllBytes(filePath), coordX, coordY) : null;
+
+    // The per-texel argmax over the raw splatmap bytes (Landscape.getSplatmapHighestWeightLayerIndex),
+    // one dominant-layer index per texel at [x * res + y]. Strict '>' keeps the FIRST layer on ties and
+    // byte/255 is monotonic, so this matches an argmax over the normalized float weights exactly —
+    // without ever materializing the 2 MB float tile the audio sampler used to retain.
+    public static byte[] DominantLayers(byte[] data)
+    {
+        const int res = Landscape.SPLATMAP_RESOLUTION;
+        int expected = res * res * LAYERS;
+        if (data.Length < expected)
+            throw new IOException($"Splatmap has {data.Length} bytes, expected {expected}");
+
+        var dominant = new byte[res * res];
+        for (int cell = 0; cell < dominant.Length; cell++)
+        {
+            int baseIndex = cell * LAYERS;
+            byte best = 0;
+            byte bestWeight = data[baseIndex];
+            for (int layer = 1; layer < LAYERS; layer++)
+            {
+                byte w = data[baseIndex + layer];
+                if (w > bestWeight)
+                {
+                    bestWeight = w;
+                    best = (byte)layer;
+                }
+            }
+            dominant[cell] = best;
+        }
+        return dominant;
+    }
 }

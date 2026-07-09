@@ -10,6 +10,11 @@ namespace UnturnedGodot;
 // pose over the bind rest, and bends the spine + skull toward the look pitch (HumanAnimator: each takes
 // half the pitch). State selection follows PlayerAnimator.updateState: moving -> Move_<stance>, else
 // Idle_<stance>, with STAND/SPRINT sharing the stand clips.
+//
+// The per-frame engine boundary is kept minimal (profiled at ~5% of all samples before): _Process is only
+// enabled while the rig is visible (no IsVisibleInTree poll per frame), rest poses are cached on the C#
+// side so a full ResetBonePoses is never issued — only channels that stop being animated are reset — and
+// the pitch bend composes with the sampled pose in C# instead of reading the bone back from the engine.
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class CharacterSkeleton : Skeleton3D
 {
@@ -26,6 +31,15 @@ public partial class CharacterSkeleton : Skeleton3D
     private float _pitchBend; // Godot pitch degrees, split across spine + skull
     private int _spine = -1;
     private int _skull = -1;
+
+    // C#-side rest cache + written-channel tracking: bones the previous frame animated and this frame
+    // doesn't fall back to these rests, everything else is left untouched (it already rests).
+    private const byte ChanRot = 1, ChanPos = 2, ChanScale = 4;
+    private Quaternion[] _restRotations = System.Array.Empty<Quaternion>();
+    private Vector3[] _restPositions = System.Array.Empty<Vector3>();
+    private Vector3[] _restScales = System.Array.Empty<Vector3>();
+    private byte[] _written = System.Array.Empty<byte>();  // channels applied by the previous frame
+    private byte[] _writing = System.Array.Empty<byte>();  // channels applied by the current frame
 
     public bool HasAnyPose => _clips.Count > 0;
 
@@ -55,6 +69,7 @@ public partial class CharacterSkeleton : Skeleton3D
         _current = clip;
         _time = 0f;
         _blend = _fromPose == null ? 1f : 0f;
+        UpdateProcessing();
     }
 
     // Jumps the current clip to an absolute time and poses immediately (used to inspect a frame off-line;
@@ -66,13 +81,20 @@ public partial class CharacterSkeleton : Skeleton3D
         Apply(CurrentPose());
     }
 
+    // _Process only runs while a clip is active AND the rig is effectively visible — checked on visibility
+    // notifications instead of an engine IsVisibleInTree call every frame. In first person the whole body
+    // is hidden, so the ~48 marshaled bone writes stop entirely; the pose (and the animation clock, which
+    // also froze before) resumes on the first visible frame.
+    private void UpdateProcessing() => SetProcess(_current.Length > 0 && IsVisibleInTree());
+
+    public override void _Notification(int what)
+    {
+        if (what == NotificationVisibilityChanged || what == NotificationEnterTree)
+            UpdateProcessing();
+    }
+
     public override void _Process(double delta)
     {
-        // In first person (the default) the whole skinned body is hidden, but Godot still ticks this
-        // _Process. Skip sampling + the ~48 marshaled SetBonePose calls while nothing is on screen; the
-        // pose is rebuilt on the first visible frame after switching to third person.
-        if (_current.Length == 0 || !IsVisibleInTree())
-            return;
         _time += (float)delta;
 
         Dictionary<int, BonePose> pose = CurrentPose();
@@ -95,32 +117,92 @@ public partial class CharacterSkeleton : Skeleton3D
 
     private void Apply(Dictionary<int, BonePose> pose)
     {
-        ResetBonePoses(); // bind rest, then layer the clip's channels
+        EnsureRestCache();
+        float half = _pitchBend * 0.5f;
+
+        // Write this frame's channels. The pitch bend is composed here, over the sampled rotation (or the
+        // rest when the clip doesn't animate that bone) — exactly what reset-then-rotate produced, without
+        // reading the bone back from the engine.
+        System.Array.Clear(_writing, 0, _writing.Length);
         foreach (BonePose p in pose.Values)
         {
+            byte channels = 0;
             if (p.Rotation is { } r)
-                SetBonePoseRotation(p.Bone, r);
+            {
+                SetBonePoseRotation(p.Bone, WithPitch(p.Bone, r, half));
+                channels |= ChanRot;
+            }
             if (p.Position is { } pos)
+            {
                 SetBonePosePosition(p.Bone, pos);
+                channels |= ChanPos;
+            }
             if (p.Scale is { } s)
+            {
                 SetBonePoseScale(p.Bone, s);
+                channels |= ChanScale;
+            }
+            _writing[p.Bone] = channels;
         }
 
-        // Bend the upper body toward the look pitch: spine and skull each take half (HumanAnimator does
-        // spine.Rotate(0, _pitch*0.5, 0) + skull.Rotate(0, _pitch*0.5, 0) — local Y, which after the bones'
-        // ~-90° Z rest maps to the character's left-right axis, i.e. a pitch nod).
-        float half = _pitchBend * 0.5f;
-        BendPitch(_spine, half);
-        BendPitch(_skull, half);
+        // Pitch bones the clip didn't rotate this frame still bend, starting from their rest.
+        BendUnanimated(_spine, half);
+        BendUnanimated(_skull, half);
+
+        // Channels the previous frame animated but this one didn't fall back to the bind rest — the
+        // incremental form of the old full ResetBonePoses.
+        for (int bone = 0; bone < _written.Length; bone++)
+        {
+            byte stale = (byte)(_written[bone] & ~_writing[bone]);
+            if (stale == 0)
+                continue;
+            if ((stale & ChanRot) != 0)
+                SetBonePoseRotation(bone, _restRotations[bone]);
+            if ((stale & ChanPos) != 0)
+                SetBonePosePosition(bone, _restPositions[bone]);
+            if ((stale & ChanScale) != 0)
+                SetBonePoseScale(bone, _restScales[bone]);
+        }
+
+        (_written, _writing) = (_writing, _written);
     }
 
-    // Rotates a bone about its local Y (the pitch axis after the Unity->Godot conversion) on top of its pose.
-    private void BendPitch(int bone, float degrees)
+    private Quaternion WithPitch(int bone, Quaternion sampled, float halfDegrees)
     {
-        if (bone < 0)
+        if (bone != _spine && bone != _skull)
+            return sampled;
+        // HumanAnimator does spine.Rotate(0, pitch*0.5, 0) + skull.Rotate(0, pitch*0.5, 0) — local Y,
+        // which after the bones' ~-90° Z rest maps to the character's left-right axis, i.e. a pitch nod.
+        return sampled * new Quaternion(Vector3.Up, Mathf.DegToRad(halfDegrees));
+    }
+
+    private void BendUnanimated(int bone, float halfDegrees)
+    {
+        if (bone < 0 || (_writing[bone] & ChanRot) != 0)
+            return; // the pose already rotated it (pitch composed in WithPitch)
+        SetBonePoseRotation(bone, _restRotations[bone] * new Quaternion(Vector3.Up, Mathf.DegToRad(halfDegrees)));
+        _writing[bone] |= ChanRot;
+    }
+
+    // One-time engine read of every bone's rest transform (the clone starts empty, so each instance
+    // fills its own copy on first apply).
+    private void EnsureRestCache()
+    {
+        int count = GetBoneCount();
+        if (_restRotations.Length == count)
             return;
-        var delta = new Quaternion(Vector3.Up, Mathf.DegToRad(degrees));
-        SetBonePoseRotation(bone, GetBonePoseRotation(bone) * delta);
+        _restRotations = new Quaternion[count];
+        _restPositions = new Vector3[count];
+        _restScales = new Vector3[count];
+        _written = new byte[count];
+        _writing = new byte[count];
+        for (int i = 0; i < count; i++)
+        {
+            Transform3D rest = GetBoneRest(i);
+            _restRotations[i] = rest.Basis.GetRotationQuaternion();
+            _restPositions[i] = rest.Origin;
+            _restScales[i] = rest.Basis.Scale;
+        }
     }
 
     private static string ClipFor(EPlayerStance stance, bool moving) => (stance, moving) switch

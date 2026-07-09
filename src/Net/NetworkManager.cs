@@ -113,6 +113,7 @@ public partial class NetworkManager : Node
         // remainder along the contact plane (one slide iteration, like a CC's per-frame resolve).
         var sweep = new SphereShape3D();
         var query = new PhysicsShapeQueryParameters3D { Shape = sweep };
+        var stepDown = new PhysicsRayQueryParameters3D { CollisionMask = 1 };
         float lastRadius = -1f;
         zombies.MoveResolver = (from, to, radius) =>
         {
@@ -141,8 +142,8 @@ public partial class NetworkManager : Node
             {
                 // Only a real step: the raised destination must have ground within the climb
                 // height, or this would hop through window openings and float over gaps.
-                var stepDown = PhysicsRayQueryParameters3D.Create(
-                    new Vector3(to.X, from.Y + 1.5f, to.Z), new Vector3(to.X, from.Y + 0.05f, to.Z), 1);
+                stepDown.From = new Vector3(to.X, from.Y + 1.5f, to.Z);
+                stepDown.To = new Vector3(to.X, from.Y + 0.05f, to.Z);
                 Godot.Collections.Dictionary ground = space.IntersectRay(stepDown);
                 if (ground.Count > 0)
                     return new Vector3(to.X, ((Vector3)ground["position"]).Y, to.Z);
@@ -169,6 +170,7 @@ public partial class NetworkManager : Node
         // house floors, stairs — with the zombie's current height as the reference so stacked
         // floors (basements, upper storeys) resolve correctly. Mask 1 = static world only (the
         // player's body lives on layer 2), falling back to the heightfield out in the open.
+        var snapRay = new PhysicsRayQueryParameters3D { CollisionMask = 1 }; // reused: one per zombie step otherwise
         zombies.GroundSnap = (Vector3 position, out float y) =>
         {
             PhysicsDirectSpaceState3D? space = GetViewport()?.World3D?.DirectSpaceState;
@@ -176,9 +178,9 @@ public partial class NetworkManager : Node
                 return _ground(position.X, position.Z, out y);
             // Start at +0.8: covers the original's walkableClimb (0.75) steps without catching
             // railings or furniture above the real floor.
-            var ray = PhysicsRayQueryParameters3D.Create(
-                position + new Vector3(0f, 0.8f, 0f), position + new Vector3(0f, -3f, 0f), 1);
-            Godot.Collections.Dictionary hit = space.IntersectRay(ray);
+            snapRay.From = position + new Vector3(0f, 0.8f, 0f);
+            snapRay.To = position + new Vector3(0f, -3f, 0f);
+            Godot.Collections.Dictionary hit = space.IntersectRay(snapRay);
             if (hit.Count > 0)
             {
                 y = ((Vector3)hit["position"]).Y;

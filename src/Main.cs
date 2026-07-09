@@ -324,9 +324,11 @@ public partial class Main : Node3D
             LevelHierarchy.ReadTileMaterials(System.IO.Path.Combine(level.Path, "Level.hierarchy"));
         foreach (((int x, int y), System.Guid[] materials) in tileMaterials)
         {
-            SplatmapTile? tile = SplatmapTile.TryRead(level.SplatmapPath(x, y), x, y);
-            if (tile != null)
-                splat.Add(tile, materials);
+            // Only the dominant layer index survives (64 KB/tile); the full float tile (2 MB) is
+            // never materialized — the audio sampler used to retain ~32 MB of those.
+            string path = level.SplatmapPath(x, y);
+            if (System.IO.File.Exists(path))
+                splat.Add(x, y, SplatmapTile.DominantLayers(System.IO.File.ReadAllBytes(path)), materials);
         }
 
         string audioCacheDir = ProjectSettings.GlobalizePath("user://audio_cache");

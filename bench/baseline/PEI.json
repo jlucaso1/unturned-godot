@@ -1,6 +1,6 @@
 {
   "schemaVersion": "1",
-  "timestamp": "2026-07-08T08:14:23",
+  "timestamp": "2026-07-09T19:42:13",
   "environment": {
     "godotVersion": "4.7-stable (official)",
     "os": "Linux",
@@ -11,21 +11,21 @@
     "scene": "PEI"
   },
   "metrics": {
-    "build.objects.ms": 212.5653,
-    "build.terrain.ms": 2341.1297,
-    "build.total.ms": 2553.695,
-    "estimatedGeometryBytes": 54738984,
+    "build.objects.ms": 251.4356,
+    "build.terrain.ms": 247.2122,
+    "build.total.ms": 498.64779999999996,
+    "estimatedGeometryBytes": 17927100,
     "meshInstances": 16,
-    "multiMeshInstances": 372,
-    "multiMeshTotalInstances": 4329,
-    "nodes": 390,
-    "objectsWithMesh": 4329,
-    "placedObjects": 4329,
+    "multiMeshInstances": 1492,
+    "multiMeshTotalInstances": 673277,
+    "nodes": 1824,
+    "objectsWithMesh": 6022,
+    "placedObjects": 6023,
     "tileCount": 16,
-    "uniqueMaterials": 377,
-    "uniqueMeshes": 388,
-    "uploadedIndices": 6532338,
-    "uploadedTriangles": 2177446,
-    "uploadedVertices": 1192068
+    "uniqueMaterials": 308,
+    "uniqueMeshes": 422,
+    "uploadedIndices": 1857831,
+    "uploadedTriangles": 619277,
+    "uploadedVertices": 437324
   }
 }

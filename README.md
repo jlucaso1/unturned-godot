@@ -42,7 +42,7 @@ walk maps each placed object's GUID to its highest-detail `Model_0` LOD mesh, an
 `MaterialPalette` — resolves each submesh's flat `_Color` and (where present) `_MainTex` texture from
 the `.resS` stream. Meshes and deduplicated textures are cached (`user://model_cache`, `user://texture_cache`);
 runtime loads only what the map needs. `Bundle_Override_Path` (holiday/variant reuse) and external mesh
-references are handled, so **all 4329 PEI objects render with real geometry and materials**. Unturned's
+references are handled, so **all ~6k placed PEI objects render with real geometry and materials**. Unturned's
 blocky objects are mostly flat-colored (5227/5229 materials have `_Color`), with textures on a few props.
 
 ## Run
@@ -102,8 +102,11 @@ Two benchmark tiers print a JSON report and diff it against the previous run:
   `heaptrack_print /tmp/ht.zst` for the peak/leaked totals. The shipped Godot binary is stripped, so
   call stacks don't symbolicate — read `/proc/<pid>/smaps_rollup` (RSS, `Private_Dirty`) for a live
   breakdown, and attribute per-subsystem by differencing runs rather than by stack.
-- **CPU** (.NET): `dotnet-trace collect -- "$GODOT" -- --benchmark`. (Godot's built-in script profiler
-  covers GDScript only — it does not see C#.)
+- **CPU** (.NET): run the profile loop and attach by PID — `"$GODOT" --headless -- --benchmark
+  --profile-loop &` then `dotnet-trace collect -p <pid> --format speedscope --duration 00:00:08`,
+  stopping the trace while the loop still runs. (Launching Godot UNDER dotnet-trace truncates the
+  trace: Godot's native quit kills the process before the profiler flushes. Godot's built-in script
+  profiler covers GDScript only — it does not see C#.)
 - **Parsers in isolation**: `dotnet run -c Release --project tools/PerfHarness` micro-benchmarks the Core
   parsers against the real game data (see `tools/PerfHarness/README.md`).
 - **GPU per render pass**: add `--gpu-profile` to any run (works in release builds) — prints each pass's

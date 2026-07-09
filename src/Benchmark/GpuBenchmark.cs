@@ -47,6 +47,7 @@ public static class GpuBenchmark
             camera.Far = Mathf.Max(bounds.Size.X, bounds.Size.Z) * 3f + 1000f;
             IReadOnlyList<(string name, Transform3D xform)> poses = Poses(bounds);
 
+            var perPoseMedianMs = new List<(string Name, double MedianMs)>();
             var frameMs = new List<double>();
             var drawCalls = new List<double>();
             var primitives = new List<double>();
@@ -75,6 +76,7 @@ public static class GpuBenchmark
                     renderObjects.Add(Mon(Performance.Monitor.RenderTotalObjectsInFrame));
                 }
                 frameMs.AddRange(poseFrameMs);
+                perPoseMedianMs.Add((name, MetricStats.Median(poseFrameMs)));
                 GD.Print($"[benchmark] pose '{name}': frameMs median {MetricStats.Median(poseFrameMs):0.00}, " +
                     $"drawCalls {Mon(Performance.Monitor.RenderTotalDrawCallsInFrame):0}");
             }
@@ -98,7 +100,8 @@ public static class GpuBenchmark
             }
 
             SceneMetricsResult sm = SceneMetrics.Collect(new Node[] { world.Terrain, world.Objects, world.Foliage });
-            BenchmarkReport report = BuildReport(mapName, frameMs, drawCalls, primitives, renderObjects, sm, poses.Count);
+            BenchmarkReport report = BuildReport(mapName, frameMs, drawCalls, primitives, renderObjects, sm,
+                poses.Count, perPoseMedianMs);
             BenchmarkRunner.Finish(report, $"{mapName}-gpu", DiffOptions(),
                 "gpu.frameMs.* are wall-clock medians — noisy, and CPU-bound when draw-call limited");
         }
@@ -113,7 +116,10 @@ public static class GpuBenchmark
     }
 
     private static BenchmarkReport BuildReport(string mapName, List<double> frameMs, List<double> drawCalls,
-        List<double> primitives, List<double> renderObjects, SceneMetricsResult sm, int poseCount) => new()
+        List<double> primitives, List<double> renderObjects, SceneMetricsResult sm, int poseCount,
+        List<(string Name, double MedianMs)> perPoseMedianMs)
+    {
+        var report = new BenchmarkReport
         {
             Timestamp = BenchmarkRunner.Timestamp(),
             Environment = BenchmarkRunner.BuildEnvironment(mapName),
@@ -139,6 +145,12 @@ public static class GpuBenchmark
                 ["samplesPerPose"] = SampleFrames,
             },
         };
+        // Per-pose medians too: an optimization that helps one view and hurts another vanishes in the
+        // aggregate median, so the report keeps each camera's own number diffable.
+        foreach ((string name, double medianMs) in perPoseMedianMs)
+            report.Metrics[$"gpu.frameMs.median.{name}"] = medianMs;
+        return report;
+    }
 
     // Wall-clock and memory metrics are jittery run-to-run; loosen their thresholds so noise is not a
     // regression. Counts (draw calls, primitives) are deterministic per view and stay strict.
@@ -147,6 +159,12 @@ public static class GpuBenchmark
         ThresholdOverrides = new Dictionary<string, double>
         {
             ["gpu.frameMs.median"] = 0.10,
+            ["gpu.frameMs.median.overhead"] = 0.10,
+            ["gpu.frameMs.median.oblique_n"] = 0.10,
+            ["gpu.frameMs.median.oblique_e"] = 0.10,
+            ["gpu.frameMs.median.oblique_s"] = 0.10,
+            ["gpu.frameMs.median.zoom"] = 0.10,
+            ["gpu.frameMs.median.tight"] = 0.10,
             ["gpu.videoMemBytes"] = 0.05,
             ["gpu.bufferMemBytes"] = 0.05,
             ["gpu.textureMemBytes"] = 0.05,
