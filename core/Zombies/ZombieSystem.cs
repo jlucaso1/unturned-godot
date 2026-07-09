@@ -60,6 +60,7 @@ public sealed class ZombieInstance
     public float PendingHit = -1f;    // counts down from attackTime/2 to the damage landing
     public float LeaveDelay;          // Zombie.leave: stand still this long, then walk to LeaveTo
     public Vector3 LeaveTo;
+    public sbyte DetourSide;          // while blocked head-on, hug the obstacle on this side (0 = none)
 
     // ZombieManager.getZombieSpeed with Slow_Movement=false (NORMAL difficulty).
     public float Speed => Speciality switch
@@ -459,11 +460,29 @@ public sealed class ZombieSystem
         if (distance < 1e-4f)
             return;
         float step = MathF.Min(zombie.Speed * dt, distance);
-        Vector3 next = zombie.Position + (flat / distance * step);
+        Vector3 direction = flat / distance;
+        Vector3 next = zombie.Position + (direction * step);
 
         // World geometry first (trees, walls, props — the CharacterController slide)...
         if (MoveResolver != null)
-            next = MoveResolver(zombie.Position, next, zombie.Radius);
+        {
+            Vector3 resolved = MoveResolver(zombie.Position, next, zombie.Radius);
+            float progress = HorizontalDistanceSquared(resolved, zombie.Position);
+            if (progress < step * step * 0.0625f) // under 25% of the step: blocked head-on
+            {
+                // The real game's navmesh routes around obstacles; without one, hug the obstacle:
+                // walk the tangent on a sticky side (like a CharacterController skirting a trunk).
+                // The side is rolled once and kept for good — re-rolling whenever the direct line
+                // briefly opened made zombies orbit back and forth on a curved trunk.
+                if (zombie.DetourSide == 0)
+                    zombie.DetourSide = _random.NextSingle() < 0.5f ? (sbyte)-1 : (sbyte)1;
+                var tangent = new Vector3(-direction.Z * zombie.DetourSide, 0f, direction.X * zombie.DetourSide);
+                Vector3 detour = MoveResolver(zombie.Position, zombie.Position + (tangent * step), zombie.Radius);
+                if (HorizontalDistanceSquared(detour, zombie.Position) > progress)
+                    resolved = detour;
+            }
+            next = resolved;
+        }
 
         // ...then the other zombies' capsules.
         foreach (ZombieInstance other in _byBound[zombie.Bound])

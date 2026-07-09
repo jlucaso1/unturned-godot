@@ -196,8 +196,17 @@ public partial class ZombiesView : Node3D
     private string ClipFor(ZombieAvatar avatar) => avatar.State switch
     {
         EZombieState.Chase or EZombieState.Return => MoveClip(avatar),
-        EZombieState.Attack => $"Attack_{_rng.RandiRange(0, 4)}", // sendZombieAttack's normal swing range
+        EZombieState.Attack => AttackClip(avatar),
         _ => IdleClip(avatar),
+    };
+
+    // sendZombieAttack's swing ids: crawlers swipe from the ground with Attack_5, sprinters lunge
+    // with Attack_6..8, everyone else swings the standing Attack_0..4.
+    private string AttackClip(ZombieAvatar avatar) => avatar.Speciality switch
+    {
+        EZombieSpeciality.Crawler => "Attack_5",
+        EZombieSpeciality.Sprinter => $"Attack_{_rng.RandiRange(6, 8)}",
+        _ => $"Attack_{_rng.RandiRange(0, 4)}",
     };
 
     private static string MoveClip(ZombieAvatar avatar) => avatar.Speciality switch
