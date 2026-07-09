@@ -84,4 +84,71 @@ public class HeightmapSamplerTests
         HeightmapSampler sampler = Flat(0.5f);
         Assert.False(sampler.TrySampleHeight(-5f, -5f, out _)); // tile (-1,-1) not loaded
     }
+
+    [Fact]
+    public void SampleNormal_FlatTile_PointsStraightUp()
+    {
+        HeightmapSampler sampler = Flat(0.5f);
+        Assert.True(sampler.TrySampleNormal(123.4f, 678.9f, out Godot.Vector3 normal));
+        Assert.Equal(0f, normal.X, 5);
+        Assert.Equal(1f, normal.Y, 5);
+        Assert.Equal(0f, normal.Z, 5);
+    }
+
+    [Fact]
+    public void SampleNormal_MissingTile_ReturnsFalseAndUp()
+    {
+        HeightmapSampler sampler = Flat(0.5f);
+        Assert.False(sampler.TrySampleNormal(-5f, -5f, out Godot.Vector3 normal));
+        Assert.Equal(Godot.Vector3.Up, normal);
+    }
+
+    [Fact]
+    public void SampleNormal_RampAlongX_TiltsAgainstTheSlope()
+    {
+        // Same ramp as the height test: rising along worldX (hy index). The plane y = slopeX * x has
+        // upward normal ~ (-slopeX, 1, 0).
+        var heights = new float[Res, Res];
+        for (int x = 0; x < Res; x++)
+        {
+            heights[x, 0] = 0.2f;
+            heights[x, 1] = 0.6f;
+        }
+        var sampler = new HeightmapSampler(new[] { HeightmapTile.FromHeights(0, 0, heights) });
+
+        float cell = Landscape.TILE_SIZE / (float)Landscape.HEIGHTMAP_RESOLUTION_MINUS_ONE;
+        float slopeX = (0.6f - 0.2f) * Landscape.TILE_HEIGHT / cell;
+        // ty = 0.5 > tx = 0 -> the (h00, h01, h11) triangle.
+        Assert.True(sampler.TrySampleNormal(0.5f * cell, 0f, out Godot.Vector3 normal));
+        Assert.Equal(-slopeX, normal.X / normal.Y, 3); // dY/dX recovered from the normal
+        Assert.Equal(0f, normal.Z, 5);
+        Assert.True(normal.Y > 0f);
+    }
+
+    [Fact]
+    public void SampleNormal_MatchesTheHeightTriangle_NotBilinear()
+    {
+        // The saddle cell again: in the tx >= ty triangle (h00, h10, h11) the plane's slopes come from
+        // h10 - h00 (along Z) and h11 - h10 (along X); the normal must be that plane's, i.e. consistent
+        // with what TrySampleHeight returns across the same triangle.
+        var heights = new float[Res, Res];
+        heights[0, 0] = 0.5f;
+        heights[1, 0] = 0.7f;
+        heights[0, 1] = 0.5f;
+        heights[1, 1] = 0.5f;
+        var sampler = new HeightmapSampler(new[] { HeightmapTile.FromHeights(0, 0, heights) });
+
+        float cell = Landscape.TILE_SIZE / (float)Landscape.HEIGHTMAP_RESOLUTION_MINUS_ONE;
+        Assert.True(sampler.TrySampleNormal(0.4f * cell, 0.6f * cell, out Godot.Vector3 normal));
+
+        // Numerical slopes from the height sampler inside the same triangle (points near tx=0.6, ty=0.4).
+        Assert.True(sampler.TrySampleHeight(0.40f * cell, 0.60f * cell, out float y0));
+        Assert.True(sampler.TrySampleHeight(0.42f * cell, 0.60f * cell, out float yx));
+        Assert.True(sampler.TrySampleHeight(0.40f * cell, 0.62f * cell, out float yz));
+        float slopeX = (yx - y0) / (0.02f * cell);
+        float slopeZ = (yz - y0) / (0.02f * cell);
+
+        Assert.Equal(-slopeX, normal.X / normal.Y, 2);
+        Assert.Equal(-slopeZ, normal.Z / normal.Y, 2);
+    }
 }

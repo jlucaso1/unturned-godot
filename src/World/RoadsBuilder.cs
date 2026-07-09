@@ -7,18 +7,15 @@ using UnturnedGodot.Unity;
 
 namespace UnturnedGodot;
 
-// Builds the map's roads: Bezier splines from Paths.dat lofted into ribbons at the widths from Roads.dat,
-// textured with the real asphalt/dirt textures from the map's Roads.unity3d (a legacy UnityRaw bundle).
-// One material is shared per road-material index (highway, dirt, ...) so the many roads batch. If the
-// bundle can't be read, roads fall back to a procedural asphalt/dirt shader.
+// Builds the map's roads: Bezier splines from Paths.dat lofted through RoadMesh — the 1:1 port of
+// Road.buildMesh's banked crown-and-skirt cross-section — at the widths/depths from Roads.dat, textured
+// with the real asphalt/dirt textures from the map's Roads.unity3d (a legacy UnityRaw bundle). One material
+// is shared per road-material index (highway, dirt, ...) so the many roads batch. If the bundle can't be
+// read, roads fall back to a procedural asphalt/dirt shader.
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class RoadsBuilder
 {
-    private const float SampleSpacing = 3f;   // metres between spline samples
     private const float FallbackRepeat = 24f; // metres per texture tile when drawing procedurally
-    // Uniform z-fight offset: with the road conformed to the mesh's own triangulation it is coplanar with the
-    // terrain, so it needs a hair of lift. The same value for every road keeps junctions flush.
-    private const float SurfaceLift = 0.05f;
 
     private static readonly Shader RoadShader = new()
     {
@@ -58,8 +55,9 @@ public static class RoadsBuilder
         pavedFallback.SetShaderParameter("paved", true);
         var dirtFallback = new ShaderMaterial { Shader = RoadShader };
         dirtFallback.SetShaderParameter("paved", false);
-        var byMaterial = new Dictionary<int, (Material material, float repeat)>();
-        // Roads of the same material index share texture, tiling and width, so merge their ribbons into one
+        var terrain = new SampledTerrain(heights);
+        var byMaterial = new Dictionary<int, (Material material, float inverseRepeat)>();
+        // Roads of the same material index share texture, tiling and width, so merge their strips into one
         // mesh per material — a handful of draw calls instead of one per road.
         var merged = new Dictionary<int, (SurfaceTool tool, Material material, int verts)>();
 
@@ -71,7 +69,7 @@ public static class RoadsBuilder
                 ? configs[mat]
                 : new RoadMaterialConfig(8f, 4f, 0.2f, 0f, true);
 
-            if (!byMaterial.TryGetValue(mat, out (Material material, float repeat) shared))
+            if (!byMaterial.TryGetValue(mat, out (Material material, float inverseRepeat) shared))
             {
                 shared = SharedMaterial(mat, config, textures, pavedFallback, dirtFallback);
                 byMaterial[mat] = shared;
@@ -86,9 +84,7 @@ public static class RoadsBuilder
                 acc = (st, shared.material, 0);
                 merged[mat] = acc;
             }
-            // Unturned's RoadMaterial.HalfWidth returns the width field as-is (it is the half-width), so
-            // the full road is 2 * config.Width.
-            int added = AppendRoad(acc.tool, acc.verts, roads[i], shared.repeat, config.Width, heights);
+            int added = AppendRoad(acc.tool, acc.verts, roads[i], config, shared.inverseRepeat, terrain);
             if (added > 0)
             {
                 merged[mat] = (acc.tool, acc.material, acc.verts + added);
@@ -109,13 +105,14 @@ public static class RoadsBuilder
     }
 
     // One material per road-material index: the real Roads.unity3d texture (tiled by the config height),
-    // or the procedural asphalt/dirt shader when no texture is available.
+    // or the procedural asphalt/dirt shader when no texture is available. The float is the source's
+    // inverseTextureRepeatDistance: v advances this much per metre of road.
     private static (Material, float) SharedMaterial(int mat, RoadMaterialConfig config,
         List<ImageTexture?> textures, ShaderMaterial paved, ShaderMaterial dirt)
     {
         ImageTexture? texture = mat < textures.Count ? textures[mat] : null;
         if (texture == null)
-            return (config.IsConcrete ? paved : dirt, FallbackRepeat);
+            return (config.IsConcrete ? paved : dirt, 1f / FallbackRepeat);
 
         var material = new StandardMaterial3D
         {
@@ -127,81 +124,42 @@ public static class RoadsBuilder
         };
         // Unturned tiles the texture every texHeight/config.Height metres of road length.
         float repeat = config.Height > 0f ? texture.GetHeight() / config.Height : texture.GetHeight();
-        return (material, repeat);
+        return (material, 1f / repeat);
     }
 
-    // Appends one road as a flat ribbon whose centreline conforms to the terrain (ConformedPoint samples the
-    // mesh's own triangulation, so the road lands exactly on the surface) with a single hair-thin, uniform
-    // z-lift. Because the lift is the same for every road and the base matches the mesh, roads meet the ground
-    // without a lip and meet each other at junctions without a step — where per-material bed heights (Depth)
-    // would otherwise leave a gap. Returns the vertex count added.
-    private static int AppendRoad(SurfaceTool st, int baseVertex, PlacedRoad road, float repeat, float halfWidth,
-        HeightmapSampler heights)
+    // Appends one road's RoadMesh strip (built in Unity space, faithful to Road.buildMesh) reflected into
+    // Godot space: positions and normals negate Z, winding kept — the same F-translation every Unity-sourced
+    // mesh here uses (UnityMeshConverter). Returns the vertex count added.
+    private static int AppendRoad(SurfaceTool st, int baseVertex, PlacedRoad road, RoadMaterialConfig config,
+        float inverseRepeat, IRoadTerrain terrain)
     {
-        if (road.Joints.Count < 2)
-            return 0;
-
-        var points = new List<Vector3>();
-        var distances = new List<float>();
-        float distance = 0f;
-        Vector3 previous = ConformedPoint(road.Joints[0], road.Joints[0], 0f, heights);
-        int segments = road.IsLoop ? road.Joints.Count : road.Joints.Count - 1;
-        for (int s = 0; s < segments; s++)
+        RoadMeshData mesh = RoadMesh.Build(road, config, inverseRepeat, terrain);
+        for (int i = 0; i < mesh.Vertices.Length; i++)
         {
-            RoadJoint a = road.Joints[s];
-            RoadJoint b = road.Joints[(s + 1) % road.Joints.Count];
-            float segLength = (b.Vertex - a.Vertex).Length();
-            int steps = Mathf.Max(2, Mathf.CeilToInt(segLength / SampleSpacing));
-            for (int step = s == 0 ? 0 : 1; step <= steps; step++)
-            {
-                Vector3 p = ConformedPoint(a, b, step / (float)steps, heights);
-                distance += (p - previous).Length();
-                points.Add(p);
-                distances.Add(distance);
-                previous = p;
-            }
+            Vector3 n = mesh.Normals[i];
+            st.SetNormal(new Vector3(n.X, n.Y, -n.Z));
+            st.SetUV(mesh.Uvs[i]);
+            st.AddVertex(Landscape.UnityToGodot(mesh.Vertices[i]));
         }
-        if (points.Count < 2)
-            return 0;
-
-        for (int i = 0; i < points.Count; i++)
-        {
-            Vector3 forward = Direction(points, i, road.IsLoop);
-            Vector3 side = forward.Cross(Vector3.Up).Normalized();
-            float v = distances[i] / repeat;
-            AddVertex(st, points[i] + (side * halfWidth), 0f, v);
-            AddVertex(st, points[i] - (side * halfWidth), 1f, v);
-        }
-        for (int i = 0; i + 1 < points.Count; i++)
-        {
-            int l = baseVertex + (i * 2);
-            int r = l + 1;
-            int ln = baseVertex + ((i + 1) * 2);
-            int rn = ln + 1;
-            st.AddIndex(l); st.AddIndex(r); st.AddIndex(ln);
-            st.AddIndex(r); st.AddIndex(rn); st.AddIndex(ln);
-        }
-
-        return points.Count * 2;
+        foreach (int index in mesh.Indices)
+            st.AddIndex(baseVertex + index);
+        return mesh.Vertices.Length;
     }
 
-    private static void AddVertex(SurfaceTool st, Vector3 position, float u, float v)
+    // RoadMesh's terrain queries (Unity space), answered from the heightmap sampler — the same triangulation
+    // the terrain mesh renders with, so the road bed hugs the visible ground exactly. Off-map points keep
+    // their own height on flat ground, like the source's out-of-bounds fallbacks.
+    private sealed class SampledTerrain : IRoadTerrain
     {
-        st.SetNormal(Vector3.Up);
-        st.SetUV(new Vector2(u, v));
-        st.AddVertex(position);
-    }
+        private readonly HeightmapSampler _heights;
 
-    // One centreline point (Godot space) at t along the a->b segment: its XZ from the Bezier, its height
-    // conformed to the terrain (unless the start joint ignores terrain, e.g. bridges), plus the interpolated
-    // per-joint offset and a uniform z-lift just large enough to avoid z-fighting with the terrain mesh.
-    private static Vector3 ConformedPoint(RoadJoint a, RoadJoint b, float t, HeightmapSampler heights)
-    {
-        Vector3 p = Landscape.UnityToGodot(LevelRoads.BezierPoint(a, b, t));
-        if (!a.IgnoreTerrain && heights.TrySampleHeight(p.X, -p.Z, out float ground)) // Godot Z -> Unity Z
-            p.Y = ground;
-        p.Y += Mathf.Lerp(a.Offset, b.Offset, t) + SurfaceLift;
-        return p;
+        public SampledTerrain(HeightmapSampler heights) => _heights = heights;
+
+        public float GetHeight(Vector3 position)
+            => _heights.TrySampleHeight(position.X, position.Z, out float y) ? y : position.Y;
+
+        public Vector3 GetNormal(Vector3 position)
+            => _heights.TrySampleNormal(position.X, position.Z, out Vector3 normal) ? normal : Vector3.Up;
     }
 
     private static MeshInstance3D CommitRoad(SurfaceTool st, Material material, string name) =>
@@ -210,18 +168,10 @@ public static class RoadsBuilder
             Name = name,
             Mesh = st.Commit(),
             MaterialOverride = material,
-            // Flat ribbons that hug the terrain: their shadow is invisible, so don't re-draw them into
+            // Low strips that hug the terrain: their shadow is invisible, so don't re-draw them into
             // every directional cascade.
             CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
         };
-
-    private static Vector3 Direction(List<Vector3> points, int i, bool loop)
-    {
-        Vector3 next = i + 1 < points.Count ? points[i + 1] : (loop ? points[0] : points[i]);
-        Vector3 prev = i > 0 ? points[i - 1] : (loop ? points[^1] : points[i]);
-        Vector3 dir = next - prev;
-        return dir.LengthSquared() > 0f ? dir.Normalized() : Vector3.Forward;
-    }
 
     // Decodes the road textures from Roads.unity3d in AssetBundle container order, which is the material
     // index order Unturned uses (material 0 -> Highway_0, 5 -> Trail, ...). The bundle is a small (~2 MB)
