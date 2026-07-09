@@ -38,6 +38,15 @@ public partial class PlayerController : CharacterBody3D
     private float _eyeHeight = PlayerConfig.EyeHeightStand;
     private bool _thirdPerson;
 
+    // Reused physics-query objects so the per-tick stance clearance test and the per-frame third-person
+    // camera sweep don't allocate fresh RefCounted query/shape/exclude objects each call.
+    private CapsuleShape3D? _clearanceShape;
+    private PhysicsShapeQueryParameters3D? _clearanceQuery;
+    private PhysicsRayQueryParameters3D? _cameraRay;
+    private Godot.Collections.Array<Rid>? _selfExclude;
+
+    private Godot.Collections.Array<Rid> SelfExclude => _selfExclude ??= new Godot.Collections.Array<Rid> { GetRid() };
+
     public override void _Ready()
     {
         _thirdPerson = StartThirdPerson;
@@ -147,15 +156,19 @@ public partial class PlayerController : CharacterBody3D
         if (targetHeight <= _capsule.Height)
             return true; // dropping lower always fits
 
-        var shape = new CapsuleShape3D { Radius = PlayerConfig.Radius - 0.01f, Height = targetHeight };
-        var query = new PhysicsShapeQueryParameters3D
+        if (_clearanceQuery == null)
         {
-            Shape = shape,
-            Transform = new Transform3D(Basis.Identity, GlobalPosition + (Vector3.Up * (targetHeight * 0.5f))),
-            CollisionMask = CollisionMask,
-            Exclude = new Godot.Collections.Array<Rid> { GetRid() },
-        };
-        return GetWorld3D().DirectSpaceState.IntersectShape(query, 1).Count == 0;
+            _clearanceShape = new CapsuleShape3D { Radius = PlayerConfig.Radius - 0.01f };
+            _clearanceQuery = new PhysicsShapeQueryParameters3D
+            {
+                Shape = _clearanceShape,
+                CollisionMask = CollisionMask,
+                Exclude = SelfExclude,
+            };
+        }
+        _clearanceShape!.Height = targetHeight;
+        _clearanceQuery.Transform = new Transform3D(Basis.Identity, GlobalPosition + (Vector3.Up * (targetHeight * 0.5f)));
+        return GetWorld3D().DirectSpaceState.IntersectShape(_clearanceQuery, 1).Count == 0;
     }
 
     private void UpdateCamera(float dt)
@@ -190,14 +203,10 @@ public partial class PlayerController : CharacterBody3D
         Vector3 origin = _head.GlobalPosition;
         Vector3 target = _head.GlobalTransform * local;
 
-        var ray = new PhysicsRayQueryParameters3D
-        {
-            From = origin,
-            To = target,
-            CollisionMask = CollisionMask,
-            Exclude = new Godot.Collections.Array<Rid> { GetRid() },
-        };
-        Godot.Collections.Dictionary hit = GetWorld3D().DirectSpaceState.IntersectRay(ray);
+        _cameraRay ??= new PhysicsRayQueryParameters3D { CollisionMask = CollisionMask, Exclude = SelfExclude };
+        _cameraRay.From = origin;
+        _cameraRay.To = target;
+        Godot.Collections.Dictionary hit = GetWorld3D().DirectSpaceState.IntersectRay(_cameraRay);
         if (hit.Count > 0)
         {
             var point = (Vector3)hit["position"];

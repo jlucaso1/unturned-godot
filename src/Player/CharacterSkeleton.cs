@@ -61,7 +61,10 @@ public partial class CharacterSkeleton : Skeleton3D
 
     public override void _Process(double delta)
     {
-        if (_current.Length == 0)
+        // In first person (the default) the whole skinned body is hidden, but Godot still ticks this
+        // _Process. Skip sampling + the ~48 marshaled SetBonePose calls while nothing is on screen; the
+        // pose is rebuilt on the first visible frame after switching to third person.
+        if (_current.Length == 0 || !IsVisibleInTree())
             return;
         _time += (float)delta;
 
