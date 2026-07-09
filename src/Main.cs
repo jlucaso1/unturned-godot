@@ -131,6 +131,7 @@ public partial class Main : Node3D
             if (OS.GetEnvironment("PLAYER") == "1")
             {
                 SpawnPlayer(world.Terrain, thirdPerson: true, unturnedPath, world.Heights);
+                RunPendingAudioExtraction(); // no streamer on this path; extract right away
                 int settle = OS.GetEnvironment("SETTLE") is { Length: > 0 } sv ? int.Parse(sv) : 40;
                 _ = CaptureAndQuit(shot, settle);
             }
@@ -207,6 +208,7 @@ public partial class Main : Node3D
         AddChild(overlay);
         overlay.Track(streamer); // connect before Begin so a warm cache's instant signals are caught
         streamer.Finished += loading.Finish; // fade out once the scene (and warm textures) are in
+        streamer.Finished += RunPendingAudioExtraction;
         streamer.Begin();
     }
 
@@ -215,6 +217,15 @@ public partial class Main : Node3D
 
     // Set by the main menu's Connect flow (or the JOIN env), consumed by SpawnPlayer.
     private string? _pendingJoin;
+
+    // One-shot movement-audio extraction, deferred behind the world streamer (see BuildFootsteps).
+    private System.Action? _pendingAudioExtraction;
+
+    private void RunPendingAudioExtraction()
+    {
+        _pendingAudioExtraction?.Invoke();
+        _pendingAudioExtraction = null;
+    }
 
     // Spawns the character over a town and gives each terrain tile a cheap heightfield collision so it can
     // stand on the ground (vs a 2.1M-triangle concave trimesh). Objects stay non-colliding for now (the
@@ -299,7 +310,10 @@ public partial class Main : Node3D
                 { "Foliage", "Concrete", "Gravel", "Sand", "Tile", "Metal", "Wood", "Cloth", "Snow", "Ice" })
                 if (bank.FindAudioDefPath(name, key) is { } path)
                     defPaths.Add(path);
-        _ = System.Threading.Tasks.Task.Run(() => AudioExtractor.Extract(bundlePath, defPaths, audioCacheDir));
+        // Deferred until the world streamer finishes: a cold load already runs one full 1.4 GB bundle
+        // decode, and racing a second one for audio doubles peak CPU/memory and can stall weak machines.
+        _pendingAudioExtraction = () =>
+            _ = System.Threading.Tasks.Task.Run(() => AudioExtractor.Extract(bundlePath, defPaths, audioCacheDir));
 
         GD.Print($"[audio] footsteps ready: {bank.Count} physics materials, {landscape.Count} landscape " +
             $"materials, {splat.TileCount} splat tiles");

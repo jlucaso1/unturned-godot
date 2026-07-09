@@ -178,6 +178,46 @@ public class EndToEndTests
     }
 
     [Fact]
+    public void ConnectingBeforeTheServerListens_SelfHeals()
+    {
+        // The client starts pumping while nothing answers (server not up yet / lost handshake): the
+        // Hello re-sends on its retry cadence and the join completes once the server appears.
+        var h = new Harness();
+        LoopbackClientTransport transport = h.ServerTransport.CreateClient();
+        var late = new NetClient(transport, "Late");
+        h.Clients.Add(late);
+
+        // Pump ONLY the client for a while (the server never drains its queue = effectively absent).
+        for (int i = 0; i < 50; i++)
+            late.Update(h.Now += ServerSimulation.TickRate);
+        Assert.False(late.Joined);
+
+        h.Pump(2); // the server comes alive and drains: the retried Hello admits the client
+        Assert.True(late.Joined);
+    }
+
+    [Fact]
+    public void ServerGoingSilent_ResetsTheSessionForRejoin()
+    {
+        var h = new Harness();
+        NetClient a = h.Join("A");
+        h.Pump(2);
+        Assert.True(a.Joined);
+
+        // No server updates at all for longer than the state timeout: the client resets itself.
+        double t = h.Now;
+        for (int i = 0; i < 200; i++)
+            a.Update(t += ServerSimulation.TickRate);
+
+        Assert.False(a.Joined);
+        Assert.Empty(a.Remotes);
+
+        h.Now = t;
+        h.Pump(2); // and rejoins as soon as the server answers again
+        Assert.True(a.Joined);
+    }
+
+    [Fact]
     public void CompositeClose_ClosesAllTransports()
     {
         var t1 = new LoopbackServerTransport();

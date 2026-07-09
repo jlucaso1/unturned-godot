@@ -52,8 +52,15 @@ public sealed class NetClient
     public PlayerSnapshotState LocalServerState { get; private set; }
     public IReadOnlyDictionary<byte, RemotePlayer> Remotes => _remotes;
 
+    // Self-healing join: while not admitted, the Hello re-sends on this cadence (covers "connected
+    // before the server was up", lost handshakes and reliable channels that already gave up); once
+    // joined, this long without any StateUpdate means the server dropped us silently — reset and rejoin.
+    public const double HelloRetryInterval = 2.0;
+    public const double StateTimeout = 10.0;
+
     private readonly string _name;
-    private bool _helloSent;
+    private double _lastHello = double.NegativeInfinity;
+    private double _lastStateAt;
 
     public NetClient(IClientTransport transport, string name)
     {
@@ -66,16 +73,26 @@ public sealed class NetClient
 
     public void Update(double now)
     {
-        _transport.Update(now); // give the transport the clock BEFORE the first reliable send
-        if (!_helloSent)
+        _transport.Update(now); // give the transport the clock BEFORE any reliable send
+
+        if (!Joined && now - _lastHello >= HelloRetryInterval)
         {
             // Deferred from the constructor: a reliable frame stamped before the transport ever saw the
             // real clock would look GiveUpAfter-seconds old on the next Update and kill the channel.
-            _helloSent = true;
+            _lastHello = now;
             _transport.Send(NetMessages.WriteHello(_name), ESendType.Reliable);
         }
+
         while (_transport.TryReceive(out byte[] payload))
             Handle(payload, now);
+
+        if (Joined && now - _lastStateAt > StateTimeout)
+        {
+            // The server stopped talking to us (session dropped, host restarted): rejoin from scratch.
+            Joined = false;
+            _remotes.Clear();
+            _lastHello = double.NegativeInfinity;
+        }
     }
 
     private void Handle(byte[] payload, double now)
@@ -87,6 +104,7 @@ public sealed class NetClient
                     (byte id, _, List<PlayerListing> players) = NetMessages.ReadWelcome(payload);
                     PlayerId = id;
                     Joined = true;
+                    _lastStateAt = now;
                     foreach (PlayerListing p in players)
                         _remotes[p.PlayerId] = SpawnRemote(p, now);
                     break;
@@ -104,6 +122,7 @@ public sealed class NetClient
             case ENetMessage.StateUpdate:
                 {
                     (_, List<PlayerSnapshotState> states) = NetMessages.ReadStateUpdate(payload);
+                    _lastStateAt = now;
                     foreach (PlayerSnapshotState s in states)
                     {
                         if (s.PlayerId == PlayerId)

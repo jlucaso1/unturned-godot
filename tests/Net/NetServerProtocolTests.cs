@@ -65,18 +65,27 @@ public class NetServerProtocolTests
     }
 
     [Fact]
-    public void SecondHello_IsIgnored()
+    public void SecondHello_IsAnIdempotentRejoin()
     {
         (NetServer server, FakeServerTransport transport) = Build();
         var conn = new FakeConnection();
+        var other = new FakeConnection();
+        var pending = new FakeConnection(); // connected but silent: must not appear in rejoin rosters
         transport.Connect(conn);
+        transport.Connect(other);
+        transport.Connect(pending);
         transport.Message(conn, NetMessages.WriteHello("A"));
-        transport.Message(conn, NetMessages.WriteHello("A-again"));
+        transport.Message(other, NetMessages.WriteHello("B"));
+        transport.Message(conn, NetMessages.WriteHello("A-again")); // state-timeout rejoin
         server.Update(0);
 
-        Assert.Equal(1, server.PlayerCount);
-        // Exactly one Welcome (the same Update's tick may add a StateUpdate broadcast).
-        Assert.Equal(1, conn.Sent.Count(m => NetMessages.TypeOf(m.Payload) == ENetMessage.Welcome));
+        Assert.Equal(2, server.PlayerCount); // no duplicate admit
+        var welcomes = conn.Sent.Where(m => NetMessages.TypeOf(m.Payload) == ENetMessage.Welcome).ToList();
+        Assert.Equal(2, welcomes.Count); // the re-Hello got the roster again
+        (byte firstId, _, _) = NetMessages.ReadWelcome(welcomes[0].Payload);
+        (byte secondId, _, List<PlayerListing> roster) = NetMessages.ReadWelcome(welcomes[1].Payload);
+        Assert.Equal(firstId, secondId);              // same identity, not a new player
+        Assert.Equal("B", Assert.Single(roster).Name); // and the roster lists everyone else
     }
 
     [Fact]

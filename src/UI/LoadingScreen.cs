@@ -82,10 +82,20 @@ public partial class LoadingScreen : CanvasLayer
         CreateTween().TweenProperty(_root, "modulate:a", 1.0f, 0.15f);
     }
 
+    private double _elapsed;
+    private bool _longLoadNoted;
+
     public override void _Process(double delta)
     {
         _sweepPhase = Mathf.PosMod(_sweepPhase + (float)delta * 1.4f, 1.3f);
         _sweep.Position = new Vector2((_sweepPhase - 0.15f) * 340f / 1.0f, 0);
+
+        _elapsed += delta;
+        if (!_longLoadNoted && _elapsed > 45)
+        {
+            _longLoadNoted = true; // first run extracts game assets from the masterbundle: minutes, once
+            _status.Text += "\nFirst run extracts game assets — this can take a few minutes, only once.";
+        }
     }
 
     public void SetStatus(string text) => _status.Text = text;

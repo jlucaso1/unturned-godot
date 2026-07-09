@@ -72,13 +72,28 @@ public sealed class NetServer
 
         switch (NetMessages.TypeOf(payload))
         {
-            case ENetMessage.Hello when !session.Joined:
+            case ENetMessage.Hello:
                 {
                     (byte version, string name) = NetMessages.ReadHello(payload);
                     if (version != NetMessages.ProtocolVersion)
+                    {
                         connection.Close(); // incompatible build: refuse cleanly instead of mis-parsing frames
-                    else
+                    }
+                    else if (!session.Joined)
+                    {
                         AdmitPlayer(connection, session, name);
+                    }
+                    else
+                    {
+                        // A joined client re-Helloing lost our state (its state-timeout fired): resend the
+                        // Welcome with the current roster — an idempotent rejoin, no duplicate broadcasts.
+                        var roster = new List<PlayerListing>();
+                        foreach (Session other in _sessions.Values)
+                            if (other.Joined && other != session)
+                                roster.Add(Listing(other, _simulation.GetState(other.PlayerId)));
+                        connection.Send(NetMessages.WriteWelcome(session.PlayerId, _simulation.Tick, roster),
+                            ESendType.Reliable);
+                    }
                     break;
                 }
             case ENetMessage.Input when session.Joined:

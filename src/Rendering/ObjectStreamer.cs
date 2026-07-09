@@ -188,6 +188,10 @@ public partial class ObjectStreamer : Node
             catch (Exception e)
             {
                 Callable.From(() => GD.PrintErr($"[stream] extraction failed: {e}")).CallDeferred();
+                // Unblock the pipeline: build whatever the cache holds so MeshesReady/Finished still fire
+                // (otherwise the loading screen would wait forever on a signal that never comes).
+                if (!_sceneBuilt)
+                    Callable.From(OnMeshesExtracted).CallDeferred();
             }
             _texturesDone = true;
         });
