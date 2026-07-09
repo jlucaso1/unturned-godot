@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using Godot;
 using UnturnedGodot.Data;
@@ -22,8 +23,6 @@ public partial class ZombiesView : Node3D
     {
         public required Node3D Root;
         public CharacterSkeleton? Rig;
-        public readonly SnapshotBuffer Buffer = new();
-        public Vector3 LastUpdatePos;
         public EZombieSpeciality Speciality;
         public byte Move;
         public byte Idle;
@@ -32,6 +31,9 @@ public partial class ZombiesView : Node3D
         public bool Streaming;     // any ZombieStates received yet (idle zombies never stream)
         public double StartleUntil; // while set, the wake-up roar plays before the state clip
         public double NextGroan;    // Zombie.cs's groan loop clock
+        public Vector3 TargetPosition; // Zombie.tellState's interpolation target
+        public float TargetYaw;
+        public double NextSwing;    // client-side swing clock while the state stays Attack
 
         // C#-side mirrors of engine state, so the per-frame loop never crosses into Godot for a value it
         // already knows, and never writes one that hasn't changed. With the whole population asleep the
@@ -107,9 +109,8 @@ public partial class ZombiesView : Node3D
         avatar.Root.RotationDegrees = new Vector3(0, NetAngles.DequantizeYaw(listing.Yaw), 0);
         avatar.KnownPosition = listing.Position;
         avatar.AppliedYaw = NetAngles.DequantizeYaw(listing.Yaw);
-        avatar.LastUpdatePos = listing.Position;
-        avatar.Buffer.UpdateLastSnapshot(
-            new PoseSnapshot(listing.Position, 0f, NetAngles.DequantizeYaw(listing.Yaw)), NetworkManager.Now);
+        avatar.TargetPosition = listing.Position;
+        avatar.TargetYaw = avatar.AppliedYaw;
         avatar.Rig?.Play(IdleClip(avatar));
     }
 
@@ -140,13 +141,10 @@ public partial class ZombiesView : Node3D
         if (!_avatars.TryGetValue(state.Id, out ZombieAvatar? avatar))
             return; // its ZombieList chunk hasn't arrived yet; the reliable channel will deliver it
 
-        var pose = new PoseSnapshot(state.Position, 0f, NetAngles.DequantizeYaw(state.Yaw));
-        bool largeDelta = (state.Position - avatar.LastUpdatePos).LengthSquared() > LargeDistance * LargeDistance;
-        avatar.LastUpdatePos = state.Position;
-        if (largeDelta)
-            avatar.Buffer.UpdateLastSnapshot(pose, now);
-        else
-            avatar.Buffer.AddNewSnapshot(pose, now);
+        // Zombie.tellState: replication only refreshes the interpolation TARGET; OnUpdate lerps
+        // the body toward it exponentially (INTERP_SPEED). No delay buffer, unlike players.
+        avatar.TargetPosition = state.Position;
+        avatar.TargetYaw = NetAngles.DequantizeYaw(state.Yaw);
         avatar.Streaming = true;
 
         if (state.State != avatar.State)
@@ -165,9 +163,13 @@ public partial class ZombiesView : Node3D
             }
             else if (avatar.StartleUntil <= 0)
             {
-                avatar.Rig?.Play(ClipFor(avatar));
                 if (avatar.State == EZombieState.Attack)
+                {
+                    avatar.Rig?.Replay(AttackClip(avatar));
+                    avatar.NextSwing = now + 1.0;
                     PlayVoice(avatar, "ZombieRoars"); // askAttack's swing roar
+                }
+                // Chase/Return/Idle clips are picked per-frame from the rendered motion.
             }
         }
     }
@@ -192,28 +194,50 @@ public partial class ZombiesView : Node3D
 
         foreach (ZombieAvatar avatar in _avatars.Values)
         {
+            bool visiblyMoving = false;
             if (avatar.Streaming)
             {
-                // Write the interpolated pose only when it differs from what the node already holds —
-                // once a zombie settles back to sleep the buffer keeps returning the same pose, and
-                // re-writing it every frame is pure interop cost for zero visual change.
-                PoseSnapshot pose = avatar.Buffer.GetCurrentSnapshot(now);
-                if (pose.Position != avatar.KnownPosition)
+                // Zombie.OnUpdate's exponential interpolation (INTERP_SPEED = 10) toward the last
+                // replicated target — no delay buffer, so remote zombies track as tightly as the
+                // original's. Writes only happen while the pose is actually changing.
+                float blend = MathF.Min(1f, (float)delta * 10f);
+                float gap = avatar.KnownPosition.DistanceSquaredTo(avatar.TargetPosition);
+                visiblyMoving = gap > 0.01f; // the ORIGINAL client derives its move anim from this
+                if (gap > 1e-8f)
                 {
-                    avatar.Root.Position = pose.Position;
-                    avatar.KnownPosition = pose.Position;
+                    avatar.KnownPosition = avatar.KnownPosition.Lerp(avatar.TargetPosition, blend);
+                    avatar.Root.Position = avatar.KnownPosition;
                 }
-                if (pose.Yaw != avatar.AppliedYaw)
+                float yawDelta = Mathf.Wrap(avatar.TargetYaw - avatar.AppliedYaw, -180f, 180f);
+                if (MathF.Abs(yawDelta) > 0.01f)
                 {
-                    avatar.Root.RotationDegrees = new Vector3(0, pose.Yaw, 0);
-                    avatar.AppliedYaw = pose.Yaw;
+                    avatar.AppliedYaw = Mathf.Wrap(avatar.AppliedYaw + (yawDelta * blend), 0f, 360f);
+                    avatar.Root.RotationDegrees = new Vector3(0, avatar.AppliedYaw, 0);
                 }
             }
 
             if (avatar.StartleUntil > 0 && now >= avatar.StartleUntil)
             {
                 avatar.StartleUntil = 0;
-                avatar.Rig?.Play(ClipFor(avatar)); // the roar ended: pick up the current state clip
+                avatar.Rig?.Play(ClipFor(avatar, visiblyMoving)); // the roar ended: current clip
+            }
+            else if (avatar.StartleUntil <= 0 && avatar.Rig != null && avatar.Streaming)
+            {
+                if (avatar.State == EZombieState.Attack)
+                {
+                    // The server swings every SwingInterval but no per-swing event is replicated
+                    // (yet): re-trigger a fresh attack clip on the same cadence client-side so the
+                    // zombie visibly keeps swinging instead of looping one frozen clip.
+                    if (now >= avatar.NextSwing)
+                    {
+                        avatar.NextSwing = now + 1.0;
+                        avatar.Rig.Replay(AttackClip(avatar));
+                    }
+                }
+                else
+                {
+                    avatar.Rig.Play(ClipFor(avatar, visiblyMoving));
+                }
             }
 
             // One camera-distance test drives both the groan loop and the animation gate (they share
@@ -246,12 +270,13 @@ public partial class ZombiesView : Node3D
         }
     }
 
-    // Zombie.cs's animation selection, driven by the replicated behavior state.
-    private string ClipFor(ZombieAvatar avatar) => avatar.State switch
+    // Zombie.cs's animation selection: the move/idle split follows what the RENDERED body is
+    // doing (the original client checks whether it is still approaching its interpolation target),
+    // so a physically blocked zombie stands instead of treadmilling its walk cycle.
+    private string ClipFor(ZombieAvatar avatar, bool visiblyMoving) => avatar.State switch
     {
-        EZombieState.Chase or EZombieState.Return => MoveClip(avatar),
         EZombieState.Attack => AttackClip(avatar),
-        _ => IdleClip(avatar),
+        _ => visiblyMoving ? MoveClip(avatar) : IdleClip(avatar),
     };
 
     // sendZombieAttack's swing ids: crawlers swipe from the ground with Attack_5, sprinters lunge

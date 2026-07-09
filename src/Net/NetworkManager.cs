@@ -108,12 +108,16 @@ public partial class NetworkManager : Node
             ray.To = from + ((to - from) * 0.95f);
             return space.IntersectRay(ray).Count > 0;
         };
-        // The CharacterController's collide-and-slide against real world colliders: sweep a sphere
-        // at chest height along the step; when it hits, advance to the safe fraction and slide the
-        // remainder along the contact plane (one slide iteration, like a CC's per-frame resolve).
-        var sweep = new SphereShape3D();
-        var query = new PhysicsShapeQueryParameters3D { Shape = sweep };
-        var stepDown = new PhysicsRayQueryParameters3D { CollisionMask = 1 };
+        // The CharacterController's collide-and-slide against real world colliders: sweep a
+        // capsule covering the zombie's body from the knees up (0.4..2.0 m — the full 2 m capsule
+        // dragged its base along the terrain and jammed on every micro-slope; ground contact is
+        // the ground snap's job here, like a CC's grounding pass). Catches knee-high furniture and
+        // head-high overhangs that the old chest sphere missed.
+        var sweep = new CapsuleShape3D { Height = 1.6f };
+        // Mask 1 only: LARGE world + terrain + resources. MEDIUM furniture lives on its own layer
+        // (the navmesh ignores it; original zombies shove through it).
+        var query = new PhysicsShapeQueryParameters3D { Shape = sweep, CollisionMask = 1 };
+        var stepDown = new PhysicsRayQueryParameters3D { CollisionMask = 1 | ObjectsBuilder.MediumFurnitureLayer };
         float lastRadius = -1f;
         zombies.MoveResolver = (from, to, radius) =>
         {
@@ -125,7 +129,7 @@ public partial class NetworkManager : Node
                 sweep.Radius = radius;
                 lastRadius = radius;
             }
-            Vector3 chest = Vector3.Up; // sweep at capsule-middle height, above ground clutter
+            var chest = new Vector3(0f, 1.2f, 0f); // capsule centre: covers 0.4..2.0 above the feet
             Vector3 motion = to - from;
             query.Transform = new Transform3D(Basis.Identity, from + chest);
             query.Motion = motion;
@@ -133,10 +137,10 @@ public partial class NetworkManager : Node
             if (cast[0] >= 1f)
                 return to; // clear path
 
-            // Step-up, like the CharacterController's stepOffset (the original's walkableClimb is
-            // 0.75): retry the sweep from 0.75 higher — stairs and porch steps pass, walls do not.
-            // The ground snap settles the final height onto the actual step afterwards.
-            query.Transform = new Transform3D(Basis.Identity, from + chest + new Vector3(0f, 0.75f, 0f));
+            // Step-up with the zombie CharacterController's REAL stepOffset (0.5, read from the
+            // prefab; slope limit is 75°): retry the sweep raised by it — steps pass, walls do
+            // not. The ground snap settles the final height onto the actual step afterwards.
+            query.Transform = new Transform3D(Basis.Identity, from + chest + new Vector3(0f, 0.5f, 0f));
             float[] stepCast = space.CastMotion(query);
             if (stepCast[0] >= 1f)
             {
@@ -170,15 +174,14 @@ public partial class NetworkManager : Node
         // house floors, stairs — with the zombie's current height as the reference so stacked
         // floors (basements, upper storeys) resolve correctly. Mask 1 = static world only (the
         // player's body lives on layer 2), falling back to the heightfield out in the open.
-        var snapRay = new PhysicsRayQueryParameters3D { CollisionMask = 1 }; // reused: one per zombie step otherwise
+        var snapRay = new PhysicsRayQueryParameters3D { CollisionMask = 1 | ObjectsBuilder.MediumFurnitureLayer }; // reused: one per zombie step otherwise
         zombies.GroundSnap = (Vector3 position, out float y) =>
         {
             PhysicsDirectSpaceState3D? space = GetViewport()?.World3D?.DirectSpaceState;
             if (space == null)
                 return _ground(position.X, position.Z, out y);
-            // Start at +0.8: covers the original's walkableClimb (0.75) steps without catching
-            // railings or furniture above the real floor.
-            snapRay.From = position + new Vector3(0f, 0.8f, 0f);
+            // Start just above the CC's stepOffset (0.5): steps resolve, railings above don't.
+            snapRay.From = position + new Vector3(0f, 0.55f, 0f);
             snapRay.To = position + new Vector3(0f, -3f, 0f);
             Godot.Collections.Dictionary hit = space.IntersectRay(snapRay);
             if (hit.Count > 0)

@@ -60,6 +60,20 @@ public partial class CharacterSkeleton : Skeleton3D
     // Picks and crossfades to the clip for a stance (Unturned's PlayerAnimator.updateState mapping).
     public void SetState(EPlayerStance stance, bool moving) => Play(ClipFor(stance, moving));
 
+    // Restarts a clip from its beginning even when it is already the current one — an attack swing
+    // re-triggering, where Play's already-playing early-out would swallow the restart.
+    public void Replay(string clip)
+    {
+        if (clip == _current && _clips.ContainsKey(clip))
+        {
+            _fromPose = new Dictionary<int, BonePose>(CurrentPose());
+            _time = 0f;
+            _blend = 0f;
+            return;
+        }
+        Play(clip);
+    }
+
     public void Play(string clip)
     {
         if (clip == _current || !_clips.ContainsKey(clip))

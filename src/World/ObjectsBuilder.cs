@@ -14,6 +14,13 @@ public static class ObjectsBuilder
     // MEDIUM object layers). Zombie alert raycasts query exactly this bit.
     public const uint VisionBlockerLayer = 1u << 1;
 
+    // MEDIUM furniture (gravestones, benches, beds) collides with the PLAYER but not with zombie
+    // movement: the original's navmesh ignores it (BLOCK_NAVMESH rasterizes only the dedicated Nav
+    // colliders) and its zombies shove straight through such props — colliding here made ours jam
+    // dead-still on a gravestone the route legitimately crosses. Zombie ground/step rays still see
+    // it (a zombie standing on a deck must find the deck).
+    public const uint MediumFurnitureLayer = 1u << 2;
+
     // Instances real meshes (grouped per GUID into one MultiMesh each) where available; placed objects
     // without an extracted mesh fall back to colored placeholder boxes.
     //
@@ -68,7 +75,12 @@ public static class ObjectsBuilder
             if (colliderLibrary.TryGetValue(guid, out List<CachedCollider>? colliders)
                 && type is EObjectType.Large or EObjectType.Medium or EObjectType.Resource)
             {
-                uint layer = type is EObjectType.Resource ? 1u : 1u | VisionBlockerLayer;
+                uint layer = type switch
+                {
+                    EObjectType.Resource => 1u,
+                    EObjectType.Medium => MediumFurnitureLayer | VisionBlockerLayer,
+                    _ => 1u | VisionBlockerLayer, // LARGE: full world collision
+                };
                 BuildCollision(collision, guid, colliders, transforms, layer);
             }
         }

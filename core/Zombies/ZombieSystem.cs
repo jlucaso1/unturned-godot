@@ -60,9 +60,11 @@ public sealed class ZombieInstance
     public float PendingHit = -1f;    // counts down from attackTime/2 to the damage landing
     public float LeaveDelay;          // Zombie.leave: stand still this long, then walk to LeaveTo
     public Vector3 LeaveTo;
-    public sbyte DetourSide;          // while blocked head-on, hug the obstacle on this side (0 = none)
+    public sbyte DetourSide;          // sticky side while skirting a head-on block (see ApplyStep)
     public readonly List<Vector3> PathPoints = new(); // the Seeker's current route over the navmesh
-    public int PathSegment;           // monotonic progress along the route (carrot following)
+    public int CurrentWaypointIndex;  // LegacyAIPathNoRedist.currentWaypointIndex
+    public bool TargetReached;        // LegacyAIPathNoRedist.targetReached
+    public Vector3 SteerDirection;    // LegacyAIPathNoRedist.targetDirection
     public float RepathTimer;         // counts down to the next path recalculation
 
     // ZombieManager.getZombieSpeed with Slow_Movement=false (NORMAL difficulty).
@@ -77,13 +79,18 @@ public sealed class ZombieInstance
     // The CharacterController capsule (SetCapsuleRadiusAndHeight): megas 0.75, everyone else 0.4.
     public float Radius => Speciality == EZombieSpeciality.Mega ? 0.75f : 0.4f;
 
-    // Zombie.GetHorizontalAttackRangeSquared for a player target on a dedicated server:
-    // ATTACK_PLAYER(2) x 0.5 for NORMAL x 2 for megas.
-    public float AttackRange => 2f
+    // Zombie.GetHorizontalAttackRangeSquared for a player target on a dedicated server. The
+    // official value IS the squared threshold (compared against sqrHorizontalDistanceFromTarget):
+    // ATTACK_PLAYER(2) x 0.5 for NORMAL x 2 for megas — so normal 1 m, crawler/sprinter ~1.41 m,
+    // mega 2 m of actual reach. Squaring it again made sprinters and megas stop conspicuously far.
+    public float AttackRangeSquared => 2f
         * (Speciality == EZombieSpeciality.Normal ? 0.5f : 1f)
         * (Speciality == EZombieSpeciality.Mega ? 2f : 1f);
 
-    public float VerticalAttackRange => 2.1f * (Speciality == EZombieSpeciality.Mega ? 1.5f : 1f);
+    // Zombie.GetVerticalAttackRange: hyper regions reach 3.5 m, everyone else 2.1, megas x1.5.
+    public bool IsHyper; // the nav flag's hyperAgro, stamped at spawn
+    public float VerticalAttackRange =>
+        (IsHyper ? 3.5f : 2.1f) * (Speciality == EZombieSpeciality.Mega ? 1.5f : 1f);
 }
 
 // One player's zombie-relevant state for a tick, as the server simulation already knows it.
@@ -135,9 +142,15 @@ public sealed class ZombieSystem
     public const float CrawlerChance = 0.15f;
     public const float SprinterChance = 0.15f;
 
-    public const float RepathRate = 0.5f;               // LegacyAIPath.repathRate
-    public const float PickNextWaypointDist = 1f;       // LegacyAIPathNoRedist.pickNextWaypointDist
-    public const float ForwardLook = 4f;                // LegacyAIPathNoRedist.forwardLook
+    // LegacyAIPathNoRedist (decompiled from the game assembly) with the values
+    // CreateMovementComponentForZombie assigns.
+    public const float RepathRate = 0.5f;               // repathRate
+    public const float PickNextWaypointDist = 1f;       // pickNextWaypointDist
+    public const float ForwardLook = 4f;                // forwardLook
+    public const float EndReachedDistance = 0.75f;      // endReachedDistance
+    public const float SlowdownDistance = 0.6f;         // slowdownDistance (component default)
+    public const float TurningSpeed = 5f;               // turningSpeed (Quaternion.Slerp damping)
+    public const float MinMoveScale = 0.05f;            // minMoveScale
     // The A* Pathfinding Project computes paths on a time budget per frame (AstarPath.maxFrameTime),
     // queueing the rest — a horde alerted by the same detect pass never recalculates in one burst.
     // Same shape here: at most this many queries per tick (~0.3-1.6 ms each against PEI's map);
@@ -259,6 +272,7 @@ public sealed class ZombieSystem
             Bound = bound,
             Type = spawn.Type,
             Speciality = speciality,
+            IsHyper = _bounds[bound].HyperAgro,
             Shirt = RollSlot(table, 0, random),
             Pants = RollSlot(table, 1, random),
             Hat = RollSlot(table, 2, random),
@@ -304,7 +318,7 @@ public sealed class ZombieSystem
         for (int p = 0; p < players.Count; p++)
         {
             ZombiePlayerView player = players[p];
-            byte bound = LevelNavigationData.TryGetBound(_bounds, player.Position);
+            byte bound = PlayerNav(player.Position);
             if (bound == LevelNavigationData.NoBound)
                 continue; // player.movement.nav == 255: no region hears the alert
 
@@ -351,7 +365,8 @@ public sealed class ZombieSystem
         zombie.Path = RollPath(zombie, player.Id);
         zombie.RepathTimer = 0f; // fresh target: path on the next move
         zombie.PathPoints.Clear();
-        zombie.PathSegment = 0;
+        zombie.CurrentWaypointIndex = 0;
+        zombie.TargetReached = false;
         AdjustAgro(player.Id, +1);
         if (zombie.State is EZombieState.Idle or EZombieState.Return)
             zombie.State = EZombieState.Chase;
@@ -391,7 +406,7 @@ public sealed class ZombieSystem
                 break;
 
             case EZombieState.Return:
-                Seek(zombie, zombie.LeaveTo, Vector3.Zero, dt);
+                Move(zombie, zombie.LeaveTo, canTurn: true, default, dt);
                 if (HorizontalDistanceSquared(zombie.Position, zombie.LeaveTo) <= ArriveDistanceSquared)
                     zombie.State = EZombieState.Idle; // stop() — the zombie settles where it is
                 break;
@@ -415,69 +430,74 @@ public sealed class ZombieSystem
             Leave(zombie, Vector3.Zero, quick: false); // player.life.isDead -> leave(false)
             return;
         }
-        if (LevelNavigationData.TryGetBound(_bounds, target.Position) == LevelNavigationData.NoBound)
+        if (PlayerNav(target.Position) == LevelNavigationData.NoBound)
         {
             Leave(zombie, target.Position, quick: true); // player.movement.nav == 255 -> leave(true)
             return;
         }
-        if (HorizontalDistanceSquared(zombie.Position, target.Position) > MaxChaseDistanceSquared)
+        float sqrHorizontal = HorizontalDistanceSquared(zombie.Position, target.Position);
+        if (sqrHorizontal > MaxChaseDistanceSquared)
         {
             Leave(zombie, target.Position, quick: false); // beyond 64 m -> leave(false)
             return;
         }
 
-        float sqrHorizontal = HorizontalDistanceSquared(zombie.Position, target.Position);
         float vertical = MathF.Abs(target.Position.Y - zombie.Position.Y);
-        if (sqrHorizontal < zombie.AttackRange * zombie.AttackRange && vertical < zombie.VerticalAttackRange)
+        if (sqrHorizontal < zombie.AttackRangeSquared && vertical < zombie.VerticalAttackRange)
         {
             zombie.State = EZombieState.Attack;
-            Face(zombie, target.Position, dt);
             if (zombie.SinceSwing > SwingInterval && zombie.PendingHit < 0f)
             {
                 // A swing starts (the replicated Attack anim); the hit lands attackTime/2 later.
                 zombie.SinceSwing = 0f;
                 zombie.PendingHit = AttackTime / 2f;
             }
-            return;
+        }
+        else
+        {
+            zombie.State = EZombieState.Chase;
         }
 
-        zombie.State = EZombieState.Chase;
-        if (sqrHorizontal <= 4f)
+        // Zombie.tick's target/steering shaping, verbatim: farther than 2 m the pathfinding
+        // DESTINATION is offset by the approach path (LEFT/RIGHT one metre to the zombie's own
+        // side, RUSH one metre short along its own forward) with turning driven by the route;
+        // inside 2 m the destination is raw and the body turns straight at the player while the
+        // route still drives the legs. Movement itself never pauses for attacks — the follower's
+        // endReachedDistance (0.75) is what brings the zombie to a stop at the target.
+        Vector3 destination = target.Position;
+        bool canTurn = true;
+        Vector3 directDirection = default;
+        if (sqrHorizontal > 4f)
         {
-            // Zombie.cs inside 2 m: steer directly at the player (seeker.TargetDirection), no
-            // route, no drift — the final approach never dances around the carrot.
-            MoveTowards(zombie, target.Position, dt);
-            return;
+            float yawRad = Mathf.DegToRad(zombie.Yaw);
+            Vector3 forward = new(-MathF.Sin(yawRad), 0f, -MathF.Cos(yawRad));
+            var right = new Vector3(forward.Z, 0f, -forward.X);
+            destination += zombie.Path switch
+            {
+                EZombiePath.Left => -right,
+                EZombiePath.Right => right,
+                _ => -forward, // RUSH
+            };
         }
-        Vector3 steerOffset = Vector3.Zero;
-        if (zombie.Path != EZombiePath.Rush && sqrHorizontal > 4f)
+        else
         {
-            // Zombie.cs LEFT/RIGHT paths: drift one metre beside the approach line until within
-            // 2 m. The offset shifts the STEERING target only (offsetting the pathfinding
-            // destination flip-flopped its wall-side snap), and its side vector derives from the
-            // TO-TARGET line rather than the zombie's own yaw — a yaw-based right rotates as the
-            // zombie turns toward the drifted point, feeding back into itself as a weave.
-            float invDist = 1f / MathF.Sqrt(sqrHorizontal);
-            var right = new Vector3(
-                (target.Position.Z - zombie.Position.Z) * invDist, 0f,
-                (zombie.Position.X - target.Position.X) * invDist);
-            steerOffset = zombie.Path == EZombiePath.Left ? -right : right;
+            canTurn = false;
+            directDirection = target.Position - zombie.Position;
         }
-        Seek(zombie, target.Position, steerOffset, dt);
+        Move(zombie, destination, canTurn, directDirection, dt);
     }
 
-    // The Seeker + FunnelModifier + LegacyAIPath port: recalculate the navmesh route to the RAW
-    // destination every repathRate seconds and follow it carrot-on-a-stick — project the current
-    // position onto the route (monotonically, so loops never read backwards) and steer at the
-    // point one pickNextWaypointDist ahead ALONG the polyline. This holds the corridor through
-    // doorways instead of cutting corners into the frames. A PARTIAL route (unreachable target)
-    // holds at its end like the original's end-of-path; no route at all decays into the
-    // straight-line NonPathfinding seek, safety-netted by MoveResolver as before.
-    private void Seek(ZombieInstance zombie, Vector3 destination, Vector3 steerOffset, float dt)
+    // LegacyAIPathNoRedist.move(), ported: repath on the cadence (a FAILED query keeps the current
+    // route, exactly like OnPathComplete ignoring an errored ABPath), then follow the route with
+    // CalculateVelocity + RotateTowards and step through the physics. With no route at all the
+    // zombie stands (path == null in the original); the straight-line seek only exists for maps
+    // without a navmesh, where the original also falls back to its NonPathfinding component.
+    private void Move(ZombieInstance zombie, Vector3 destination, bool canTurn,
+        Vector3 directDirection, float dt)
     {
         if (PathQuery == null)
         {
-            MoveTowards(zombie, destination + steerOffset, dt);
+            MoveTowards(zombie, destination, dt); // NonPathfindingZombieMovementComponent fallback
             return;
         }
 
@@ -486,110 +506,124 @@ public sealed class ZombieSystem
         {
             _repathsThisTick++;
             zombie.RepathTimer = RepathRate;
-            zombie.PathPoints.Clear();
-            zombie.PathSegment = 0;
             // Stabilize the query's destination: project it onto the navmesh XZ-first (its own
-            // floor). A target standing just off the mesh otherwise snaps to whichever polygon is
-            // closest in 3D — flipping between a street edge and the basement below on every
-            // repath, which zigzags the whole route.
+            // floor), so an off-mesh target can never snap the route into a basement below it.
             Vector3 queryTo = destination;
             if (_navmesh != null && LevelNavmesh.SnapXZ(_navmesh, destination, out Vector3 snapped))
                 queryTo = snapped;
-            if (!PathQuery(zombie.Position, queryTo, zombie.PathPoints))
-                zombie.PathPoints.Clear();
-        }
-
-        Vector3 target;
-        bool onRoute = zombie.PathPoints.Count >= 2;
-        if (onRoute)
-        {
-            // Adaptive lookahead: aim forwardLook (4 m) ahead when the physical line is open —
-            // the original's smooth, far-sighted steering — but fall back toward the corridor
-            // (2 m, then 1 m) when a wall or doorway corner blocks the line, so narrow openings
-            // are threaded precisely instead of leaning on the collision slide.
-            target = Carrot(zombie, ForwardLook);
-            if (MoveResolver != null && !LineOpen(zombie, target))
+            _scratchPath.Clear();
+            if (PathQuery(zombie.Position, queryTo, _scratchPath)
+                && HorizontalDistanceSquared(_scratchPath[^1], queryTo) <= 4f)
             {
-                Vector3 mid = Carrot(zombie, 2f);
-                target = LineOpen(zombie, mid) ? mid : Carrot(zombie, PickNextWaypointDist);
+                // Success: replace the route (OnPathComplete). A route that stops short of the
+                // destination is Godot's closest-reachable result — the official ABPath ERRORS on
+                // unreachable targets instead, so it is treated as a failure and discarded.
+                zombie.PathPoints.Clear();
+                zombie.PathPoints.AddRange(_scratchPath);
+                zombie.CurrentWaypointIndex = 0;
+                zombie.TargetReached = false;
             }
         }
-        else if (zombie.PathPoints.Count == 1)
+
+        if (zombie.PathPoints.Count == 0)
+            return; // no route has ever succeeded: stand, like the original with path == null
+
+        Vector3 velocity = CalculateVelocity(zombie, destination, canTurn, dt);
+        if (!canTurn)
+            zombie.SteerDirection = directDirection;
+        RotateTowards(zombie, zombie.SteerDirection, dt);
+        ApplyStep(zombie, velocity * dt);
+    }
+
+    private readonly List<Vector3> _scratchPath = new();
+
+    // LegacyAIPathNoRedist.CalculateVelocity, ported: advance waypoints within pickNextWaypointDist
+    // (XZ), aim at the forwardLook point interpolated ON THE CURRENT SEGMENT, stop within
+    // endReachedDistance of the route's end, and return a velocity along the body's FORWARD scaled
+    // by how aligned the body is with the desired direction (a zombie turns INTO its route instead
+    // of strafing sideways onto it) and by the slowdown near the target point.
+    private static Vector3 CalculateVelocity(ZombieInstance zombie, Vector3 destination,
+        bool canTurn, float dt)
+    {
+        List<Vector3> vp = zombie.PathPoints;
+        // (The original also clamps index >= count here, guarding its ASYNC path callbacks; our
+        // repath is synchronous and always resets the index, so that state cannot occur.)
+        int index = zombie.CurrentWaypointIndex;
+        if (index <= 1)
+            index = 1;
+
+        Vector3 segmentStart;
+        if (vp.Count == 1)
         {
-            target = zombie.PathPoints[0];
+            segmentStart = zombie.Position; // the original inserts currentPosition at [0]
+            index = 0;
         }
         else
         {
-            target = destination;
+            while (index < vp.Count - 1
+                && HorizontalDistanceSquared(vp[index], zombie.Position)
+                    < PickNextWaypointDist * PickNextWaypointDist)
+                index++;
+            segmentStart = vp[index - 1];
+        }
+        zombie.CurrentWaypointIndex = index;
+
+        Vector3 targetPoint = CalculateTargetPoint(zombie.Position, segmentStart,
+            vp[vp.Count == 1 ? 0 : index], index == vp.Count - 1, destination);
+        Vector3 direction = targetPoint - zombie.Position;
+        direction.Y = 0f;
+        float magnitude = direction.Length();
+        float slowdown = Mathf.Clamp(magnitude / SlowdownDistance, 0f, 1f);
+        if (canTurn)
+            zombie.SteerDirection = direction;
+
+        if (index == vp.Count - 1 && magnitude <= EndReachedDistance)
+        {
+            zombie.TargetReached = true;
+            return Vector3.Zero;
         }
 
-        // The side drift never displaces the route's END (a partial route's end is a wall or a
-        // doorway the zombie must actually reach).
-        bool atRouteEnd = onRoute && zombie.PathSegment >= zombie.PathPoints.Count - 2
-            && HorizontalDistanceSquared(target, zombie.PathPoints[^1]) < 0.01f;
-        MoveTowards(zombie, atRouteEnd || !onRoute ? target : target + steerOffset, dt);
+        // magnitude here is always > endReachedDistance (the stop above returned otherwise), so
+        // the normalization is safe without the original's tiny-magnitude guard.
+        float yawRad = Mathf.DegToRad(zombie.Yaw);
+        Vector3 forward = new(-MathF.Sin(yawRad), 0f, -MathF.Cos(yawRad));
+        float alignment = (direction.X / magnitude * forward.X) + (direction.Z / magnitude * forward.Z);
+        float speed = zombie.Speed * MathF.Max(alignment, MinMoveScale) * slowdown;
+        if (dt > 0f)
+            speed = Mathf.Clamp(speed, 0f, magnitude / (dt * 2f)); // never overshoot the point
+        return forward * speed;
     }
 
-    // The physical line test behind the adaptive lookahead: sweep the actual movement collider
-    // along the straight line and see whether it arrives (within a shoulder of tolerance).
-    private bool LineOpen(ZombieInstance zombie, Vector3 point)
+    // LegacyAIPathNoRedist.CalculateTargetPoint, ported: interpolate the aim point forwardLook
+    // ahead ON the current segment only; on the final segment, if its end sits within 4 m of the
+    // real destination, head straight for the destination itself.
+    private static Vector3 CalculateTargetPoint(Vector3 p, Vector3 a, Vector3 b,
+        bool canGoDirectly, Vector3 destination)
     {
-        Vector3 resolved = MoveResolver!(zombie.Position, point, zombie.Radius);
-        return HorizontalDistanceSquared(resolved, point) < 0.25f;
+        if (canGoDirectly && HorizontalDistanceSquared(b, destination) < 16f)
+            return destination;
+        a.Y = p.Y;
+        b.Y = p.Y;
+        // A degenerate active segment cannot occur: consecutive duplicate waypoints are skipped
+        // together by the advance loop, and the final segment short-circuits to the destination.
+        float magnitude = (a - b).Length();
+        float dx = b.X - a.X, dz = b.Z - a.Z;
+        float factor = Mathf.Clamp(
+            (((p.X - a.X) * dx) + ((p.Z - a.Z) * dz)) / (magnitude * magnitude), 0f, 1f);
+        float distanceToLine = ((b - a) * factor + a - p).Length();
+        float lookAheadFactor = Mathf.Clamp(ForwardLook - distanceToLine, 0f, ForwardLook) / magnitude;
+        lookAheadFactor = Mathf.Clamp(lookAheadFactor + factor, 0f, 1f);
+        return (b - a) * lookAheadFactor + a;
     }
 
-    // Projects the zombie onto its route near its current segment (monotonic: it never jumps to a
-    // later fold of a route that loops back), then walks one lookahead ahead along the polyline.
-    private static Vector3 Carrot(ZombieInstance zombie, float lookahead)
+    // LegacyAIPathNoRedist.RotateTowards: Quaternion.Slerp damping around Y at turningSpeed = 5.
+    private static void RotateTowards(ZombieInstance zombie, Vector3 direction, float dt)
     {
-        List<Vector3> pts = zombie.PathPoints;
-
-        int bestSegment = zombie.PathSegment;
-        float bestT = 0f;
-        float bestDistance = float.MaxValue;
-        int lastSegment = Math.Min(pts.Count - 2, zombie.PathSegment + 5);
-        for (int i = zombie.PathSegment; i <= lastSegment; i++)
-        {
-            float ax = pts[i].X, az = pts[i].Z;
-            float bx = pts[i + 1].X, bz = pts[i + 1].Z;
-            float dx = bx - ax, dz = bz - az;
-            float lengthSquared = (dx * dx) + (dz * dz);
-            float t = lengthSquared < 1e-8f
-                ? 0f
-                : Mathf.Clamp((((zombie.Position.X - ax) * dx) + ((zombie.Position.Z - az) * dz))
-                    / lengthSquared, 0f, 1f);
-            float px = ax + (dx * t), pz = az + (dz * t);
-            float ddx = zombie.Position.X - px, ddz = zombie.Position.Z - pz;
-            float distance = (ddx * ddx) + (ddz * ddz);
-            if (distance < bestDistance)
-            {
-                bestDistance = distance;
-                bestSegment = i;
-                bestT = t;
-            }
-        }
-        zombie.PathSegment = bestSegment;
-
-        Vector3 point = pts[bestSegment].Lerp(pts[bestSegment + 1], bestT);
-        float remaining = lookahead;
-        int segment = bestSegment;
-        while (segment < pts.Count - 1)
-        {
-            Vector3 segmentEnd = pts[segment + 1];
-            float segmentLeft = new Vector2(segmentEnd.X - point.X, segmentEnd.Z - point.Z).Length();
-            if (segmentLeft > remaining)
-            {
-                float f = remaining / segmentLeft;
-                return new Vector3(
-                    point.X + ((segmentEnd.X - point.X) * f),
-                    segmentEnd.Y,
-                    point.Z + ((segmentEnd.Z - point.Z) * f));
-            }
-            remaining -= segmentLeft;
-            point = segmentEnd;
-            segment++;
-        }
-        return pts[^1];
+        if (direction.X * direction.X + direction.Z * direction.Z < 1e-10f)
+            return;
+        float targetYaw = Mathf.RadToDeg(MathF.Atan2(-direction.X, -direction.Z));
+        float delta = Mathf.Wrap(targetYaw - zombie.Yaw, -180f, 180f);
+        zombie.Yaw = Mathf.Wrap(zombie.Yaw + (delta * MathF.Min(1f, TurningSpeed * dt)), 0f, 360f);
     }
 
     private void LandHit(ZombieInstance zombie)
@@ -626,7 +660,8 @@ public sealed class ZombieSystem
 
         zombie.RepathTimer = 0f; // the retreat is a new destination
         zombie.PathPoints.Clear();
-        zombie.PathSegment = 0;
+        zombie.CurrentWaypointIndex = 0;
+        zombie.TargetReached = false;
         zombie.LeaveTo = retreat;
         zombie.LeaveDelay = quick
             ? 0.5f + (_random.NextSingle() * 0.5f)
@@ -646,10 +681,21 @@ public sealed class ZombieSystem
     private Vector3 Scatter() =>
         new((_random.NextSingle() * 16f) - 8f, 0f, (_random.NextSingle() * 16f) - 8f);
 
-    // NonPathfindingZombieMovementComponent.Move: seek straight at the target, turning the body at
-    // 720°/s, then resolve the step against the other zombies' capsules the way a Unity
-    // CharacterController does — the mover is pushed out, the blocker never budges — so a horde
-    // funnels into a queue instead of a single stacked point.
+    // PlayerMovement.nav, exactly: tryGetNavigation tests the NON-expanded navmesh boxes (the
+    // expanded Bounds.dat territory is tryGetBounds, a different field). Detection gating and the
+    // hunt's nav == 255 rule both key off this; maps without navmesh data fall back to bounds.
+    private byte PlayerNav(Vector3 position)
+    {
+        if (_navmesh == null)
+            return LevelNavigationData.TryGetBound(_bounds, position);
+        for (int i = 0; i < _navmesh.Count; i++)
+            if (_navmesh[i].ContainsXZ(position))
+                return (byte)i;
+        return LevelNavigationData.NoBound;
+    }
+
+    // NonPathfindingZombieMovementComponent.Move: straight-line seek with its own 720°/s turning —
+    // the original's fallback when no pathfinding exists, kept for maps without navmesh data.
     private void MoveTowards(ZombieInstance zombie, Vector3 targetPosition, float dt)
     {
         Face(zombie, targetPosition, dt);
@@ -658,57 +704,66 @@ public sealed class ZombieSystem
         if (distance < 1e-4f)
             return;
         float step = MathF.Min(zombie.Speed * dt, distance);
-        Vector3 direction = flat / distance;
-        Vector3 next = zombie.Position + (direction * step);
+        ApplyStep(zombie, flat / distance * step);
+    }
 
-        // World geometry first (trees, walls, props — the CharacterController slide)...
+    // The physics leg of a movement step: world collision (the host's capsule collide-and-slide),
+    // then the other zombies' capsules (CharacterController semantics: the mover is pushed out,
+    // the blocker never budges), re-resolved against the world so separation can't shove anyone
+    // through a wall, and finally the ground snap.
+    private void ApplyStep(ZombieInstance zombie, Vector3 step)
+    {
+        if ((step.X * step.X) + (step.Z * step.Z) < 1e-10f)
+            return;
+        Vector3 next = zombie.Position + step;
+
         if (MoveResolver != null)
         {
-            Vector3 resolved = MoveResolver(zombie.Position, next, zombie.Radius);
-            float progress = HorizontalDistanceSquared(resolved, zombie.Position);
-            if (progress < step * step * 0.0625f) // under 25% of the step: blocked head-on
+            next = MoveResolver(zombie.Position, next, zombie.Radius);
+
+            // A Unity CharacterController resolves collisions ITERATIVELY per move, so a dead-on
+            // block destabilizes sideways within a frame or two; our single-sweep resolve is
+            // deterministic and can deadlock nose-first forever (a plateau corner the funnel cut
+            // over, a prop edge). Recreate that escape: when the step made under a quarter of its
+            // length, sweep both tangents and take the side that physically opens — preferring,
+            // when both do, the one ending closer ALONG the blocked direction, with the previous
+            // side as the near-tie hysteresis so curved obstacles are rounded, never orbited.
+            float stepLen = MathF.Sqrt((step.X * step.X) + (step.Z * step.Z));
+            float progress = HorizontalDistanceSquared(next, zombie.Position);
+            if (progress < stepLen * stepLen * 0.0625f)
             {
-                // Blocked dead-on (the slide was degenerate): skirt the obstacle along the tangent,
-                // trying BOTH sides and keeping whichever ends closer to the target — the side a
-                // CharacterController slide picks naturally. Near-ties keep the previous side so a
-                // curved trunk is rounded consistently instead of orbited.
-                var tangent = new Vector3(-direction.Z, 0f, direction.X);
-                Vector3 plus = MoveResolver(zombie.Position,
-                    zombie.Position + (tangent * step), zombie.Radius);
-                Vector3 minus = MoveResolver(zombie.Position,
-                    zombie.Position - (tangent * step), zombie.Radius);
-                float blockedStep = step * step * 0.0625f;
-                bool plusMoves = HorizontalDistanceSquared(plus, zombie.Position) > blockedStep;
-                bool minusMoves = HorizontalDistanceSquared(minus, zombie.Position) > blockedStep;
+                var tangent = new Vector3(-step.Z / stepLen, 0f, step.X / stepLen) * stepLen;
+                Vector3 ahead = zombie.Position + (step / stepLen * 4f); // where it wants to go
+                Vector3 plus = MoveResolver(zombie.Position, zombie.Position + tangent, zombie.Radius);
+                Vector3 minus = MoveResolver(zombie.Position, zombie.Position - tangent, zombie.Radius);
+                float blocked = stepLen * stepLen * 0.0625f;
+                bool plusMoves = HorizontalDistanceSquared(plus, zombie.Position) > blocked;
+                bool minusMoves = HorizontalDistanceSquared(minus, zombie.Position) > blocked;
                 sbyte side;
                 if (plusMoves && minusMoves)
                 {
-                    // Both sides are open: prefer the one that ends closer to the target
-                    // (rounding an obstacle momentarily moves away on both — near-ties keep the
-                    // previous side so a curved trunk is rounded consistently, never orbited).
-                    float plusGain = HorizontalDistanceSquared(minus, targetPosition)
-                        - HorizontalDistanceSquared(plus, targetPosition);
-                    side = MathF.Abs(plusGain) < 0.01f
+                    float gain = HorizontalDistanceSquared(minus, ahead)
+                        - HorizontalDistanceSquared(plus, ahead);
+                    side = MathF.Abs(gain) < 0.01f
                         ? (zombie.DetourSide != 0 ? zombie.DetourSide : (sbyte)1)
-                        : (plusGain > 0f ? (sbyte)1 : (sbyte)-1);
+                        : (gain > 0f ? (sbyte)1 : (sbyte)-1);
                 }
                 else if (plusMoves || minusMoves)
                 {
-                    side = plusMoves ? (sbyte)1 : (sbyte)-1; // only one way physically opens
+                    side = plusMoves ? (sbyte)1 : (sbyte)-1;
                 }
                 else
                 {
-                    side = zombie.DetourSide != 0 ? zombie.DetourSide : (sbyte)1; // walled in
+                    side = zombie.DetourSide != 0 ? zombie.DetourSide : (sbyte)1;
                 }
                 zombie.DetourSide = side;
                 Vector3 detour = side > 0 ? plus : minus;
                 if (HorizontalDistanceSquared(detour, zombie.Position) > progress)
-                    resolved = detour;
+                    next = detour;
             }
-            next = resolved;
         }
 
-        // ...then the other zombies' capsules.
+        bool separated = false;
         foreach (ZombieInstance other in _byBound[zombie.Bound])
         {
             if (other == zombie)
@@ -722,7 +777,10 @@ public sealed class ZombieSystem
             float dist = MathF.Sqrt(sqr);
             next.X = other.Position.X + (dx / dist * minDist);
             next.Z = other.Position.Z + (dz / dist * minDist);
+            separated = true;
         }
+        if (separated && MoveResolver != null)
+            next = MoveResolver(zombie.Position, next, zombie.Radius);
 
         // Ground: the real surface underfoot (sidewalks, house floors, stairs) when the host wires
         // physics in; the bare terrain heightfield otherwise.
