@@ -429,16 +429,18 @@ public static class ModelExtractor
             if (!mesh.Usable || mesh.Submeshes.Count == 0)
                 continue;
 
-            (string texKey, _) = ResolveTextureByPath(graph, fa.MaterialPath, neededTextures);
+            (string texKey, Color color) = ResolveMaterialByPath(graph, fa.MaterialPath, neededTextures);
 
             var uvs = new Vector2[mesh.Vertices.Length];
             for (int i = 0; i < uvs.Length; i++)
                 uvs[i] = i < mesh.Uvs.Length ? mesh.Uvs[i] : Vector2.Zero;
             Vector3[] normals = mesh.Normals.Length == mesh.Vertices.Length ? mesh.Normals : Array.Empty<Vector3>();
 
+            // Always cutout: foliage uses Unturned's own clipping shader, whose materials don't carry the
+            // Standard shader's _Mode (GetBlendMode would misread them as opaque and break the grass cards).
             var submeshes = new List<CachedSubmesh>();
             foreach (int[] src in mesh.Submeshes)
-                submeshes.Add(new CachedSubmesh((int[])src.Clone(), Colors.White, texKey, UnityMaterial.Blend.Cutout));
+                submeshes.Add(new CachedSubmesh((int[])src.Clone(), color, texKey, UnityMaterial.Blend.Cutout));
 
             using var stream = File.Create(outPath);
             MeshCache.Write(stream, mesh.Vertices, normals, uvs, submeshes);
@@ -447,26 +449,29 @@ public static class ModelExtractor
         return extracted;
     }
 
-    // Resolves the _MainTex path id (hex key) of a material named by its masterbundle container path, and
-    // records its metadata for the texture-streaming pass. Mirrors MaterialResolver's per-submesh lookup.
-    private static (string texKey, long texId) ResolveTextureByPath(PrefabGraph graph, string materialPath,
+    // Resolves a material named by its masterbundle container path into the _MainTex hex key (recorded for
+    // the texture-streaming pass) and the _Color tint. Mirrors MaterialResolver's per-submesh lookup — some
+    // foliage (the pebbles) has no texture at all and renders purely from _Color, exactly as in Unturned.
+    private static (string texKey, Color color) ResolveMaterialByPath(PrefabGraph graph, string materialPath,
         Dictionary<long, UnityTexture>? neededTextures)
     {
         if (materialPath.Length == 0)
-            return (string.Empty, 0);
+            return (string.Empty, Colors.White);
         string matKey = graph.AssetPrefix + materialPath.Replace('\\', '/').ToLowerInvariant();
         if (!graph.ContainerByPath.TryGetValue(matKey, out long matId) ||
             !graph.ObjectsByPathId.TryGetValue(matId, out SerializedObject? matObj))
-            return (string.Empty, 0);
+            return (string.Empty, Colors.White);
 
         Dictionary<string, object> matDict = TypeTreeReader.Read(matObj.TypeTree, graph.File.ReaderFor(matObj));
+        Color color = UnityMaterial.GetColor(matDict, "_Color") ?? Colors.White;
+
         (int fileId, long texId) = UnityMaterial.GetTexture(matDict, "_MainTex");
         if (fileId != 0 || texId == 0 || !graph.ObjectsByPathId.TryGetValue(texId, out SerializedObject? texObj))
-            return (string.Empty, 0);
+            return (string.Empty, color);
 
         if (neededTextures != null && !neededTextures.ContainsKey(texId))
             neededTextures[texId] = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, graph.File.ReaderFor(texObj)));
-        return (texId.ToString("x"), texId);
+        return (texId.ToString("x"), color);
     }
 
     // Phase 2: decode the full bundle (now including the ~1.18 GB .resS pixel stream) and write the
