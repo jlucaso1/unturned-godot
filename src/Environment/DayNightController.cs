@@ -52,11 +52,12 @@ public partial class DayNightController : Node
             // split stays dense enough for a crisp player shadow in third person, and beyond ~64 m Unturned
             // shows no shadows either. 4 cascades was ~10% frame time for no visible gain here (#6).
             DirectionalShadowMode = DirectionalLight3D.ShadowMode.Parallel2Splits,
-            DirectionalShadowMaxDistance = 64f,
+            DirectionalShadowMaxDistance = 128f,
             // Near split out to 16 m (0.25 * 64): thin casters (fence wires, goal nets) hold their shadow
             // well past walking distance instead of popping in at ~6 m, while the near texel density stays
             // ample for the player's own shadow.
-            DirectionalShadowSplit1 = 0.25f,
+            DirectionalShadowSplit1 = 0.125f,
+            DirectionalShadowBlendSplits = true,
         };
 
         controller._sky = new ProceduralSkyMaterial();
