@@ -3,6 +3,9 @@
     <TargetFramework>net10.0</TargetFramework>
     <PublishAot>true</PublishAot>
     <EnableDynamicLoading>true</EnableDynamicLoading>
+    <!-- Every parser in this project uses InvariantCulture explicitly, and there is no locale-facing UI, so
+         drop the ICU globalization data: smaller/faster startup and no libicu dependency in the AOT build. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -19,5 +22,11 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="core/UnturnedGodot.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Trim freed GC segments back to the OS more eagerly (0-9 scale). The live managed heap after load is
+         ~1-5 MB, so keeping the heap tight costs nothing and holds steady-state RSS ~11 MB lower (measured
+         via DOTNET_GCConserveMemory=5). -->
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="5" />
   </ItemGroup>
 </Project>

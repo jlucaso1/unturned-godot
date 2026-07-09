@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using Godot;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Data;
+using UnturnedGodot.Unity;
 
 namespace UnturnedGodot;
 
@@ -139,7 +140,11 @@ public partial class ObjectStreamer : Node
     private void BuildObjects()
     {
         var meshLibrary = ModelLibrary.Load(_cacheDir, _registry);
-        var colliderLibrary = ColliderLibrary.Load(_cacheDir);
+        // The freecam mode never spawns the player, so collision bodies would sit unused — skip the collider
+        // library entirely there and build the objects render-only (saves the shape/BVH build + its memory).
+        var colliderLibrary = OS.GetEnvironment("FREECAM") == "1"
+            ? new Dictionary<Guid, List<CachedCollider>>()
+            : ColliderLibrary.Load(_cacheDir);
         Node3D root = ObjectsBuilder.Build(_objects, _db, meshLibrary, colliderLibrary, out int withMesh);
         AddChild(root);
         AddChild(FoliageBuilder.Build(_foliage, meshLibrary));

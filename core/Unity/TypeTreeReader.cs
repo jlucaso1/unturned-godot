@@ -81,7 +81,7 @@ public static class TypeTreeReader
 
     private static Dictionary<string, object> ReadStruct(Tree t, UnityBinaryReader r)
     {
-        var dict = new Dictionary<string, object>();
+        var dict = new Dictionary<string, object>(t.Children.Count); // exact size: one entry per child
         foreach (Tree child in t.Children)
             dict[child.Node.Name] = ReadValue(child, r);
         return dict;
