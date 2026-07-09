@@ -162,6 +162,12 @@ public sealed class ZombieSystem
 
     public IReadOnlyList<ZombieInstance> Zombies => _zombies;
 
+    // Region queries for the host's per-region replication (LevelNavigation.tryGetBounds and the
+    // region's own zombie list).
+    public byte BoundOf(Vector3 position) => LevelNavigationData.TryGetBound(_bounds, position);
+    public int BoundCount => _byBound.Length;
+    public IReadOnlyList<ZombieInstance> ZombiesInBound(byte bound) => _byBound[bound];
+
     // AlertTool's line-of-sight test, wired to real world geometry by the host (optional).
     public VisionBlocked? VisionBlocked;
 

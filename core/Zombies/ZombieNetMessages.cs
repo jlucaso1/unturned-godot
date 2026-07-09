@@ -42,12 +42,15 @@ public static class ZombieNetMessages
 
     // These payloads are rebuilt every server tick, so they are written straight into an exact-sized
     // array (same little-endian bytes a BinaryWriter produced) instead of growing a MemoryStream.
-    public static byte[] WriteZombieList(IReadOnlyList<ZombieListing> chunk)
+    // A list carries ONE region's zombies (SendZombies ships per region, to one connection): the bound
+    // rides in the header so the client can group avatars by region and drop them on region change.
+    public static byte[] WriteZombieList(byte bound, IReadOnlyList<ZombieListing> chunk)
     {
-        var payload = new byte[2 + (chunk.Count * ListingBytes)];
+        var payload = new byte[3 + (chunk.Count * ListingBytes)];
         payload[0] = (byte)ENetMessage.ZombieList;
-        payload[1] = (byte)chunk.Count;
-        int o = 2;
+        payload[1] = bound;
+        payload[2] = (byte)chunk.Count;
+        int o = 3;
         for (int i = 0; i < chunk.Count; i++)
         {
             ZombieListing z = chunk[i];
@@ -69,9 +72,10 @@ public static class ZombieNetMessages
         return payload;
     }
 
-    public static List<ZombieListing> ReadZombieList(byte[] payload)
+    public static (byte Bound, List<ZombieListing> Listings) ReadZombieList(byte[] payload)
     {
         using BinaryReader r = Reader(payload);
+        byte bound = r.ReadByte();
         int count = r.ReadByte();
         var chunk = new List<ZombieListing>(count);
         for (int i = 0; i < count; i++)
@@ -91,7 +95,7 @@ public static class ZombieNetMessages
                 Yaw = r.ReadByte(),
             });
         }
-        return chunk;
+        return (bound, chunk);
     }
 
     public static byte[] WriteZombieStates(uint tick, IReadOnlyList<ZombieSnapshotState> states)

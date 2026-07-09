@@ -300,7 +300,12 @@ public partial class Main : Node3D
             return;
         player.Net = network.Client;
         AddChild(RemotePlayersView.Create(network.Client, unturnedPath, _movementAudioFactory));
-        AddChild(ZombiesView.Create(network.Client, unturnedPath, _oneShotAudio));
+        // The zombies view tracks the LOCAL player's nav bound (PlayerMovement.updateBounds runs client-
+        // side in the original too) to drop the avatars of a region it leaves.
+        var navBounds = LevelNavigationData.Load(
+            System.IO.Path.Combine(unturnedPath, "Maps", MapName, "Environment"));
+        AddChild(ZombiesView.Create(network.Client, unturnedPath, _oneShotAudio,
+            navBounds, () => player.GlobalPosition));
     }
 
     // One MovementAudio per character; remote avatars get theirs from this factory (RemotePlayersView).

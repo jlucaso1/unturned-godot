@@ -34,7 +34,7 @@ public partial class BotClient : Node
             switch (NetMessages.TypeOf(payload))
             {
                 case ENetMessage.ZombieList:
-                    node._zombiesListed += UnturnedGodot.Zombies.ZombieNetMessages.ReadZombieList(payload).Count;
+                    node._zombiesListed += UnturnedGodot.Zombies.ZombieNetMessages.ReadZombieList(payload).Listings.Count;
                     break;
                 case ENetMessage.ZombieStates:
                     node._zombieStateMessages++;

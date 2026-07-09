@@ -1,64 +1,119 @@
 using System.Collections.Generic;
 using Godot;
+using UnturnedGodot.Data;
 using UnturnedGodot.Net;
 
 namespace UnturnedGodot.Zombies;
 
-// Server-side glue between the ZombieSystem brain and a NetServer, built purely on the extension
-// seams: OnTick advances the zombies against the live player states and broadcasts awake zombies;
-// OnPlayerAdmitted ships the freshly admitted client the full population in reliable chunks.
+// Server-side glue between the ZombieSystem brain and a NetServer, replicating REGIONALLY the way
+// ZombieManager does: a region's full zombie list ships (reliably) only to a connection whose player
+// just entered its nav bound (onBoundUpdated -> SendZombiesToPlayer, guarded per player by
+// isZombiesLoaded so re-entries resend and oscillation doesn't), and per-tick state snapshots go only
+// to the connections standing in the zombie's own region (GatherRemoteClientConnections). A zombie
+// that chases a player across a border keeps replicating to its HOME region — the player who left
+// simply stops hearing about it, exactly like the original.
 public sealed class ZombieHost
 {
     private readonly ZombieSystem _system;
     private readonly NetServer _server;
-    private readonly List<ZombiePlayerView> _players = new();
-    private readonly List<ZombieSnapshotState> _awake = new();
+    private readonly Dictionary<byte, byte> _playerBounds = new(); // each player's current nav bound
+    private readonly List<byte> _gone = new();
+    private readonly List<ZombiePlayerView> _views = new();
+    private readonly List<(byte Player, ITransportConnection Connection)> _connections = new();
     private readonly Dictionary<ushort, EZombieState> _lastSent = new();
-    private readonly System.Action<byte, PlayerMoveState> _collectPlayer; // cached: a fresh closure per tick is garbage
+    private readonly List<ZombieSnapshotState>[] _awakeByBound;
+    private readonly List<ZombieListing> _chunk = new(ZombieNetMessages.ListChunkSize);
+    private readonly System.Action<byte, PlayerMoveState, ITransportConnection> _collectPlayer; // cached closure
 
     public ZombieHost(ZombieSystem system, NetServer server)
     {
         _system = system;
         _server = server;
-        _collectPlayer = (id, state) =>
-            _players.Add(new ZombiePlayerView(id, state.Position, state.Stance, state.Moving));
+        _awakeByBound = new List<ZombieSnapshotState>[system.BoundCount];
+        for (int i = 0; i < _awakeByBound.Length; i++)
+            _awakeByBound[i] = new List<ZombieSnapshotState>();
+        _collectPlayer = CollectPlayer;
         server.OnTick += Tick;
-        server.OnPlayerAdmitted += SendPopulation;
+        // A (re)admitted player starts from scratch: the self-healing rejoin implies the client lost
+        // state (and dropped its avatars), so clearing our tracking makes the next tick resend the
+        // region it stands in — the counterpart of onPlayerCreated resetting loadedBounds.
+        server.OnPlayerAdmitted += (id, _) => _playerBounds.Remove(id);
+    }
+
+    private void CollectPlayer(byte id, PlayerMoveState state, ITransportConnection connection)
+    {
+        _views.Add(new ZombiePlayerView(id, state.Position, state.Stance, state.Moving));
+        _connections.Add((id, connection));
+
+        // PlayerMovement.updateBounds -> ZombieManager.onBoundUpdated: entering a region ships its
+        // full list to this connection alone. (The original's per-player isZombiesLoaded guard is
+        // always cleared on exit, so a plain send-on-entry is the same behavior: returns resend.)
+        byte newBound = _system.BoundOf(state.Position);
+        if (_playerBounds.TryGetValue(id, out byte bound) && bound == newBound)
+            return;
+        if (newBound != LevelNavigationData.NoBound)
+            SendRegion(connection, newBound);
+        _playerBounds[id] = newBound;
     }
 
     private void Tick(uint tick)
     {
-        _players.Clear();
-        _server.ForEachJoinedPlayer(_collectPlayer);
+        _views.Clear();
+        _connections.Clear();
+        _server.ForEachJoinedConnection(_collectPlayer);
 
-        _system.Tick(_players, ServerSimulation.TickRate);
+        // Players that vanished from the roster disconnected: drop their region state.
+        if (_playerBounds.Count > _connections.Count)
+        {
+            _gone.Clear();
+            foreach (byte id in _playerBounds.Keys)
+            {
+                bool present = false;
+                for (int i = 0; i < _connections.Count && !present; i++)
+                    present = _connections[i].Player == id;
+                if (!present)
+                    _gone.Add(id);
+            }
+            foreach (byte id in _gone)
+                _playerBounds.Remove(id);
+        }
 
-        // Replicate every awake zombie, plus one final snapshot when a zombie settles back to idle so
-        // clients see it stop; sleeping zombies cost zero bandwidth.
-        _awake.Clear();
+        _system.Tick(_views, ServerSimulation.TickRate);
+
+        // Replicate every awake zombie (plus one final snapshot when it settles back to idle so clients
+        // see it stop), grouped by the zombie's home region and sent only to that region's connections.
+        foreach (List<ZombieSnapshotState> states in _awakeByBound)
+            states.Clear();
         foreach (ZombieInstance zombie in _system.Zombies)
         {
             _lastSent.TryGetValue(zombie.Id, out EZombieState last);
             if (zombie.State == EZombieState.Idle && last == EZombieState.Idle)
                 continue;
             _lastSent[zombie.Id] = zombie.State;
-            _awake.Add(Snapshot(zombie));
-            if (_awake.Count == byte.MaxValue)
-            {
-                _server.Broadcast(ZombieNetMessages.WriteZombieStates(tick, _awake), ESendType.Unreliable);
-                _awake.Clear();
-            }
+            _awakeByBound[zombie.Bound].Add(Snapshot(zombie));
         }
-        if (_awake.Count > 0)
-            _server.Broadcast(ZombieNetMessages.WriteZombieStates(tick, _awake), ESendType.Unreliable);
+
+        // One message per region (a region holds at most 255 zombies — MaxZombies is a byte — so the
+        // count always fits the payload's byte header), sent to that region's connections only.
+        for (int bound = 0; bound < _awakeByBound.Length; bound++)
+        {
+            List<ZombieSnapshotState> states = _awakeByBound[bound];
+            if (states.Count == 0)
+                continue;
+            byte[] payload = ZombieNetMessages.WriteZombieStates(tick, states);
+            foreach ((byte player, ITransportConnection connection) in _connections)
+                if (_playerBounds[player] == bound)
+                    connection.Send(payload, ESendType.Unreliable);
+        }
     }
 
-    private void SendPopulation(byte playerId, ITransportConnection connection)
+    // SendZombies: the region's complete zombie list, reliable, to one connection, in MTU-sized chunks.
+    private void SendRegion(ITransportConnection connection, byte bound)
     {
-        var chunk = new List<ZombieListing>(ZombieNetMessages.ListChunkSize);
-        foreach (ZombieInstance zombie in _system.Zombies)
+        _chunk.Clear();
+        foreach (ZombieInstance zombie in _system.ZombiesInBound(bound))
         {
-            chunk.Add(new ZombieListing
+            _chunk.Add(new ZombieListing
             {
                 Id = zombie.Id,
                 Type = zombie.Type,
@@ -72,14 +127,14 @@ public sealed class ZombieHost
                 Position = zombie.Position,
                 Yaw = NetAngles.QuantizeYaw(zombie.Yaw),
             });
-            if (chunk.Count == ZombieNetMessages.ListChunkSize)
+            if (_chunk.Count == ZombieNetMessages.ListChunkSize)
             {
-                connection.Send(ZombieNetMessages.WriteZombieList(chunk), ESendType.Reliable);
-                chunk.Clear();
+                connection.Send(ZombieNetMessages.WriteZombieList(bound, _chunk), ESendType.Reliable);
+                _chunk.Clear();
             }
         }
-        if (chunk.Count > 0)
-            connection.Send(ZombieNetMessages.WriteZombieList(chunk), ESendType.Reliable);
+        if (_chunk.Count > 0)
+            connection.Send(ZombieNetMessages.WriteZombieList(bound, _chunk), ESendType.Reliable);
     }
 
     private static ZombieSnapshotState Snapshot(ZombieInstance zombie) => new()

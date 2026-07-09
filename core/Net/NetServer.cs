@@ -34,12 +34,15 @@ public sealed class NetServer
     public Action<uint>? OnTick;
     public Action<byte, ITransportConnection>? OnPlayerAdmitted;
 
-    // Every joined player id with its live simulation state — what a replicated system ticks against.
-    public void ForEachJoinedPlayer(Action<byte, PlayerMoveState> visit)
+    // Every joined player id with its live simulation state and connection — what a replicated system
+    // ticks against; the connection lets it address specific players, the way Unturned's per-region
+    // replication (GatherRemoteClientConnections) sends zombie payloads only to the connections whose
+    // player stands in the region.
+    public void ForEachJoinedConnection(Action<byte, PlayerMoveState, ITransportConnection> visit)
     {
-        foreach (Session session in _sessions.Values)
+        foreach ((ITransportConnection connection, Session session) in _sessions)
             if (session.Joined)
-                visit(session.PlayerId, _simulation.GetState(session.PlayerId));
+                visit(session.PlayerId, _simulation.GetState(session.PlayerId), connection);
     }
 
     public NetServer(IServerTransport transport, ServerSimulation simulation, Vector3 spawnPosition)

@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using Godot;
+using UnturnedGodot.Data;
 using UnturnedGodot.Net;
 using UnturnedGodot.Zombies;
 
@@ -27,6 +28,7 @@ public partial class ZombiesView : Node3D
         public byte Move;
         public byte Idle;
         public EZombieState State;
+        public byte Bound;         // the zombie's home region (from its ZombieList header)
         public bool Streaming;     // any ZombieStates received yet (idle zombies never stream)
         public double StartleUntil; // while set, the wake-up roar plays before the state clip
         public double NextGroan;    // Zombie.cs's groan loop clock
@@ -42,13 +44,25 @@ public partial class ZombiesView : Node3D
     private string _unturnedPath = "";
     private OneShotAudio? _audio;
     private readonly Dictionary<ushort, ZombieAvatar> _avatars = new();
+    private readonly List<ushort> _leaving = new();
     private Node3D? _normalTemplate;
     private Node3D? _megaTemplate;
     private readonly RandomNumberGenerator _rng = new();
+    private IReadOnlyList<NavBound> _navBounds = System.Array.Empty<NavBound>();
+    private System.Func<Vector3>? _localPosition;
+    private byte _localBound = LevelNavigationData.NoBound;
 
-    public static ZombiesView Create(NetClient client, string unturnedPath, OneShotAudio? audio)
+    public static ZombiesView Create(NetClient client, string unturnedPath, OneShotAudio? audio,
+        IReadOnlyList<NavBound> navBounds, System.Func<Vector3> localPosition)
     {
-        var view = new ZombiesView { Name = "Zombies", _unturnedPath = unturnedPath, _audio = audio };
+        var view = new ZombiesView
+        {
+            Name = "Zombies",
+            _unturnedPath = unturnedPath,
+            _audio = audio,
+            _navBounds = navBounds,
+            _localPosition = localPosition,
+        };
         client.OnUnhandledMessage += view.Handle;
         return view;
     }
@@ -68,8 +82,9 @@ public partial class ZombiesView : Node3D
         switch (NetMessages.TypeOf(payload))
         {
             case ENetMessage.ZombieList:
-                foreach (ZombieListing listing in ZombieNetMessages.ReadZombieList(payload))
-                    SpawnOrReset(listing);
+                (byte bound, List<ZombieListing> listings) = ZombieNetMessages.ReadZombieList(payload);
+                foreach (ZombieListing listing in listings)
+                    SpawnOrReset(listing, bound);
                 break;
             case ENetMessage.ZombieStates:
                 double now = NetworkManager.Now;
@@ -79,11 +94,12 @@ public partial class ZombiesView : Node3D
         }
     }
 
-    private void SpawnOrReset(in ZombieListing listing)
+    private void SpawnOrReset(in ZombieListing listing, byte bound)
     {
         if (!_avatars.TryGetValue(listing.Id, out ZombieAvatar? avatar))
             _avatars[listing.Id] = avatar = Spawn(listing);
 
+        avatar.Bound = bound;
         avatar.Speciality = listing.Speciality;
         avatar.Move = listing.Move;
         avatar.Idle = listing.Idle;
@@ -160,6 +176,19 @@ public partial class ZombiesView : Node3D
     {
         double now = NetworkManager.Now;
         Vector3? eye = GetViewport()?.GetCamera3D()?.GlobalPosition;
+
+        // ZombieManager.onBoundUpdated (IsLocalPlayer branch): when the LOCAL player leaves a nav
+        // bound, the client destroys that region's avatars on its own — no server message involved.
+        // The server independently notices the same transition and resends the region on re-entry.
+        if (_localPosition != null)
+        {
+            byte bound = LevelNavigationData.TryGetBound(_navBounds, _localPosition());
+            if (bound != _localBound)
+            {
+                DropRegion(_localBound);
+                _localBound = bound;
+            }
+        }
 
         foreach (ZombieAvatar avatar in _avatars.Values)
         {
@@ -255,6 +284,22 @@ public partial class ZombiesView : Node3D
         EZombieSpeciality.Sprinter => _rng.Randf() < 0.5f ? "Startle_4" : "Startle_5",
         _ => $"Startle_{_rng.RandiRange(0, 2)}",
     };
+
+    // ZombieRegion.destroy: free every avatar of the region the player just left.
+    private void DropRegion(byte bound)
+    {
+        if (bound == LevelNavigationData.NoBound)
+            return;
+        _leaving.Clear();
+        foreach ((ushort id, ZombieAvatar avatar) in _avatars)
+            if (avatar.Bound == bound)
+                _leaving.Add(id);
+        foreach (ushort id in _leaving)
+        {
+            _avatars[id].Root.QueueFree();
+            _avatars.Remove(id);
+        }
+    }
 
     private static Node3D Placeholder() => new MeshInstance3D
     {
