@@ -1,0 +1,159 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using Godot;
+using UnturnedGodot.Unity;
+
+namespace UnturnedGodot;
+
+// One-time extraction of the movement audio: for each OneShotAudioDefinition the physics materials
+// reference (FootstepWalk/FootstepRun/BipedLand), read its MonoBehaviour (volume/pitch + AudioClip list),
+// slice each clip's FSB5 blob out of the masterbundle's .resource stream and rebuild it as a standard .ogg
+// (Fmod5Sharp — Unturned's clips are FSB5/Vorbis), cached per definition under audioCacheDir.
+[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
+public static class AudioExtractor
+{
+    // Cache layout: <audioCacheDir>/<DefName>/def.bin + <clip>.ogg. A def.bin marks the def as complete.
+    public static bool IsCached(string audioCacheDir, string defName) =>
+        File.Exists(Path.Combine(audioCacheDir, defName, "def.bin"));
+
+    public static string DefNameOf(string assetPath)
+    {
+        string file = assetPath.Replace('\\', '/');
+        int slash = file.LastIndexOf('/');
+        if (slash >= 0)
+            file = file[(slash + 1)..];
+        return file.EndsWith(".asset", StringComparison.OrdinalIgnoreCase) ? file[..^6] : file;
+    }
+
+    // Extracts every definition in defAssetPaths (masterbundle-relative, e.g.
+    // "Effects/Physics/Footstep/Grass_Walk/Footstep_Grass_Walk.asset") that is not cached yet.
+    public static int Extract(string bundlePath, IReadOnlyCollection<string> defAssetPaths, string audioCacheDir)
+    {
+        var missing = new List<string>();
+        foreach (string p in defAssetPaths)
+            if (!IsCached(audioCacheDir, DefNameOf(p)))
+                missing.Add(p);
+        if (missing.Count == 0)
+            return 0;
+
+        GD.Print($"[audio] extracting {missing.Count} audio definitions from masterbundle (one-time)...");
+        UnityBundle bundle = UnityBundle.Read(File.ReadAllBytes(bundlePath)); // full: audio sits in .resource
+        byte[] sf = Array.Empty<byte>();
+        byte[] resource = Array.Empty<byte>();
+        foreach (KeyValuePair<string, byte[]> f in bundle.Files)
+        {
+            if (f.Key.EndsWith(".resource"))
+                resource = f.Value;
+            else if (!f.Key.EndsWith(".resS"))
+                sf = f.Value;
+        }
+        SerializedFile file = SerializedFile.Read(sf);
+
+        var byId = new Dictionary<long, SerializedObject>();
+        foreach (SerializedObject o in file.Objects)
+            byId[o.PathId] = o;
+
+        // Container catalog: path -> asset path id (same walk PrefabGraph does, kept local to this pass).
+        var containers = new Dictionary<string, long>();
+        string assetPrefix = string.Empty;
+        foreach (SerializedObject o in file.Objects)
+        {
+            if (o.ClassId != 142) // AssetBundle
+                continue;
+            Dictionary<string, object> ab = TypeTreeReader.Read(o.TypeTree, file.ReaderFor(o));
+            foreach (object entry in (List<object>)ab["m_Container"])
+            {
+                var pair = (Dictionary<string, object>)entry;
+                var path = (string)pair["first"];
+                containers[path] = PathId(((Dictionary<string, object>)pair["second"])["asset"]);
+                int idx = path.IndexOf("effects/", StringComparison.Ordinal);
+                if (assetPrefix.Length == 0 && idx > 0)
+                    assetPrefix = path[..idx];
+            }
+        }
+
+        int extracted = 0;
+        foreach (string assetPath in missing)
+        {
+            string key = assetPrefix + assetPath.Replace('\\', '/').ToLowerInvariant();
+            if (!containers.TryGetValue(key, out long defId) ||
+                !byId.TryGetValue(defId, out SerializedObject? defObj))
+            {
+                GD.PushWarning($"[audio] def not found in bundle: {assetPath}");
+                continue;
+            }
+
+            Dictionary<string, object> def = TypeTreeReader.Read(defObj.TypeTree, file.ReaderFor(defObj));
+            float volumeMultiplier = Convert.ToSingle(def.GetValueOrDefault("volumeMultiplier", 1f));
+            float minPitch = Convert.ToSingle(def.GetValueOrDefault("minPitch", 1f));
+            float maxPitch = Convert.ToSingle(def.GetValueOrDefault("maxPitch", 1f));
+
+            string defName = DefNameOf(assetPath);
+            string defDir = Path.Combine(audioCacheDir, defName);
+            Directory.CreateDirectory(defDir);
+
+            var clipFiles = new List<string>();
+            if (def.TryGetValue("clips", out object? clips))
+            {
+                foreach (object c in (List<object>)clips)
+                {
+                    long clipId = PathId(c);
+                    if (!byId.TryGetValue(clipId, out SerializedObject? clipObj))
+                        continue;
+                    Dictionary<string, object> clip = TypeTreeReader.Read(clipObj.TypeTree, file.ReaderFor(clipObj));
+                    string name = clip.GetValueOrDefault("m_Name") as string ?? $"clip_{clipId:x}";
+                    if (clip.GetValueOrDefault("m_Resource") is not Dictionary<string, object> res)
+                        continue;
+                    long offset = Convert.ToInt64(res["m_Offset"]);
+                    int size = Convert.ToInt32(res["m_Size"]);
+                    if (offset < 0 || size <= 0 || offset + size > resource.Length)
+                        continue;
+
+                    byte[]? ogg = RebuildOgg(resource, offset, size, name);
+                    if (ogg == null)
+                        continue;
+                    string fileName = name + ".ogg";
+                    File.WriteAllBytes(Path.Combine(defDir, fileName), ogg);
+                    clipFiles.Add(fileName);
+                }
+            }
+
+            if (clipFiles.Count == 0)
+            {
+                GD.PushWarning($"[audio] no clips rebuilt for {defName}");
+                continue;
+            }
+
+            using (FileStream s = File.Create(Path.Combine(defDir, "def.bin")))
+                AudioDefCache.Write(s, new OneShotAudioDef(volumeMultiplier, minPitch, maxPitch, clipFiles));
+            extracted++;
+        }
+
+        GD.Print($"[audio] extracted {extracted} definitions to {audioCacheDir}");
+        return extracted;
+    }
+
+    private static byte[]? RebuildOgg(byte[] resource, long offset, int size, string name)
+    {
+        try
+        {
+            var blob = new byte[size];
+            Array.Copy(resource, offset, blob, 0, size);
+            Fmod5Sharp.FmodTypes.FmodSoundBank bank = Fmod5Sharp.FsbLoader.LoadFsbFromByteArray(blob);
+            if (bank.Samples.Count == 0)
+                return null;
+            return bank.Samples[0].RebuildAsStandardFileFormat(out byte[]? data, out string? ext)
+                && data != null && ext == "ogg"
+                ? data
+                : null;
+        }
+        catch (Exception e)
+        {
+            GD.PushWarning($"[audio] failed to rebuild '{name}': {e.Message}");
+            return null;
+        }
+    }
+
+    private static long PathId(object pptr) => Convert.ToInt64(((Dictionary<string, object>)pptr)["m_PathID"]);
+}

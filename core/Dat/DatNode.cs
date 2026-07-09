@@ -27,6 +27,8 @@ public sealed class DatDictionary : DatNode
     // Last value wins on duplicate keys, mirroring AddValueToDictionary.
     public void Set(string key, DatNode node) => _nodes[key] = node;
 
+    public IEnumerable<string> Keys => _nodes.Keys;
+
     public bool TryGetString(string key, out string value)
     {
         if (_nodes.TryGetValue(key, out DatNode? node) && node is DatValue v)

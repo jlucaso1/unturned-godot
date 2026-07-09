@@ -34,4 +34,7 @@
          via DOTNET_GCConserveMemory=5). -->
     <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="5" />
   </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Fmod5Sharp" Version="3.1.0" />
+  </ItemGroup>
 </Project>
