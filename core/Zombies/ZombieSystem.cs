@@ -155,7 +155,11 @@ public sealed class ZombieSystem
     // queueing the rest — a horde alerted by the same detect pass never recalculates in one burst.
     // Same shape here: at most this many queries per tick (~0.3-1.6 ms each against PEI's map);
     // zombies over budget keep their expired timer and drain on the following ticks.
-    public const int MaxRepathsPerTick = 2;
+    // Path-query budget per tick. MapGetPath over the pre-baked mesh costs tens of microseconds,
+    // so 8 per 0.08 s tick (100/s) sustains the official 0.5 s repath cadence for ~50 concurrent
+    // hunters — a full region's worth. (Two per tick starved hordes: routes went stale and packs
+    // visibly chased where the player USED to be.)
+    public const int MaxRepathsPerTick = 8;
     public const float MaxChaseDistanceSquared = 4096f; // Zombie.cs: target beyond 64 m -> leave
     public const float SwingInterval = 1f;              // Time.time - lastAttack > 1 starts a swing
     public const float AttackTime = 0.5f;               // dedicated-server Attack_0 fallback length
@@ -306,9 +310,19 @@ public sealed class ZombieSystem
             Detect(players);
         }
 
-        foreach (ZombieInstance zombie in _zombies)
-            Behave(zombie, players, dt);
+        // Rotate the tick's starting index so the path-query budget is shared fairly: a fixed
+        // iteration order let the first hunters in the list monopolize every tick's budget while
+        // the rest ran on stale routes.
+        int count = _zombies.Count;
+        if (count > 0)
+        {
+            _behaveRotation = (_behaveRotation + 1) % count;
+            for (int i = 0; i < count; i++)
+                Behave(_zombies[(_behaveRotation + i) % count], players, dt);
+        }
     }
+
+    private int _behaveRotation;
 
     // PlayerStance's 0.1 s stealth alert per player, against the zombies of the player's nav region.
     // (Indexed loops throughout: foreach over the IReadOnlyList interface boxes an enumerator per call,
