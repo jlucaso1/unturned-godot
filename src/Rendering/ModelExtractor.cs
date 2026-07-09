@@ -442,7 +442,7 @@ public static class ModelExtractor
             // Foliage renders with Unturned's own Framework/Grass-family shaders, which hard-code
             // "OUT.Specular = 0.0" — the material's Standard-shader _Glossiness (0.5 Unity default) is
             // never read there, so carrying it would give grass a sky-reflection sheen the game never shows.
-            (string texKey, Color color, float _, float _) =
+            (string texKey, Color color, float _, float _, EShaderCull foliageCull) =
                 ResolveMaterialByPath(graph, fa.MaterialPath, neededTextures);
 
             var uvs = new Vector2[mesh.Vertices.Length];
@@ -455,7 +455,7 @@ public static class ModelExtractor
             var submeshes = new List<CachedSubmesh>();
             foreach (int[] src in mesh.Submeshes)
                 submeshes.Add(new CachedSubmesh((int[])src.Clone(), color, texKey, UnityMaterial.Blend.Cutout,
-                    cull: EShaderCull.TwoSided)); // the Grass/Leaves shader family authors Cull Off
+                    cull: foliageCull)); // read from the material's own shader (Grass/Leaves author Cull Off)
 
             using var stream = File.Create(outPath);
             MeshCache.Write(stream, mesh.Vertices, normals, uvs, submeshes);
@@ -467,28 +467,34 @@ public static class ModelExtractor
     // Resolves a material named by its masterbundle container path into the _MainTex hex key (recorded for
     // the texture-streaming pass) and the _Color tint. Mirrors MaterialResolver's per-submesh lookup — some
     // foliage (the pebbles) has no texture at all and renders purely from _Color, exactly as in Unturned.
-    private static (string texKey, Color color, float metallic, float smoothness) ResolveMaterialByPath(
-        PrefabGraph graph, string materialPath, Dictionary<long, UnityTexture>? neededTextures)
+    private static (string texKey, Color color, float metallic, float smoothness, EShaderCull cull)
+        ResolveMaterialByPath(PrefabGraph graph, string materialPath, Dictionary<long, UnityTexture>? neededTextures)
     {
         if (materialPath.Length == 0)
-            return (string.Empty, Colors.White, 0f, 0f);
+            return (string.Empty, Colors.White, 0f, 0f, EShaderCull.Back);
         string matKey = graph.AssetPrefix + materialPath.Replace('\\', '/').ToLowerInvariant();
         if (!graph.ContainerByPath.TryGetValue(matKey, out long matId) ||
             !graph.ObjectsByPathId.TryGetValue(matId, out SerializedObject? matObj))
-            return (string.Empty, Colors.White, 0f, 0f);
+            return (string.Empty, Colors.White, 0f, 0f, EShaderCull.Back);
 
         Dictionary<string, object> matDict = TypeTreeReader.Read(matObj.TypeTree, graph.File.ReaderFor(matObj));
         Color color = UnityMaterial.GetColor(matDict, "_Color") ?? Colors.White;
         float metallic = UnityMaterial.GetFloat(matDict, "_Metallic") ?? 0f;
         float smoothness = UnityMaterial.GetFloat(matDict, "_Glossiness") ?? 0f;
 
+        // The shader's authored culling, from the bundle (the Grass/Leaves family authors Cull Off).
+        EShaderCull cull = EShaderCull.Back;
+        (int shaderFileId, long shaderId) = UnityMaterial.GetShader(matDict);
+        if (shaderFileId == 0 && shaderId != 0 && graph.ObjectsByPathId.TryGetValue(shaderId, out SerializedObject? shObj))
+            cull = UnityShaderCulling.Read(TypeTreeReader.Read(shObj.TypeTree, graph.File.ReaderFor(shObj)));
+
         (int fileId, long texId) = UnityMaterial.GetTexture(matDict, "_MainTex");
         if (fileId != 0 || texId == 0 || !graph.ObjectsByPathId.TryGetValue(texId, out SerializedObject? texObj))
-            return (string.Empty, color, metallic, smoothness);
+            return (string.Empty, color, metallic, smoothness, cull);
 
         if (neededTextures != null && !neededTextures.ContainsKey(texId))
             neededTextures[texId] = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, graph.File.ReaderFor(texObj)));
-        return (texId.ToString("x"), color, metallic, smoothness);
+        return (texId.ToString("x"), color, metallic, smoothness, cull);
     }
 
     // Phase 2: decode the full bundle (now including the ~1.18 GB .resS pixel stream) and write the

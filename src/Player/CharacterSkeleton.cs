@@ -40,6 +40,11 @@ public partial class CharacterSkeleton : Skeleton3D
     private Vector3[] _restScales = System.Array.Empty<Vector3>();
     private byte[] _written = System.Array.Empty<byte>();  // channels applied by the previous frame
     private byte[] _writing = System.Array.Empty<byte>();  // channels applied by the current frame
+    // Engine-side mirrors of every bone pose channel, so values that did not change this frame (most
+    // position/scale tracks are constant, and idle rotations barely move) skip the marshaled write.
+    private Quaternion[] _appliedRotations = System.Array.Empty<Quaternion>();
+    private Vector3[] _appliedPositions = System.Array.Empty<Vector3>();
+    private Vector3[] _appliedScales = System.Array.Empty<Vector3>();
 
     public bool HasAnyPose => _clips.Count > 0;
 
@@ -129,17 +134,25 @@ public partial class CharacterSkeleton : Skeleton3D
             byte channels = 0;
             if (p.Rotation is { } r)
             {
-                SetBonePoseRotation(p.Bone, WithPitch(p.Bone, r, half));
+                WriteRotation(p.Bone, WithPitch(p.Bone, r, half));
                 channels |= ChanRot;
             }
             if (p.Position is { } pos)
             {
-                SetBonePosePosition(p.Bone, pos);
+                if (pos != _appliedPositions[p.Bone])
+                {
+                    SetBonePosePosition(p.Bone, pos);
+                    _appliedPositions[p.Bone] = pos;
+                }
                 channels |= ChanPos;
             }
             if (p.Scale is { } s)
             {
-                SetBonePoseScale(p.Bone, s);
+                if (s != _appliedScales[p.Bone])
+                {
+                    SetBonePoseScale(p.Bone, s);
+                    _appliedScales[p.Bone] = s;
+                }
                 channels |= ChanScale;
             }
             _writing[p.Bone] = channels;
@@ -157,11 +170,17 @@ public partial class CharacterSkeleton : Skeleton3D
             if (stale == 0)
                 continue;
             if ((stale & ChanRot) != 0)
-                SetBonePoseRotation(bone, _restRotations[bone]);
-            if ((stale & ChanPos) != 0)
+                WriteRotation(bone, _restRotations[bone]);
+            if ((stale & ChanPos) != 0 && _appliedPositions[bone] != _restPositions[bone])
+            {
                 SetBonePosePosition(bone, _restPositions[bone]);
-            if ((stale & ChanScale) != 0)
+                _appliedPositions[bone] = _restPositions[bone];
+            }
+            if ((stale & ChanScale) != 0 && _appliedScales[bone] != _restScales[bone])
+            {
                 SetBonePoseScale(bone, _restScales[bone]);
+                _appliedScales[bone] = _restScales[bone];
+            }
         }
 
         (_written, _writing) = (_writing, _written);
@@ -180,8 +199,16 @@ public partial class CharacterSkeleton : Skeleton3D
     {
         if (bone < 0 || (_writing[bone] & ChanRot) != 0)
             return; // the pose already rotated it (pitch composed in WithPitch)
-        SetBonePoseRotation(bone, _restRotations[bone] * new Quaternion(Vector3.Up, Mathf.DegToRad(halfDegrees)));
+        WriteRotation(bone, _restRotations[bone] * new Quaternion(Vector3.Up, Mathf.DegToRad(halfDegrees)));
         _writing[bone] |= ChanRot;
+    }
+
+    private void WriteRotation(int bone, Quaternion value)
+    {
+        if (value == _appliedRotations[bone])
+            return;
+        SetBonePoseRotation(bone, value);
+        _appliedRotations[bone] = value;
     }
 
     // One-time engine read of every bone's rest transform (the clone starts empty, so each instance
@@ -209,6 +236,11 @@ public partial class CharacterSkeleton : Skeleton3D
             _restPositions[i] = rest.Origin;
             _restScales[i] = rest.Basis.Scale;
         }
+        // The skeleton's poses ARE the rests here (the builder ResetBonePoses after assembly, and every
+        // change since went through these mirrors), so the mirrors start as a copy of the rests.
+        _appliedRotations = (Quaternion[])_restRotations.Clone();
+        _appliedPositions = (Vector3[])_restPositions.Clone();
+        _appliedScales = (Vector3[])_restScales.Clone();
     }
 
     private static string ClipFor(EPlayerStance stance, bool moving) => (stance, moving) switch

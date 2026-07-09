@@ -15,5 +15,26 @@ public sealed class BoneCurves
 public sealed class AnimationClipData
 {
     public float Length { get; init; }
-    public IReadOnlyDictionary<int, BoneCurves> Bones { get; init; } = new Dictionary<int, BoneCurves>();
+
+    private readonly IReadOnlyDictionary<int, BoneCurves> _bones = new Dictionary<int, BoneCurves>();
+
+    public IReadOnlyDictionary<int, BoneCurves> Bones
+    {
+        get => _bones;
+        init
+        {
+            _bones = value;
+            // Flatten once at decode time: the per-frame sampler walks this dense array with an indexed
+            // loop — enumerating the IReadOnlyDictionary interface boxed an enumerator per rig per frame,
+            // which was the process's dominant steady-state allocation.
+            var tracks = new (int Bone, BoneCurves Curves)[value.Count];
+            int i = 0;
+            foreach (KeyValuePair<int, BoneCurves> kv in value)
+                tracks[i++] = (kv.Key, kv.Value);
+            Tracks = tracks;
+        }
+    }
+
+    internal (int Bone, BoneCurves Curves)[] Tracks { get; private init; } =
+        System.Array.Empty<(int, BoneCurves)>();
 }

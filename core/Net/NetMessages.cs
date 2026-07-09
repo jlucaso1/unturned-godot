@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 using Godot;
@@ -238,24 +239,31 @@ public static class NetMessages
         return new InputCommand(frame, x, y, jump, sprint, yaw, pitch, stance, position, grounded);
     }
 
+    private const int SnapshotBytes = 16; // id 1 + position 12 + pitch 1 + yaw 1 + stance/flags 1
+
+    // Rebuilt every server tick for every client, so it writes straight into an exact-sized array
+    // (identical little-endian bytes) instead of growing a MemoryStream through a BinaryWriter —
+    // and iterates by index, since foreach over the IReadOnlyList interface boxes an enumerator.
     public static byte[] WriteStateUpdate(uint tick, IReadOnlyList<PlayerSnapshotState> states)
     {
-        using var ms = new MemoryStream();
-        using var w = new BinaryWriter(ms);
-        w.Write((byte)ENetMessage.StateUpdate);
-        w.Write(tick);
-        w.Write((byte)states.Count);
-        foreach (PlayerSnapshotState s in states)
+        var payload = new byte[6 + (states.Count * SnapshotBytes)];
+        payload[0] = (byte)ENetMessage.StateUpdate;
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(1), tick);
+        payload[5] = (byte)states.Count;
+        int o = 6;
+        for (int i = 0; i < states.Count; i++)
         {
-            w.Write(s.PlayerId);
-            w.Write(s.Position.X);
-            w.Write(s.Position.Y);
-            w.Write(s.Position.Z);
-            w.Write(s.Pitch);
-            w.Write(s.Yaw);
-            w.Write(PackStanceFlags(s.Stance, s.Moving, s.Grounded));
+            PlayerSnapshotState s = states[i];
+            payload[o] = s.PlayerId;
+            BinaryPrimitives.WriteSingleLittleEndian(payload.AsSpan(o + 1), s.Position.X);
+            BinaryPrimitives.WriteSingleLittleEndian(payload.AsSpan(o + 5), s.Position.Y);
+            BinaryPrimitives.WriteSingleLittleEndian(payload.AsSpan(o + 9), s.Position.Z);
+            payload[o + 13] = s.Pitch;
+            payload[o + 14] = s.Yaw;
+            payload[o + 15] = PackStanceFlags(s.Stance, s.Moving, s.Grounded);
+            o += SnapshotBytes;
         }
-        return ms.ToArray();
+        return payload;
     }
 
     public static (uint Tick, List<PlayerSnapshotState> States) ReadStateUpdate(byte[] payload)

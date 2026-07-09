@@ -94,16 +94,22 @@ public sealed class ZombieHost
         }
 
         // One message per region (a region holds at most 255 zombies — MaxZombies is a byte — so the
-        // count always fits the payload's byte header), sent to that region's connections only.
+        // count always fits the payload's byte header), sent to that region's connections only. The
+        // payload is only serialized once a listener is found: with the map awake and nobody around,
+        // a region costs nothing.
         for (int bound = 0; bound < _awakeByBound.Length; bound++)
         {
             List<ZombieSnapshotState> states = _awakeByBound[bound];
             if (states.Count == 0)
                 continue;
-            byte[] payload = ZombieNetMessages.WriteZombieStates(tick, states);
+            byte[]? payload = null;
             foreach ((byte player, ITransportConnection connection) in _connections)
-                if (_playerBounds[player] == bound)
-                    connection.Send(payload, ESendType.Unreliable);
+            {
+                if (_playerBounds[player] != bound)
+                    continue;
+                payload ??= ZombieNetMessages.WriteZombieStates(tick, states);
+                connection.Send(payload, ESendType.Unreliable);
+            }
         }
     }
 

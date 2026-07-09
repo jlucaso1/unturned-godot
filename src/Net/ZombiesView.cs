@@ -185,8 +185,8 @@ public partial class ZombiesView : Node3D
             byte bound = LevelNavigationData.TryGetBound(_navBounds, _localPosition());
             if (bound != _localBound)
             {
-                DropRegion(_localBound);
                 _localBound = bound;
+                DropForeignRegions();
             }
         }
 
@@ -285,14 +285,14 @@ public partial class ZombiesView : Node3D
         _ => $"Startle_{_rng.RandiRange(0, 2)}",
     };
 
-    // ZombieRegion.destroy: free every avatar of the region the player just left.
-    private void DropRegion(byte bound)
+    // ZombieRegion.destroy on region change: free every avatar that is not of the CURRENT region —
+    // the one just left, plus any region a late reliable list resurrected after we had already moved
+    // on (the guard the original doesn't need, since its RPCs can't outrun its bound events).
+    private void DropForeignRegions()
     {
-        if (bound == LevelNavigationData.NoBound)
-            return;
         _leaving.Clear();
         foreach ((ushort id, ZombieAvatar avatar) in _avatars)
-            if (avatar.Bound == bound)
+            if (avatar.Bound != _localBound)
                 _leaving.Add(id);
         foreach (ushort id in _leaving)
         {

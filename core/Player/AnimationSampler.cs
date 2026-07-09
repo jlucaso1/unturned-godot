@@ -16,14 +16,16 @@ public static class AnimationSampler
     }
 
     // Buffer-reusing variant: clears and refills dest, so a per-frame caller keeps one dictionary alive
-    // instead of allocating a fresh one every sampled frame.
+    // instead of allocating a fresh one every sampled frame. Walks the clip's dense track array — an
+    // indexed loop with no enumerator allocation, unlike iterating the read-only dictionary view.
     public static void Sample(AnimationClipData clip, float time, Dictionary<int, BonePose> dest)
     {
         dest.Clear();
-        foreach (KeyValuePair<int, BoneCurves> b in clip.Bones)
+        (int Bone, BoneCurves Curves)[] tracks = clip.Tracks;
+        for (int i = 0; i < tracks.Length; i++)
         {
-            BoneCurves c = b.Value;
-            dest[b.Key] = new BonePose(b.Key,
+            (int bone, BoneCurves c) = tracks[i];
+            dest[bone] = new BonePose(bone,
                 c.Rotation.Length > 0 ? SampleRotation(c.Rotation, time) : null,
                 c.Position.Length > 0 ? SampleVector(c.Position, time) : null,
                 c.Scale.Length > 0 ? SampleVector(c.Scale, time) : null);

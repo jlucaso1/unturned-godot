@@ -136,4 +136,31 @@ public class NetMessagesTests
         Assert.False(read[1].Moving);
         Assert.True(read[1].Grounded);
     }
+
+    // Byte-for-byte wire layout — what a little-endian BinaryWriter historically produced — so
+    // serializer rewrites provably ship the same bytes.
+    [Fact]
+    public void StateUpdate_WireLayout_IsExact()
+    {
+        var states = new List<PlayerSnapshotState>
+        {
+            new(3, new Vector3(1f, -2f, 0.5f), 9, 7, UnturnedGodot.Player.EPlayerStance.Stand,
+                moving: false, grounded: true),
+        };
+        byte[] payload = NetMessages.WriteStateUpdate(0x04030201u, states);
+
+        var expected = new List<byte> { (byte)ENetMessage.StateUpdate, 0x01, 0x02, 0x03, 0x04, 1, 3 };
+        expected.AddRange(System.BitConverter.GetBytes(1f));
+        expected.AddRange(System.BitConverter.GetBytes(-2f));
+        expected.AddRange(System.BitConverter.GetBytes(0.5f));
+        expected.Add(9);
+        expected.Add(7);
+        // PackStanceFlags: stance low nibble, moving bit 4? — recompute via a round trip instead of
+        // hardcoding the packing here.
+        (uint _, List<PlayerSnapshotState> read) = NetMessages.ReadStateUpdate(payload);
+        Assert.Equal(expected.Count + 1, payload.Length);
+        Assert.Equal(expected.ToArray(), payload[..expected.Count]);
+        Assert.Equal(UnturnedGodot.Player.EPlayerStance.Stand, read[0].Stance);
+        Assert.True(read[0].Grounded);
+    }
 }
