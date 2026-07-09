@@ -36,9 +36,13 @@ public sealed class ZombieInstance
     public byte Pants = byte.MaxValue;
     public byte Hat = byte.MaxValue;
     public byte Gear = byte.MaxValue;
+    // The animation variant seeds ZombieManager rolls at spawn and replicates with the zombie:
+    // clients play Move_{Move}/Idle_{Idle} (specialities override with their fixed variants).
+    public byte Move;
+    public byte Idle;
     public Vector3 Home;
     public Vector3 Position;
-    public float Yaw; // radians, the direction the zombie faces
+    public float Yaw; // degrees, player yaw convention: the model faces (-sin, 0, -cos)
     public EZombieState State;
     public byte TargetPlayer = byte.MaxValue;
     public float AttackCooldown;
@@ -164,9 +168,11 @@ public sealed class ZombieSystem
             Pants = RollSlot(table, 1, random),
             Hat = RollSlot(table, 2, random),
             Gear = RollSlot(table, 3, random),
+            Move = (byte)random.Next(4), // ZombieManager's Random.Range(0, 4)
+            Idle = (byte)random.Next(3), // ZombieManager's Random.Range(0, 3)
             Home = position,
             Position = position,
-            Yaw = random.NextSingle() * MathF.Tau,
+            Yaw = random.NextSingle() * 360f,
         };
     }
 
@@ -210,7 +216,8 @@ public sealed class ZombieSystem
                 if (zombie.Bound != bound)
                     continue;
                 Vector3 playerToZombie = zombie.Position - player.Position;
-                Vector3 forward = new(MathF.Sin(zombie.Yaw), 0f, MathF.Cos(zombie.Yaw));
+                float yawRad = Mathf.DegToRad(zombie.Yaw);
+                Vector3 forward = new(-MathF.Sin(yawRad), 0f, -MathF.Cos(yawRad));
                 if (!ZombieDetection.IsDetected(forward, playerToZombie, sqrRadius, sneak))
                     continue;
                 Alert(zombie, player, players);
@@ -300,7 +307,7 @@ public sealed class ZombieSystem
         float dx = targetPosition.X - zombie.Position.X;
         float dz = targetPosition.Z - zombie.Position.Z;
         if ((dx * dx) + (dz * dz) > 1e-8f)
-            zombie.Yaw = MathF.Atan2(dx, dz);
+            zombie.Yaw = Mathf.RadToDeg(MathF.Atan2(-dx, -dz));
     }
 
     private static float HorizontalDistanceSquared(Vector3 a, Vector3 b)

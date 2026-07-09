@@ -16,6 +16,8 @@ public partial class BotClient : Node
     private double _lastInput;
     private uint _frame;
     private float _lifetime = 20f;
+    private int _zombiesListed;
+    private int _zombieStateMessages;
 
     public static BotClient Create(string host, ushort port, string name, float lifetime)
     {
@@ -26,6 +28,18 @@ public partial class BotClient : Node
             _transport = transport,
             _client = new NetClient(transport, name),
             _lifetime = lifetime,
+        };
+        node._client.OnUnhandledMessage += payload =>
+        {
+            switch (NetMessages.TypeOf(payload))
+            {
+                case ENetMessage.ZombieList:
+                    node._zombiesListed += UnturnedGodot.Zombies.ZombieNetMessages.ReadZombieList(payload).Count;
+                    break;
+                case ENetMessage.ZombieStates:
+                    node._zombieStateMessages++;
+                    break;
+            }
         };
         GD.Print($"[bot] '{name}' connecting to {host}:{port} for {lifetime}s");
         return node;
@@ -57,6 +71,7 @@ public partial class BotClient : Node
                 PoseSnapshot pose = remote.Sample(now);
                 line.Append($" | {remote.Name}#{id}=({pose.Position.X:F1},{pose.Position.Y:F1},{pose.Position.Z:F1})");
             }
+            line.Append($" | zombies={_zombiesListed} zombieStateMsgs={_zombieStateMessages}");
             GD.Print(line.ToString());
         }
 

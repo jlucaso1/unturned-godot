@@ -30,6 +30,15 @@ public partial class DedicatedServer : Node
             _transport = transport,
             _server = new NetServer(transport, new ServerSimulation(new HeightfieldMoveSolver(ground)), spawn),
         };
+
+        UnturnedGodot.Zombies.ZombieSystem? zombies = UnturnedGodot.Zombies.ZombieWorld.Load(
+            level.Path, ground, new System.Random());
+        if (zombies != null)
+        {
+            _ = new UnturnedGodot.Zombies.ZombieHost(zombies, node._server);
+            GD.Print($"[server] {zombies.Zombies.Count} zombies spawned");
+        }
+
         GD.Print($"[server] dedicated server for {mapName} listening on UDP {port} ({tiles.Count} height tiles)");
         return node;
     }

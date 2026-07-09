@@ -20,6 +20,7 @@ public class ZombieNetMessagesTests
             {
                 Id = 7, Type = 2, Speciality = EZombieSpeciality.Sprinter,
                 Shirt = 0, Pants = byte.MaxValue, Hat = 1, Gear = byte.MaxValue,
+                Move = 3, Idle = 2,
                 Position = new Vector3(10.5f, 34f, -20.25f), Yaw = 90,
             },
             new()
@@ -40,6 +41,8 @@ public class ZombieNetMessagesTests
         Assert.Equal(0, read[0].Shirt);
         Assert.Equal(byte.MaxValue, read[0].Pants);
         Assert.Equal(1, read[0].Hat);
+        Assert.Equal(3, read[0].Move);
+        Assert.Equal(2, read[0].Idle);
         Assert.Equal(new Vector3(10.5f, 34f, -20.25f), read[0].Position);
         Assert.Equal(90, read[0].Yaw);
         Assert.Equal(300, read[1].Id);
@@ -185,6 +188,8 @@ public class ZombieHostTests
         Assert.Equal(first.Type, listed.Type);
         Assert.Equal(first.Speciality, listed.Speciality);
         Assert.Equal(first.Shirt, listed.Shirt);
+        Assert.Equal(first.Move, listed.Move);
+        Assert.Equal(first.Idle, listed.Idle);
     }
 
     [Fact]

@@ -17,13 +17,48 @@ public static class CharacterModel
     private const int ClassSkinnedMeshRenderer = 137;
     private const int ClassTransform = 4;
     private const int ClassAnimation = 111; // the legacy Animation component
-    // The entity to import. Only this name is entity-specific; everything else (skeleton, skin, default
-    // animation) is read from the data, so other skinned entities import the same way with a different name.
-    private const string EntityRoot = "Player_Client";
 
-    // Customization.SKINS[0] — the default light skin tone the character's skin regions are filled with.
-    private static readonly Color DefaultSkin = new(244f / 255f, 230f / 255f, 210f / 255f);
-    private const int DefaultFace = 0; // Items/Faces/0 — the default face overlay (eyes + mouth, transparent)
+    // Everything entity-specific about a skinned character import; the skeleton, skin weights and clips are
+    // read from the data, so any of the game's skinned entities imports through the same pipeline.
+    private sealed class EntityConfig
+    {
+        public required string Root;         // prefab root GameObject name in resources.assets
+        public required string[] Clips;      // legacy Animation clips to decode (missing ones just skip)
+        public required string PrimaryIdle;  // resting clip; falls back to the component's default clip
+        public required Color Skin;          // flat colour the skin UV regions are filled with
+        public required int FaceIndex;       // Items/Faces/<n> overlay composited by UV
+    }
+
+    // Customization.SKINS[0] — the default light skin tone — and Items/Faces/0, the default face.
+    private static readonly EntityConfig PlayerEntity = new()
+    {
+        Root = "Player_Client",
+        Clips = new[]
+            { "Idle_Stand", "Idle_Crouch", "Idle_Prone", "Move_Walk", "Move_Run", "Move_Crouch", "Move_Prone" },
+        PrimaryIdle = "Idle_Stand",
+        Skin = new Color(244f / 255f, 230f / 255f, 210f / 255f),
+        FaceIndex = 0,
+    };
+
+    // ZombieClothing.paint: the greenish zombie skin tones and the fixed zombie face (Items/Faces/19).
+    // Clip variants are the ones Zombie.cs plays: Idle_0..2 + crawler 3 / sprinter 4, Move_0..3 + crawler 4 /
+    // sprinter 5, Attack_0..8, plus the startle/stun reactions for later.
+    private static EntityConfig ZombieEntity(bool isMega) => new()
+    {
+        Root = "Zombie_Client",
+        Clips = new[]
+        {
+            "Idle_0", "Idle_1", "Idle_2", "Idle_3", "Idle_4",
+            "Move_0", "Move_1", "Move_2", "Move_3", "Move_4", "Move_5",
+            "Attack_0", "Attack_1", "Attack_2", "Attack_3", "Attack_4",
+            "Attack_5", "Attack_6", "Attack_7", "Attack_8",
+            "Startle_0", "Startle_1", "Startle_2",
+            "Stun_0", "Stun_1", "Stun_2", "Stun_3", "Stun_4",
+        },
+        PrimaryIdle = "Idle_0",
+        Skin = isMega ? new Color(89f / 255f, 99f / 255f, 89f / 255f) : new Color(99f / 255f, 124f / 255f, 99f / 255f),
+        FaceIndex = 19,
+    };
 
     // Ports Unturned's Standard/Clothes body compositing (the parts a bare survivor uses): a flat skin
     // colour with the face overlaid where the mesh UV falls in the face patch. Unturned places the face by
@@ -51,20 +86,56 @@ public static class CharacterModel
 
     // Builds the skinned Player_Client character, or null when the game data is absent or can't be parsed
     // (the caller then falls back to the placeholder figure).
-    public static Node3D? Build(string unturnedPath)
+    public static Node3D? Build(string unturnedPath) => BuildEntity(unturnedPath, PlayerEntity);
+
+    // Builds the skinned Zombie_Client character with the real zombie skin tone and face.
+    public static Node3D? BuildZombie(string unturnedPath, bool isMega) =>
+        BuildEntity(unturnedPath, ZombieEntity(isMega));
+
+    // Cheap copy of an already-imported character: rebuilds the bone hierarchy and shares the mesh,
+    // skin and decoded clips with the template, so populating hundreds of entities decodes the game
+    // data exactly once per look.
+    public static CharacterSkeleton? Clone(Node3D? template)
+    {
+        if (template is not CharacterSkeleton source
+            || source.GetChildOrNull<MeshInstance3D>(0) is not { } sourceBody)
+            return null;
+
+        var skeleton = new CharacterSkeleton { Name = "Skeleton" };
+        for (int i = 0; i < source.GetBoneCount(); i++)
+            skeleton.AddBone(source.GetBoneName(i));
+        for (int i = 0; i < source.GetBoneCount(); i++)
+        {
+            int parent = source.GetBoneParent(i);
+            if (parent >= 0)
+                skeleton.SetBoneParent(i, parent);
+            skeleton.SetBoneRest(i, source.GetBoneRest(i));
+        }
+        skeleton.ResetBonePoses();
+
+        var body = new MeshInstance3D { Mesh = sourceBody.Mesh, Skin = sourceBody.Skin, Name = "CharacterBody" };
+        skeleton.AddChild(body);
+        body.Skeleton = body.GetPathTo(skeleton);
+
+        foreach ((string name, AnimationClipData clip) in source.Clips)
+            skeleton.StoreClip(name, clip);
+        return skeleton;
+    }
+
+    private static Node3D? BuildEntity(string unturnedPath, EntityConfig entity)
     {
         try
         {
-            return BuildInternal(unturnedPath);
+            return BuildInternal(unturnedPath, entity);
         }
         catch (System.Exception e)
         {
-            GD.PrintErr($"[unturned-godot] Character: failed to load real body ({e.GetType().Name}: {e.Message}); using placeholder.\n{e.StackTrace}");
+            GD.PrintErr($"[unturned-godot] Character: failed to load real {entity.Root} ({e.GetType().Name}: {e.Message}); using placeholder.\n{e.StackTrace}");
             return null;
         }
     }
 
-    private static Node3D? BuildInternal(string unturnedPath)
+    private static Node3D? BuildInternal(string unturnedPath, EntityConfig entity)
     {
         string assetsPath = Path.Combine(unturnedPath, "Unturned_Data", "resources.assets");
         string bundlePath = Path.Combine(unturnedPath, "Bundles", "core_linux.masterbundle");
@@ -79,27 +150,37 @@ public static class CharacterModel
         foreach (SerializedObject o in file.Objects)
             byId[o.PathId] = o;
 
+        // The character prefabs carry two LOD renderers (Model_0/Model_1). Import the first one whose
+        // mesh actually decodes with full per-vertex skinning — Model_1, the in-game blocky character;
+        // Model_0's weights live in a compressed stream this pipeline doesn't read. Keep the first
+        // match as a static-mesh fallback so an unskinnable entity still shows its bind pose.
+        Dictionary<string, object>? fallbackSmr = null;
+        UnityMesh? fallbackMesh = null;
         foreach (SerializedObject o in file.Objects)
         {
             if (o.ClassId != ClassSkinnedMeshRenderer)
                 continue;
             Dictionary<string, object> smr = Read(file, byId, o.PathId);
-            long goId = Id(smr["m_GameObject"]);
-            if (RootName(file, byId, goId) != EntityRoot)
+            if (RootName(file, byId, Id(smr["m_GameObject"])) != entity.Root)
                 continue;
-
             if (!byId.TryGetValue(Id(smr["m_Mesh"]), out SerializedObject? meshObj))
-                return null;
+                continue;
             UnityMesh mesh = UnityMesh.Read(Read(file, byId, meshObj.PathId));
             if (!mesh.Usable)
-                return null;
+                continue;
 
             if (mesh.BoneIndices.Length == mesh.Vertices.Length * UnityMesh.BonesPerVertex && mesh.BindPoses.Count > 0)
-                return BuildSkinnedCharacter(file, byId, smr, mesh, bundlePath);
-
-            // Fallback: no skinning data -> static bind-pose mesh.
-            return new MeshInstance3D { Mesh = BuildMesh(mesh, skinned: false), Name = "CharacterBody" };
+                return BuildSkinnedCharacter(file, byId, smr, mesh, bundlePath, entity);
+            if (fallbackSmr == null)
+            {
+                fallbackSmr = smr;
+                fallbackMesh = mesh;
+            }
         }
+
+        // Fallback: no renderer with skinning data -> static bind-pose mesh.
+        if (fallbackMesh != null)
+            return new MeshInstance3D { Mesh = BuildMesh(fallbackMesh, entity, skinned: false), Name = "CharacterBody" };
         return null;
     }
 
@@ -107,7 +188,7 @@ public static class CharacterModel
     // body mesh as its child. Uses Godot's CreateSkinFromRestTransforms so the bind matrices derive from the
     // rest hierarchy — the mesh is authored in that same bind pose, so this is exact.
     private static Node3D BuildSkinnedCharacter(SerializedFile file, Dictionary<long, SerializedObject> byId,
-        Dictionary<string, object> smr, UnityMesh mesh, string bundlePath)
+        Dictionary<string, object> smr, UnityMesh mesh, string bundlePath, EntityConfig entity)
     {
         var boneRefs = (List<object>)smr["m_Bones"];
         int boneCount = boneRefs.Count;
@@ -142,18 +223,18 @@ public static class CharacterModel
 
         var body = new MeshInstance3D
         {
-            Mesh = BuildMesh(mesh, skinned: true, face: LoadFace(bundlePath, DefaultFace)),
+            Mesh = BuildMesh(mesh, entity, skinned: true, face: LoadFace(bundlePath, entity.FaceIndex)),
             Skin = skeleton.CreateSkinFromRestTransforms(), // bind matrices from the rest hierarchy
             Name = "CharacterBody",
         };
         skeleton.AddChild(body);
         body.Skeleton = body.GetPathTo(skeleton);
 
-        StoreClips(file, byId, skeleton, boneByName, Id(smr["m_GameObject"]));
+        StoreClips(file, byId, skeleton, boneByName, Id(smr["m_GameObject"]), entity);
         skeleton.BindPitchBones(boneByName.GetValueOrDefault("Spine", -1), boneByName.GetValueOrDefault("Skull", -1));
-        skeleton.SetState(UnturnedGodot.Player.EPlayerStance.Stand, moving: false);
+        skeleton.Play(entity.PrimaryIdle);
 
-        GD.Print($"[unturned-godot] Character: real {EntityRoot} skinned body loaded ({boneCount} bones, " +
+        GD.Print($"[unturned-godot] Character: real {entity.Root} skinned body loaded ({boneCount} bones, " +
             (skeleton.HasAnyPose ? "animated" : "bind pose") + ").");
         return skeleton;
     }
@@ -162,7 +243,7 @@ public static class CharacterModel
     // the entity's legacy Animation component (m_Animations), keyed by name. If Idle_Stand is missing we fall
     // back to the component's default clip (m_Animation) so a generic entity still gets a resting pose.
     private static void StoreClips(SerializedFile file, Dictionary<long, SerializedObject> byId,
-        CharacterSkeleton skeleton, Dictionary<string, int> boneByName, long goId)
+        CharacterSkeleton skeleton, Dictionary<string, int> boneByName, long goId, EntityConfig entity)
     {
         long animComp = AnimationComponentOf(file, byId, goId);
         if (animComp == 0)
@@ -177,13 +258,12 @@ public static class CharacterModel
                 clips[(string)Read(file, byId, co.PathId)["m_Name"]] = cid;
         }
 
-        foreach (string name in new[]
-                 { "Idle_Stand", "Idle_Crouch", "Idle_Prone", "Move_Walk", "Move_Run", "Move_Crouch", "Move_Prone" })
+        foreach (string name in entity.Clips)
             if (clips.TryGetValue(name, out long cid))
                 skeleton.StoreClip(name, ReadClip(file, byId, boneByName, cid));
 
-        if (!clips.ContainsKey("Idle_Stand") && Id(anim["m_Animation"]) is var def && def != 0)
-            skeleton.StoreClip("Idle_Stand", ReadClip(file, byId, boneByName, def));
+        if (!clips.ContainsKey(entity.PrimaryIdle) && Id(anim["m_Animation"]) is var def && def != 0)
+            skeleton.StoreClip(entity.PrimaryIdle, ReadClip(file, byId, boneByName, def));
     }
 
     // Walks up from the mesh's GameObject to the one carrying a legacy Animation component (data-driven; not
@@ -381,7 +461,7 @@ public static class CharacterModel
     // positions AND normals plus reversed winding, so the character keeps its authored hard-edge normals
     // and can't be lit inside-out. When skinned, also carry the per-vertex bone indices + normalized weights
     // (unaffected by the winding flip, which only reorders indices).
-    private static ArrayMesh BuildMesh(UnityMesh mesh, bool skinned, ImageTexture? face = null)
+    private static ArrayMesh BuildMesh(UnityMesh mesh, EntityConfig entity, bool skinned, ImageTexture? face = null)
     {
         UnityMeshConverter.GodotMesh g = UnityMeshConverter.ToGodot(mesh);
 
@@ -403,7 +483,7 @@ public static class CharacterModel
         // The body's _MainTex is only a UV-region reference atlas; the game composites the character in the
         // Standard/Clothes shader. Reproduce that here: skin colour with the face overlaid by UV.
         var material = new ShaderMaterial { Shader = BodyShader };
-        material.SetShaderParameter("skin_color", DefaultSkin);
+        material.SetShaderParameter("skin_color", entity.Skin);
         if (face != null) // unset -> Godot's default transparent sampler, so the face patch just shows skin
             material.SetShaderParameter("face_albedo", face);
         arrayMesh.SurfaceSetMaterial(0, material);

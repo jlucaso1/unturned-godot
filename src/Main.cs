@@ -271,6 +271,7 @@ public partial class Main : Node3D
         else
         {
             network.StartSingleplayer(playerName);
+            network.HostZombies(System.IO.Path.Combine(unturnedPath, "Maps", MapName));
         }
 
         // OPEN_LAN=1 opens the UDP listener immediately; OPEN_LAN_AFTER=seconds opens it mid-game — the
@@ -292,6 +293,7 @@ public partial class Main : Node3D
             return;
         player.Net = network.Client;
         AddChild(RemotePlayersView.Create(network.Client, unturnedPath, _movementAudioFactory));
+        AddChild(ZombiesView.Create(network.Client, unturnedPath));
     }
 
     // One MovementAudio per character; remote avatars get theirs from this factory (RemotePlayersView).

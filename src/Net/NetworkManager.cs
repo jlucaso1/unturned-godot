@@ -77,6 +77,23 @@ public partial class NetworkManager : Node
         return true;
     }
 
+    // Brings the level's zombie population up on the hosted server (no-op for pure clients): the
+    // ZombieHost hooks the NetServer extension seams, so solo, LAN and dedicated all share it.
+    public void HostZombies(string levelDir)
+    {
+        if (_server == null)
+            return;
+        UnturnedGodot.Zombies.ZombieSystem? zombies =
+            UnturnedGodot.Zombies.ZombieWorld.Load(levelDir, _ground, new System.Random());
+        if (zombies == null)
+        {
+            GD.PushWarning("[zombies] level ships no zombie data; skipping");
+            return;
+        }
+        _ = new UnturnedGodot.Zombies.ZombieHost(zombies, _server);
+        GD.Print($"[zombies] {zombies.Zombies.Count} zombies spawned from the level's spawnpoints");
+    }
+
     public void JoinServer(string host, ushort port, string name)
     {
         if (IsActive)

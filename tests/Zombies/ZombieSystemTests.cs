@@ -122,6 +122,9 @@ public class ZombieSystemTests
         Assert.True(byKind[(int)EZombieSpeciality.Sprinter] > 0);
         Assert.Equal(0, byKind[(int)EZombieSpeciality.Mega]);
         Assert.True(byKind[(int)EZombieSpeciality.Normal] > byKind[(int)EZombieSpeciality.Crawler]);
+        Assert.All(system.Zombies, z => Assert.InRange(z.Move, 0, 3));
+        Assert.All(system.Zombies, z => Assert.InRange(z.Idle, 0, 2));
+        Assert.True(system.Zombies.Select(z => z.Move).Distinct().Count() > 1); // actually rolled
     }
 
     [Fact]
@@ -196,7 +199,7 @@ public class ZombieSystemTests
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         // Player 3 m west of the zombie; zombie faces east (away from the player).
-        zombie.Yaw = MathF.Atan2(1f, 0f);
+        zombie.Yaw = -90f; // facing +X: (-sin, -cos) = (1, 0)
         Vector3 playerPos = new(-3, 5, 0);
 
         system.Tick(new[] { Player(1, playerPos, UnturnedGodot.Player.EPlayerStance.Crouch) }, 0.1f);
@@ -262,7 +265,7 @@ public class ZombieSystemTests
 
         Assert.Equal(0.55f, before - after, 2); // normal zombie: 5.5 m/s x 0.1 s
         Assert.Equal(0f, zombie.Position.Z, 3); // dead straight along the X axis
-        Assert.Equal(MathF.Atan2(1, 0), zombie.Yaw, 3); // facing the target
+        Assert.Equal(-90f, zombie.Yaw, 3); // facing the +X target in the player yaw convention
     }
 
     [Theory]

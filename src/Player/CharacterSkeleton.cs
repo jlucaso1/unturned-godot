@@ -29,6 +29,9 @@ public partial class CharacterSkeleton : Skeleton3D
 
     public bool HasAnyPose => _clips.Count > 0;
 
+    // The decoded clip set, exposed so cheap clones can share it (clips are immutable once stored).
+    public IReadOnlyDictionary<string, AnimationClipData> Clips => _clips;
+
     public void StoreClip(string name, AnimationClipData clip) => _clips[name] = clip;
 
     public void BindPitchBones(int spine, int skull)

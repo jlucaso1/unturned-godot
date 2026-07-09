@@ -65,8 +65,10 @@ public sealed class ZombieHost
                 Pants = zombie.Pants,
                 Hat = zombie.Hat,
                 Gear = zombie.Gear,
+                Move = zombie.Move,
+                Idle = zombie.Idle,
                 Position = zombie.Position,
-                Yaw = NetAngles.QuantizeYaw(Mathf.RadToDeg(zombie.Yaw)),
+                Yaw = NetAngles.QuantizeYaw(zombie.Yaw),
             });
             if (chunk.Count == ZombieNetMessages.ListChunkSize)
             {
@@ -82,7 +84,7 @@ public sealed class ZombieHost
     {
         Id = zombie.Id,
         Position = zombie.Position,
-        Yaw = NetAngles.QuantizeYaw(Mathf.RadToDeg(zombie.Yaw)),
+        Yaw = NetAngles.QuantizeYaw(zombie.Yaw),
         State = zombie.State,
     };
 }
