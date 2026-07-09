@@ -11,7 +11,7 @@ namespace UnturnedGodot;
 //
 // Unturned simulates movement on a fixed 12.5 Hz tick for deterministic netcode; single-player here runs on
 // Godot's physics step with the same instant-velocity/gravity/jump maths, which yields the same speeds,
-// jump arc and gravity while staying smooth. Runtime keys: H = perspective, X = crouch, Z = prone,
+// jump arc and gravity while staying smooth. Runtime keys: H (or F5) = perspective, X = crouch, Z = prone,
 // Shift = sprint, Space = jump, Esc = release mouse.
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class PlayerController : CharacterBody3D
@@ -86,7 +86,7 @@ public partial class PlayerController : CharacterBody3D
 
         if (@event is InputEventKey { Pressed: true, Echo: false } key)
         {
-            if (key.Keycode == _settings.Perspective) { _thirdPerson = !_thirdPerson; ApplyPerspective(); }
+            if (key.Keycode == _settings.Perspective || key.Keycode == Key.F5) { _thirdPerson = !_thirdPerson; ApplyPerspective(); }
             else if (key.Keycode == _settings.Crouch) { _wantCrouch = !_wantCrouch; if (_wantCrouch) _wantProne = false; }
             else if (key.Keycode == _settings.Prone) { _wantProne = !_wantProne; if (_wantProne) _wantCrouch = false; }
             else if (key.Keycode == Key.Escape)

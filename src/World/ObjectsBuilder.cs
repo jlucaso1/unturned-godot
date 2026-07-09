@@ -67,32 +67,50 @@ public static class ObjectsBuilder
         return root;
     }
 
-    // One physics body per GUID holding every instance's shapes (shared Shape resources, no per-instance
-    // nodes) so thousands of instances stay light. See InstancedStaticBody.
+    // One physics body per GUID holding every instance's shapes (no per-instance nodes) so thousands of
+    // instances stay light. Primitive shapes are shared and placed by a per-instance transform; mesh colliders
+    // instead bake the full world transform into their vertices and are placed at identity — Godot's physics
+    // hangs on a scaled/transformed ConcavePolygonShape3D, so baking keeps every trimesh axis-aligned + unit.
     private static void BuildCollision(Node3D root, Guid guid, List<CachedCollider> colliders,
         List<Transform3D> instances)
     {
-        var shapes = new List<Shape3D>(colliders.Count);
-        var local = new List<Transform3D>(colliders.Count);
+        var shapes = new List<Shape3D>();
+        var placements = new List<(int, Transform3D)>();
+
+        var primitives = new List<(int index, Transform3D local)>();
+        var meshes = new List<CachedCollider>();
         foreach (CachedCollider c in colliders)
-            if (BuildShape(c) is { } s)
+        {
+            if (c.Kind == EColliderKind.Mesh)
+            {
+                meshes.Add(c);
+            }
+            else if (BuildPrimitive(c) is { } s)
             {
                 shapes.Add(s.shape);
-                local.Add(s.local);
+                primitives.Add((shapes.Count - 1, s.local));
             }
-        if (shapes.Count == 0)
-            return;
+        }
 
-        var placements = new List<(int, Transform3D)>(instances.Count * shapes.Count);
         foreach (Transform3D instance in instances)
-            for (int i = 0; i < shapes.Count; i++)
-                placements.Add((i, instance * local[i]));
+        {
+            foreach ((int index, Transform3D local) in primitives)
+                placements.Add((index, instance * local));
+            foreach (CachedCollider m in meshes)
+                if (BakedMeshShape(m, instance) is { } shape)
+                {
+                    shapes.Add(shape);
+                    placements.Add((shapes.Count - 1, Transform3D.Identity));
+                }
+        }
+        if (placements.Count == 0)
+            return;
 
         root.AddChild(new InstancedStaticBody { Name = $"Col_{guid:N}", Shapes = shapes, Placements = placements });
     }
 
-    // Converts one Unity collider to a Godot shape + its pose relative to the object root (Unity->Godot).
-    private static (Shape3D shape, Transform3D local)? BuildShape(CachedCollider c)
+    // A primitive Unity collider as a Godot shape + its pose relative to the object root (Unity->Godot).
+    private static (Shape3D shape, Transform3D local)? BuildPrimitive(CachedCollider c)
         => c.Kind switch
         {
             EColliderKind.Box => (new BoxShape3D { Size = c.Size },
@@ -101,11 +119,29 @@ public static class ObjectsBuilder
                 UnityMath.ReflectZ(c.LocalToRoot.TranslatedLocal(c.Center))),
             EColliderKind.Capsule => (new CapsuleShape3D { Radius = c.Radius, Height = c.Height },
                 UnityMath.ReflectZ(c.LocalToRoot.TranslatedLocal(c.Center) * DirectionRotation(c.Direction))),
-            // Mesh: the building collision meshes are cached (phase 1), but instancing a ConcavePolygonShape3D
-            // through the shared-shape body hangs Godot's physics (a scaled/degenerate concave shape). Deferred
-            // until it can use per-instance baked geometry; primitive-collider objects collide today.
             _ => null,
         };
+
+    // A MeshCollider as a ConcavePolygonShape3D with each triangle vertex baked to its final world position
+    // (instance * collider-in-root * F-vertex), so the shape needs no placement transform.
+    private static ConcavePolygonShape3D? BakedMeshShape(CachedCollider c, Transform3D instance)
+    {
+        if (c.Indices.Length < 3 || c.Indices.Length % 3 != 0)
+            return null;
+        Transform3D toWorld = instance * UnityMath.ReflectZ(c.LocalToRoot);
+        var faces = new Vector3[c.Indices.Length];
+        for (int i = 0; i < c.Indices.Length; i++)
+        {
+            int idx = c.Indices[i];
+            if (idx < 0 || idx >= c.Vertices.Length)
+                return null;
+            Vector3 v = c.Vertices[idx];
+            if (!float.IsFinite(v.X) || !float.IsFinite(v.Y) || !float.IsFinite(v.Z))
+                return null;
+            faces[i] = toWorld * new Vector3(v.X, v.Y, -v.Z); // F: negate Z, then to world
+        }
+        return new ConcavePolygonShape3D { Data = faces };
+    }
 
     // Godot's CapsuleShape3D is Y-aligned; orient it to Unity's m_Direction (0=X, 1=Y, 2=Z).
     private static Transform3D DirectionRotation(int direction) => direction switch
