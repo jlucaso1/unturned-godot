@@ -15,7 +15,10 @@ public sealed class ZombieNavigation
 {
     private readonly Rid _map;
     private readonly List<Rid> _regions = new();
-    private bool _ready; // the map's FIRST (async) synchronization has completed
+    private bool _synced; // the map's FIRST (async) synchronization pass has completed (map_changed)
+    private bool _ready;  // a real route resolved: the map actually answers queries
+    private Vector3 _probeFrom;
+    private Vector3 _probeTo;
 
     public ZombiePathQuery Query { get; }
 
@@ -50,6 +53,15 @@ public sealed class ZombieNavigation
     {
         _map = NavigationServer3D.MapCreate();
         NavigationServer3D.MapSetActive(_map, true);
+        // Readiness probe: two corners of the first flag's first triangle. map_changed only says the
+        // FIRST synchronization pass finished — measured live, real routes still resolve empty for a
+        // few more seconds while the edge merge completes, so readiness is only declared once this
+        // route actually resolves (probing earlier than map_changed would spam console errors).
+        if (flags[0].Triangles.Length >= 3)
+        {
+            _probeFrom = flags[0].Vertices[flags[0].Triangles[0]];
+            _probeTo = flags[0].Vertices[flags[0].Triangles[1]];
+        }
         // The pre-baked mesh was recast at cellSize 0.1 (doorways and dense clutter produce edges
         // that close together); the map's default 0.25 rasterization cell collapses distinct edges
         // into the same cell and DROPS their connections — houses lost their doorway link and
@@ -86,7 +98,14 @@ public sealed class ZombieNavigation
         Query = (Vector3 from, Vector3 to, List<Vector3> path) =>
         {
             if (!_ready)
-                return false; // first sync still building: the brain seeks straight for now
+            {
+                // map_changed fired but the edge merge may still be running: declare readiness only
+                // when a real probe route resolves (each due repath retries — a few per tick at most).
+                if (!_synced || NavigationServer3D.MapGetPath(map, _probeFrom, _probeTo, optimize: true).Length < 2)
+                    return false; // still building: the brain waits, like a zombie with no route
+                _ready = true;
+                GD.Print("[nav] navmesh answering queries; zombie pathfinding live");
+            }
             Vector3[] points = NavigationServer3D.MapGetPath(map, from, to, optimize: true);
             if (points.Length < 2)
                 return false; // no route (start/target unreachable): the brain seeks straight
@@ -103,10 +122,10 @@ public sealed class ZombieNavigation
 
     private void OnMapChanged(Rid map)
     {
-        if (map != _map || _ready)
+        if (map != _map || _synced)
             return;
-        _ready = true;
-        GD.Print("[nav] navmesh synchronized; zombie pathfinding live");
+        _synced = true;
+        GD.Print("[nav] navmesh first synchronization done");
     }
 
     public void Free()

@@ -61,6 +61,7 @@ public sealed class ZombieInstance
     public float LeaveDelay;          // Zombie.leave: stand still this long, then walk to LeaveTo
     public Vector3 LeaveTo;
     public sbyte DetourSide;          // sticky side while skirting a head-on block (see ApplyStep)
+    public bool RepathGranted;        // this tick's path-query token (granted round-robin)
     public readonly List<Vector3> PathPoints = new(); // the Seeker's current route over the navmesh
     public int CurrentWaypointIndex;  // LegacyAIPathNoRedist.currentWaypointIndex
     public bool TargetReached;        // LegacyAIPathNoRedist.targetReached
@@ -153,12 +154,12 @@ public sealed class ZombieSystem
     public const float MinMoveScale = 0.05f;            // minMoveScale
     // The A* Pathfinding Project computes paths on a time budget per frame (AstarPath.maxFrameTime),
     // queueing the rest — a horde alerted by the same detect pass never recalculates in one burst.
-    // Same shape here: at most this many queries per tick (~0.3-1.6 ms each against PEI's map);
-    // zombies over budget keep their expired timer and drain on the following ticks.
-    // Path-query budget per tick. MapGetPath over the pre-baked mesh costs tens of microseconds,
-    // so 8 per 0.08 s tick (100/s) sustains the official 0.5 s repath cadence for ~50 concurrent
-    // hunters — a full region's worth. (Two per tick starved hordes: routes went stale and packs
-    // visibly chased where the player USED to be.)
+    // Same shape here: 8 per 0.08 s tick (100/s) sustains the official 0.5 s repath cadence for ~50
+    // concurrent hunters — a full region's worth. (Two per tick starved hordes: routes went stale
+    // and packs visibly chased where the player USED to be.) Tokens are granted round-robin so no
+    // fixed subset monopolizes the budget. Cost note: MapGetPath measures ~1.3 ms median against
+    // PEI's map after warm-up, so a saturated budget is ~10 ms of an 80 ms tick — deliberate
+    // headroom spent on route freshness.
     public const int MaxRepathsPerTick = 8;
     public const float MaxChaseDistanceSquared = 4096f; // Zombie.cs: target beyond 64 m -> leave
     public const float SwingInterval = 1f;              // Time.time - lastAttack > 1 starts a swing
@@ -175,7 +176,6 @@ public sealed class ZombieSystem
     private readonly Dictionary<byte, int> _agro = new(); // Player.agro: how many zombies hunt each player
     private Random _random = new();
     private float _detectTimer;
-    private int _repathsThisTick; // path-query budget spent this tick (MaxRepathsPerTick)
 
     public IReadOnlyList<ZombieInstance> Zombies => _zombies;
 
@@ -302,7 +302,6 @@ public sealed class ZombieSystem
 
     public void Tick(IReadOnlyList<ZombiePlayerView> players, float dt)
     {
-        _repathsThisTick = 0;
         _detectTimer += dt;
         if (_detectTimer >= ZombieDetection.DetectInterval)
         {
@@ -310,19 +309,37 @@ public sealed class ZombieSystem
             Detect(players);
         }
 
-        // Rotate the tick's starting index so the path-query budget is shared fairly: a fixed
-        // iteration order let the first hunters in the list monopolize every tick's budget while
-        // the rest ran on stale routes.
+        // Grant this tick's path-query tokens round-robin among the hunters whose repath timer is
+        // due, then run Behave in FIXED order. (Rotating Behave itself shared the budget but also
+        // reordered movement and the order-dependent zombie-zombie collision — the whole simulation
+        // changed with the rotation. Only the tokens rotate now.)
         int count = _zombies.Count;
-        if (count > 0)
+        for (int i = 0; i < count; i++)
+            _zombies[i].RepathGranted = false;
+        if (count > 0 && PathQuery != null)
         {
-            _behaveRotation = (_behaveRotation + 1) % count;
-            for (int i = 0; i < count; i++)
-                Behave(_zombies[(_behaveRotation + i) % count], players, dt);
+            _repathCursor %= count;
+            int granted = 0;
+            int nextCursor = _repathCursor;
+            for (int i = 0; i < count && granted < MaxRepathsPerTick; i++)
+            {
+                ZombieInstance z = _zombies[(_repathCursor + i) % count];
+                if (z.State is EZombieState.Chase or EZombieState.Return && z.RepathTimer - dt <= 0f)
+                {
+                    z.RepathGranted = true;
+                    granted++;
+                    nextCursor = (_repathCursor + i + 1) % count; // the queue resumes after the last grant
+                }
+            }
+            if (granted > 0)
+                _repathCursor = nextCursor;
         }
+
+        for (int i = 0; i < count; i++)
+            Behave(_zombies[i], players, dt);
     }
 
-    private int _behaveRotation;
+    private int _repathCursor;
 
     // PlayerStance's 0.1 s stealth alert per player, against the zombies of the player's nav region.
     // (Indexed loops throughout: foreach over the IReadOnlyList interface boxes an enumerator per call,
@@ -516,9 +533,9 @@ public sealed class ZombieSystem
         }
 
         zombie.RepathTimer -= dt;
-        if (zombie.RepathTimer <= 0f && _repathsThisTick < MaxRepathsPerTick)
+        if (zombie.RepathTimer <= 0f && zombie.RepathGranted)
         {
-            _repathsThisTick++;
+            zombie.RepathGranted = false;
             zombie.RepathTimer = RepathRate;
             // Stabilize the query's destination: project it onto the navmesh XZ-first (its own
             // floor), so an off-mesh target can never snap the route into a basement below it.

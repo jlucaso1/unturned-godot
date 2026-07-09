@@ -73,11 +73,16 @@ public partial class RemotePlayersView : Node3D
             }
     }
 
+    private Node3D? _template; // one full CharacterModel.Build; every remote is a cheap Clone of it
+
     private Avatar Spawn(byte id, string name)
     {
         var root = new Node3D { Name = $"Remote_{id}" };
         MovementAudio? audio = _audioFactory?.Invoke();
-        Node3D? body = CharacterModel.Build(_unturnedPath);
+        // Building the body re-parses resources.assets (~100 ms and tens of MB of transient heap per
+        // remote); the template is built once and cloned per player — identical mesh, skin and clips.
+        _template ??= CharacterModel.Build(_unturnedPath);
+        Node3D? body = CharacterModel.Clone(_template);
         CharacterSkeleton? rig = body as CharacterSkeleton;
         root.AddChild(body ?? Placeholder());
 

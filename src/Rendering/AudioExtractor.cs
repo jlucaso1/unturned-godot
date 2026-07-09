@@ -26,6 +26,62 @@ public static class AudioExtractor
         return file.EndsWith(".asset", StringComparison.OrdinalIgnoreCase) ? file[..^6] : file;
     }
 
+    // Streams the bundle forward, keeping only the SerializedFile and the audio .resource node and
+    // DISCARDING the ~1.2 GB texture .resS in chunks: audio never reads it, and materializing every
+    // node (the old UnityBundle.Read path) held the whole decompressed bundle in memory at once —
+    // multi-GB RSS spikes on the one-time audio extraction. Falls back to the full decode only for
+    // bundles that are not the expected single-LZMA-block shape.
+    private static (byte[] SerializedFile, byte[] Resource) ReadAudioNodes(string bundlePath)
+    {
+        byte[] raw = File.ReadAllBytes(bundlePath);
+        using MasterBundleStream? stream = MasterBundleStream.Open(raw);
+        if (stream == null)
+        {
+            UnityBundle bundle = UnityBundle.Read(raw);
+            byte[] sfFull = Array.Empty<byte>();
+            byte[] resourceFull = Array.Empty<byte>();
+            foreach (KeyValuePair<string, byte[]> f in bundle.Files)
+            {
+                if (f.Key.EndsWith(".resource"))
+                    resourceFull = f.Value;
+                else if (!f.Key.EndsWith(".resS"))
+                    sfFull = f.Value;
+            }
+            return (sfFull, resourceFull);
+        }
+
+        var ordered = new List<MasterBundleStream.Node>(stream.Nodes);
+        ordered.Sort((a, b) => a.Offset.CompareTo(b.Offset));
+        byte[] sf = Array.Empty<byte>();
+        byte[] resource = Array.Empty<byte>();
+        byte[]? discard = null;
+        foreach (MasterBundleStream.Node node in ordered)
+        {
+            if (node.Path.EndsWith(".resource"))
+            {
+                resource = stream.Read((int)node.Size);
+            }
+            else if (node.Path.EndsWith(".resS"))
+            {
+                // Forward-only stream: decompress through the texture blob in chunks, retaining none.
+                discard ??= new byte[16 * 1024 * 1024];
+                long remaining = node.Size;
+                while (remaining > 0)
+                {
+                    int got = stream.Read(discard, 0, (int)Math.Min(discard.Length, remaining));
+                    if (got == 0)
+                        break;
+                    remaining -= got;
+                }
+            }
+            else
+            {
+                sf = stream.Read((int)node.Size);
+            }
+        }
+        return (sf, resource);
+    }
+
     // A synthetic definition built from RAW AudioClips (assets the game plays directly, without a
     // OneShotAudioDefinition — e.g. ZombieManager's roar/groan arrays): the clip container paths
     // plus the caller-supplied volume/pitch envelope, cached under the group name like any def.
@@ -52,16 +108,7 @@ public static class AudioExtractor
 
         GD.Print($"[audio] extracting {missing.Count} audio definitions and {missingGroups.Count} " +
             "clip groups from masterbundle (one-time)...");
-        UnityBundle bundle = UnityBundle.Read(File.ReadAllBytes(bundlePath)); // full: audio sits in .resource
-        byte[] sf = Array.Empty<byte>();
-        byte[] resource = Array.Empty<byte>();
-        foreach (KeyValuePair<string, byte[]> f in bundle.Files)
-        {
-            if (f.Key.EndsWith(".resource"))
-                resource = f.Value;
-            else if (!f.Key.EndsWith(".resS"))
-                sf = f.Value;
-        }
+        (byte[] sf, byte[] resource) = ReadAudioNodes(bundlePath);
         SerializedFile file = SerializedFile.Read(sf);
 
         var byId = new Dictionary<long, SerializedObject>();
