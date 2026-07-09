@@ -35,6 +35,9 @@ public partial class DedicatedServer : Node
             level.Path, ground, new System.Random());
         if (zombies != null)
         {
+            node._zombieNavigation = ZombieNavigation.Build(zombies.Navmesh);
+            if (node._zombieNavigation != null)
+                zombies.PathQuery = node._zombieNavigation.Query;
             _ = new UnturnedGodot.Zombies.ZombieHost(zombies, node._server);
             GD.Print($"[server] {zombies.Zombies.Count} zombies spawned");
         }
@@ -55,5 +58,11 @@ public partial class DedicatedServer : Node
         }
     }
 
-    public override void _ExitTree() => _transport.Close();
+    private ZombieNavigation? _zombieNavigation;
+
+    public override void _ExitTree()
+    {
+        _transport.Close();
+        _zombieNavigation?.Free();
+    }
 }
