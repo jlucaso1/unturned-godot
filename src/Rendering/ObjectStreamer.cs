@@ -139,7 +139,8 @@ public partial class ObjectStreamer : Node
     private void BuildObjects()
     {
         var meshLibrary = ModelLibrary.Load(_cacheDir, _registry);
-        Node3D root = ObjectsBuilder.Build(_objects, _db, meshLibrary, out int withMesh);
+        var colliderLibrary = ColliderLibrary.Load(_cacheDir);
+        Node3D root = ObjectsBuilder.Build(_objects, _db, meshLibrary, colliderLibrary, out int withMesh);
         AddChild(root);
         AddChild(FoliageBuilder.Build(_foliage, meshLibrary));
         _totalTextureKeys = _registry.PendingKeyCount;

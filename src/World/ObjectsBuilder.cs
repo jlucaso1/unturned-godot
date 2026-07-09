@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using Godot;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Data;
+using UnturnedGodot.Unity;
 
 namespace UnturnedGodot;
 
@@ -21,7 +22,8 @@ public static class ObjectsBuilder
     // helps (near-ground "tight") was already the cheapest (~0.5 ms). Median frame time regressed +52-82%.
     // Real vegetation wins need per-instance LOD/impostors, which MultiMesh doesn't do natively.
     public static Node3D Build(IReadOnlyList<PlacedObject> objects, ObjectAssetDatabase db,
-        IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary, out int withMesh)
+        IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary,
+        IReadOnlyDictionary<Guid, List<CachedCollider>> colliderLibrary, out int withMesh)
     {
         var root = new Node3D { Name = "Objects" };
 
@@ -43,19 +45,75 @@ public static class ObjectsBuilder
             }
         }
 
+        var collision = new Node3D { Name = "ObjectCollision" };
         withMesh = 0;
         foreach ((Guid guid, List<Transform3D> transforms) in byMesh)
         {
             // No MaterialOverride: the mesh's per-submesh surface materials carry the textures.
             root.AddChild(BuildMultiMesh(meshLibrary[guid], transforms, $"Mesh_{guid:N}"));
             withMesh += transforms.Count;
+
+            // Only LARGE/MEDIUM objects block the player (SMALL objects have their collider stripped in
+            // Unturned); give each such GUID's instances the object's real colliders.
+            if (colliderLibrary.TryGetValue(guid, out List<CachedCollider>? colliders)
+                && db.Resolve(guid, 0)?.Type is EObjectType.Large or EObjectType.Medium)
+                BuildCollision(collision, guid, colliders, transforms);
         }
+        root.AddChild(collision);
 
         if (fallback.Count > 0)
             root.AddChild(BuildFallbackBoxes(fallback));
 
         return root;
     }
+
+    // One physics body per GUID holding every instance's shapes (shared Shape resources, no per-instance
+    // nodes) so thousands of instances stay light. See InstancedStaticBody.
+    private static void BuildCollision(Node3D root, Guid guid, List<CachedCollider> colliders,
+        List<Transform3D> instances)
+    {
+        var shapes = new List<Shape3D>(colliders.Count);
+        var local = new List<Transform3D>(colliders.Count);
+        foreach (CachedCollider c in colliders)
+            if (BuildShape(c) is { } s)
+            {
+                shapes.Add(s.shape);
+                local.Add(s.local);
+            }
+        if (shapes.Count == 0)
+            return;
+
+        var placements = new List<(int, Transform3D)>(instances.Count * shapes.Count);
+        foreach (Transform3D instance in instances)
+            for (int i = 0; i < shapes.Count; i++)
+                placements.Add((i, instance * local[i]));
+
+        root.AddChild(new InstancedStaticBody { Name = $"Col_{guid:N}", Shapes = shapes, Placements = placements });
+    }
+
+    // Converts one Unity collider to a Godot shape + its pose relative to the object root (Unity->Godot).
+    private static (Shape3D shape, Transform3D local)? BuildShape(CachedCollider c)
+        => c.Kind switch
+        {
+            EColliderKind.Box => (new BoxShape3D { Size = c.Size },
+                UnityMath.ReflectZ(c.LocalToRoot.TranslatedLocal(c.Center))),
+            EColliderKind.Sphere => (new SphereShape3D { Radius = c.Radius },
+                UnityMath.ReflectZ(c.LocalToRoot.TranslatedLocal(c.Center))),
+            EColliderKind.Capsule => (new CapsuleShape3D { Radius = c.Radius, Height = c.Height },
+                UnityMath.ReflectZ(c.LocalToRoot.TranslatedLocal(c.Center) * DirectionRotation(c.Direction))),
+            // Mesh: the building collision meshes are cached (phase 1), but instancing a ConcavePolygonShape3D
+            // through the shared-shape body hangs Godot's physics (a scaled/degenerate concave shape). Deferred
+            // until it can use per-instance baked geometry; primitive-collider objects collide today.
+            _ => null,
+        };
+
+    // Godot's CapsuleShape3D is Y-aligned; orient it to Unity's m_Direction (0=X, 1=Y, 2=Z).
+    private static Transform3D DirectionRotation(int direction) => direction switch
+    {
+        0 => new Transform3D(new Basis(new Quaternion(new Vector3(0, 0, 1), -Mathf.Pi / 2f)), Vector3.Zero),
+        2 => new Transform3D(new Basis(new Quaternion(new Vector3(1, 0, 0), Mathf.Pi / 2f)), Vector3.Zero),
+        _ => Transform3D.Identity,
+    };
 
     private static MultiMeshInstance3D BuildMultiMesh(Mesh mesh, List<Transform3D> transforms, string name)
     {

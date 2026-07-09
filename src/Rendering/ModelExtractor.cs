@@ -350,15 +350,60 @@ public static class ModelExtractor
 
             // Runtime derives smooth normals from the winding-corrected geometry (ModelLibrary.SmoothNormals),
             // so the extracted per-vertex normals are never read — don't compute or store them.
-            using var stream = File.Create(Path.Combine(cacheDir, asset.Guid.ToString("N") + ".mesh"));
-            MeshCache.Write(stream, verts.ToArray(), Array.Empty<Vector3>(), uvs.ToArray(), submeshes);
+            using (var stream = File.Create(Path.Combine(cacheDir, asset.Guid.ToString("N") + ".mesh")))
+                MeshCache.Write(stream, verts.ToArray(), Array.Empty<Vector3>(), uvs.ToArray(), submeshes);
             extracted++;
+
+            // Cache the object's colliders next to its mesh (Unity units; converted when the body is built).
+            if (graph.CollidersByKey.TryGetValue(key, out List<ColliderPart>? colliderParts))
+            {
+                List<CachedCollider> colliders = BuildColliders(colliderParts, graph, file);
+                if (colliders.Count > 0)
+                    using (var cs = File.Create(Path.Combine(cacheDir, asset.Guid.ToString("N") + ".collider")))
+                        ColliderCache.Write(cs, colliders);
+            }
         }
 
         if (foliageAssets != null)
             extracted += ExtractFoliageMeshes(graph, foliageAssets, cacheDir, neededTextures);
 
         return extracted;
+    }
+
+    // Resolves each collider part to a cacheable collider: primitives pass their Unity parameters through;
+    // a MeshCollider reads its collision mesh (its own low-poly geometry, distinct from the render mesh) into
+    // raw Unity-space vertices + flattened triangle indices.
+    private static List<CachedCollider> BuildColliders(List<ColliderPart> parts, PrefabGraph graph,
+        SerializedFile file)
+    {
+        var result = new List<CachedCollider>(parts.Count);
+        foreach (ColliderPart p in parts)
+        {
+            switch (p.Kind)
+            {
+                case EColliderKind.Box:
+                    result.Add(CachedCollider.Box(p.LocalToRoot, p.Center, p.Size));
+                    break;
+                case EColliderKind.Sphere:
+                    result.Add(CachedCollider.Sphere(p.LocalToRoot, p.Center, p.Radius));
+                    break;
+                case EColliderKind.Capsule:
+                    result.Add(CachedCollider.Capsule(p.LocalToRoot, p.Center, p.Radius, p.Height, p.Direction));
+                    break;
+                default:
+                    if (!graph.ObjectsByPathId.TryGetValue(p.MeshId, out SerializedObject? meshObj))
+                        break;
+                    UnityMesh mesh = UnityMesh.Read(TypeTreeReader.Read(meshObj.TypeTree, file.ReaderFor(meshObj)));
+                    if (!mesh.Usable)
+                        break;
+                    var indices = new List<int>();
+                    foreach (int[] sub in mesh.Submeshes)
+                        indices.AddRange(sub);
+                    result.Add(CachedCollider.Mesh(p.LocalToRoot, mesh.Vertices, indices.ToArray()));
+                    break;
+            }
+        }
+        return result;
     }
 
     // Extracts the foliage meshes (grass/flowers/pebbles) the Foliage.blob instances. Unlike objects,
