@@ -432,25 +432,89 @@ public class ZombieSystemTests
     public void FullyWalledIn_TheZombieStaysPutWithoutJitter()
     {
         var system = new ZombieSystem(new[] { Table() }, TwoBounds(), FlatGround);
-        // A dozen zombies so the sticky detour side gets rolled both ways at least once.
-        system.Spawn(Enumerable.Range(0, 48).Select(i => At((i % 8) * 3, i / 8 * 3)).ToList(), new Random(6));
+        system.Spawn(Enumerable.Range(0, 8).Select(i => At(i * 3, 0)).ToList(), new Random(6));
         foreach (ZombieInstance z in system.Zombies)
         {
             z.Speciality = EZombieSpeciality.Normal;
             z.Yaw = 0f;
         }
         system.MoveResolver = (from, to, radius) => from; // sealed in: nothing moves, ever
+        system.Zombies[0].DetourSide = -1; // walled-in hysteresis must keep a previous side too
 
-        var player = Player(1, new Vector3(11, 5, 11));
+        // Sprinting: the 20 m radius reaches every zombie, so the walled-in branch actually runs.
+        var player = Player(1, new Vector3(11, 5, 11), UnturnedGodot.Player.EPlayerStance.Sprint);
         for (int i = 0; i < 10; i++)
             system.Tick(new[] { player }, 0.1f);
+        Assert.All(system.Zombies, z => Assert.Equal(EZombieState.Chase, z.State)); // aggroed
 
-        List<ZombieInstance> blocked = system.Zombies.Where(z => z.DetourSide != 0).ToList();
-        Assert.True(blocked.Count >= 2);
-        Assert.Contains(blocked, z => z.DetourSide == -1); // both sides get rolled
-        Assert.Contains(blocked, z => z.DetourSide == 1);
         // The failed tangent never teleports anyone: everyone is exactly where they spawned.
         Assert.All(system.Zombies, z => Assert.Equal(z.Home, z.Position));
+        Assert.Equal(-1, system.Zombies[0].DetourSide);
+    }
+
+    [Fact]
+    public void DetourSide_IsChosenGeometrically_TowardTheTarget()
+    {
+        // A wall at x = 2 blocks two zombies dead-on; the target sits up-Z of one and down-Z of the
+        // other. Each must skirt the wall on ITS side toward the target — the side a
+        // CharacterController slide picks — not a random one.
+        var system = new ZombieSystem(new[] { Table() }, TwoBounds(), FlatGround);
+        system.Spawn(Enumerable.Range(0, 8).Select(i => At(0, i * 2 - 8)).ToList(), new Random(2));
+        Assert.Equal(2, system.Zombies.Count);
+        ZombieInstance upper = system.Zombies[0];
+        ZombieInstance lower = system.Zombies[1];
+        foreach (ZombieInstance z in system.Zombies)
+        {
+            z.Speciality = EZombieSpeciality.Normal;
+            z.Yaw = -90f; // face +X, where the wall and the target are
+        }
+        upper.Position = new Vector3(0, 5, 2);
+        lower.Position = new Vector3(0, 5, -2);
+        system.MoveResolver = (from, to, radius) =>
+            to.X > 2f ? new Vector3(2f, to.Y, to.Z) : to; // a wall at x=2: blocks X, slides along Z
+
+        var player = Player(1, new Vector3(10, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
+        for (int i = 0; i < 20; i++)
+            system.Tick(new[] { player }, 0.1f);
+
+        // The upper zombie's tangent toward the target points down-Z; the lower one's up-Z.
+        Assert.Equal(-1, upper.DetourSide * lower.DetourSide < 0 ? -1 : 1); // opposite sides
+        Assert.True(upper.Position.Z < 2f, $"upper skirted away from the target: {upper.Position}");
+        Assert.True(lower.Position.Z > -2f, $"lower skirted away from the target: {lower.Position}");
+    }
+
+    [Fact]
+    public void DetourTies_KeepThePreviousSide()
+    {
+        // A perfectly symmetric head-on block (both tangents open, equal gains): the previous side
+        // wins; with no previous side the default (+1) is taken.
+        foreach (sbyte preset in new sbyte[] { 0, -1 })
+        {
+            ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+            zombie.DetourSide = preset;
+            system.MoveResolver = (from, to, radius) =>
+                to.X > from.X + 0.01f ? from : to; // any +X progress is walled; Z moves freely
+            var player = Player(1, new Vector3(10, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
+            system.Tick(new[] { player }, 0.1f); // the first tick's block is perfectly symmetric
+            Assert.Equal(preset == 0 ? (sbyte)1 : (sbyte)-1, zombie.DetourSide);
+        }
+    }
+
+    [Theory]
+    [InlineData(+1)]
+    [InlineData(-1)]
+    public void OnlyOneOpenSide_IsTakenRegardlessOfGain(int openSign)
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        // Everything is walled except movement toward one Z direction: that single open tangent
+        // must be taken no matter which side it is.
+        system.MoveResolver = (from, to, radius) =>
+            MathF.Sign(to.Z - from.Z) == openSign && MathF.Abs(to.Z - from.Z) > 0.01f ? to : from;
+        var player = Player(1, new Vector3(10, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
+        for (int i = 0; i < 3; i++)
+            system.Tick(new[] { player }, 0.1f);
+        Assert.Equal(openSign, zombie.DetourSide);
+        Assert.True(zombie.Position.Z * openSign > 0f);
     }
 
     [Fact]
@@ -637,8 +701,42 @@ public class ZombieSystemTests
             closestToCorner = MathF.Min(closestToCorner,
                 new Vector2(zombie.Position.X - corner.X, zombie.Position.Z - corner.Z).Length());
         }
-        Assert.True(closestToCorner < 1.5f, $"cut the corner: nearest pass {closestToCorner:F2}m");
+        // forwardLook (4 m) rounds the corner like the original: the cut is bounded by the
+        // lookahead (~2.8 m worst case), far tighter than the 4.2 m straight diagonal.
+        Assert.True(closestToCorner < 2.5f, $"cut the corner: nearest pass {closestToCorner:F2}m");
         Assert.Equal(EZombieState.Attack, zombie.State); // and still reached the target
+    }
+
+    [Theory]
+    [InlineData(2.2f, 3f)]   // the 4 m line is blocked, the 2 m one is open: mid lookahead
+    [InlineData(1.2f, 1.6f)] // 4 m and 2 m both blocked: fall back to the 1 m corridor carrot
+    public void AdaptiveLookahead_RetreatsWhenThePhysicalLineIsBlocked(float lineLimit, float maxStep)
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        system.PathQuery = (from, to, path) =>
+        {
+            path.Add(from);
+            path.Add(to);
+            return true;
+        };
+        // A resolver that refuses any single sweep longer than lineLimit (a wall always just
+        // ahead): the line test must retreat the carrot instead of leaning on the slide.
+        var sweeps = new List<float>();
+        system.MoveResolver = (from, to, radius) =>
+        {
+            float length = new Vector2(to.X - from.X, to.Z - from.Z).Length();
+            sweeps.Add(length);
+            return length > lineLimit ? from : to;
+        };
+
+        var player = Player(1, new Vector3(10, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
+        system.Tick(new[] { player }, 0.1f);
+        system.Tick(new[] { player }, 0.1f);
+
+        Assert.True(zombie.Position.X > 0.5f, $"never moved: {zombie.Position}");
+        // Every ACCEPTED movement sweep stayed within the open-line budget (the carrot retreated).
+        Assert.Contains(sweeps, len => len > lineLimit);   // the long line was probed...
+        Assert.True(zombie.Position.X <= maxStep, "...but movement itself never overshot it");
     }
 
     [Fact]
