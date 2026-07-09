@@ -172,6 +172,10 @@ public partial class Main : Node3D
     private async System.Threading.Tasks.Task StartInteractiveWorld(string unturnedPath, string environmentDir,
         LevelLighting? lighting, string? joinTarget)
     {
+        // Kick the zombie navigation map off first: its NavigationServer sync runs async over a
+        // few seconds and finishes behind the world build, so pathfinding is ready on first aggro.
+        ZombieNavigation.Preload(System.IO.Path.Combine(unturnedPath, "Maps", MapName));
+
         _pendingJoin = joinTarget;
 
         var loading = new LoadingScreen { Name = "LoadingScreen" };

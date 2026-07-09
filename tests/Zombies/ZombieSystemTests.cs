@@ -558,6 +558,90 @@ public class ZombieSystemTests
     }
 
     [Fact]
+    public void PartialRoute_HoldsAtItsEndInsteadOfBeeliningThroughWalls()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        // The target is unreachable (a raised porch): the navmesh route ends at the doorway,
+        // 5 m short of the player. The zombie must hold at the route's end — walking straight at
+        // the raw destination from there means pushing into the wall.
+        var doorway = new Vector3(5, 5, 0);
+        system.PathQuery = (from, to, path) =>
+        {
+            path.Add(from);
+            path.Add(doorway);
+            return true;
+        };
+
+        var player = Player(1, new Vector3(10, 5, 0));
+        for (int i = 0; i < 40; i++)
+            system.Tick(new[] { player }, 0.1f);
+
+        Assert.Equal(EZombieState.Chase, zombie.State); // never in attack range
+        Assert.True(zombie.Position.X <= doorway.X + 0.05f,
+            $"beelined past the route's end: {zombie.Position}");
+        Assert.True(zombie.Position.X > 4f, "never reached the route's end");
+    }
+
+    [Fact]
+    public void SidePathZombies_QueryTheRawTarget_NeverTheOffsetPoint()
+    {
+        // Offsetting the pathfinding DESTINATION made its navmesh snap flip between the two sides
+        // of a wall on every repath (zombies entering houses oscillated back out). The drift must
+        // live in the steering only: every query goes to the target's exact position.
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        var destinations = new List<Vector3>();
+        system.PathQuery = (from, to, path) =>
+        {
+            destinations.Add(to);
+            path.Add(from);
+            path.Add(to);
+            return true;
+        };
+
+        var player = Player(1, new Vector3(10, 5, 0));
+        system.Tick(new[] { player }, 0.1f);
+        zombie.Path = EZombiePath.Left; // force the drifting approach
+        for (int i = 0; i < 10; i++)
+            system.Tick(new[] { player }, 0.1f);
+
+        Assert.True(destinations.Count >= 2);
+        Assert.All(destinations, d => Assert.Equal(player.Position, d)); // raw, never ±1 m
+        // And the drift is visible in the motion: the zombie leaves the straight X-axis line.
+        Assert.NotEqual(0f, zombie.Position.Z);
+    }
+
+    [Fact]
+    public void CarrotFollowing_HoldsTheCorridorThroughTheCorner()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        // An L-route with the corner at (6, 0, 6): proper polyline following passes NEAR the
+        // corner instead of cutting the diagonal through the "wall".
+        var corner = new Vector3(6, 5, 6);
+        system.PathQuery = (from, to, path) =>
+        {
+            path.Add(from);
+            if (new Vector2(from.X - corner.X, from.Z - corner.Z).Length() > 1.2f && from.Z < 5f)
+                path.Add(corner);
+            path.Add(to);
+            return true;
+        };
+
+        // Sprinting: inside the 20 m radius and never shielded by the sneak-behind rule.
+        var player = Player(1, new Vector3(0, 5, 6), UnturnedGodot.Player.EPlayerStance.Sprint);
+        zombie.Position = new Vector3(6, 5, 0); // on the first leg of the L
+        zombie.Home = zombie.Position;
+        float closestToCorner = float.MaxValue;
+        for (int i = 0; i < 60; i++)
+        {
+            system.Tick(new[] { player }, 0.1f);
+            closestToCorner = MathF.Min(closestToCorner,
+                new Vector2(zombie.Position.X - corner.X, zombie.Position.Z - corner.Z).Length());
+        }
+        Assert.True(closestToCorner < 1.5f, $"cut the corner: nearest pass {closestToCorner:F2}m");
+        Assert.Equal(EZombieState.Attack, zombie.State); // and still reached the target
+    }
+
+    [Fact]
     public void PathQuery_WithNoRoute_FallsBackToTheStraightSeek()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
@@ -836,6 +920,34 @@ public class ZombieSystemTests
         Assert.Equal(EZombieState.Idle, zombie.State);
         Assert.Equal(zombie.LeaveTo, zombie.Position);
         Assert.Equal(yaw, zombie.Yaw); // a degenerate direction must not spin the zombie
+    }
+
+    [Fact]
+    public void GroundSnap_OverridesTheHeightfieldWithTheRealSurface()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        Vector3 sampledAt = default;
+        system.GroundSnap = (Vector3 position, out float y) =>
+        {
+            sampledAt = position; // receives the full position: stacked floors need the height
+            y = 9.25f;            // a sidewalk top, above the flat heightfield at 5
+            return true;
+        };
+
+        var player = Player(1, new Vector3(10, 5, 0));
+        system.Tick(new[] { player }, 0.1f);
+        Assert.Equal(9.25f, zombie.Position.Y);
+        Assert.NotEqual(default, sampledAt);
+
+        // When physics finds nothing (a hole), the sampler's own fallback decides; a false return
+        // keeps the previous height rather than teleporting anywhere.
+        system.GroundSnap = (Vector3 position, out float y) =>
+        {
+            y = 0f;
+            return false;
+        };
+        system.Tick(new[] { player }, 0.1f);
+        Assert.Equal(9.25f, zombie.Position.Y);
     }
 
     [Fact]

@@ -131,6 +131,23 @@ public partial class NetworkManager : Node
             float[] cast = space.CastMotion(query);
             if (cast[0] >= 1f)
                 return to; // clear path
+
+            // Step-up, like the CharacterController's stepOffset (the original's walkableClimb is
+            // 0.75): retry the sweep from 0.75 higher — stairs and porch steps pass, walls do not.
+            // The ground snap settles the final height onto the actual step afterwards.
+            query.Transform = new Transform3D(Basis.Identity, from + chest + new Vector3(0f, 0.75f, 0f));
+            float[] stepCast = space.CastMotion(query);
+            if (stepCast[0] >= 1f)
+            {
+                // Only a real step: the raised destination must have ground within the climb
+                // height, or this would hop through window openings and float over gaps.
+                var stepDown = PhysicsRayQueryParameters3D.Create(
+                    new Vector3(to.X, from.Y + 1.5f, to.Z), new Vector3(to.X, from.Y + 0.05f, to.Z), 1);
+                Godot.Collections.Dictionary ground = space.IntersectRay(stepDown);
+                if (ground.Count > 0)
+                    return new Vector3(to.X, ((Vector3)ground["position"]).Y, to.Z);
+            }
+
             Vector3 safe = from + (motion * cast[0]);
 
             // Contact normal at the blocked spot -> slide the remaining motion along the surface.
@@ -148,11 +165,173 @@ public partial class NetworkManager : Node
             float[] slideCast = space.CastMotion(query);
             return safe + (slide * slideCast[0]);
         };
+        // Real ground: a short downward ray finds the surface actually underfoot — sidewalks,
+        // house floors, stairs — with the zombie's current height as the reference so stacked
+        // floors (basements, upper storeys) resolve correctly. Mask 1 = static world only (the
+        // player's body lives on layer 2), falling back to the heightfield out in the open.
+        zombies.GroundSnap = (Vector3 position, out float y) =>
+        {
+            PhysicsDirectSpaceState3D? space = GetViewport()?.World3D?.DirectSpaceState;
+            if (space == null)
+                return _ground(position.X, position.Z, out y);
+            // Start at +0.8: covers the original's walkableClimb (0.75) steps without catching
+            // railings or furniture above the real floor.
+            var ray = PhysicsRayQueryParameters3D.Create(
+                position + new Vector3(0f, 0.8f, 0f), position + new Vector3(0f, -3f, 0f), 1);
+            Godot.Collections.Dictionary hit = space.IntersectRay(ray);
+            if (hit.Count > 0)
+            {
+                y = ((Vector3)hit["position"]).Y;
+                return true;
+            }
+            return _ground(position.X, position.Z, out y);
+        };
         // The pre-baked navmesh drives the Seeker port: zombies path around buildings and props
-        // exactly over the triangles the original game baked.
-        _zombieNavigation = ZombieNavigation.Build(zombies.Navmesh);
+        // exactly over the triangles the original game baked. Prefer the map preloaded at the
+        // start of the world load (its async sync is already done by now).
+        _zombieNavigation = ZombieNavigation.TakePreloaded() ?? ZombieNavigation.Build(zombies.Navmesh);
         if (_zombieNavigation != null)
             zombies.PathQuery = _zombieNavigation.Query;
+
+        // PATH_PROBE="x,y,z>x,y,z": log the navmesh route between two points — the exact tool for
+        // "which opening does the zombie leave the house through" investigations.
+        if (OS.GetEnvironment("PATH_PROBE") is { Length: > 0 } pathProbe && zombies.PathQuery != null)
+        {
+            string[] ends = pathProbe.Split('>');
+            string[] a = ends[0].Split(',');
+            string[] b = ends[1].Split(',');
+            var from = new Vector3(a[0].ToFloat(), a[1].ToFloat(), a[2].ToFloat());
+            var to = new Vector3(b[0].ToFloat(), b[1].ToFloat(), b[2].ToFloat());
+            double startedAt = Now;
+            void Probe()
+            {
+                var waypoints = new System.Collections.Generic.List<Vector3>();
+                bool ok = zombies.PathQuery!(from, to, waypoints);
+                GD.Print($"[nav] path probe t={Now - startedAt:F1}s {from} -> {to}: " +
+                    $"found={ok} waypoints={waypoints.Count}");
+                foreach (Vector3 w in waypoints)
+                    GD.Print($"[nav]   wp {w}");
+                if (!ok && Now - startedAt < 15)
+                    GetTree().CreateTimer(1.0).Timeout += Probe;
+            }
+            GetTree().CreateTimer(1.0).Timeout += Probe;
+        }
+
+        // HUNT_PROBE="zx,zy,zz>px,py,pz": run the COMPLETE zombie brain (detection, pathfinding,
+        // carrot following, physics) with one synthetic zombie hunting a stationary player, and
+        // log its trajectory — the definitive end-to-end check for "does the zombie reach me here".
+        if (OS.GetEnvironment("HUNT_PROBE") is { Length: > 0 } huntProbe)
+        {
+            GetTree().CreateTimer(8.0).Timeout += () => // after the nav map sync
+            {
+                string[] ends = huntProbe.Split('>');
+                string[] a = ends[0].Split(',');
+                string[] b = ends[1].Split(',');
+                var zombieAt = new UnturnedGodot.Data.ZombieSpawnpointData(0,
+                    new Vector3(a[0].ToFloat(), a[1].ToFloat(), -a[2].ToFloat())); // unity z-flip
+                var playerAt = new Vector3(b[0].ToFloat(), b[1].ToFloat(), b[2].ToFloat());
+                // Optional third point: after 3 s the player "runs" there (aggro out in the open,
+                // then dive into the house/garage — the reported scenario shape).
+                Vector3? playerLater = null;
+                if (ends.Length > 2)
+                {
+                    string[] c = ends[2].Split(',');
+                    playerLater = new Vector3(c[0].ToFloat(), c[1].ToFloat(), c[2].ToFloat());
+                }
+
+                var probe = new UnturnedGodot.Zombies.ZombieSystem(
+                    new[] { new UnturnedGodot.Data.ZombieTable { Name = "Probe", Damage = 10 } },
+                    UnturnedGodot.Data.LevelNavigationData.Load(
+                        System.IO.Path.Combine(levelDir, "Environment")),
+                    _ground,
+                    zombies.Navmesh)
+                {
+                    PathQuery = zombies.PathQuery,
+                    MoveResolver = zombies.MoveResolver,
+                    GroundSnap = zombies.GroundSnap,
+                    VisionBlocked = zombies.VisionBlocked,
+                };
+                probe.Spawn(new[] { zombieAt }, new System.Random(1));
+                if (probe.Zombies.Count == 0)
+                {
+                    GD.Print("[nav] hunt probe: spawnpoint rejected (outside bounds/navmesh)");
+                    return;
+                }
+                UnturnedGodot.Zombies.ZombieInstance z = probe.Zombies[0];
+                z.Speciality = UnturnedGodot.Zombies.EZombieSpeciality.Normal;
+                Vector3 last = z.Position;
+                for (int tick = 0; tick < 500; tick++) // 40 s of hunting
+                {
+                    Vector3 where = playerLater != null && tick > 37 ? playerLater.Value : playerAt;
+                    var views = new[]
+                    {
+                        new UnturnedGodot.Zombies.ZombiePlayerView(1, where,
+                            UnturnedGodot.Player.EPlayerStance.Sprint, false),
+                    };
+                    probe.Tick(views, UnturnedGodot.Net.ServerSimulation.TickRate);
+                    if (tick % 25 == 0)
+                        GD.Print($"[nav] hunt t={tick * 0.08f:F1}s pos={z.Position} state={z.State}");
+                    bool phaseTwo = playerLater == null || tick > 37;
+                    if (z.State == UnturnedGodot.Zombies.EZombieState.Attack && phaseTwo)
+                    {
+                        GD.Print($"[nav] hunt probe: ATTACK reached at t={tick * 0.08f:F1}s pos={z.Position}");
+                        return;
+                    }
+                    last = z.Position;
+                }
+                GD.Print($"[nav] hunt probe: never reached attack; final pos={last} state={z.State}");
+            };
+        }
+
+        // WALK_PROBE="x,y,z>x,y,z": march the zombie movement mechanics (MoveResolver + GroundSnap)
+        // in a straight line between two points and log where they end up — the tool for "can a
+        // zombie physically climb this stair/step" questions.
+        if (OS.GetEnvironment("WALK_PROBE") is { Length: > 0 } walkProbe)
+        {
+            GetTree().CreateTimer(2.0).Timeout += () =>
+            {
+                string[] ends = walkProbe.Split('>');
+                string[] a = ends[0].Split(',');
+                string[] b = ends[1].Split(',');
+                var at = new Vector3(a[0].ToFloat(), a[1].ToFloat(), a[2].ToFloat());
+                var goal = new Vector3(b[0].ToFloat(), b[1].ToFloat(), b[2].ToFloat());
+                for (int i = 0; i < 120; i++)
+                {
+                    Vector3 flat = new(goal.X - at.X, 0, goal.Z - at.Z);
+                    if (flat.Length() < 0.2f)
+                        break;
+                    Vector3 next = at + (flat.Normalized() * 0.44f); // one 5.5 m/s tick
+                    next = zombies.MoveResolver!(at, next, 0.4f);
+                    if (zombies.GroundSnap!(next, out float gy))
+                        next.Y = gy;
+                    if ((next - at).Length() < 0.02f)
+                    {
+                        GD.Print($"[nav] walk probe STUCK at {at} (step {i})");
+                        return;
+                    }
+                    at = next;
+                }
+                GD.Print($"[nav] walk probe reached {at} (goal {goal})");
+            };
+        }
+
+        // GROUND_PROBE="x,y,z;x,y,z": log the sampled ground at reference points (the pre-baked
+        // navmesh heights are the ground truth of the ORIGINAL geometry, so this diagnoses any
+        // placement drift in our world). Deferred a second so the physics world has colliders.
+        if (OS.GetEnvironment("GROUND_PROBE") is { Length: > 0 } probe)
+        {
+            GetTree().CreateTimer(2.0).Timeout += () =>
+            {
+                foreach (string point in probe.Split(';'))
+                {
+                    string[] parts = point.Split(',');
+                    var at = new Vector3(parts[0].ToFloat(), parts[1].ToFloat(), parts[2].ToFloat());
+                    bool ok = zombies.GroundSnap!(at, out float gy);
+                    GD.Print($"[nav] ground probe at {at}: hit={ok} y={gy:F2} (reference {at.Y:F2}, " +
+                        $"delta {gy - at.Y:+0.00;-0.00})");
+                }
+            };
+        }
 
         _ = new UnturnedGodot.Zombies.ZombieHost(zombies, _server);
         GD.Print($"[zombies] {zombies.Zombies.Count} zombies spawned from the level's spawnpoints");
