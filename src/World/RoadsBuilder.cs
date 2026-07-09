@@ -122,6 +122,8 @@ public static class RoadsBuilder
             AlbedoTexture = texture,
             Roughness = 1f,
             CullMode = BaseMaterial3D.CullModeEnum.Disabled, // seen from above; winding varies with curves
+            // Roads are viewed at grazing angles; plain trilinear collapses to blurry mips ~10 m out.
+            TextureFilter = BaseMaterial3D.TextureFilterEnum.LinearWithMipmapsAnisotropic,
         };
         // Unturned tiles the texture every texHeight/config.Height metres of road length.
         float repeat = config.Height > 0f ? texture.GetHeight() / config.Height : texture.GetHeight();

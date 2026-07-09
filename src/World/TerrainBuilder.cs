@@ -28,14 +28,14 @@ public static class TerrainBuilder
         Code = """
         shader_type spatial;
         render_mode cull_back;
-        uniform sampler2D layer0 : source_color, repeat_enable;
-        uniform sampler2D layer1 : source_color, repeat_enable;
-        uniform sampler2D layer2 : source_color, repeat_enable;
-        uniform sampler2D layer3 : source_color, repeat_enable;
-        uniform sampler2D layer4 : source_color, repeat_enable;
-        uniform sampler2D layer5 : source_color, repeat_enable;
-        uniform sampler2D layer6 : source_color, repeat_enable;
-        uniform sampler2D layer7 : source_color, repeat_enable;
+        uniform sampler2D layer0 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
+        uniform sampler2D layer1 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
+        uniform sampler2D layer2 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
+        uniform sampler2D layer3 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
+        uniform sampler2D layer4 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
+        uniform sampler2D layer5 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
+        uniform sampler2D layer6 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
+        uniform sampler2D layer7 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
         uniform sampler2D control0 : repeat_disable; // weights of layers 0..3
         uniform sampler2D control1 : repeat_disable; // weights of layers 4..7
         uniform float tiling = 0.15;                 // texture repeats every 1/tiling world metres
