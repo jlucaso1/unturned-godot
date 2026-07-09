@@ -257,6 +257,53 @@ public class ZombieDataTests : IDisposable
         Assert.Equal(LevelNavigationData.NoBound, LevelNavigationData.TryGetBound(bounds, new Vector3(0, 0, 200)));
     }
 
+    private static bool Flat(float x, float z, out float y)
+    {
+        y = 7f;
+        return true;
+    }
+
+    [Fact]
+    public void ZombieWorld_MissingAnyPiece_ReturnsNull()
+    {
+        // Empty level dir: no tables, no spawnpoints, no bounds.
+        Assert.Null(UnturnedGodot.Zombies.ZombieWorld.Load(_dir, Flat, new Random(1)));
+
+        // Tables alone are not enough (spawnpoints and bounds still missing).
+        Directory.CreateDirectory(Path.Combine(_dir, "Spawns"));
+        File.WriteAllBytes(Path.Combine(_dir, "Spawns", "Zombies.dat"), TablesV10());
+        Assert.Null(UnturnedGodot.Zombies.ZombieWorld.Load(_dir, Flat, new Random(1)));
+
+        // Tables + spawnpoints, still no bounds.
+        File.WriteAllBytes(Path.Combine(_dir, "Spawns", "Animals.dat"),
+            Spawnpoints((0, new Vector3(0, 5, 0))));
+        Assert.Null(UnturnedGodot.Zombies.ZombieWorld.Load(_dir, Flat, new Random(1)));
+    }
+
+    [Fact]
+    public void ZombieWorld_CompleteLevel_SpawnsThePopulation()
+    {
+        Directory.CreateDirectory(Path.Combine(_dir, "Spawns"));
+        Directory.CreateDirectory(Path.Combine(_dir, "Environment"));
+        File.WriteAllBytes(Path.Combine(_dir, "Spawns", "Zombies.dat"), TablesV10());
+        File.WriteAllBytes(Path.Combine(_dir, "Spawns", "Animals.dat"),
+            Spawnpoints((0, new Vector3(0, 5, 0)), (0, new Vector3(5, 5, 0)),
+                (0, new Vector3(-5, 5, 0)), (0, new Vector3(0, 5, 5))));
+        using (var w = new BinaryWriter(File.Create(Path.Combine(_dir, "Environment", "Bounds.dat"))))
+        {
+            w.Write((byte)1);
+            w.Write((byte)1);
+            foreach (float v in new[] { 0f, 140f, 0f, 100f, 300f, 100f })
+                w.Write(v);
+        }
+
+        UnturnedGodot.Zombies.ZombieSystem? system =
+            UnturnedGodot.Zombies.ZombieWorld.Load(_dir, Flat, new Random(1));
+        Assert.NotNull(system);
+        Assert.Single(system!.Zombies); // ceil(4 * 0.25)
+        Assert.Equal(7f, system.Zombies[0].Position.Y); // ground-clamped by the sampler
+    }
+
     // Real PEI data (self-skips without the game): 19 zombie tables, 1456 spawnpoints, 19 nav bounds.
     [Fact]
     public void RealPei_ZombieDataParses()

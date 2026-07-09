@@ -26,18 +26,32 @@ public static class AudioExtractor
         return file.EndsWith(".asset", StringComparison.OrdinalIgnoreCase) ? file[..^6] : file;
     }
 
+    // A synthetic definition built from RAW AudioClips (assets the game plays directly, without a
+    // OneShotAudioDefinition — e.g. ZombieManager's roar/groan arrays): the clip container paths
+    // plus the caller-supplied volume/pitch envelope, cached under the group name like any def.
+    public sealed record RawClipGroup(
+        string Name, IReadOnlyList<string> ClipPaths, float Volume, float MinPitch, float MaxPitch);
+
     // Extracts every definition in defAssetPaths (masterbundle-relative, e.g.
-    // "Effects/Physics/Footstep/Grass_Walk/Footstep_Grass_Walk.asset") that is not cached yet.
-    public static int Extract(string bundlePath, IReadOnlyCollection<string> defAssetPaths, string audioCacheDir)
+    // "Effects/Physics/Footstep/Grass_Walk/Footstep_Grass_Walk.asset") plus every raw clip group
+    // that is not cached yet.
+    public static int Extract(string bundlePath, IReadOnlyCollection<string> defAssetPaths, string audioCacheDir,
+        IReadOnlyCollection<RawClipGroup>? clipGroups = null)
     {
         var missing = new List<string>();
         foreach (string p in defAssetPaths)
             if (!IsCached(audioCacheDir, DefNameOf(p)))
                 missing.Add(p);
-        if (missing.Count == 0)
+        var missingGroups = new List<RawClipGroup>();
+        if (clipGroups != null)
+            foreach (RawClipGroup g in clipGroups)
+                if (!IsCached(audioCacheDir, g.Name))
+                    missingGroups.Add(g);
+        if (missing.Count == 0 && missingGroups.Count == 0)
             return 0;
 
-        GD.Print($"[audio] extracting {missing.Count} audio definitions from masterbundle (one-time)...");
+        GD.Print($"[audio] extracting {missing.Count} audio definitions and {missingGroups.Count} " +
+            "clip groups from masterbundle (one-time)...");
         UnityBundle bundle = UnityBundle.Read(File.ReadAllBytes(bundlePath)); // full: audio sits in .resource
         byte[] sf = Array.Empty<byte>();
         byte[] resource = Array.Empty<byte>();
@@ -127,6 +141,46 @@ public static class AudioExtractor
 
             using (FileStream s = File.Create(Path.Combine(defDir, "def.bin")))
                 AudioDefCache.Write(s, new OneShotAudioDef(volumeMultiplier, minPitch, maxPitch, clipFiles));
+            extracted++;
+        }
+
+        foreach (RawClipGroup group in missingGroups)
+        {
+            string groupDir = Path.Combine(audioCacheDir, group.Name);
+            Directory.CreateDirectory(groupDir);
+            var clipFiles = new List<string>();
+            foreach (string clipPath in group.ClipPaths)
+            {
+                string key = assetPrefix + clipPath.Replace('\\', '/').ToLowerInvariant();
+                if (!containers.TryGetValue(key, out long clipId)
+                    || !byId.TryGetValue(clipId, out SerializedObject? clipObj))
+                {
+                    GD.PushWarning($"[audio] clip not found in bundle: {clipPath}");
+                    continue;
+                }
+                Dictionary<string, object> clip = TypeTreeReader.Read(clipObj.TypeTree, file.ReaderFor(clipObj));
+                string name = clip.GetValueOrDefault("m_Name") as string ?? $"clip_{clipId:x}";
+                if (clip.GetValueOrDefault("m_Resource") is not Dictionary<string, object> res)
+                    continue;
+                long offset = Convert.ToInt64(res["m_Offset"]);
+                int size = Convert.ToInt32(res["m_Size"]);
+                if (offset < 0 || size <= 0 || offset + size > resource.Length)
+                    continue;
+                byte[]? ogg = RebuildOgg(resource, offset, size, name);
+                if (ogg == null)
+                    continue;
+                string fileName = name + ".ogg";
+                File.WriteAllBytes(Path.Combine(groupDir, fileName), ogg);
+                clipFiles.Add(fileName);
+            }
+            if (clipFiles.Count == 0)
+            {
+                GD.PushWarning($"[audio] no clips rebuilt for group {group.Name}");
+                continue;
+            }
+            using (FileStream s = File.Create(Path.Combine(groupDir, "def.bin")))
+                AudioDefCache.Write(s,
+                    new OneShotAudioDef(group.Volume, group.MinPitch, group.MaxPitch, clipFiles));
             extracted++;
         }
 

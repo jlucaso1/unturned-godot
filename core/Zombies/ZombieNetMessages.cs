@@ -15,6 +15,8 @@ public struct ZombieListing
     public byte Pants;
     public byte Hat;
     public byte Gear;
+    public byte Move; // animation variant seeds, rolled server-side and replicated (Move_N/Idle_N)
+    public byte Idle;
     public Vector3 Position;
     public byte Yaw;
 }
@@ -48,6 +50,8 @@ public static class ZombieNetMessages
             w.Write(z.Pants);
             w.Write(z.Hat);
             w.Write(z.Gear);
+            w.Write(z.Move);
+            w.Write(z.Idle);
             w.Write(z.Position.X);
             w.Write(z.Position.Y);
             w.Write(z.Position.Z);
@@ -72,6 +76,8 @@ public static class ZombieNetMessages
                 Pants = r.ReadByte(),
                 Hat = r.ReadByte(),
                 Gear = r.ReadByte(),
+                Move = r.ReadByte(),
+                Idle = r.ReadByte(),
                 Position = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()),
                 Yaw = r.ReadByte(),
             });

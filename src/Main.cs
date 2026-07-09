@@ -271,6 +271,7 @@ public partial class Main : Node3D
         else
         {
             network.StartSingleplayer(playerName);
+            network.HostZombies(System.IO.Path.Combine(unturnedPath, "Maps", MapName));
         }
 
         // OPEN_LAN=1 opens the UDP listener immediately; OPEN_LAN_AFTER=seconds opens it mid-game — the
@@ -292,10 +293,12 @@ public partial class Main : Node3D
             return;
         player.Net = network.Client;
         AddChild(RemotePlayersView.Create(network.Client, unturnedPath, _movementAudioFactory));
+        AddChild(ZombiesView.Create(network.Client, unturnedPath, _oneShotAudio));
     }
 
     // One MovementAudio per character; remote avatars get theirs from this factory (RemotePlayersView).
     private System.Func<MovementAudio>? _movementAudioFactory;
+    private OneShotAudio? _oneShotAudio; // the shared positional voice pool (zombie roars use it too)
 
     // Movement audio infrastructure: the physics-material bank + terrain splat sampler resolve WHICH
     // definition a step plays; the shared AudioDefLibrary + positional OneShotAudio pool play it. The
@@ -327,16 +330,32 @@ public partial class Main : Node3D
                 { "Foliage", "Concrete", "Gravel", "Sand", "Tile", "Metal", "Wood", "Cloth", "Snow", "Ice" })
                 if (bank.FindAudioDefPath(name, key) is { } path)
                     defPaths.Add(path);
+        // ZombieManager's raw clip arrays (played directly, not via OneShotAudioDefinitions): the 16
+        // roars and 5 groans, packaged as synthetic definitions with Zombie.PlayOneShot's envelope
+        // (pitch 0.9-1.1 for a normal zombie; megas override at play time).
+        var roarPaths = new string[16];
+        for (int i = 0; i < roarPaths.Length; i++)
+            roarPaths[i] = $"Sounds/Zombies/Roars/Roar_{i}.mp3";
+        var groanPaths = new string[5];
+        for (int i = 0; i < groanPaths.Length; i++)
+            groanPaths[i] = $"Sounds/Zombies/Groans/Groan_{i}.mp3";
+        var clipGroups = new System.Collections.Generic.List<AudioExtractor.RawClipGroup>
+        {
+            new("ZombieRoars", roarPaths, Volume: 1f, MinPitch: 0.9f, MaxPitch: 1.1f),
+            new("ZombieGroans", groanPaths, Volume: 1f, MinPitch: 0.9f, MaxPitch: 1.1f),
+        };
         // Deferred until the world streamer finishes: a cold load already runs one full 1.4 GB bundle
         // decode, and racing a second one for audio doubles peak CPU/memory and can stall weak machines.
         _pendingAudioExtraction = () =>
-            _ = System.Threading.Tasks.Task.Run(() => AudioExtractor.Extract(bundlePath, defPaths, audioCacheDir));
+            _ = System.Threading.Tasks.Task.Run(
+                () => AudioExtractor.Extract(bundlePath, defPaths, audioCacheDir, clipGroups));
 
         GD.Print($"[audio] footsteps ready: {bank.Count} physics materials, {landscape.Count} landscape " +
             $"materials, {splat.TileCount} splat tiles");
 
         var oneShot = OneShotAudio.Create(new AudioDefLibrary(audioCacheDir));
         AddChild(oneShot);
+        _oneShotAudio = oneShot;
         MovementAudio Factory(bool startGrounded) => new(bank, landscape, splat, oneShot, startGrounded);
         return (Factory(startGrounded: false), () => Factory(startGrounded: true));
     }
