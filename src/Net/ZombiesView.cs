@@ -30,6 +30,13 @@ public partial class ZombiesView : Node3D
         public bool Streaming;     // any ZombieStates received yet (idle zombies never stream)
         public double StartleUntil; // while set, the wake-up roar plays before the state clip
         public double NextGroan;    // Zombie.cs's groan loop clock
+
+        // C#-side mirrors of engine state, so the per-frame loop never crosses into Godot for a value it
+        // already knows, and never writes one that hasn't changed. With the whole population asleep the
+        // loop makes zero interop calls; the values written are exactly the ones written before.
+        public Vector3 KnownPosition;  // Root.Position as last written
+        public float AppliedYaw;       // Root.RotationDegrees.Y as last written
+        public bool AnimationActive = true; // rig.ProcessMode as last written (Inherit on spawn)
     }
 
     private string _unturnedPath = "";
@@ -52,7 +59,7 @@ public partial class ZombiesView : Node3D
         (float minPitch, float maxPitch) = avatar.Speciality == EZombieSpeciality.Mega
             ? (0.5f, 0.7f)
             : (0.9f, 1.1f);
-        _audio?.Play(group, avatar.Root.Position + Vector3.Up, volumeScale: 0.5f, maxDistance: 32f,
+        _audio?.Play(group, avatar.KnownPosition + Vector3.Up, volumeScale: 0.5f, maxDistance: 32f,
             minPitch, maxPitch);
     }
 
@@ -82,6 +89,8 @@ public partial class ZombiesView : Node3D
         avatar.Idle = listing.Idle;
         avatar.Root.Position = listing.Position;
         avatar.Root.RotationDegrees = new Vector3(0, NetAngles.DequantizeYaw(listing.Yaw), 0);
+        avatar.KnownPosition = listing.Position;
+        avatar.AppliedYaw = NetAngles.DequantizeYaw(listing.Yaw);
         avatar.LastUpdatePos = listing.Position;
         avatar.Buffer.UpdateLastSnapshot(
             new PoseSnapshot(listing.Position, 0f, NetAngles.DequantizeYaw(listing.Yaw)), NetworkManager.Now);
@@ -156,9 +165,20 @@ public partial class ZombiesView : Node3D
         {
             if (avatar.Streaming)
             {
+                // Write the interpolated pose only when it differs from what the node already holds —
+                // once a zombie settles back to sleep the buffer keeps returning the same pose, and
+                // re-writing it every frame is pure interop cost for zero visual change.
                 PoseSnapshot pose = avatar.Buffer.GetCurrentSnapshot(now);
-                avatar.Root.Position = pose.Position;
-                avatar.Root.RotationDegrees = new Vector3(0, pose.Yaw, 0);
+                if (pose.Position != avatar.KnownPosition)
+                {
+                    avatar.Root.Position = pose.Position;
+                    avatar.KnownPosition = pose.Position;
+                }
+                if (pose.Yaw != avatar.AppliedYaw)
+                {
+                    avatar.Root.RotationDegrees = new Vector3(0, pose.Yaw, 0);
+                    avatar.AppliedYaw = pose.Yaw;
+                }
             }
 
             if (avatar.StartleUntil > 0 && now >= avatar.StartleUntil)
@@ -167,10 +187,13 @@ public partial class ZombiesView : Node3D
                 avatar.Rig?.Play(ClipFor(avatar)); // the roar ended: pick up the current state clip
             }
 
+            // One camera-distance test drives both the groan loop and the animation gate (they share
+            // the same radius), off the C#-side position — no engine round-trip.
+            bool nearby = eye is { } cam
+                && avatar.KnownPosition.DistanceSquaredTo(cam) <= AnimateWithin * AnimateWithin;
+
             // Zombie.cs's groan loop, only for visible (nearby) zombies: every 4-8 s (megas 2-4 s),
             // a standing zombie has a 20% chance to groan while a moving one always roars.
-            bool nearby = eye is { } cam
-                && avatar.Root.Position.DistanceSquaredTo(cam) <= AnimateWithin * AnimateWithin;
             if (nearby && now >= avatar.NextGroan)
             {
                 avatar.NextGroan = now + (avatar.Speciality == EZombieSpeciality.Mega
@@ -184,10 +207,12 @@ public partial class ZombiesView : Node3D
             }
 
             // Far zombies keep their pose but stop sampling animation, like Unturned's inactive regions.
-            if (avatar.Rig is { } rig && eye is { } camera)
+            // The mode is only pushed on transitions; re-asserting it every frame was an interop call
+            // per zombie per frame.
+            if (avatar.Rig is { } rig && eye != null && nearby != avatar.AnimationActive)
             {
-                bool animate = avatar.Root.Position.DistanceSquaredTo(camera) <= AnimateWithin * AnimateWithin;
-                rig.ProcessMode = animate ? ProcessModeEnum.Inherit : ProcessModeEnum.Disabled;
+                avatar.AnimationActive = nearby;
+                rig.ProcessMode = nearby ? ProcessModeEnum.Inherit : ProcessModeEnum.Disabled;
             }
         }
     }

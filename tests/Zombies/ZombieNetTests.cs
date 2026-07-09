@@ -70,6 +70,52 @@ public class ZombieNetMessagesTests
         Assert.Equal(new Vector3(-4, 5, -6), read[1].Position);
         Assert.Equal(EZombieState.Attack, read[1].State);
     }
+
+    // The exact wire layout, byte for byte — what a little-endian BinaryWriter historically produced.
+    // Locks the format so serializer rewrites can't silently change what's on the wire.
+    [Fact]
+    public void ZombieStates_WireLayout_IsExact()
+    {
+        var states = new List<ZombieSnapshotState>
+        {
+            new() { Id = 0x0102, Position = new Vector3(1f, -2f, 0.5f), Yaw = 7, State = EZombieState.Return },
+        };
+        byte[] payload = ZombieNetMessages.WriteZombieStates(0x04030201u, states);
+
+        var expected = new List<byte> { (byte)ENetMessage.ZombieStates, 0x01, 0x02, 0x03, 0x04, 1, 0x02, 0x01 };
+        expected.AddRange(BitConverter.GetBytes(1f));
+        expected.AddRange(BitConverter.GetBytes(-2f));
+        expected.AddRange(BitConverter.GetBytes(0.5f));
+        expected.Add(7);
+        expected.Add((byte)EZombieState.Return);
+        Assert.Equal(expected.ToArray(), payload);
+    }
+
+    [Fact]
+    public void ZombieList_WireLayout_IsExact()
+    {
+        var chunk = new List<ZombieListing>
+        {
+            new()
+            {
+                Id = 0x0201, Type = 3, Speciality = EZombieSpeciality.Crawler,
+                Shirt = 1, Pants = 2, Hat = 3, Gear = 4, Move = 5, Idle = 6,
+                Position = new Vector3(8f, 16f, -32f), Yaw = 200,
+            },
+        };
+        byte[] payload = ZombieNetMessages.WriteZombieList(chunk);
+
+        var expected = new List<byte>
+        {
+            (byte)ENetMessage.ZombieList, 1,
+            0x01, 0x02, 3, (byte)EZombieSpeciality.Crawler, 1, 2, 3, 4, 5, 6,
+        };
+        expected.AddRange(BitConverter.GetBytes(8f));
+        expected.AddRange(BitConverter.GetBytes(16f));
+        expected.AddRange(BitConverter.GetBytes(-32f));
+        expected.Add(200);
+        Assert.Equal(expected.ToArray(), payload);
+    }
 }
 
 // The full server-side loop over the in-memory loopback: a host with zombies, clients that join and

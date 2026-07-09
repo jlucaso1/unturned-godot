@@ -94,32 +94,38 @@ public partial class NetworkManager : Node
         // buildings): stealth detection fails when geometry hides the player. Stops at 95% of the
         // distance exactly like the original so the ray never clips the target's own capsule. The
         // ZombieHost ticks inside _PhysicsProcess, so querying the physics space here is safe.
+        // Query-parameter objects are engine objects, so both closures reuse one instead of
+        // allocating (and later finalizing) a fresh one per zombie step.
+        var ray = new PhysicsRayQueryParameters3D();
         zombies.VisionBlocked = (from, to) =>
         {
             PhysicsDirectSpaceState3D? space = GetViewport()?.World3D?.DirectSpaceState;
             if (space == null)
                 return false;
-            var query = PhysicsRayQueryParameters3D.Create(from, from + ((to - from) * 0.95f));
-            return space.IntersectRay(query).Count > 0;
+            ray.From = from;
+            ray.To = from + ((to - from) * 0.95f);
+            return space.IntersectRay(ray).Count > 0;
         };
         // The CharacterController's collide-and-slide against real world colliders: sweep a sphere
         // at chest height along the step; when it hits, advance to the safe fraction and slide the
         // remainder along the contact plane (one slide iteration, like a CC's per-frame resolve).
         var sweep = new SphereShape3D();
+        var query = new PhysicsShapeQueryParameters3D { Shape = sweep };
+        float lastRadius = -1f;
         zombies.MoveResolver = (from, to, radius) =>
         {
             PhysicsDirectSpaceState3D? space = GetViewport()?.World3D?.DirectSpaceState;
             if (space == null)
                 return to;
-            sweep.Radius = radius;
+            if (radius != lastRadius) // one capsule size per speciality; skip the redundant engine write
+            {
+                sweep.Radius = radius;
+                lastRadius = radius;
+            }
             Vector3 chest = Vector3.Up; // sweep at capsule-middle height, above ground clutter
             Vector3 motion = to - from;
-            var query = new PhysicsShapeQueryParameters3D
-            {
-                Shape = sweep,
-                Transform = new Transform3D(Basis.Identity, from + chest),
-                Motion = motion,
-            };
+            query.Transform = new Transform3D(Basis.Identity, from + chest);
+            query.Motion = motion;
             float[] cast = space.CastMotion(query);
             if (cast[0] >= 1f)
                 return to; // clear path

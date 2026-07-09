@@ -254,10 +254,13 @@ public sealed class ZombieSystem
     }
 
     // PlayerStance's 0.1 s stealth alert per player, against the zombies of the player's nav region.
+    // (Indexed loops throughout: foreach over the IReadOnlyList interface boxes an enumerator per call,
+    // which in the per-zombie hunt path was the tick's only steady allocation.)
     private void Detect(IReadOnlyList<ZombiePlayerView> players)
     {
-        foreach (ZombiePlayerView player in players)
+        for (int p = 0; p < players.Count; p++)
         {
+            ZombiePlayerView player = players[p];
             byte bound = LevelNavigationData.TryGetBound(_bounds, player.Position);
             if (bound == LevelNavigationData.NoBound)
                 continue; // player.movement.nav == 255: no region hears the alert
@@ -507,11 +510,11 @@ public sealed class ZombieSystem
 
     private static bool TryGetPlayer(IReadOnlyList<ZombiePlayerView> players, byte id, out ZombiePlayerView player)
     {
-        foreach (ZombiePlayerView candidate in players)
+        for (int i = 0; i < players.Count; i++)
         {
-            if (candidate.Id == id)
+            if (players[i].Id == id)
             {
-                player = candidate;
+                player = players[i];
                 return true;
             }
         }

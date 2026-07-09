@@ -14,11 +14,14 @@ public sealed class ZombieHost
     private readonly List<ZombiePlayerView> _players = new();
     private readonly List<ZombieSnapshotState> _awake = new();
     private readonly Dictionary<ushort, EZombieState> _lastSent = new();
+    private readonly System.Action<byte, PlayerMoveState> _collectPlayer; // cached: a fresh closure per tick is garbage
 
     public ZombieHost(ZombieSystem system, NetServer server)
     {
         _system = system;
         _server = server;
+        _collectPlayer = (id, state) =>
+            _players.Add(new ZombiePlayerView(id, state.Position, state.Stance, state.Moving));
         server.OnTick += Tick;
         server.OnPlayerAdmitted += SendPopulation;
     }
@@ -26,8 +29,7 @@ public sealed class ZombieHost
     private void Tick(uint tick)
     {
         _players.Clear();
-        _server.ForEachJoinedPlayer((id, state) =>
-            _players.Add(new ZombiePlayerView(id, state.Position, state.Stance, state.Moving)));
+        _server.ForEachJoinedPlayer(_collectPlayer);
 
         _system.Tick(_players, ServerSimulation.TickRate);
 

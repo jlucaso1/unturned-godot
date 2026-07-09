@@ -1,3 +1,5 @@
+using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 using Godot;
@@ -35,29 +37,36 @@ public static class ZombieNetMessages
     // Reliable datagrams are not fragmented, so the full population ships in MTU-sized chunks.
     public const int ListChunkSize = 50;
 
+    private const int ListingBytes = 23;  // id 2 + look bytes 8 + position 12 + yaw 1
+    private const int SnapshotBytes = 16; // id 2 + position 12 + yaw 1 + state 1
+
+    // These payloads are rebuilt every server tick, so they are written straight into an exact-sized
+    // array (same little-endian bytes a BinaryWriter produced) instead of growing a MemoryStream.
     public static byte[] WriteZombieList(IReadOnlyList<ZombieListing> chunk)
     {
-        using var ms = new MemoryStream();
-        using var w = new BinaryWriter(ms);
-        w.Write((byte)ENetMessage.ZombieList);
-        w.Write((byte)chunk.Count);
-        foreach (ZombieListing z in chunk)
+        var payload = new byte[2 + (chunk.Count * ListingBytes)];
+        payload[0] = (byte)ENetMessage.ZombieList;
+        payload[1] = (byte)chunk.Count;
+        int o = 2;
+        for (int i = 0; i < chunk.Count; i++)
         {
-            w.Write(z.Id);
-            w.Write(z.Type);
-            w.Write((byte)z.Speciality);
-            w.Write(z.Shirt);
-            w.Write(z.Pants);
-            w.Write(z.Hat);
-            w.Write(z.Gear);
-            w.Write(z.Move);
-            w.Write(z.Idle);
-            w.Write(z.Position.X);
-            w.Write(z.Position.Y);
-            w.Write(z.Position.Z);
-            w.Write(z.Yaw);
+            ZombieListing z = chunk[i];
+            BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(o), z.Id);
+            payload[o + 2] = z.Type;
+            payload[o + 3] = (byte)z.Speciality;
+            payload[o + 4] = z.Shirt;
+            payload[o + 5] = z.Pants;
+            payload[o + 6] = z.Hat;
+            payload[o + 7] = z.Gear;
+            payload[o + 8] = z.Move;
+            payload[o + 9] = z.Idle;
+            BinaryPrimitives.WriteSingleLittleEndian(payload.AsSpan(o + 10), z.Position.X);
+            BinaryPrimitives.WriteSingleLittleEndian(payload.AsSpan(o + 14), z.Position.Y);
+            BinaryPrimitives.WriteSingleLittleEndian(payload.AsSpan(o + 18), z.Position.Z);
+            payload[o + 22] = z.Yaw;
+            o += ListingBytes;
         }
-        return ms.ToArray();
+        return payload;
     }
 
     public static List<ZombieListing> ReadZombieList(byte[] payload)
@@ -87,21 +96,23 @@ public static class ZombieNetMessages
 
     public static byte[] WriteZombieStates(uint tick, IReadOnlyList<ZombieSnapshotState> states)
     {
-        using var ms = new MemoryStream();
-        using var w = new BinaryWriter(ms);
-        w.Write((byte)ENetMessage.ZombieStates);
-        w.Write(tick);
-        w.Write((byte)states.Count);
-        foreach (ZombieSnapshotState s in states)
+        var payload = new byte[6 + (states.Count * SnapshotBytes)];
+        payload[0] = (byte)ENetMessage.ZombieStates;
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(1), tick);
+        payload[5] = (byte)states.Count;
+        int o = 6;
+        for (int i = 0; i < states.Count; i++)
         {
-            w.Write(s.Id);
-            w.Write(s.Position.X);
-            w.Write(s.Position.Y);
-            w.Write(s.Position.Z);
-            w.Write(s.Yaw);
-            w.Write((byte)s.State);
+            ZombieSnapshotState s = states[i];
+            BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(o), s.Id);
+            BinaryPrimitives.WriteSingleLittleEndian(payload.AsSpan(o + 2), s.Position.X);
+            BinaryPrimitives.WriteSingleLittleEndian(payload.AsSpan(o + 6), s.Position.Y);
+            BinaryPrimitives.WriteSingleLittleEndian(payload.AsSpan(o + 10), s.Position.Z);
+            payload[o + 14] = s.Yaw;
+            payload[o + 15] = (byte)s.State;
+            o += SnapshotBytes;
         }
-        return ms.ToArray();
+        return payload;
     }
 
     public static (uint Tick, List<ZombieSnapshotState> States) ReadZombieStates(byte[] payload)
