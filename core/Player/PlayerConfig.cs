@@ -9,13 +9,6 @@ public enum EPlayerStance
     Prone = 5,
 }
 
-// How a hold/toggle control behaves (Unturned's ControlsSettings modes).
-public enum EControlMode
-{
-    Hold,
-    Toggle,
-}
-
 // The exact numeric constants from Unturned's PlayerMovement / PlayerStance / PlayerLook (SI units: metres,
 // m/s, seconds, degrees). These are hardcoded in the game source, so they are hardcoded here too, with the
 // cited origin. Player-configurable / settings values live in PlayerSettings instead.
@@ -49,8 +42,7 @@ public static class PlayerConfig
     public const float EyeLerpRate = 4f;           // PlayerLook camera/eye lerps use rate 4
     public const float FovLerpRate = 8f;           // PlayerLook FOV lerps use rate 8
 
-    // Third-person camera (PlayerLook: origin at eye height, ~2 m back over the shoulder).
-    public const float ThirdPersonEyeHeight = 1.75f;
+    // Third-person camera (PlayerLook: origin at the stance eye height, ~2 m back over the shoulder).
     public const float ThirdPersonDistance = 2f;
     public const float ThirdPersonShoulder = 0.5f; // right offset (animator.shoulder * 1.0, ~0.5 at rest)
     public const float ThirdPersonUp = 0.25f;

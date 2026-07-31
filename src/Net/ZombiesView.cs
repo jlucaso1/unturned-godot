@@ -15,7 +15,6 @@ namespace UnturnedGodot;
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class ZombiesView : Node3D
 {
-    private const float LargeDistance = 16f;   // tellState's interpolation-reset threshold
     private const float AnimateWithin = 100f;  // skeletons past this stop sampling (Unturned's far
                                                // zombie regions deactivate entirely)
 

@@ -49,10 +49,11 @@ public class PlayerMovementTests
     }
 
     [Fact]
-    public void JumpApexHeight_MatchesJumpSpeedAndGravity()
+    public void JumpSpeedAndGravity_GiveTheGamesJumpHeight()
     {
-        // v² / (2|g|) = 49 / (2*29.43) ≈ 0.83 m.
-        Assert.Equal(0.832f, PlayerMovement.JumpApexHeight(), 2);
+        // Apex height h = v² / (2|g|) = 49 / (2*29.43) ≈ 0.83 m.
+        float apex = (PlayerConfig.JumpSpeed * PlayerConfig.JumpSpeed) / (2f * -PlayerConfig.Gravity);
+        Assert.Equal(0.832f, apex, 2);
     }
 
     [Theory]

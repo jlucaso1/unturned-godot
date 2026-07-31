@@ -62,17 +62,6 @@ public static class MetricStats
         return Math.Sqrt(sumSq / values.Count);
     }
 
-    // Median absolute deviation — outlier-robust dispersion, better than StdDev for noisy frame times.
-    public static double Mad(IReadOnlyList<double> values)
-    {
-        RequireNonEmpty(values);
-        double median = Median(values);
-        var deviations = new double[values.Count];
-        for (int i = 0; i < values.Count; i++)
-            deviations[i] = Math.Abs(values[i] - median);
-        return Median(deviations);
-    }
-
     private static double Reduce(IReadOnlyList<double> values, double seed, Func<double, double, double> fn)
     {
         RequireNonEmpty(values);

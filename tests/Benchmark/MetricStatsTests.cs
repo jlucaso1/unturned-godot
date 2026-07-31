@@ -17,7 +17,6 @@ public class MetricStatsTests
         Assert.Equal(3, MetricStats.Mean(Sample));
         Assert.Equal(3, MetricStats.Median(Sample));
         Assert.Equal(Math.Sqrt(2), MetricStats.StdDev(Sample), 6);
-        Assert.Equal(1, MetricStats.Mad(Sample));
     }
 
     [Theory]

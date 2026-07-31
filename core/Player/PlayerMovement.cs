@@ -34,8 +34,4 @@ public static class PlayerMovement
 
         return new Vector3(horizontal.X, velocity.Y, horizontal.Y);
     }
-
-    // The height the jump reaches under the game's gravity: h = v² / (2·|g|). Used to lock the jump feel.
-    public static float JumpApexHeight()
-        => (PlayerConfig.JumpSpeed * PlayerConfig.JumpSpeed) / (2f * -PlayerConfig.Gravity);
 }

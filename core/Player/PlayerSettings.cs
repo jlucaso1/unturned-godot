@@ -16,11 +16,6 @@ public sealed class PlayerSettings
     public float VerticalFovDegrees { get; init; } = 90f;
     public float SprintFovBoost { get; init; } = 10f;
 
-    // ControlsSettings modes: crouch/prone default TOGGLE, sprint default HOLD.
-    public EControlMode CrouchMode { get; init; } = EControlMode.Toggle;
-    public EControlMode ProneMode { get; init; } = EControlMode.Toggle;
-    public EControlMode SprintMode { get; init; } = EControlMode.Hold;
-
     // ControlsSettings default key bindings.
     public Key Forward { get; init; } = Key.W;
     public Key Back { get; init; } = Key.S;

@@ -60,3 +60,7 @@ dotnet_naming_symbols.private_fields.applicable_accessibilities = private
 dotnet_diagnostic.CA1002.severity = none   # exposing List<T> is intentional here
 dotnet_diagnostic.CA1051.severity = none   # public readonly fields on data carriers
 dotnet_diagnostic.CA1815.severity = none   # struct equality not needed for data carriers
+
+# Dead code fails the build instead of accumulating
+dotnet_diagnostic.IDE0051.severity = warning   # unused private member
+dotnet_diagnostic.IDE0052.severity = warning   # private member written but never read

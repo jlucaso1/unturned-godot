@@ -63,8 +63,6 @@ public sealed class FoliageTile
 // older per-instance-GUID version (1).
 public sealed class LevelFoliage
 {
-    public const float TileSize = 32f; // FoliageSystem.TILE_SIZE
-
     private const int VersionAssetListHeader = 2; // FOLIAGE_FILE_VERSION_ADDED_ASSET_LIST_HEADER
 
     public int Version { get; }
