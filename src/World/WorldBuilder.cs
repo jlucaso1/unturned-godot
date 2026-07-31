@@ -41,7 +41,7 @@ public static class WorldBuilder
         (Node3D objects, Node3D foliage, int placed, int withMesh, int unique) = BuildObjects(level,
             System.IO.Path.Combine(unturnedPath, "Bundles", "Objects"),
             System.IO.Path.Combine(unturnedPath, "Bundles", "Trees"),
-            System.IO.Path.Combine(unturnedPath, "Bundles", "core_linux.masterbundle"));
+            UnturnedInstall.MasterBundlePath(unturnedPath));
         objectsSw.Stop();
 
         return new WorldBuildResult(terrain, heights, objects, foliage, tileCount, placed, withMesh, unique,

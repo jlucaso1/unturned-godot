@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using UnturnedGodot.Assets;
 using UnturnedGodot.Dat;
 using UnturnedGodot.Data;
 using UnturnedGodot.Unity;
@@ -185,26 +186,8 @@ public static class Program
         return median;
     }
 
-    // The Unturned install: UNTURNED_PATH env var first, then the default Steam library per OS.
-    private static string? FindUnturnedPath()
-    {
-        string? env = Environment.GetEnvironmentVariable("UNTURNED_PATH");
-        if (!string.IsNullOrEmpty(env) && Directory.Exists(env))
-            return env;
-
-        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        string[] candidates =
-        {
-            Path.Combine(home, ".local", "share", "Steam", "steamapps", "common", "Unturned"), // Linux
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
-                "Steam", "steamapps", "common", "Unturned"),                                    // Windows
-            Path.Combine(home, "Library", "Application Support", "Steam", "steamapps", "common", "Unturned"), // macOS
-        };
-        foreach (string c in candidates)
-            if (c.Length > 0 && Directory.Exists(c))
-                return c;
-        return null;
-    }
+    // The Unturned install: UNTURNED_PATH env var first, then the Steam libraries for this OS.
+    private static string? FindUnturnedPath() => UnturnedInstall.Find();
 
     // Godot's per-project user:// directory, where the game keeps its mesh cache, per OS.
     private static string? FindGodotUserDir()

@@ -7,17 +7,24 @@ namespace UnturnedGodot;
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class Main : Node3D
 {
-    // Overridable via UNTURNED_PATH env var.
-    private const string DefaultUnturnedPath =
-        "/home/jlucaso/.local/share/Steam/steamapps/common/Unturned";
-
     private const string MapName = "PEI";
 
     public override void _Ready()
     {
-        string unturnedPath = OS.GetEnvironment("UNTURNED_PATH");
+        // Nothing here ships with the project: the map, models, textures and audio are all read from the
+        // player's own Steam copy of Unturned. UNTURNED_PATH overrides the Steam library autodetection.
+        string unturnedPath = OS.GetEnvironment(UnturnedInstall.PathEnvironmentVariable);
         if (string.IsNullOrEmpty(unturnedPath))
-            unturnedPath = DefaultUnturnedPath;
+            unturnedPath = UnturnedInstall.FindInstall(UnturnedInstall.DefaultSteamRoots()) ?? "";
+
+        if (!System.IO.Directory.Exists(unturnedPath))
+        {
+            GD.PrintErr("[unturned-godot] Unturned install not found. Install it through Steam, or point "
+                + $"{UnturnedInstall.PathEnvironmentVariable} at the game directory (the one containing "
+                + "Bundles/ and Maps/).");
+            GetTree().Quit(1);
+            return;
+        }
 
         // CHAR_ONLY=1: just the character + a light + a front camera, no world build. For fast iteration on
         // the character material/shader (renders in seconds instead of the ~2 min full-world build).
@@ -337,7 +344,7 @@ public partial class Main : Node3D
         }
 
         string audioCacheDir = ProjectSettings.GlobalizePath("user://audio_cache");
-        string bundlePath = System.IO.Path.Combine(unturnedPath, "Bundles", "core_linux.masterbundle");
+        string bundlePath = UnturnedInstall.MasterBundlePath(unturnedPath);
         var defPaths = new System.Collections.Generic.HashSet<string>();
         foreach (string key in new[] { "FootstepWalk", "FootstepRun", "BipedLand" })
             foreach (string name in new[]

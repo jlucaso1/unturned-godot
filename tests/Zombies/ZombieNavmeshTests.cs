@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using Godot;
 using UnturnedGodot.Data;
+using UnturnedGodot.Tests.Helpers;
 using UnturnedGodot.Zombies;
 using Xunit;
 
@@ -188,8 +189,7 @@ public class ZombieNavmeshTests : IDisposable
     [Fact]
     public void RealPei_TheReportedOffMeshSpot_SnapsToTheStreetNotTheBasement()
     {
-        string pei = "/home/jlucaso/.local/share/Steam/steamapps/common/Unturned/Maps/PEI";
-        if (!Directory.Exists(pei))
+        if (GameData.Map("PEI") is not { } pei)
             return;
         List<NavFlag> flags = LevelNavmesh.Load(Path.Combine(pei, "Environment"));
         // The reported zigzag spot: a player standing off-mesh at street level (y~34) with a
@@ -205,8 +205,7 @@ public class ZombieNavmeshTests : IDisposable
     [Fact]
     public void RealPei_NavmeshesParseAndMatchTheBounds()
     {
-        string pei = "/home/jlucaso/.local/share/Steam/steamapps/common/Unturned/Maps/PEI";
-        if (!Directory.Exists(pei))
+        if (GameData.Map("PEI") is not { } pei)
             return;
         string env = Path.Combine(pei, "Environment");
 

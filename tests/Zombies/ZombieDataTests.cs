@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using Godot;
 using UnturnedGodot.Data;
+using UnturnedGodot.Tests.Helpers;
 using Xunit;
 
 namespace UnturnedGodot.Tests.Zombies;
@@ -331,8 +332,7 @@ public class ZombieDataTests : IDisposable
     [Fact]
     public void RealPei_ZombieDataParses()
     {
-        string pei = "/home/jlucaso/.local/share/Steam/steamapps/common/Unturned/Maps/PEI";
-        if (!Directory.Exists(pei))
+        if (GameData.Map("PEI") is not { } pei)
             return;
 
         List<ZombieTable> tables = LevelZombiesData.LoadTables(Path.Combine(pei, "Spawns", "Zombies.dat"));

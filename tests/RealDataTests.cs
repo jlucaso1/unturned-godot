@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Data;
+using UnturnedGodot.Tests.Helpers;
 using UnturnedGodot.Unity;
 using Xunit;
 
@@ -12,19 +13,12 @@ namespace UnturnedGodot.Tests;
 // when the game is not present, so they never fail on machines without the content.
 public class RealDataTests
 {
-    private static string? UnturnedPath()
-    {
-        string env = System.Environment.GetEnvironmentVariable("UNTURNED_PATH") ?? "";
-        if (env.Length > 0 && Directory.Exists(env)) return env;
-        string def = "/home/jlucaso/.local/share/Steam/steamapps/common/Unturned";
-        return Directory.Exists(def) ? def : null;
-    }
+    private static string? UnturnedPath() => GameData.Install;
 
     private static LevelInfo? Pei()
     {
-        string? root = UnturnedPath();
-        if (root == null) return null;
-        var level = new LevelInfo(Path.Combine(root, "Maps", "PEI"));
+        if (GameData.Map("PEI") is not { } pei) return null;
+        var level = new LevelInfo(pei);
         return Directory.Exists(level.HeightmapsDir) ? level : null;
     }
 

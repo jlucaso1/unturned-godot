@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using Godot;
+using UnturnedGodot.Assets;
 using UnturnedGodot.Unity;
 
 namespace UnturnedGodot;
@@ -41,8 +42,8 @@ public sealed class SkyboxAssets
     private static SkyboxAssets? LoadInternal(string unturnedPath)
     {
         string assetsPath = Path.Combine(unturnedPath, "Unturned_Data", "resources.assets");
-        string bundlePath = Path.Combine(unturnedPath, "Bundles", "core_linux.masterbundle");
-        if (!File.Exists(assetsPath) || !File.Exists(bundlePath))
+        string? bundlePath = UnturnedInstall.FindMasterBundle(unturnedPath);
+        if (!File.Exists(assetsPath) || bundlePath == null)
             return null;
 
         IReadOnlyDictionary<int, List<TypeTreeNode>> trees = ModelExtractor.ReadClassTypeTrees(bundlePath);

@@ -57,7 +57,7 @@ public partial class ObjectStreamer : Node
         _level = level;
         _objectBundlesDir = Path.Combine(unturnedPath, "Bundles", "Objects");
         _treeBundlesDir = Path.Combine(unturnedPath, "Bundles", "Trees");
-        _bundlePath = Path.Combine(unturnedPath, "Bundles", "core_linux.masterbundle");
+        _bundlePath = UnturnedInstall.MasterBundlePath(unturnedPath);
         _assetsDir = Path.Combine(Path.GetDirectoryName(_bundlePath)!, "Assets");
         _cacheDir = ProjectSettings.GlobalizePath("user://model_cache");
         _textureCacheDir = ProjectSettings.GlobalizePath("user://texture_cache");

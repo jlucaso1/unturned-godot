@@ -9,8 +9,8 @@ dotnet run -c Release --project tools/PerfHarness -- foliage lz4 # a subset
 ```
 
 Suites: `lz4` (synthetic, no data needed), `foliage`, `heightmap`, `splat`, `objects`, `dat`,
-`meshcache`. The Unturned install resolves from `UNTURNED_PATH` or the default Steam library
-(Linux/Windows/macOS); the map from `MAP` (default `PEI`).
+`meshcache`. The Unturned install resolves through `UnturnedInstall` — `UNTURNED_PATH`, else the Steam
+libraries for this OS (Linux/Windows/macOS, extra drives included); the map from `MAP` (default `PEI`).
 
 To A/B a candidate optimization: copy the current implementation into a local variant, `Bench()` both,
 and **gate on an output-equivalence check first**. A variant that skips work the real code does

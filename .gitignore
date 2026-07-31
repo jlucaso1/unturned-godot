@@ -13,9 +13,16 @@ obj/
 !/build/export/
 !/build/export/linux/
 !/build/export/linux/.gitkeep
+!/build/export/windows/
+!/build/export/windows/.gitkeep
+!/build/export/macos/
+!/build/export/macos/.gitkeep
 
 # Godot 4.x stores export secrets (keystore/SSH passwords) here — never commit it
 export_credentials.cfg
+
+# Backup the Godot editor drops when it rewrites the csproj (e.g. bumping Godot.NET.Sdk)
+*.csproj.old
 
 # Test / coverage artifacts
 [Tt]est[Rr]esults/

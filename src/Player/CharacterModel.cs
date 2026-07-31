@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.IO;
 using Godot;
+using UnturnedGodot.Assets;
 using UnturnedGodot.Data;
 using UnturnedGodot.Player;
 using UnturnedGodot.Unity;
@@ -138,8 +139,8 @@ public static class CharacterModel
     private static Node3D? BuildInternal(string unturnedPath, EntityConfig entity)
     {
         string assetsPath = Path.Combine(unturnedPath, "Unturned_Data", "resources.assets");
-        string bundlePath = Path.Combine(unturnedPath, "Bundles", "core_linux.masterbundle");
-        if (!File.Exists(assetsPath) || !File.Exists(bundlePath))
+        string? bundlePath = UnturnedInstall.FindMasterBundle(unturnedPath);
+        if (!File.Exists(assetsPath) || bundlePath == null)
             return null;
 
         // resources.assets ships with its type trees stripped (enableTypeTree = 0). Type trees are identical

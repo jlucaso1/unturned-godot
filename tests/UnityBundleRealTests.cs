@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.IO;
+using UnturnedGodot.Tests.Helpers;
 using UnturnedGodot.Unity;
 using Xunit;
 
@@ -9,11 +10,7 @@ namespace UnturnedGodot.Tests;
 // Ground-truth counts come from UnityPy reading the same file.
 public class UnityBundleRealTests
 {
-    private static string? BundlePath()
-    {
-        string p = "/home/jlucaso/.local/share/Steam/steamapps/common/Unturned/Bundles/core_linux.masterbundle";
-        return File.Exists(p) ? p : null;
-    }
+    private static string? BundlePath() => GameData.MasterBundle;
 
     private static byte[]? SerializedFileBytes(UnityBundle bundle)
     {
