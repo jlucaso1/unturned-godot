@@ -25,7 +25,7 @@ public class UnturnedInstallTests
     [Fact]
     public void DefaultSteamRoots_Windows_DropsUnresolvedFolders_AndDuplicates()
     {
-        // Off Windows the ProgramFiles special folders resolve to "" — Path.Combine would then yield
+        // Off Windows the ProgramFiles special folders resolve to "", and Path.Combine would then yield
         // a bare relative "Steam", which must never be probed. Identical folders collapse to one.
         IReadOnlyList<string> empty = UnturnedInstall.DefaultSteamRoots(
             UnturnedInstall.Platform.Windows, Home, "", "");
@@ -196,7 +196,7 @@ public class UnturnedInstallTests
         }
         catch (UnauthorizedAccessException)
         {
-            // expected — this is the case the lookup has to survive
+            // expected: this is the case the lookup has to survive
         }
 
         Assert.Equal(new[] { dir.Path }, UnturnedInstall.EnumerateLibraries(new[] { dir.Path }));
@@ -250,7 +250,7 @@ public class UnturnedInstallTests
         Assert.Equal(Path.Combine(dir.Path, "Bundles", "core_linux.masterbundle"),
             UnturnedInstall.FindMasterBundle(dir.Path, UnturnedInstall.Platform.Linux));
 
-        // The same install read from Windows: no core.masterbundle, so the Linux one is used —
+        // The same install read from Windows: no core.masterbundle, so the Linux one is used;
         // meshes, materials and textures are identical across the platform builds.
         Assert.Equal(Path.Combine(dir.Path, "Bundles", "core_linux.masterbundle"),
             UnturnedInstall.FindMasterBundle(dir.Path, UnturnedInstall.Platform.Windows));

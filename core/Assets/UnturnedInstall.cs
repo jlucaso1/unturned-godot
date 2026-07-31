@@ -10,7 +10,7 @@ namespace UnturnedGodot.Assets;
 // points into the user's own Steam copy of Unturned, on whichever OS they run.
 //
 // The lookup order is UNTURNED_PATH first (an explicit override always wins), then the Steam
-// libraries — the default one for the platform plus any extra drives registered in
+// libraries: the default one for the platform plus any extra drives registered in
 // steamapps/libraryfolders.vdf, which is how Steam records installs on a second disk.
 //
 // The OS-dependent members (CurrentPlatform, DefaultSteamRoots, Find) are excluded from coverage:
@@ -85,7 +85,7 @@ public static class UnturnedInstall
         void Add(string baseFolder, params string[] parts)
         {
             // An unresolved SpecialFolder comes back as "", and Path.Combine("", "Steam") would yield
-            // a bare relative "Steam" — never probe that.
+            // a bare relative "Steam", which must never be probed.
             if (string.IsNullOrEmpty(baseFolder))
                 return;
 
@@ -117,7 +117,7 @@ public static class UnturnedInstall
 
     // Every Steam library to probe: the roots themselves, then the drives listed in each root's
     // steamapps/libraryfolders.vdf (Steam's registry of installs on other disks). Duplicates are
-    // dropped — libraryfolders.vdf normally lists the root it lives in as well.
+    // dropped, since libraryfolders.vdf normally lists the root it lives in as well.
     public static IReadOnlyList<string> EnumerateLibraries(IEnumerable<string> steamRoots)
     {
         ArgumentNullException.ThrowIfNull(steamRoots);
@@ -147,7 +147,7 @@ public static class UnturnedInstall
     // each numbered block carries a "path" key, and the pre-2021 one, where the numbered key holds
     // the path directly. Both are handled.
     //
-    // Numbered keys only count at depth 1 (directly inside the root block) — the current format
+    // Numbered keys only count at depth 1 (directly inside the root block), because the current format
     // nests an "apps" block whose keys are numeric app ids mapped to sizes, and those are not paths.
     public static IReadOnlyList<string> ParseLibraryFolders(string vdf)
     {
@@ -208,7 +208,7 @@ public static class UnturnedInstall
 
     // Unturned ships the Windows bundle unsuffixed and gives Linux/macOS their own copies (they
     // differ only in the shader variants baked in). Steam installs just the one for the running OS,
-    // so the native name is tried first and the others accepted as a fallback — that way pointing
+    // so the native name is tried first and the others accepted as a fallback, so pointing
     // UNTURNED_PATH at a copy of another platform's install still loads, since the meshes,
     // materials and textures this project reads are identical across all three.
     public static IReadOnlyList<string> MasterBundleFileNames(Platform platform)
@@ -285,7 +285,7 @@ public static class UnturnedInstall
                         {
                             'n' => '\n',
                             't' => '\t',
-                            _ => text[i], // \\ and \" — and anything else, taken literally
+                            _ => text[i], // \\ and \", and anything else, taken literally
                         });
                     }
                     else

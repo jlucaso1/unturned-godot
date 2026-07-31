@@ -11,7 +11,7 @@ related names, logos and content are the property of Smartly Dressed Games.
 
 The repository contains source code only. Every map, mesh, texture, material and
 sound this project renders is read at runtime from **your own** installation of
-Unturned, obtained through Steam — nothing is copied into the repository, and no
+Unturned, obtained through Steam. Nothing is copied into the repository, and no
 build artifact of this project embeds game assets.
 
 Without Unturned installed the project builds and its test suite passes, but
@@ -23,10 +23,10 @@ The binary and text formats (heightmaps, splatmaps, `Level/Objects.dat`, the
 `.dat` grammar, navmeshes, asset definitions, …) were re-implemented in C# by
 reading the game's own published sources and documentation:
 
-- [U3-SDK](https://github.com/SmartlyDressedGames/U3-SDK) — Smartly Dressed Games'
+- [U3-SDK](https://github.com/SmartlyDressedGames/U3-SDK): Smartly Dressed Games'
   official Unturned SDK, whose scripts define the serialization used here. It is the
   reference this port was written against.
-- [Unturned documentation](https://docs.smartlydressedgames.com/) — asset and
+- [Unturned documentation](https://docs.smartlydressedgames.com/): asset and
   master bundle documentation.
 
 The implementations in `core/` are original code written for this project; they

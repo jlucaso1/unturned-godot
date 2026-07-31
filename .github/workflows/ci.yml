@@ -12,7 +12,7 @@ permissions:
 jobs:
   build-and-test:
     # The game content is never present on a runner, so this is the hermetic half of the suite: the
-    # real-data tests self-skip and everything else must still pass — on all three desktop platforms,
+    # real-data tests self-skip and everything else must still pass, on all three desktop platforms,
     # since the loader now resolves Steam installs for each of them.
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
