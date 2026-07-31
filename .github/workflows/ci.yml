@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    # The game content is never present on a runner, so this is the hermetic half of the suite: the
+    # real-data tests self-skip and everything else must still pass — on all three desktop platforms,
+    # since the loader now resolves Steam installs for each of them.
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: |
+          dotnet restore unturned-godot.sln
+          dotnet restore tools/PerfHarness/PerfHarness.csproj
+
+      # Analyzers + .editorconfig style are build-enforced (Directory.Build.props), so a warning here
+      # is a failure worth seeing.
+      - name: Build
+        run: |
+          dotnet build unturned-godot.sln -c Release --no-restore -warnaserror
+          dotnet build tools/PerfHarness/PerfHarness.csproj -c Release --no-restore -warnaserror
+
+      - name: Test
+        run: dotnet test tests/UnturnedGodot.Tests.csproj -c Release --no-build
+
+  format:
+    name: format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Verify formatting
+        run: |
+          dotnet format unturned-godot.sln --verify-no-changes
+          dotnet format tools/PerfHarness/PerfHarness.csproj --verify-no-changes
