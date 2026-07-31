@@ -32,6 +32,5 @@ project/assembly_name="unturned-godot"
 [rendering]
 
 rendering_device/driver.windows="d3d12"
-lights_and_shadows/directional_shadow/size=4096
-lights_and_shadows/positional_shadow/atlas_size=1024
 textures/default_filters/anisotropic_filtering_level=4
+lights_and_shadows/positional_shadow/atlas_size=1024
