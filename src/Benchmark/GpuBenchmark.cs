@@ -136,7 +136,8 @@ public static class GpuBenchmark
             }
 
             BenchmarkRunner.Finish(report, $"{mapName}-gpu", DiffOptions(),
-                "gpu.frameMs.* are wall-clock medians — noisy, and CPU-bound when draw-call limited");
+                "gpu.frameMs.* are wall-clock medians — noisy, and CPU-bound when draw-call limited; "
+                    + "foliage residency counts compare only with foliage.settled=1 on both sides");
         }
         catch (Exception e)
         {
@@ -159,13 +160,15 @@ public static class GpuBenchmark
             {
                 metrics["foliage.indexedChunks"] = foliage.IndexedChunks;
                 metrics["foliage.indexedInstances"] = foliage.IndexedInstances;
-                // Always report what is resident; `settled` says whether it is a stable state. See
-                // RuntimeBenchmark.AddFoliageMetrics for why the snapshot is no longer withheld.
+                // Always report what is resident, under its own keys when the queue never drained. See
+                // RuntimeBenchmark.AddFoliageMetrics for why the snapshot is no longer withheld and why
+                // an unsettled one is kept out of the settled keys' comparison.
                 bool settled = includeResidencySnapshot && foliage.IsSettled;
+                string state = settled ? "" : "Unsettled";
                 metrics["foliage.settled"] = settled ? 1 : 0;
-                metrics["foliage.residentChunks"] = foliage.ResidentChunks;
-                metrics["foliage.residentInstances"] = foliage.ResidentInstances;
-                metrics["foliage.residentBufferBytes"] = foliage.ResidentBufferBytes;
+                metrics[$"foliage.residentChunks{state}"] = foliage.ResidentChunks;
+                metrics[$"foliage.residentInstances{state}"] = foliage.ResidentInstances;
+                metrics[$"foliage.residentBufferBytes{state}"] = foliage.ResidentBufferBytes;
                 metrics["foliage.maxQueued"] = foliage.MaximumQueued;
                 metrics["foliage.maxDecodedBytes"] = foliage.MaximumDecodedBytes;
                 metrics["foliage.emergencyVisibleLoads"] = foliage.EmergencyVisibleLoads;
@@ -226,6 +229,9 @@ public static class GpuBenchmark
     // regression. Counts (draw calls, primitives) are deterministic per view and stay strict.
     private static BaselineDiffOptions DiffOptions() => new()
     {
+        // Losing settlement is a regression, not an improvement: a baseline that drained its queue
+        // against a current run that timed out means less of the map was ever submitted.
+        HigherIsBetter = new HashSet<string>(StringComparer.Ordinal) { "foliage.settled" },
         ThresholdPrefixOverrides = new Dictionary<string, double>
         {
             ["gpu.frameMs.median."] = 0.10,

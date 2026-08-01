@@ -184,15 +184,19 @@ public static class RuntimeBenchmark
             {
                 metrics["runtime.foliage.indexedChunks"] = foliage.IndexedChunks;
                 metrics["runtime.foliage.indexedInstances"] = foliage.IndexedInstances;
-                // Report the residency snapshot unconditionally, and let `settled` say whether it is a
-                // stable state or a machine that never drained its queue. Omitting it left the reports
-                // that most need it — a slow or GPU-less box, where streaming is starved by the
-                // per-frame upload budget — with no record of what the streamer actually kept resident.
-                metrics["runtime.foliage.settled"] = includeResidencySnapshot && foliage.IsSettled ? 1 : 0;
-                metrics["runtime.foliage.residentChunks"] = foliage.ResidentChunks;
-                metrics["runtime.foliage.residentInstances"] = foliage.ResidentInstances;
-                metrics["runtime.foliage.residentBufferBytes"] = foliage.ResidentBufferBytes;
-                metrics["runtime.foliage.pendingChunks"] = foliage.PendingChunks;
+                // Always record the residency snapshot: omitting it left the reports that most need it —
+                // a slow or GPU-less box, where streaming is starved by the per-frame upload budget —
+                // with no record of what the streamer actually kept resident. A mid-fill snapshot is not
+                // comparable with a drained one, so it is recorded under its own keys instead: the
+                // baseline diff then reports it as added/removed and can never read it as a regression
+                // against a settled baseline's steady set.
+                bool settled = includeResidencySnapshot && foliage.IsSettled;
+                string state = settled ? "" : "Unsettled";
+                metrics["runtime.foliage.settled"] = settled ? 1 : 0;
+                metrics[$"runtime.foliage.residentChunks{state}"] = foliage.ResidentChunks;
+                metrics[$"runtime.foliage.residentInstances{state}"] = foliage.ResidentInstances;
+                metrics[$"runtime.foliage.residentBufferBytes{state}"] = foliage.ResidentBufferBytes;
+                metrics[$"runtime.foliage.pendingChunks{state}"] = foliage.PendingChunks;
                 metrics["runtime.foliage.maxQueued"] = foliage.MaximumQueued;
                 metrics["runtime.foliage.maxDecodedBytes"] = foliage.MaximumDecodedBytes;
                 metrics["runtime.foliage.emergencyVisibleLoads"] = foliage.EmergencyVisibleLoads;

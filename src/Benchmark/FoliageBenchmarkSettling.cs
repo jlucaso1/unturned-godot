@@ -29,7 +29,8 @@ internal static class FoliageBenchmarkSettling
             await context.ToSignal(tree, SceneTree.SignalName.ProcessFrame);
         }
         Log.PushWarning("[benchmark] foliage streaming did not remain settled for three frames in 10 s; "
-            + "residency snapshot metrics will be omitted");
+            + "residency counts are reported under their *Unsettled keys and describe a mid-fill state, "
+            + "not the steady resident set");
         return false;
     }
 }
