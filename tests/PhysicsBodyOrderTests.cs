@@ -1003,6 +1003,27 @@ public class PhysicsBodyOrderTests
         // Read when the deferred call runs, not when it is scheduled, so a failure raised in between lands.
         Assert.Contains("Callable.From(() => tree.Quit(ExitCode)).CallDeferred();", source);
         Assert.Contains("tree.Quit(ExitCode);", source);
+
+        // Capturing a late failure is not enough by itself: a quit the tier never asked for lands on the
+        // next idle frame, sooner than the tier gets a frame to reach its finally, so no failure is ever
+        // raised to capture. Leaving mid-measurement has to fail on this side, before the capture.
+        int inFlight = source.IndexOf("if (exitCode == 0 && BenchmarkInFlight)", StringComparison.Ordinal);
+        Assert.True(inFlight >= 0 && inFlight < capture);
+    }
+
+    [Fact]
+    public void RuntimeBenchmarkOwnsTheExitStatusUntilItsReportIsWritten()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Benchmark", "RuntimeBenchmark.cs")) is not { } path)
+            return;
+
+        // The bracket has to open before the sampling loop and close only once Finish has run, or an
+        // early quit lands inside the window and still exits zero.
+        string source = File.ReadAllText(path);
+        int begin = source.IndexOf("AppShutdown.BeginBenchmark();", StringComparison.Ordinal);
+        int finish = source.IndexOf("BenchmarkRunner.Finish(", begin, StringComparison.Ordinal);
+        int end = source.IndexOf("AppShutdown.EndBenchmark();", finish, StringComparison.Ordinal);
+        Assert.True(begin >= 0 && finish > begin && end > finish);
     }
 
     [Fact]

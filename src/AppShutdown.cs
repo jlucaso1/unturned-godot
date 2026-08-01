@@ -92,10 +92,29 @@ public static class AppShutdown
     // and the first failure wins over any later or earlier request to leave cleanly.
     private static int ExitCode;
 
+    // Raised while a benchmark tier owns the process's exit status and has not written its report yet.
+    //
+    // Capturing a late failure is not enough on its own. When something else asks to leave mid-run — an
+    // expired QUIT_AFTER, the pause-menu button — the deferred quit lands on the next idle frame, which
+    // is sooner than the tier gets another frame to reach its finally, so there is no late failure to
+    // capture: the process just exits 0 with no report. The tier cannot defend itself here, so the
+    // invariant lives on this side. Leaving while a measurement is in flight *is* a failed measurement,
+    // whoever asked to leave.
+    private static bool BenchmarkInFlight;
+
+    // Brackets a tier whose report decides the exit status. Tier 3 only: it is the tier that runs the
+    // full interactive path, and so the only one reachable by a quit it did not ask for.
+    public static void BeginBenchmark() => BenchmarkInFlight = true;
+
+    public static void EndBenchmark() => BenchmarkInFlight = false;
+
     // The single way out of a loaded world. Safe to call more than once. exitCode is what the process
     // reports; a headless caller that failed passes nonzero so its wrapper script can tell.
     public static void RequestQuit(SceneTree tree, int exitCode = 0)
     {
+        if (exitCode == 0 && BenchmarkInFlight)
+            exitCode = 1;
+
         if (exitCode != 0 && ExitCode == 0)
             ExitCode = exitCode;
 

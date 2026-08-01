@@ -15,6 +15,9 @@ public static class RuntimeBenchmark
     {
         SceneTree tree = context.GetTree();
         bool failed = true;
+        // From here until the report is written, any quit — including one this tier never asked for —
+        // has to report a failure. See AppShutdown.BenchmarkInFlight.
+        AppShutdown.BeginBenchmark();
         try
         {
             seconds = Math.Clamp(seconds, 3.0, 120.0);
@@ -103,6 +106,7 @@ public static class RuntimeBenchmark
                 "timings are advisory; counts are deterministic for the same spawn view, "
                     + "except foliage residency counts, which need runtime.foliage.settled=1 on both sides");
             failed = false;
+            AppShutdown.EndBenchmark();
         }
         catch (Exception e)
         {
