@@ -843,6 +843,19 @@ public class PhysicsBodyOrderTests
     }
 
     [Fact]
+    public void BenchmarkScriptAcceptsWorkshopSelectionKeys()
+    {
+        if (FindRepositoryFile(Path.Combine("scripts", "run-benchmark.sh")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("[[ \"$MAP\" == workshop:* ]]", source);
+        Assert.Contains("workshop_map=\"${MAP#workshop:}\"", source);
+        Assert.Contains("\"$workshop_map/Level.dat\"", source);
+        Assert.Contains("--verify --maps \"$MAP\"", source);
+    }
+
+    [Fact]
     public void NavigationBenchmarkClearsItsReusableRouteForEveryQuery()
     {
         if (FindRepositoryFile(Path.Combine("tools", "PerfHarness", "Program.cs")) is not { } path)
