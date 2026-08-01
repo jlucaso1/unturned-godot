@@ -26,10 +26,8 @@ set -euo pipefail
 readonly APP_ID=1110390                      # Unturned Dedicated Server, anonymous-downloadable
 readonly DD_VERSION=3.4.0
 
-# Receipt a finished run leaves in the destination, naming the selection it completed. Only "all"
-# needs it — the set of maps that exists is a Steam-side fact, so nothing on disk can stand in for it
-# — which keeps every other selection verifiable against a tree this script never wrote, such as a
-# real Steam install someone points --dir at.
+# Receipt a finished --maps all run leaves in the destination. It records every loadable official map
+# that was checked, so a stale cache cannot prove completion merely because one other map survived.
 readonly COMPLETION_MARKER=.unturned-fetch-complete
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -76,7 +74,7 @@ selected_maps() {
 # names; the data-backed tests then run against half a map and fail instead of self-skipping. Callers
 # ask this before trusting a directory, and before deciding a re-run has nothing left to do.
 verify_content() {
-    local ok=1 map
+    local ok=1 map require_all_receipt="${2:-1}"
 
     shopt -s nullglob
     local bundles=("$1"/Bundles/core*.masterbundle)
@@ -92,14 +90,7 @@ verify_content() {
     fi
 
     if [[ "$maps" == "all" ]]; then
-        # "Every map Valve currently ships" is not knowable from disk, so the only honest evidence is
-        # the receipt a completed run leaves behind. Without it, fall through to the downloader, which
-        # is incremental; with it, still require that the maps on disk are themselves whole.
-        if [[ "$(cat "$1/$COMPLETION_MARKER" 2>/dev/null)" != "all" ]]; then
-            echo "No record of a completed --maps all download in $1." >&2
-            ok=0
-        elif ! any_map_is_whole "$1"; then
-            echo "Missing: any loadable map under $1/Maps" >&2
+        if ! verify_all_maps "$1" "$require_all_receipt"; then
             ok=0
         fi
     else
@@ -112,48 +103,128 @@ verify_content() {
 }
 
 # Level.dat is the map itself, and the heightmap tiles are what this project needs to load one. The
-# tiles are checked as files rather than as a directory because an interrupted download leaves the
-# directory behind: DepotDownloader creates the tree before it has written everything into it. Maps
-# predating Landscape tiles (Destruction, Paintball Arena) therefore never pass, which matches the
-# fact that the project cannot load them either.
+# expected grids below are the official Landscape maps in the depot; legacy maps without Landscape
+# tiles are intentionally excluded from --maps all because this project cannot load them.
+expected_all_maps() {
+    printf '%s\n' "Alpha Valley" Germany Monolith PEI Russia Tutorial Washington Yukon
+}
+
+map_tile_bounds() {
+    case "$1" in
+        "Alpha Valley"|Monolith|Tutorial) printf '%s\n' '-1 0 -1 0' ;;
+        PEI|Washington|Yukon) printf '%s\n' '-2 1 -2 1' ;;
+        Germany) printf '%s\n' '-3 2 -3 2' ;;
+        Russia) printf '%s\n' '-4 3 -4 3' ;;
+        *) return 1 ;;
+    esac
+}
+
+receipt_has_map() {
+    local marker="$1" wanted="$2" line
+    while IFS= read -r line; do
+        [[ "$line" == "map=$wanted" ]] && return 0
+    done < "$marker"
+    return 1
+}
+
 map_is_whole() {
-    local root="$1" map="$2" ok=1
+    local root="$1" map="$2" ok=1 min_x max_x min_y max_y expected_count bounds
+    local map_root="$root/Maps/$map"
 
     if [[ -z "$map" ]]; then
         echo "Missing: any map under $root/Maps" >&2
         return 1
     fi
 
-    [[ -f "$root/Maps/$map/Level.dat" ]] || { echo "Missing: $root/Maps/$map/Level.dat" >&2; ok=0; }
+    [[ -s "$map_root/Level.dat" ]] || { echo "Missing: $map_root/Level.dat" >&2; ok=0; }
 
     shopt -s nullglob
-    local tiles=("$root/Maps/$map/Landscape/Heightmaps"/*.heightmap)
+    local tiles=("$map_root/Landscape/Heightmaps"/*.heightmap)
     shopt -u nullglob
-    if [[ ${#tiles[@]} -eq 0 ]]; then
-        echo "Missing: heightmap tiles in $root/Maps/$map/Landscape/Heightmaps" >&2
-        ok=0
+
+    if bounds="$(map_tile_bounds "$map")"; then
+        read -r min_x max_x min_y max_y <<< "$bounds"
+        expected_count=$(((max_x - min_x + 1) * (max_y - min_y + 1)))
+        if [[ ${#tiles[@]} -ne $expected_count ]]; then
+            echo "Missing: $map expects $expected_count heightmap tiles, found ${#tiles[@]}" >&2
+            ok=0
+        fi
+        local x y
+        for ((x = min_x; x <= max_x; x++)); do
+            for ((y = min_y; y <= max_y; y++)); do
+                [[ -s "$map_root/Landscape/Heightmaps/Tile_${x}_${y}_Source.heightmap" ]] || {
+                    echo "Missing: $map_root/Landscape/Heightmaps/Tile_${x}_${y}_Source.heightmap" >&2
+                    ok=0
+                }
+            done
+        done
+    else
+        # Workshop/preview maps are not part of the depot's fixed set. Require at least a 2x2 grid and
+        # make sure it has no holes, rather than accepting a directory containing one arbitrary tile.
+        if [[ ${#tiles[@]} -lt 4 ]]; then
+            echo "Missing: at least four heightmap tiles in $map_root/Landscape/Heightmaps" >&2
+            ok=0
+        else
+            min_x=2147483647; max_x=-2147483648; min_y=2147483647; max_y=-2147483648
+            local tile base tx ty
+            for tile in "${tiles[@]}"; do
+                base="${tile##*/}"
+                if [[ "$base" =~ ^Tile_(-?[0-9]+)_(-?[0-9]+)_Source\.heightmap$ ]]; then
+                    tx="${BASH_REMATCH[1]}"; ty="${BASH_REMATCH[2]}"
+                    ((tx < min_x)) && min_x=$tx
+                    ((tx > max_x)) && max_x=$tx
+                    ((ty < min_y)) && min_y=$ty
+                    ((ty > max_y)) && max_y=$ty
+                else
+                    echo "Invalid heightmap filename: $tile" >&2
+                    ok=0
+                fi
+            done
+            expected_count=$(((max_x - min_x + 1) * (max_y - min_y + 1)))
+            if [[ ${#tiles[@]} -ne $expected_count ]]; then
+                echo "Missing: heightmap grid in $map_root is not complete" >&2
+                ok=0
+            fi
+        fi
     fi
 
     [[ $ok == 1 ]]
 }
 
-# For "all", the maps Valve ships include pre-Landscape ones this project cannot load, so the bar is
-# that at least one map came down whole rather than that every directory did.
-any_map_is_whole() {
-    local dir
-    shopt -s nullglob
-    for dir in "$1"/Maps/*/; do
-        if map_is_whole "$1" "$(basename "$dir")" 2>/dev/null; then
-            shopt -u nullglob
-            return 0
+verify_all_maps() {
+    local root="$1" require_receipt="$2" ok=1 map marker="$1/$COMPLETION_MARKER"
+
+    if [[ "$require_receipt" == 1 ]]; then
+        if [[ ! -f "$marker" ]] || [[ "$(head -n 1 "$marker" 2>/dev/null)" != "selection=all" ]]; then
+            echo "No record of a completed --maps all download in $root." >&2
+            return 1
         fi
-    done
-    shopt -u nullglob
-    return 1
+    fi
+
+    while IFS= read -r map; do
+        if [[ "$require_receipt" == 1 ]] && ! receipt_has_map "$marker" "$map"; then
+            echo "Completion receipt does not contain map: $map" >&2
+            ok=0
+        fi
+        map_is_whole "$root" "$map" || ok=0
+    done < <(expected_all_maps)
+
+    [[ $ok == 1 ]]
+}
+
+write_completion_marker() {
+    local marker="$dest/$COMPLETION_MARKER" temp="$dest/$COMPLETION_MARKER.tmp.$$" map
+    {
+        printf '%s\n' 'selection=all'
+        while IFS= read -r map; do
+            printf 'map=%s\n' "$map"
+        done < <(expected_all_maps)
+    } > "$temp"
+    mv -f -- "$temp" "$marker"
 }
 
 if [[ "$mode" == "verify" ]]; then
-    if ! verify_content "$dest"; then
+    if ! verify_content "$dest" 1; then
         echo "Incomplete game content in $dest (maps: $maps)." >&2
         exit 1
     fi
@@ -231,7 +302,12 @@ if [[ "$mode" == "manifest-key" ]]; then
     trap 'rm -rf -- "$key_dir"' EXIT
     run_downloader -app "$APP_ID" -os "$os_name" -manifest-only -dir "$key_dir" >&2
 
-    ids="$(find "$key_dir" -maxdepth 1 -name 'manifest_*.txt' -exec basename {} \; | sort | tr '\n' ' ')"
+    ids="$(
+        for manifest in "$key_dir"/manifest_*.txt; do
+            [[ -f "$manifest" ]] || continue
+            basename "$manifest"
+        done | sort | tr '\n' ' '
+    )"
     if [[ -z "$ids" ]]; then
         echo "Could not read the depot manifests." >&2
         exit 1
@@ -248,6 +324,10 @@ fi
 # Localization/ is what the map browser reads its names from. Maps are opt-in because each is 50-130 MB.
 mkdir -p "$dest"
 dest="$(cd "$dest" && pwd)"
+
+# An old receipt must never survive a new attempt: if the retry fails, the previous success cannot be
+# mistaken for the content that this invocation was asked to produce.
+rm -f -- "$dest/$COMPLETION_MARKER"
 
 filelist="$(mktemp "${TMPDIR:-/tmp}/unturned-filelist.XXXXXX")"
 trap 'rm -f -- "$filelist"' EXIT
@@ -267,11 +347,15 @@ echo "Downloading Unturned content (app $APP_ID, maps: $maps, bundle: $os_name) 
 run_downloader -app "$APP_ID" -os "$os_name" -filelist "$filelist" -dir "$dest"
 
 # A download that reports success but left the tree short is worth catching here rather than in a
-# confusing test failure later. The receipt goes down first because verifying an "all" selection reads
-# it, and comes back off if the tree does not hold up, so it never outlives a good download.
-printf '%s\n' "$maps" > "$dest/$COMPLETION_MARKER"
-if ! verify_content "$dest"; then
-    rm -f "$dest/$COMPLETION_MARKER"
+# confusing test failure later. Validate before publishing the all-map receipt, so it never outlives a
+# complete content tree.
+if [[ "$maps" == "all" ]]; then
+    if ! verify_content "$dest" 0; then
+        echo "Download finished but $dest is incomplete." >&2
+        exit 1
+    fi
+    write_completion_marker
+elif ! verify_content "$dest"; then
     echo "Download finished but $dest is incomplete." >&2
     exit 1
 fi

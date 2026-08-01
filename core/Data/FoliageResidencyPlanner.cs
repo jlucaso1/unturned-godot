@@ -53,9 +53,13 @@ public static class FoliageResidencyPlanner
 
         visible.Sort(CompareDistance);
         prefetch.Sort(CompareDistance);
-        bool truncated = prefetch.Count > maximumPrefetch;
+        // maximumPrefetch is the renderer's total pending-work bound, not an allowance for this plan
+        // alone. Active decodes survive replans and must consume slots, otherwise the caller can stop
+        // enqueueing midway through this list without PrefetchTruncated recording the omitted work.
+        int availablePrefetch = Math.Max(0, maximumPrefetch - pending.Count);
+        bool truncated = prefetch.Count > availablePrefetch;
         if (truncated)
-            prefetch.RemoveRange(maximumPrefetch, prefetch.Count - maximumPrefetch);
+            prefetch.RemoveRange(availablePrefetch, prefetch.Count - availablePrefetch);
         return new FoliageResidencyPlan(Indices(visible), Indices(prefetch), retire, truncated);
     }
 

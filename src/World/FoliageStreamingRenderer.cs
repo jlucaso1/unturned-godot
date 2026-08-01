@@ -148,7 +148,8 @@ public partial class FoliageStreamingRenderer : Node3D
             if (!_focused || focus.DistanceSquaredTo(_lastFocus) >= 16f * 16f)
                 Replan(focus, !_focused || focus.DistanceSquaredTo(_lastFocus)
                     >= _teleportDistance * _teleportDistance);
-            else if (_needsRefill && _queue.Count == 0 && Volatile.Read(ref _workers) == 0)
+            else if (_needsRefill && _queue.Count == 0 && _pending.Count < _maximumPending
+                && Volatile.Read(ref _workers) < _maximumWorkers)
                 Replan(focus, teleport: false);
         }
         PumpWorkers();
