@@ -35,6 +35,55 @@ public class PhysicsBodyOrderTests
             "placement tuples must be released only after PhysicsServer has copied every transform");
     }
 
+    // Attributing RSS between the game and the rendering driver needs one session that runs streaming,
+    // navigation, physics and netcode with no driver at all. The flag must therefore skip the
+    // synchronous-build-and-quit branch, force the auto-start (there is no menu to click without a
+    // display), and still yield to a screenshot, which cannot be taken with nothing drawn.
+    [Fact]
+    public void HeadlessInteractiveRunsTheRealSessionAndStillYieldsToAScreenshot()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Main.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("OS.GetEnvironment(\"UG_HEADLESS_INTERACTIVE\") == \"1\"", source);
+        Assert.Contains("&& string.IsNullOrEmpty(shot)", source);
+        Assert.Contains("if ((headless && !headlessInteractive) || !string.IsNullOrEmpty(shot))", source);
+        Assert.Contains("bool autoStart = headlessInteractive", source);
+
+        int flag = source.IndexOf("bool headlessInteractive", StringComparison.Ordinal);
+        int build = source.IndexOf("if ((headless && !headlessInteractive)", StringComparison.Ordinal);
+        int autoStart = source.IndexOf("bool autoStart = headlessInteractive", StringComparison.Ordinal);
+        Assert.True(flag >= 0 && build > flag && autoStart > build);
+
+        // The documented workflow is the script, and its runtime tier otherwise always takes a swapchain.
+        // Handing the no-renderer control an Xvfb display would measure lavapipe and report it as the
+        // game's memory, which is the confusion the flag exists to remove — so the script must branch too.
+        if (FindRepositoryFile(Path.Combine("scripts", "run-benchmark.sh")) is not { } scriptPath)
+            return;
+
+        // A load failure has no reachable way out without a display, so it must fail the process rather
+        // than present a Back button no one can press and leave a benchmark waiting on it forever.
+        int failure = source.IndexOf("loading.Fail(", StringComparison.Ordinal);
+        int headlessQuit = source.LastIndexOf("if (_headlessInteractive)", failure, StringComparison.Ordinal);
+        Assert.True(headlessQuit >= 0 && headlessQuit < failure,
+            "the headless route must quit before the on-screen failure path");
+        Assert.Contains("GetTree().Quit(1);", source[headlessQuit..failure]);
+
+        string script = File.ReadAllText(scriptPath);
+        int runtimeTier = script.IndexOf("    runtime)", StringComparison.Ordinal);
+        // The same screenshot precedence Main applies: a capture keeps the swapchain, or the run reaches
+        // the quit-after-load branch and writes no PNG at all.
+        int guard = script.IndexOf(
+            "\"${UG_HEADLESS_INTERACTIVE:-}\" == \"1\" && -z \"${SCREENSHOT_PATH:-}\"", runtimeTier,
+            StringComparison.Ordinal);
+        int headlessLaunch = script.IndexOf("\"$godot\" --headless", guard, StringComparison.Ordinal);
+        int windowed = script.IndexOf("run_windowed", guard, StringComparison.Ordinal);
+        Assert.True(runtimeTier >= 0 && guard > runtimeTier, "the runtime tier must branch on the flag");
+        Assert.True(headlessLaunch > guard && windowed > headlessLaunch,
+            "the flag must launch --headless, and the windowed launch must stay on the other branch");
+    }
+
     [Fact]
     public void IdlePhysicsFastPath_DoesNotSuppressMultiplayerFrames()
     {

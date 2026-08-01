@@ -147,6 +147,18 @@ public partial class Main : Node3D
         bool headless = DisplayServer.GetName() == "headless";
         string shot = OS.GetEnvironment("SCREENSHOT_PATH");
 
+        // Memory attribution: without this, the only session that runs streaming, navigation, physics and
+        // the netcode is also the only one that runs a rendering driver, so their costs cannot be told
+        // apart. UG_HEADLESS_INTERACTIVE=1 runs the normal interactive path with no driver at all, and
+        // differencing the two answers how much of RSS is the renderer. A screenshot still wins, since it
+        // needs something drawn.
+        bool headlessInteractive = headless && OS.GetEnvironment("UG_HEADLESS_INTERACTIVE") == "1"
+            && string.IsNullOrEmpty(shot);
+        _headlessInteractive = headlessInteractive;
+        if (headlessInteractive)
+            Log.Print("[unturned-godot] Headless interactive: no rendering driver; "
+                + "view-dependent metrics (draw calls, primitives, frame time) do not apply.");
+
         if (!string.IsNullOrEmpty(shot) && OS.GetEnvironment("MENU_SHOT") == "1")
         {
             // Screenshot of the boot menu, no world.
@@ -158,7 +170,7 @@ public partial class Main : Node3D
         string environmentDir = EnvironmentDir(unturnedPath, _mapName);
         LevelLighting? lighting = LevelLighting.Load(System.IO.Path.Combine(environmentDir, "Lighting.dat"));
 
-        if (headless || !string.IsNullOrEmpty(shot))
+        if ((headless && !headlessInteractive) || !string.IsNullOrEmpty(shot))
         {
             // Complete synchronous build — headless validation, or a screenshot that must be finished.
             WorldBuildResult world = WorldBuilder.Build(unturnedPath, _mapName);
@@ -198,7 +210,9 @@ public partial class Main : Node3D
         // normal launch lands on the main menu first — no map is loaded until the player picks an option.
         // SOLO=1 is the local session WITHOUT the UDP listener — the right flag for single-player
         // automation; OPEN_LAN is only for tests where a second client actually joins.
-        bool autoStart = OS.GetEnvironment("SOLO") == "1"
+        // A headless interactive session has no menu to click, so it always boots into the world.
+        bool autoStart = headlessInteractive
+            || OS.GetEnvironment("SOLO") == "1"
             || OS.GetEnvironment("FREECAM") == "1" || OS.GetEnvironment("OPEN_LAN") == "1"
             || OS.GetEnvironment("OPEN_LAN_AFTER") is { Length: > 0 }
             || OS.GetEnvironment("JOIN") is { Length: > 0 }
@@ -392,6 +406,14 @@ public partial class Main : Node3D
         catch (System.Exception e)
         {
             Log.PrintErr($"[unturned-godot] Failed to load {_mapName}: {e}");
+            if (_headlessInteractive)
+            {
+                // The way back is a button, and this session has neither a display to draw it on nor an
+                // input to press it with. Reporting on screen would leave a benchmark waiting on a
+                // loading screen that can never resolve, so fail the process instead.
+                GetTree().Quit(1);
+                return;
+            }
             loading.Fail($"{e.GetType().Name}: {e.Message}", BackToMenu);
         }
     }
@@ -399,6 +421,7 @@ public partial class Main : Node3D
     // Returns to the map browser after a failed load, clearing whatever the attempt already built.
     private ObjectStreamer? _activeLoadStreamer;
     private bool _returningToMenu;
+    private bool _headlessInteractive;
 
     private async void BackToMenu()
     {
