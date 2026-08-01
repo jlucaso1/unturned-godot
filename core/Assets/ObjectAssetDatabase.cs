@@ -54,6 +54,12 @@ public sealed class ObjectAssetDatabase
         // and the parse is pure CPU. Results are merged serially afterwards in file order, so the by-GUID /
         // by-id last-write-wins index is identical to a sequential scan (Add is not thread-safe).
         var files = new List<string>(Directory.EnumerateFiles(root, "*.dat", SearchOption.AllDirectories));
+        return ScanFiles(files, File.ReadAllText);
+    }
+
+    internal static ObjectAssetDatabase ScanFiles(IReadOnlyList<string> files, Func<string, string> readText)
+    {
+        var db = new ObjectAssetDatabase();
         var parsedAssets = new ObjectAsset?[files.Count];
         System.Threading.Tasks.Parallel.For(0, files.Count, i =>
         {
@@ -61,9 +67,9 @@ public sealed class ObjectAssetDatabase
             DatDictionary parsed;
             try
             {
-                parsed = DatParser.Parse(File.ReadAllText(files[i]));
+                parsed = DatParser.Parse(readText(files[i]));
             }
-            catch (IOException)
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {
                 return;
             }

@@ -127,6 +127,7 @@ public static class GpuBenchmark
                 Log.Print($"[benchmark] screenshot saved: {shotPath}");
             }
 
+            await WaitForFoliageSettledAsync(context, tree);
             SceneMetricsResult sm = SceneMetrics.Collect(new Node[] { world.Terrain, world.Objects, world.Foliage });
             BenchmarkReport report = BuildReport(mapName, frameMs, processMs, drawCalls, primitives,
                 renderObjects, sm, poses.Count, perPose);
@@ -154,9 +155,13 @@ public static class GpuBenchmark
             {
                 metrics["foliage.indexedChunks"] = foliage.IndexedChunks;
                 metrics["foliage.indexedInstances"] = foliage.IndexedInstances;
-                metrics["foliage.residentChunks"] = foliage.ResidentChunks;
-                metrics["foliage.residentInstances"] = foliage.ResidentInstances;
-                metrics["foliage.residentBufferBytes"] = foliage.ResidentBufferBytes;
+                metrics["foliage.settled"] = foliage.IsSettled ? 1 : 0;
+                if (foliage.IsSettled)
+                {
+                    metrics["foliage.residentChunks"] = foliage.ResidentChunks;
+                    metrics["foliage.residentInstances"] = foliage.ResidentInstances;
+                    metrics["foliage.residentBufferBytes"] = foliage.ResidentBufferBytes;
+                }
                 metrics["foliage.maxQueued"] = foliage.MaximumQueued;
                 metrics["foliage.maxDecodedBytes"] = foliage.MaximumDecodedBytes;
                 metrics["foliage.emergencyVisibleLoads"] = foliage.EmergencyVisibleLoads;
@@ -166,6 +171,30 @@ public static class GpuBenchmark
                 metrics["foliage.decodeFailures"] = foliage.DecodeFailures;
                 break;
             }
+    }
+
+    private static async Task WaitForFoliageSettledAsync(Node context, SceneTree tree)
+    {
+        int stableFrames = 0;
+        ulong deadline = Time.GetTicksUsec() + 10_000_000;
+        while (Time.GetTicksUsec() < deadline)
+        {
+            bool found = false;
+            bool settled = true;
+            foreach (Node node in tree.GetNodesInGroup("foliage_streaming"))
+                if (node is FoliageStreamingRenderer foliage)
+                {
+                    found = true;
+                    settled &= foliage.IsSettled;
+                }
+            if (!found || (settled && ++stableFrames >= 3))
+                return;
+            if (!settled)
+                stableFrames = 0;
+            await context.ToSignal(tree, SceneTree.SignalName.ProcessFrame);
+        }
+        Log.PushWarning("[benchmark] foliage streaming did not settle in 10 s; "
+            + "residency counts will be omitted from the report");
     }
 
     private static BenchmarkReport BuildReport(string mapName, List<double> frameMs, List<double> processMs,

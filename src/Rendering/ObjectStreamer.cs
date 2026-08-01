@@ -287,8 +287,17 @@ public partial class ObjectStreamer : Node
                 var watch = Stopwatch.StartNew();
                 _foliageIndex = FoliageResidencyIndex.LoadOrBuild(blobPath, indexPath,
                     FoliageBuilder.RuntimeChunkTiles, out bool cacheHit);
-                AppShutdown.PrintUnlessQuitting($"[foliage-stream] {(cacheHit ? "loaded" : "built")} index "
-                    + $"with {_foliageIndex?.Chunks.Count ?? 0} chunks in {watch.ElapsedMilliseconds} ms");
+                if (_foliageIndex == null)
+                {
+                    _foliage = LevelFoliageChunks.Load(blobPath, FoliageBuilder.RuntimeChunkTiles);
+                    AppShutdown.PrintUnlessQuitting("[foliage-stream] source disappeared during indexing; "
+                        + "using the legacy foliage loader");
+                }
+                else
+                {
+                    AppShutdown.PrintUnlessQuitting($"[foliage-stream] {(cacheHit ? "loaded" : "built")} "
+                        + $"index with {_foliageIndex.Chunks.Count} chunks in {watch.ElapsedMilliseconds} ms");
+                }
             }
             else
             {
@@ -561,21 +570,31 @@ public partial class ObjectStreamer : Node
     // worker; _Process applies them (once this registry exists) as their keys land in the queue.
     private void OnMeshesExtracted()
     {
-        double meshMs = _coldWatch.Elapsed.TotalMilliseconds;
-        BuildObjects();
-        _sceneBuilt = true;
+        try
+        {
+            double meshMs = _coldWatch.Elapsed.TotalMilliseconds;
+            BuildObjects();
+            _sceneBuilt = true;
 
-        // Whatever the decode already produced goes on before the world is shown. Applying a texture
-        // changes the material's shader key (an albedo map appears, the filter may switch to nearest, a
-        // cutout swaps shader), so a material that reaches the scene bare and is textured a frame later
-        // makes the renderer build its pipelines twice. Everything still arriving keeps streaming through
-        // _Process; this only closes the gap for what was ready all along, at a cost of tens of ms.
-        _appliedTextures += _registry.ApplyAllAvailable();
+            // Whatever the decode already produced goes on before the world is shown. Applying a texture
+            // changes the material's shader key (an albedo map appears, the filter may switch to nearest, a
+            // cutout swaps shader), so a material that reaches the scene bare and is textured a frame later
+            // makes the renderer build its pipelines twice. Everything still arriving keeps streaming through
+            // _Process; this only closes the gap for what was ready all along, at a cost of tens of ms.
+            _appliedTextures += _registry.ApplyAllAvailable();
 
-        EmitSignal(SignalName.MeshesReady, meshMs);
-        EmitSignal(SignalName.Progress, _appliedTextures, _totalTextureKeys);
-        Log.Print($"[stream] playable in {meshMs:0} ms ({_appliedTextures}/{_totalTextureKeys} "
-            + "textures already applied); the rest stream in...");
+            EmitSignal(SignalName.MeshesReady, meshMs);
+            EmitSignal(SignalName.Progress, _appliedTextures, _totalTextureKeys);
+            Log.Print($"[stream] playable in {meshMs:0} ms ({_appliedTextures}/{_totalTextureKeys} "
+                + "textures already applied); the rest stream in...");
+        }
+        catch (Exception e)
+        {
+            // This callback is deferred from the extraction worker, so an exception cannot fault that
+            // worker. Settle the task the loading flow actually awaits; Main will cancel the remaining
+            // texture pass and return to the menu with the original build error.
+            _completion.TrySetException(e);
+        }
     }
 
     public override void _Process(double delta)

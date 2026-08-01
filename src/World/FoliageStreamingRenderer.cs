@@ -8,6 +8,8 @@ using UnturnedGodot.Data;
 
 namespace UnturnedGodot;
 
+public readonly record struct FoliageStructuralChunk(ArrayMesh Mesh, int Count, float OriginSpread);
+
 // Spatial owner for visual-only foliage. Core keeps a compact offset/bounds index; this node decodes and
 // uploads only the chunks whose existing visibility ranges approach the active camera, then retires their
 // RenderingServer resources on the main thread after a larger hysteresis radius.
@@ -68,9 +70,24 @@ public partial class FoliageStreamingRenderer : Node3D
     public int DecodeFailures => _decodeFailures;
     public int MaximumQueued => _maxQueued;
     public long MaximumDecodedBytes => _maxDecodedBytes;
+    public bool IsSettled => _focused && !_needsRefill && _pending.Count == 0 && _queue.Count == 0
+        && _decoded.IsEmpty && Volatile.Read(ref _workers) == 0;
     public IEnumerable<MultiMesh> MultiMeshes
     {
         get { foreach (Resident value in _resident.Values) yield return value.Mesh; }
+    }
+    public IEnumerable<FoliageStructuralChunk> StructuralChunks
+    {
+        get
+        {
+            foreach (FoliageResidencyItem item in _items)
+            {
+                FoliageChunkMetadata chunk = _index.Chunks[item.Index];
+                Vector3 size = chunk.Bounds.Max - chunk.Bounds.Min;
+                yield return new FoliageStructuralChunk(_meshes[item.Index], chunk.Count,
+                    MathF.Max(size.X, MathF.Max(size.Y, size.Z)));
+            }
+        }
     }
 
     public static FoliageStreamingRenderer Create(FoliageResidencyIndex index,
@@ -328,6 +345,7 @@ public partial class FoliageStreamingRenderer : Node3D
             return;
         if (resident.Instance.IsValid)
             RenderingServer.FreeRid(resident.Instance);
+        resident.Mesh.Dispose();
         ResidentInstances -= resident.Count;
         ResidentBufferBytes -= resident.Bytes;
         _retiredChunks++;

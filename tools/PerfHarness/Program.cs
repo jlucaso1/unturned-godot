@@ -201,10 +201,17 @@ public static class Program
         residency.Write(indexCache);
         long indexBytes = new FileInfo(indexCache).Length;
         var cacheWatch = Stopwatch.StartNew();
-        if (!FoliageResidencyIndex.TryRead(indexCache, path, 4, out FoliageResidencyIndex? reused))
-            throw new InvalidOperationException("Fresh foliage residency index did not reload.");
-        cacheWatch.Stop();
-        File.Delete(indexCache);
+        FoliageResidencyIndex? reused;
+        try
+        {
+            if (!FoliageResidencyIndex.TryRead(indexCache, path, 4, out reused))
+                throw new InvalidOperationException("Fresh foliage residency index did not reload.");
+            cacheWatch.Stop();
+        }
+        finally
+        {
+            File.Delete(indexCache);
+        }
         Console.WriteLine($"  residency index: {residency.Chunks.Count:N0} chunks / "
             + $"{residency.IndexedInstances:N0} instances, {indexBytes / 1048576.0:0.00} MiB sidecar, "
             + $"build {indexWatch.Elapsed.TotalMilliseconds:0.0} ms, validated reload "

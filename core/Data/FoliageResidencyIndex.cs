@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
@@ -198,28 +199,42 @@ public sealed class FoliageResidencyIndex
     {
         if ((uint)index >= (uint)Chunks.Count)
             throw new ArgumentOutOfRangeException(nameof(index));
-        byte[] records = new byte[DecodeRecordsPerBatch * MatrixRecordBytes];
-        using var stream = new FileStream(SourcePath, FileMode.Open, System.IO.FileAccess.Read,
-            FileShare.Read, 64 * 1024, FileOptions.RandomAccess);
-        return DecodeChunk(index, stream, records, cancellationToken);
+        byte[] records = ArrayPool<byte>.Shared.Rent(DecodeRecordsPerBatch * MatrixRecordBytes);
+        try
+        {
+            using var stream = new FileStream(SourcePath, FileMode.Open, System.IO.FileAccess.Read,
+                FileShare.Read, 64 * 1024, FileOptions.RandomAccess);
+            return DecodeChunk(index, stream, records, cancellationToken);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(records);
+        }
     }
 
     public IReadOnlyList<FoliageChunk> DecodeChunks(IReadOnlyList<int> indices,
         CancellationToken cancellationToken = default)
     {
         var result = new FoliageChunk[indices.Count];
-        byte[] records = new byte[DecodeRecordsPerBatch * MatrixRecordBytes];
-        using var stream = new FileStream(SourcePath, FileMode.Open, System.IO.FileAccess.Read,
-            FileShare.Read, 64 * 1024, FileOptions.RandomAccess);
-        for (int i = 0; i < indices.Count; i++)
+        byte[] records = ArrayPool<byte>.Shared.Rent(DecodeRecordsPerBatch * MatrixRecordBytes);
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            int index = indices[i];
-            if ((uint)index >= (uint)Chunks.Count)
-                throw new ArgumentOutOfRangeException(nameof(indices));
-            result[i] = DecodeChunk(index, stream, records, cancellationToken);
+            using var stream = new FileStream(SourcePath, FileMode.Open, System.IO.FileAccess.Read,
+                FileShare.Read, 64 * 1024, FileOptions.RandomAccess);
+            for (int i = 0; i < indices.Count; i++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                int index = indices[i];
+                if ((uint)index >= (uint)Chunks.Count)
+                    throw new ArgumentOutOfRangeException(nameof(indices));
+                result[i] = DecodeChunk(index, stream, records, cancellationToken);
+            }
+            return result;
         }
-        return result;
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(records);
+        }
     }
 
     private FoliageChunk DecodeChunk(int index, FileStream stream, byte[] records,
@@ -372,7 +387,7 @@ public sealed class FoliageResidencyIndex
             return true;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or EndOfStreamException
-            or InvalidDataException or ArgumentException or OverflowException)
+            or InvalidDataException or ArgumentException or OverflowException or FormatException)
         {
             return false;
         }

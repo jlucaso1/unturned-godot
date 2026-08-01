@@ -186,6 +186,8 @@ public static class WorldBuilder
                 FoliageResidencyIndex.CacheFileName(foliagePath));
             foliageIndex = FoliageResidencyIndex.LoadOrBuild(foliagePath, indexPath,
                 FoliageBuilder.RuntimeChunkTiles, out _);
+            if (foliageIndex == null)
+                foliageData = LevelFoliageChunks.Load(foliagePath, FoliageBuilder.RuntimeChunkTiles);
         }
         else
         {

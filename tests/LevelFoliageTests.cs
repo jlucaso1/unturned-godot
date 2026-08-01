@@ -461,6 +461,19 @@ public class LevelFoliageTests
         Assert.True(FoliageResidencyIndex.TryRead(cache, source, 4, out FoliageResidencyIndex? reused));
         Assert.Empty(rebuilt.Chunks);
         Assert.NotNull(reused);
+
+        // An interrupted atomic replacement can retain a valid header and only part of the body.
+        byte[] complete = File.ReadAllBytes(cache);
+        File.WriteAllBytes(cache, complete.AsSpan(0, complete.Length / 2).ToArray());
+        Assert.False(FoliageResidencyIndex.TryRead(cache, source, 4, out _));
+        FoliageResidencyIndex recovered = FoliageResidencyIndex.LoadOrBuild(source, cache, 4,
+            out bool truncatedHit)!;
+        Assert.False(truncatedHit);
+        Assert.Empty(recovered.Chunks);
+
+        // BinaryReader.ReadString throws FormatException for a malformed 7-bit length prefix.
+        File.WriteAllBytes(cache, new byte[] { 0x80, 0x80, 0x80, 0x80, 0x80 });
+        Assert.False(FoliageResidencyIndex.TryRead(cache, source, 4, out _));
     }
 
     [Fact]

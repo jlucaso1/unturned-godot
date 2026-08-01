@@ -43,7 +43,7 @@ public static class FoliageResidencyPlanner
                 else if (!pending.Contains(item.Index) && distanceSquared <= loadRadius * loadRadius)
                     prefetch.Add((item.Index, distanceSquared));
             }
-            else if (resident.Contains(item.Index))
+            else
             {
                 float unloadRadius = loadRadius + unloadHysteresis;
                 if (distanceSquared > unloadRadius * unloadRadius)

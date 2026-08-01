@@ -1,5 +1,7 @@
 using System;
+using System.Buffers.Binary;
 using System.IO;
+using System.Text;
 
 namespace UnturnedGodot.Unity;
 
@@ -59,6 +61,7 @@ public readonly struct CachedTexture
 public static class TextureCache
 {
     private const uint Magic = 0x33584754; // "TGX3": now carries the Unity filter mode
+    private const uint SourceMagic = 0x31534754; // "TGS1"
 
     // True when the file starts with the current format magic; false for stale formats, short files or a
     // missing path — stale caches are rewritten by the next texture pass instead of crashing Read.
@@ -71,7 +74,71 @@ public static class TextureCache
             return s.Read(head) == 4 &&
                 System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(head) == Magic;
         }
-        catch (IOException) { return false; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
+    }
+
+    // Texture keys are stable across updates because Unity PathIDs usually stay stable. Current cache
+    // magic therefore proves only that the payload is readable, not that its pixels came from the current
+    // bundle revision. The source sidecar is committed after the texture payload; an absent, interrupted,
+    // or stale sidecar safely forces that one texture to be extracted again.
+    public static bool IsCurrentForSource(string path, string bundlePath, long stamp)
+    {
+        if (!IsCurrent(path))
+            return false;
+        try
+        {
+            byte[] data = File.ReadAllBytes(SourcePath(path));
+            if (data.Length < 16 || BinaryPrimitives.ReadUInt32LittleEndian(data) != SourceMagic
+                || BinaryPrimitives.ReadInt64LittleEndian(data.AsSpan(4)) != stamp)
+                return false;
+            int length = BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(12));
+            if (length < 0 || 16L + length != data.Length)
+                return false;
+            string recorded = Encoding.UTF8.GetString(data, 16, length);
+            return string.Equals(recorded, Path.GetFullPath(bundlePath),
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException
+            or NotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    public static void RecordSource(string path, string bundlePath, long stamp)
+    {
+        string owner = SourcePath(path);
+        string temporary = owner + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            byte[] source = Encoding.UTF8.GetBytes(Path.GetFullPath(bundlePath));
+            var data = new byte[16 + source.Length];
+            BinaryPrimitives.WriteUInt32LittleEndian(data, SourceMagic);
+            BinaryPrimitives.WriteInt64LittleEndian(data.AsSpan(4), stamp);
+            BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(12), source.Length);
+            source.CopyTo(data.AsSpan(16));
+            File.WriteAllBytes(temporary, data);
+            File.Move(temporary, owner, overwrite: true);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException
+            or NotSupportedException)
+        {
+            // Best effort. Without the sidecar the next load safely rewrites the texture.
+        }
+        finally
+        {
+            try { File.Delete(temporary); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
+    public static string SourcePath(string texturePath) => texturePath + ".source";
+
+    public static void Remove(string texturePath)
+    {
+        foreach (string candidate in new[] { texturePath, SourcePath(texturePath) })
+            try { File.Delete(candidate); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
     }
 
     public static void Write(Stream stream, CachedTexture texture)

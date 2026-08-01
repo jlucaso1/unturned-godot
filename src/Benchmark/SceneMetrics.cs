@@ -43,8 +43,12 @@ public static class SceneMetrics
         switch (node)
         {
             case FoliageStreamingRenderer foliageOwner:
-                foreach (MultiMesh mm in foliageOwner.MultiMeshes)
-                    AccountMultiMesh(mm, r, meshes, materials);
+                // Tier 1 attaches no camera and advances no frame, so a spatial renderer intentionally
+                // has no resident GPU buffers yet. Its index is nevertheless the complete deterministic
+                // scene structure and must contribute the same counts, meshes and materials as the legacy
+                // all-resident path.
+                foreach (FoliageStructuralChunk chunk in foliageOwner.StructuralChunks)
+                    AccountMultiMesh(chunk.Mesh, chunk.Count, chunk.OriginSpread, r, meshes, materials);
                 break;
             case MultiMeshRidRenderer ridOwner:
                 foreach (MultiMesh mm in ridOwner.MultiMeshes)
@@ -79,6 +83,18 @@ public static class SceneMetrics
         AccountMesh(mm.Mesh, r, meshes);
         AccountMultiMeshMaterials(mm, materials);
         double spread = InstanceOriginSpread(mm);
+        if (spread > r.MaxMultiMeshSpread)
+            r.MaxMultiMeshSpread = spread;
+    }
+
+    private static void AccountMultiMesh(ArrayMesh mesh, int count, double spread, SceneMetricsResult r,
+        HashSet<ulong> meshes, HashSet<ulong> materials)
+    {
+        r.MultiMeshInstances++;
+        r.MultiMeshTotalInstances += count;
+        AccountMesh(mesh, r, meshes);
+        for (int s = 0; s < mesh.GetSurfaceCount(); s++)
+            AccountMaterial(mesh.SurfaceGetMaterial(s), materials);
         if (spread > r.MaxMultiMeshSpread)
             r.MaxMultiMeshSpread = spread;
     }

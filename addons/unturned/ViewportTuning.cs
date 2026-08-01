@@ -1,6 +1,7 @@
 #if TOOLS
 using System;
 using System.Collections.Generic;
+using System.IO;
 using Godot;
 
 namespace UnturnedGodot.EditorTools;
@@ -15,7 +16,7 @@ namespace UnturnedGodot.EditorTools;
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class ViewportTuning
 {
-    private const string BackupPath = "user://editor_viewport_backup.cfg";
+    private const string LegacyBackupPath = "user://editor_viewport_backup.cfg";
     private const string BackupSection = "viewport";
 
     // Free-look metres per second. A map is crossed in ~20 s at span/200, and Shift still triples it for
@@ -58,8 +59,9 @@ public static class ViewportTuning
     // Restores whatever the settings were before the first Apply. Returns false when there is no backup.
     public static bool Restore()
     {
+        string backupPath = BackupPath();
         var config = new ConfigFile();
-        if (config.Load(BackupPath) != Error.Ok)
+        if (config.Load(backupPath) != Error.Ok)
             return false;
 
         EditorSettings settings = EditorInterface.Singleton.GetEditorSettings();
@@ -67,24 +69,47 @@ public static class ViewportTuning
             if (config.HasSectionKey(BackupSection, key))
                 settings.SetSetting(key, config.GetValue(BackupSection, key));
 
-        DirAccess.RemoveAbsolute(ProjectSettings.GlobalizePath(BackupPath));
+        DirAccess.RemoveAbsolute(backupPath);
         return true;
     }
 
-    public static bool HasBackup() => new ConfigFile().Load(BackupPath) == Error.Ok;
+    public static bool HasBackup() => new ConfigFile().Load(BackupPath()) == Error.Ok;
 
     // Saves the current values once — a second Apply (a different map) must not overwrite the backup with
     // the already-tuned values, or Restore would put the tuned ones back.
     private static void Backup(EditorSettings settings)
     {
+        string backupPath = BackupPath();
         var config = new ConfigFile();
-        if (config.Load(BackupPath) == Error.Ok)
+        if (config.Load(backupPath) == Error.Ok)
             return;
 
         foreach (string key in Tuned)
             if (settings.HasSetting(key))
                 config.SetValue(BackupSection, key, settings.GetSetting(key));
-        config.Save(BackupPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(backupPath)!);
+        config.Save(backupPath);
+    }
+
+    private static string BackupPath()
+    {
+        // EditorSettings are global, so their backup belongs beside the editor's global configuration,
+        // not in one project's user:// directory. Migrate the old project-local backup when this project
+        // is first reopened after upgrading so an existing Restore button keeps working.
+        string path = Path.Combine(EditorInterface.Singleton.GetEditorPaths().GetConfigDir(),
+            "unturned-godot", "editor_viewport_backup.cfg");
+        string legacy = ProjectSettings.GlobalizePath(LegacyBackupPath);
+        if (!File.Exists(path) && File.Exists(legacy))
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                File.Move(legacy, path);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                return legacy;
+            }
+        return path;
     }
 
     // The settings as they stand now, for display.
