@@ -349,6 +349,52 @@ public class PhysicsBodyOrderTests
     }
 
     [Fact]
+    public void EditorWarmCachePlansAndWritesMissingTerrainLayers()
+    {
+        if (FindRepositoryFile(Path.Combine("addons", "unturned", "WorldPreview.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("MissingTerrainLayers(mapPath, sources)", source);
+        Assert.Contains("TerrainLayerCache.Missing(needed, owners, TerrainCacheDir)", source);
+        Assert.Contains("BundleTextures.ExtractStreamed(plan.Source.BundlePath", source);
+        Assert.Contains("TerrainLayerCache.Write(material, texture, plan.Source.BundlePath, TerrainCacheDir)",
+            source);
+    }
+
+    [Fact]
+    public void AudioExtractionPreservesEverySerializedFileAndSelectsItsResource()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Rendering", "AudioExtractor.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("List<byte[]> SerializedFiles", source);
+        Assert.Contains("Dictionary<string, byte[]> Resources", source);
+        Assert.Contains("serialized.Add(stream.Read((int)node.Size))", source);
+        Assert.Contains("foreach (byte[] bytes in nodes.SerializedFiles)", source);
+        Assert.Contains("ResourceFor(res, nodes.Resources)", source);
+        Assert.DoesNotContain("sf = stream.Read((int)node.Size)", source);
+        Assert.DoesNotContain("resource = stream.Read((int)node.Size)", source);
+    }
+
+    [Fact]
+    public void RuntimeBenchmarkAppliesFamilyThresholdsToAllWallClockMetrics()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Benchmark", "RuntimeBenchmark.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("[\"runtime.frameMs\"] = 0.15", source);
+        Assert.Contains("[\"runtime.processMonitorMs.\"] = 0.15", source);
+        Assert.Contains("[\"runtime.physicsMonitorMs.\"] = 0.15", source);
+        Assert.Contains("ThresholdSuffixOverrides", source);
+        Assert.Contains("[\".totalMs\"] = 0.15", source);
+        Assert.Contains("[\".meanMs\"] = 0.15", source);
+        Assert.Contains("[\".maxMs\"] = 0.15", source);
+    }
+
+    [Fact]
     public void FinishedSubscribersSeeNeededGuidsBeforeTheyAreReleased()
     {
         if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } path)

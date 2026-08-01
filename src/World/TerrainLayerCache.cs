@@ -15,11 +15,11 @@ public static class TerrainLayerCache
 {
     public static string Directory => ProjectSettings.GlobalizePath("user://terrain_cache");
 
-    private static string PathFor(Guid material) =>
-        Path.Combine(Directory, material.ToString("N") + ".tex");
+    private static string PathFor(Guid material, string directory) =>
+        Path.Combine(directory, material.ToString("N") + ".tex");
 
-    private static string StampPathFor(Guid material) =>
-        Path.Combine(Directory, material.ToString("N") + ".stamp");
+    private static string StampPathFor(Guid material, string directory) =>
+        Path.Combine(directory, material.ToString("N") + ".stamp");
 
     private static string SourceStamp(string bundlePath)
     {
@@ -36,7 +36,7 @@ public static class TerrainLayerCache
         }
     }
 
-    private static bool MatchesSource(Guid material, string bundlePath)
+    private static bool MatchesSource(Guid material, string bundlePath, string directory)
     {
         string expected = SourceStamp(bundlePath);
         if (expected.Length == 0)
@@ -44,7 +44,7 @@ public static class TerrainLayerCache
 
         try
         {
-            return File.ReadAllText(StampPathFor(material)) == expected;
+            return File.ReadAllText(StampPathFor(material, directory)) == expected;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
@@ -54,15 +54,18 @@ public static class TerrainLayerCache
 
     // The GUIDs among `needed` that are not cached yet, which is exactly what a bundle pass has to produce.
     public static HashSet<Guid> Missing(IEnumerable<Guid> needed,
-        IReadOnlyDictionary<Guid, string> bundlePaths)
+        IReadOnlyDictionary<Guid, string> bundlePaths) => Missing(needed, bundlePaths, Directory);
+
+    public static HashSet<Guid> Missing(IEnumerable<Guid> needed,
+        IReadOnlyDictionary<Guid, string> bundlePaths, string cacheDirectory)
     {
         var missing = new HashSet<Guid>();
         foreach (Guid guid in needed)
         {
-            string path = PathFor(guid);
+            string path = PathFor(guid, cacheDirectory);
             if (!bundlePaths.TryGetValue(guid, out string? bundlePath)
                 || !File.Exists(path) || !TextureCache.IsCurrent(path)
-                || !MatchesSource(guid, bundlePath))
+                || !MatchesSource(guid, bundlePath, cacheDirectory))
                 missing.Add(guid);
         }
         return missing;
@@ -70,8 +73,9 @@ public static class TerrainLayerCache
 
     public static CachedTexture? Read(Guid material, string bundlePath)
     {
-        string path = PathFor(material);
-        if (!File.Exists(path) || !TextureCache.IsCurrent(path) || !MatchesSource(material, bundlePath))
+        string path = PathFor(material, Directory);
+        if (!File.Exists(path) || !TextureCache.IsCurrent(path)
+            || !MatchesSource(material, bundlePath, Directory))
             return null;
 
         try
@@ -86,17 +90,21 @@ public static class TerrainLayerCache
     }
 
     // Best-effort: a write failure just means the next boot extracts this texture again.
-    public static void Write(Guid material, CachedTexture texture, string bundlePath)
+    public static void Write(Guid material, CachedTexture texture, string bundlePath) =>
+        Write(material, texture, bundlePath, Directory);
+
+    public static void Write(Guid material, CachedTexture texture, string bundlePath,
+        string cacheDirectory)
     {
         try
         {
             string stamp = SourceStamp(bundlePath);
             if (stamp.Length == 0)
                 return;
-            System.IO.Directory.CreateDirectory(Directory);
-            using FileStream stream = File.Create(PathFor(material));
+            System.IO.Directory.CreateDirectory(cacheDirectory);
+            using FileStream stream = File.Create(PathFor(material, cacheDirectory));
             TextureCache.Write(stream, texture);
-            File.WriteAllText(StampPathFor(material), stamp);
+            File.WriteAllText(StampPathFor(material, cacheDirectory), stamp);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {

@@ -105,6 +105,24 @@ public class ContentSourceTests
         Assert.EndsWith(Path.Combine("5000", "Assets"), mod.AssetsDir, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("Foliage")]
+    [InlineData("PhysicsMaterials")]
+    public void Discover_AcceptsOtherSupportedAssetOnlyBundles(string assetKind)
+    {
+        using var dir = new TempDir();
+        string install = BuildLibrary(dir);
+        string item = Path.Combine("steamapps", "workshop", "content", "304930", "5002");
+        dir.Write(Path.Combine(item, "MasterBundle.dat"), ModConfig);
+        dir.Write(Path.Combine(item, "california2_linux.masterbundle"), new byte[] { 1 });
+        dir.Write(Path.Combine(item, "Assets", assetKind, "Custom.asset"), "Metadata {}\n");
+
+        ContentSource mod = Assert.Single(ContentSource.Discover(install,
+            UnturnedInstall.Platform.Linux), source => !source.IsCore);
+
+        Assert.EndsWith(Path.Combine("5002", "Assets"), mod.AssetsDir, StringComparison.Ordinal);
+    }
+
     // Still not a source: a bundle declaration with no content of any kind behind it.
     [Fact]
     public void Discover_RejectsAnItemWithNoContentAtAll()

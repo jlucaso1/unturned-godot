@@ -33,40 +33,42 @@ public static class AudioExtractor
         return file.EndsWith(".asset", StringComparison.OrdinalIgnoreCase) ? file[..^6] : file;
     }
 
-    // Streams the bundle forward, keeping only the SerializedFile and the audio .resource node and
+    // Streams the bundle forward, keeping every SerializedFile and audio .resource node and
     // DISCARDING the ~1.2 GB texture .resS in chunks: audio never reads it, and materializing every
     // node (the old UnityBundle.Read path) held the whole decompressed bundle in memory at once —
     // multi-GB RSS spikes on the one-time audio extraction. Falls back to the full decode only for
     // bundles that are not the expected single-LZMA-block shape.
-    private static (byte[] SerializedFile, byte[] Resource) ReadAudioNodes(string bundlePath)
+    private sealed record AudioNodes(List<byte[]> SerializedFiles, Dictionary<string, byte[]> Resources);
+
+    private static AudioNodes ReadAudioNodes(string bundlePath)
     {
         byte[] raw = File.ReadAllBytes(bundlePath);
         using MasterBundleStream? stream = MasterBundleStream.Open(raw);
         if (stream == null)
         {
             UnityBundle bundle = UnityBundle.Read(raw);
-            byte[] sfFull = Array.Empty<byte>();
-            byte[] resourceFull = Array.Empty<byte>();
+            var serializedFiles = new List<byte[]>();
+            var resources = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
             foreach (KeyValuePair<string, byte[]> f in bundle.Files)
             {
                 if (f.Key.EndsWith(".resource"))
-                    resourceFull = f.Value;
+                    resources[ResourceName(f.Key)] = f.Value;
                 else if (!f.Key.EndsWith(".resS"))
-                    sfFull = f.Value;
+                    serializedFiles.Add(f.Value);
             }
-            return (sfFull, resourceFull);
+            return new AudioNodes(serializedFiles, resources);
         }
 
         var ordered = new List<MasterBundleStream.Node>(stream.Nodes);
         ordered.Sort((a, b) => a.Offset.CompareTo(b.Offset));
-        byte[] sf = Array.Empty<byte>();
-        byte[] resource = Array.Empty<byte>();
+        var serialized = new List<byte[]>();
+        var resourceNodes = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
         byte[]? discard = null;
         foreach (MasterBundleStream.Node node in ordered)
         {
             if (node.Path.EndsWith(".resource"))
             {
-                resource = stream.Read((int)node.Size);
+                resourceNodes[ResourceName(node.Path)] = stream.Read((int)node.Size);
             }
             else if (node.Path.EndsWith(".resS"))
             {
@@ -83,11 +85,23 @@ public static class AudioExtractor
             }
             else
             {
-                sf = stream.Read((int)node.Size);
+                serialized.Add(stream.Read((int)node.Size));
             }
         }
-        return (sf, resource);
+        return new AudioNodes(serialized, resourceNodes);
     }
+
+    private static string ResourceName(string path)
+    {
+        string normalized = path.Replace('\\', '/');
+        int slash = normalized.LastIndexOf('/');
+        return slash >= 0 ? normalized[(slash + 1)..] : normalized;
+    }
+
+    private sealed record AudioFile(SerializedFile File, Dictionary<long, SerializedObject> ById,
+        Dictionary<string, long> Containers);
+
+    private sealed record AudioAsset(AudioFile File, SerializedObject Object);
 
     // A synthetic definition built from RAW AudioClips (assets the game plays directly, without a
     // OneShotAudioDefinition — e.g. ZombieManager's roar/groan arrays): the clip container paths
@@ -116,44 +130,45 @@ public static class AudioExtractor
 
         AppShutdown.PrintUnlessQuitting($"[audio] extracting {missing.Count} audio definitions and {missingGroups.Count} " +
             "clip groups from masterbundle (one-time)...");
-        (byte[] sf, byte[] resource) = ReadAudioNodes(bundlePath);
-        SerializedFile file = SerializedFile.Read(sf);
-
-        var byId = new Dictionary<long, SerializedObject>();
-        foreach (SerializedObject o in file.Objects)
-            byId[o.PathId] = o;
-
-        // Container catalog: path -> asset path id (same walk PrefabGraph does, kept local to this pass).
-        var containers = new Dictionary<string, long>();
-        string assetPrefix = string.Empty;
-        foreach (SerializedObject o in file.Objects)
+        AudioNodes nodes = ReadAudioNodes(bundlePath);
+        var files = new List<AudioFile>(nodes.SerializedFiles.Count);
+        foreach (byte[] bytes in nodes.SerializedFiles)
         {
-            if (o.ClassId != 142) // AssetBundle
-                continue;
-            Dictionary<string, object> ab = TypeTreeReader.Read(o.TypeTree, file.ReaderFor(o));
-            foreach (object entry in (List<object>)ab["m_Container"])
+            SerializedFile file = SerializedFile.Read(bytes);
+            var byId = new Dictionary<long, SerializedObject>();
+            foreach (SerializedObject o in file.Objects)
+                byId[o.PathId] = o;
+
+            // Path ids are local to one SerializedFile. Keep each catalog attached to its own object map
+            // so colliding ids in a multi-file workshop bundle never resolve into a different file.
+            var containers = new Dictionary<string, long>(StringComparer.Ordinal);
+            foreach (SerializedObject o in file.Objects)
             {
-                var pair = (Dictionary<string, object>)entry;
-                var path = (string)pair["first"];
-                containers[path] = PathId(((Dictionary<string, object>)pair["second"])["asset"]);
-                int idx = path.IndexOf("effects/", StringComparison.Ordinal);
-                if (assetPrefix.Length == 0 && idx > 0)
-                    assetPrefix = path[..idx];
+                if (o.ClassId != 142) // AssetBundle
+                    continue;
+                Dictionary<string, object> ab = TypeTreeReader.Read(o.TypeTree, file.ReaderFor(o));
+                foreach (object entry in (List<object>)ab["m_Container"])
+                {
+                    var pair = (Dictionary<string, object>)entry;
+                    containers[(string)pair["first"]] =
+                        PathId(((Dictionary<string, object>)pair["second"])["asset"]);
+                }
             }
+
+            files.Add(new AudioFile(file, byId, containers));
         }
 
         int extracted = 0;
         foreach (string assetPath in missing)
         {
-            string key = assetPrefix + assetPath.Replace('\\', '/').ToLowerInvariant();
-            if (!containers.TryGetValue(key, out long defId) ||
-                !byId.TryGetValue(defId, out SerializedObject? defObj))
+            if (FindAsset(files, assetPath) is not { } defAsset)
             {
                 AppShutdown.WarnUnlessQuitting($"[audio] def not found in bundle: {assetPath}");
                 continue;
             }
 
-            Dictionary<string, object> def = TypeTreeReader.Read(defObj.TypeTree, file.ReaderFor(defObj));
+            Dictionary<string, object> def = TypeTreeReader.Read(defAsset.Object.TypeTree,
+                defAsset.File.File.ReaderFor(defAsset.Object));
             float volumeMultiplier = Convert.ToSingle(def.GetValueOrDefault("volumeMultiplier", 1f));
             float minPitch = Convert.ToSingle(def.GetValueOrDefault("minPitch", 1f));
             float maxPitch = Convert.ToSingle(def.GetValueOrDefault("maxPitch", 1f));
@@ -168,15 +183,17 @@ public static class AudioExtractor
                 foreach (object c in (List<object>)clips)
                 {
                     long clipId = PathId(c);
-                    if (!byId.TryGetValue(clipId, out SerializedObject? clipObj))
+                    if (!defAsset.File.ById.TryGetValue(clipId, out SerializedObject? clipObj))
                         continue;
-                    Dictionary<string, object> clip = TypeTreeReader.Read(clipObj.TypeTree, file.ReaderFor(clipObj));
+                    Dictionary<string, object> clip = TypeTreeReader.Read(clipObj.TypeTree,
+                        defAsset.File.File.ReaderFor(clipObj));
                     string name = clip.GetValueOrDefault("m_Name") as string ?? $"clip_{clipId:x}";
                     if (clip.GetValueOrDefault("m_Resource") is not Dictionary<string, object> res)
                         continue;
                     long offset = Convert.ToInt64(res["m_Offset"]);
                     int size = Convert.ToInt32(res["m_Size"]);
-                    if (offset < 0 || size <= 0 || offset + size > resource.Length)
+                    if (ResourceFor(res, nodes.Resources) is not { } resource
+                        || offset < 0 || size <= 0 || offset + size > resource.Length)
                         continue;
 
                     byte[]? ogg = RebuildOgg(resource, offset, size, name);
@@ -208,20 +225,21 @@ public static class AudioExtractor
             var clipFiles = new List<string>();
             foreach (string clipPath in group.ClipPaths)
             {
-                string key = assetPrefix + clipPath.Replace('\\', '/').ToLowerInvariant();
-                if (!containers.TryGetValue(key, out long clipId)
-                    || !byId.TryGetValue(clipId, out SerializedObject? clipObj))
+                if (FindAsset(files, clipPath) is not { } clipAsset)
                 {
                     AppShutdown.WarnUnlessQuitting($"[audio] clip not found in bundle: {clipPath}");
                     continue;
                 }
-                Dictionary<string, object> clip = TypeTreeReader.Read(clipObj.TypeTree, file.ReaderFor(clipObj));
+                long clipId = clipAsset.Object.PathId;
+                Dictionary<string, object> clip = TypeTreeReader.Read(clipAsset.Object.TypeTree,
+                    clipAsset.File.File.ReaderFor(clipAsset.Object));
                 string name = clip.GetValueOrDefault("m_Name") as string ?? $"clip_{clipId:x}";
                 if (clip.GetValueOrDefault("m_Resource") is not Dictionary<string, object> res)
                     continue;
                 long offset = Convert.ToInt64(res["m_Offset"]);
                 int size = Convert.ToInt32(res["m_Size"]);
-                if (offset < 0 || size <= 0 || offset + size > resource.Length)
+                if (ResourceFor(res, nodes.Resources) is not { } resource
+                    || offset < 0 || size <= 0 || offset + size > resource.Length)
                     continue;
                 byte[]? ogg = RebuildOgg(resource, offset, size, name);
                 if (ogg == null)
@@ -243,6 +261,31 @@ public static class AudioExtractor
 
         AppShutdown.PrintUnlessQuitting($"[audio] extracted {extracted} definitions to {audioCacheDir}");
         return extracted;
+    }
+
+    private static AudioAsset? FindAsset(IReadOnlyList<AudioFile> files, string assetPath)
+    {
+        string suffix = assetPath.Replace('\\', '/').ToLowerInvariant();
+        foreach (AudioFile file in files)
+            foreach ((string path, long id) in file.Containers)
+                if (path.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
+                    && file.ById.TryGetValue(id, out SerializedObject? asset))
+                    return new AudioAsset(file, asset);
+        return null;
+    }
+
+    private static byte[]? ResourceFor(IReadOnlyDictionary<string, object> resourceRef,
+        IReadOnlyDictionary<string, byte[]> resources)
+    {
+        if (resourceRef.GetValueOrDefault("m_Source") is string source
+            && resources.TryGetValue(ResourceName(source), out byte[]? resource))
+            return resource;
+
+        // Older bundles omit m_Source because they carry only one audio stream.
+        if (resources.Count == 1)
+            foreach (byte[] only in resources.Values)
+                return only;
+        return null;
     }
 
     private static byte[]? RebuildOgg(byte[] resource, long offset, int size, string name)

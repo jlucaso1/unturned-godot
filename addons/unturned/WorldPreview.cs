@@ -33,27 +33,31 @@ public static class WorldPreview
 
     public static string CacheDir => ProjectSettings.GlobalizePath("user://model_cache");
     public static string TextureCacheDir => ProjectSettings.GlobalizePath("user://texture_cache");
+    public static string TerrainCacheDir => ProjectSettings.GlobalizePath("user://terrain_cache");
+
+    private sealed record CachePlan(List<ContentExtraction.BundlePlan> Bundles,
+        Dictionary<string, TerrainLayerPlan.BundleWants> TerrainLayers, int Needed);
 
     // How much of a map's cache is already on disk. Mesh and texture misses are separate because textures
     // can be incomplete while every mesh GUID is ready, and they have different editor consequences.
-    public static (int MissingMeshes, int MissingTextures, int Needed) CacheState(
+    public static (int MissingMeshes, int MissingTextures, int MissingTerrainLayers, int Needed) CacheState(
         string unturnedPath, string mapPath)
     {
-        List<ContentExtraction.BundlePlan> plans = PlanFor(unturnedPath, mapPath, out int needed);
+        CachePlan cachePlan = PlanFor(unturnedPath, mapPath);
         int missingMeshes = 0, missingTextures = 0;
-        foreach (ContentExtraction.BundlePlan plan in plans)
+        foreach (ContentExtraction.BundlePlan plan in cachePlan.Bundles)
         {
             missingMeshes += plan.Missing.Count;
             missingTextures += plan.MissingTextures.Count;
         }
-        return (missingMeshes, missingTextures, needed);
+        int missingTerrainLayers = TerrainLayerPlan.MaterialBundlePaths(cachePlan.TerrainLayers).Count;
+        return (missingMeshes, missingTextures, missingTerrainLayers, cachePlan.Needed);
     }
 
     // What each bundle owes this map. Goes through the same planner the game does, so a workshop map is
     // measured against ITS bundle too rather than only the game's — the dock would otherwise call a map
     // fully cached while every one of its custom objects was still missing.
-    private static List<ContentExtraction.BundlePlan> PlanFor(string unturnedPath, string mapPath,
-        out int neededCount)
+    private static CachePlan PlanFor(string unturnedPath, string mapPath)
     {
         IReadOnlyList<ContentSource> sources = ContentSource.Discover(unturnedPath);
         var assetsDirs = new string[sources.Count];
@@ -61,15 +65,40 @@ public static class WorldPreview
             assetsDirs[i] = sources[i].AssetsDir;
 
         HashSet<Guid> needed = MapAssetSet.Collect(mapPath, assetsDirs);
-        neededCount = needed.Count;
 
         var foliageGuids = LevelFoliageChunks.ReadAssetGuids(Path.Combine(mapPath, "Foliage.blob"));
         var foliage = foliageGuids is { } guids
             ? FoliageAsset.ScanSources(sources, new HashSet<Guid>(guids))
             : new Dictionary<Guid, FoliageAsset.Owned>();
 
-        return ContentExtraction.Plan(sources, CacheDir, TextureCacheDir, needed,
-            ContentExtraction.ScanAssets(sources), foliage);
+        Dictionary<string, TerrainLayerPlan.BundleWants> terrainLayers = MissingTerrainLayers(mapPath, sources);
+        var bundlesOwingLayers = new HashSet<string>(terrainLayers.Keys, StringComparer.Ordinal);
+        List<ContentExtraction.BundlePlan> bundles = ContentExtraction.Plan(sources, CacheDir,
+            TextureCacheDir, needed, ContentExtraction.ScanAssets(sources), foliage, bundlesOwingLayers);
+        return new CachePlan(bundles, terrainLayers, needed.Count);
+    }
+
+    private static Dictionary<string, TerrainLayerPlan.BundleWants> MissingTerrainLayers(string mapPath,
+        IReadOnlyList<ContentSource> sources)
+    {
+        Dictionary<(int x, int y), Guid[]> tiles =
+            LevelHierarchy.ReadTileMaterials(Path.Combine(mapPath, "Level.hierarchy"));
+        var materials = new Dictionary<Guid, LandscapeMaterialAsset>();
+        foreach (ContentSource source in sources)
+            LandscapeMaterialAsset.MergeFirstClaimants(materials,
+                LandscapeMaterialAsset.ScanDirectory(Path.Combine(source.AssetsDir, "Landscapes")));
+
+        var needed = new HashSet<Guid>();
+        foreach (Guid[] guids in tiles.Values)
+            foreach (Guid guid in guids)
+                if (guid != Guid.Empty && materials.ContainsKey(guid))
+                    needed.Add(guid);
+
+        Dictionary<string, TerrainLayerPlan.BundleWants> all =
+            TerrainLayerPlan.ByBundle(needed, materials, sources, MasterBundleConfig.Load);
+        Dictionary<Guid, string> owners = TerrainLayerPlan.MaterialBundlePaths(all);
+        HashSet<Guid> missing = TerrainLayerCache.Missing(needed, owners, TerrainCacheDir);
+        return TerrainLayerPlan.ByBundle(missing, materials, sources, MasterBundleConfig.Load);
     }
 
     // Extracts everything `mapName` needs and is missing, straight into the shared cache. Pure parsing and
@@ -78,25 +107,36 @@ public static class WorldPreview
     public static string WarmCache(string unturnedPath, string mapName)
     {
         string mapPath = MapCatalog.ResolvePath(unturnedPath, mapName);
-        List<ContentExtraction.BundlePlan> plans = PlanFor(unturnedPath, mapPath, out int _);
-        if (plans.Count == 0)
+        CachePlan cachePlan = PlanFor(unturnedPath, mapPath);
+        if (cachePlan.Bundles.Count == 0)
             return $"No content bundle found for {mapName}.";
 
         ObjectAssetDatabase db = ContentExtraction.ScanAssets(ContentSource.Discover(unturnedPath));
-        int meshes = 0, textures = 0;
-        foreach (ContentExtraction.BundlePlan plan in plans)
+        int meshes = 0, textures = 0, terrainLayers = 0;
+        foreach (ContentExtraction.BundlePlan plan in cachePlan.Bundles)
         {
-            if (!plan.NeedsExtraction)
-                continue;
+            if (plan.NeedsExtraction)
+            {
+                meshes += ModelExtractor.ExtractMeshes(plan.Source.BundlePath, plan.Source.CacheTag,
+                    plan.Source.ObjectsDir, plan.Source.TreesDir, plan.Source.AssetsDir, plan.Needed,
+                    CacheDir, db, plan.Foliage);
+                textures += ModelExtractor.ExtractTextures(plan.Source.BundlePath, plan.Source.CacheTag,
+                    CacheDir, TextureCacheDir);
+            }
 
-            meshes += ModelExtractor.ExtractMeshes(plan.Source.BundlePath, plan.Source.CacheTag,
-                plan.Source.ObjectsDir, plan.Source.TreesDir, plan.Source.AssetsDir, plan.Needed,
-                CacheDir, db, plan.Foliage);
-            textures += ModelExtractor.ExtractTextures(plan.Source.BundlePath, plan.Source.CacheTag,
-                CacheDir, TextureCacheDir);
+            if (cachePlan.TerrainLayers.TryGetValue(plan.Source.BundlePath,
+                out TerrainLayerPlan.BundleWants? wants))
+                foreach ((string path, CachedTexture texture) in
+                    BundleTextures.ExtractStreamed(plan.Source.BundlePath, wants.ByContainerPath.Keys))
+                    foreach (Guid material in wants.ByContainerPath[path])
+                    {
+                        TerrainLayerCache.Write(material, texture, plan.Source.BundlePath, TerrainCacheDir);
+                        terrainLayers++;
+                    }
         }
 
-        return $"{mapName}: {meshes} meshes, {textures} textures cached.";
+        return $"{mapName}: {meshes} meshes, {textures} object textures and "
+            + $"{terrainLayers} terrain layers cached.";
     }
 
     // Builds the map under a single `UnturnedPreview` node and returns it detached, plus a per-subsystem

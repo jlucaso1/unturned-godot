@@ -100,11 +100,13 @@ public sealed class ContentSource
         string objects = Path.Combine(itemDirectory, "Objects");
         string trees = Path.Combine(itemDirectory, "Resources"); // the game's Trees folder, mod-side name
         string assets = Path.Combine(itemDirectory, "Assets");
-        // Landscape materials count as content on their own. A map mod may ship nothing but its custom
-        // terrain layers, and rejecting it here would leave terrain-layer discovery — which only looks at
-        // the sources this returns — unable to find them, dropping the map back to flat splat colors.
-        string landscapes = Path.Combine(assets, "Landscapes");
-        if (!Directory.Exists(objects) && !Directory.Exists(trees) && !Directory.Exists(landscapes))
+        // Asset-only bundles are valid sources too. Foliage, physics materials and landscapes are consumed
+        // independently of Objects/Resources, and every one of those scanners starts from Discover's
+        // result. Rejecting an item that contains only one of them silently drops otherwise valid content.
+        bool hasSupportedAssets = Directory.Exists(Path.Combine(assets, "Landscapes"))
+            || Directory.Exists(Path.Combine(assets, "Foliage"))
+            || Directory.Exists(Path.Combine(assets, "PhysicsMaterials"));
+        if (!Directory.Exists(objects) && !Directory.Exists(trees) && !hasSupportedAssets)
             return null;
 
         string baseName = config.BundleName.EndsWith(".masterbundle", StringComparison.OrdinalIgnoreCase)

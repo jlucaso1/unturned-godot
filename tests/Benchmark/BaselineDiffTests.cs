@@ -128,6 +128,53 @@ public class BaselineDiffTests
     }
 
     [Fact]
+    public void ThresholdSuffixOverride_CoversDynamicSubsystemTimingsButNotCounts()
+    {
+        var options = new BaselineDiffOptions
+        {
+            ThresholdSuffixOverrides = new Dictionary<string, double>
+            {
+                [".totalMs"] = 0.15,
+                [".meanMs"] = 0.15,
+                [".maxMs"] = 0.15,
+            },
+        };
+        var baseline = new Dictionary<string, double>
+        {
+            ["runtime.subsystem.Navigation.totalMs"] = 100,
+            ["runtime.subsystem.Navigation.meanMs"] = 100,
+            ["runtime.subsystem.Navigation.maxMs"] = 100,
+            ["runtime.subsystem.Navigation.calls"] = 100,
+        };
+        var current = baseline.ToDictionary(pair => pair.Key, _ => 110.0);
+
+        IReadOnlyList<MetricDelta> r = BaselineDiff.Compare(baseline, current, options);
+
+        Assert.Equal(MetricStatus.Unchanged, Delta(r, "runtime.subsystem.Navigation.totalMs").Status);
+        Assert.Equal(MetricStatus.Unchanged, Delta(r, "runtime.subsystem.Navigation.meanMs").Status);
+        Assert.Equal(MetricStatus.Unchanged, Delta(r, "runtime.subsystem.Navigation.maxMs").Status);
+        Assert.Equal(MetricStatus.Regressed, Delta(r, "runtime.subsystem.Navigation.calls").Status);
+    }
+
+    [Fact]
+    public void MostSpecificPrefixOrSuffixWins()
+    {
+        var options = new BaselineDiffOptions
+        {
+            ThresholdPrefixOverrides = new Dictionary<string, double> { ["runtime."] = 0.50 },
+            ThresholdSuffixOverrides = new Dictionary<string, double>
+            {
+                [".subsystem.Audio.maxMs"] = 0.10,
+            },
+        };
+        var r = BaselineDiff.Compare(
+            new Dictionary<string, double> { ["runtime.subsystem.Audio.maxMs"] = 100 },
+            new Dictionary<string, double> { ["runtime.subsystem.Audio.maxMs"] = 120 }, options);
+
+        Assert.Equal(MetricStatus.Regressed, Delta(r, "runtime.subsystem.Audio.maxMs").Status);
+    }
+
+    [Fact]
     public void ZeroBaseline_HandlesPercentAndClassification()
     {
         var r = BaselineDiff.Compare(

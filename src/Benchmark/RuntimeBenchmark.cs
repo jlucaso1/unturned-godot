@@ -94,24 +94,8 @@ public static class RuntimeBenchmark
             AddFrameBucket(report.Metrics, "withPhysics", withPhysicsFrameMs);
             AddFrameBucket(report.Metrics, "withoutPhysics", withoutPhysicsFrameMs);
             AddCounterMetrics(report.Metrics);
-            BenchmarkRunner.Finish(report, $"{mapName}-runtime", new BaselineDiffOptions
-            {
-                HigherIsBetter = new HashSet<string>(StringComparer.Ordinal)
-                {
-                    "runtime.fps.fromMedian",
-                    "runtime.samples",
-                },
-                ThresholdOverrides = new Dictionary<string, double>
-                {
-                    ["interactive.loadMs"] = 0.10,
-                    ["runtime.frameMs.median"] = 0.10,
-                    ["runtime.frameMs.p95"] = 0.15,
-                    ["runtime.processMonitorMs.median"] = 0.15,
-                    ["runtime.physicsMonitorMs.median"] = 0.15,
-                    ["runtime.rssBytes"] = 0.05,
-                    ["runtime.videoMemoryBytes"] = 0.05,
-                },
-            }, "timings are advisory; counts are deterministic for the same spawn view");
+            BenchmarkRunner.Finish(report, $"{mapName}-runtime", DiffOptions(),
+                "timings are advisory; counts are deterministic for the same spawn view");
         }
         catch (Exception e)
         {
@@ -125,6 +109,36 @@ public static class RuntimeBenchmark
     }
 
     private static double Mon(Performance.Monitor monitor) => Performance.GetMonitor(monitor);
+
+    // Every wall-clock timing is subject to scheduler noise. Prefixes cover the frame/monitor families,
+    // while suffixes cover every dynamically named subsystem without loosening its deterministic call
+    // count. Keeping this family-based also covers future percentiles and counters automatically.
+    private static BaselineDiffOptions DiffOptions() => new()
+    {
+        HigherIsBetter = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "runtime.fps.fromMedian",
+            "runtime.samples",
+        },
+        ThresholdPrefixOverrides = new Dictionary<string, double>
+        {
+            ["runtime.frameMs"] = 0.15,
+            ["runtime.processMonitorMs."] = 0.15,
+            ["runtime.physicsMonitorMs."] = 0.15,
+        },
+        ThresholdSuffixOverrides = new Dictionary<string, double>
+        {
+            [".totalMs"] = 0.15,
+            [".meanMs"] = 0.15,
+            [".maxMs"] = 0.15,
+        },
+        ThresholdOverrides = new Dictionary<string, double>
+        {
+            ["interactive.loadMs"] = 0.10,
+            ["runtime.rssBytes"] = 0.05,
+            ["runtime.videoMemoryBytes"] = 0.05,
+        },
+    };
 
     // At or below the physics tick rate, every rendered frame can include a physics step and leave the
     // complementary bucket empty. An absent metric describes that run honestly; asking MetricStats to

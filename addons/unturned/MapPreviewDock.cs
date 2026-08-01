@@ -195,12 +195,13 @@ public partial class MapPreviewDock : VBoxContainer
         string result;
         try
         {
-            (int missingMeshes, int missingTextures, int needed) =
+            (int missingMeshes, int missingTextures, int missingTerrainLayers, int needed) =
                 await Task.Run(() => WorldPreview.CacheState(install, map.Path));
-            result = missingMeshes == 0 && missingTextures == 0
+            result = missingMeshes == 0 && missingTextures == 0 && missingTerrainLayers == 0
                 ? $"Cache ready ({needed} assets)."
                 : $"{missingMeshes} of {needed} meshes not cached"
                     + (missingTextures > 0 ? $"; {missingTextures} textures pending" : "")
+                    + (missingTerrainLayers > 0 ? $"; {missingTerrainLayers} terrain layers pending" : "")
                     + " — warm the cache to complete the preview.";
         }
         catch (Exception e)

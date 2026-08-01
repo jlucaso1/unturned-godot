@@ -38,6 +38,12 @@ public sealed class BaselineDiffOptions
     public IReadOnlyDictionary<string, double> ThresholdPrefixOverrides { get; init; } =
         new Dictionary<string, double>();
 
+    // Suffix policies cover metric families whose leading segment is dynamic (for example subsystem
+    // names followed by .totalMs/.meanMs/.maxMs). Exact overrides still win; otherwise the most-specific
+    // matching prefix or suffix wins.
+    public IReadOnlyDictionary<string, double> ThresholdSuffixOverrides { get; init; } =
+        new Dictionary<string, double>();
+
     // Metrics where a larger value is an improvement. Everything else is lower-is-better.
     public IReadOnlySet<string> HigherIsBetter { get; init; } = new HashSet<string>();
 }
@@ -109,6 +115,12 @@ public static class BaselineDiff
             {
                 threshold = candidate;
                 bestLength = prefix.Length;
+            }
+        foreach ((string suffix, double candidate) in options.ThresholdSuffixOverrides)
+            if (suffix.Length > bestLength && name.EndsWith(suffix, StringComparison.Ordinal))
+            {
+                threshold = candidate;
+                bestLength = suffix.Length;
             }
         return threshold;
     }
