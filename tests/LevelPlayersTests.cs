@@ -93,13 +93,13 @@ public class LevelPlayersTests
         using var dir = new TempDir();
         string path = dir.Write(Path.Combine("Spawns", "Players.dat"),
             File(4, (new Vector3(1, 2, 3), 0, false)));
-        File.SetUnixFileMode(path, UnixFileMode.None);
+        System.IO.File.SetUnixFileMode(path, UnixFileMode.None);
 
         try
         {
             try
             {
-                File.ReadAllBytes(path);
+                System.IO.File.ReadAllBytes(path);
                 return; // running as root: modes do not apply
             }
             catch (UnauthorizedAccessException)
@@ -111,7 +111,7 @@ public class LevelPlayersTests
         }
         finally
         {
-            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            System.IO.File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
         }
     }
 
