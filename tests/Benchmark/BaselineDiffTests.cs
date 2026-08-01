@@ -127,6 +127,43 @@ public class BaselineDiffTests
         Assert.Equal(MetricStatus.Regressed, Delta(r, "gpu.frameMs.median.ground").Status);
     }
 
+    // Both benchmark tiers park scheduler-dependent snapshots (the foliage residency counts of a run
+    // whose upload queue never drained) behind an infinite suffix threshold. Whatever the two sides
+    // happen to hold, the difference is never a verdict — and the delta is still reported.
+    [Fact]
+    public void InfiniteThreshold_ReportsTheDeltaWithoutEverClassifyingIt()
+    {
+        var options = new BaselineDiffOptions
+        {
+            ThresholdSuffixOverrides = new Dictionary<string, double>
+            {
+                ["Unsettled"] = double.PositiveInfinity,
+            },
+        };
+        var baseline = new Dictionary<string, double>
+        {
+            ["runtime.foliage.residentChunksUnsettled"] = 94,
+            ["runtime.foliage.residentChunks"] = 94,
+            ["runtime.foliage.zeroBaselineUnsettled"] = 0,
+        };
+        var current = new Dictionary<string, double>
+        {
+            ["runtime.foliage.residentChunksUnsettled"] = 12,
+            ["runtime.foliage.residentChunks"] = 12,
+            ["runtime.foliage.zeroBaselineUnsettled"] = 5_000_000,
+        };
+
+        IReadOnlyList<MetricDelta> r = BaselineDiff.Compare(baseline, current, options);
+
+        Assert.Equal(MetricStatus.Unchanged, Delta(r, "runtime.foliage.residentChunksUnsettled").Status);
+        // A zero baseline takes the denominator fallback; that must not escape the infinite threshold.
+        Assert.Equal(MetricStatus.Unchanged, Delta(r, "runtime.foliage.zeroBaselineUnsettled").Status);
+        // The settled key keeps the strict default and is still classified — the suffix rule must not
+        // leak onto it. Fewer resident chunks is less memory, so the same drop reads as an improvement.
+        Assert.Equal(MetricStatus.Improved, Delta(r, "runtime.foliage.residentChunks").Status);
+        Assert.Equal(-82, Delta(r, "runtime.foliage.residentChunksUnsettled").AbsoluteDelta);
+    }
+
     [Fact]
     public void ThresholdSuffixOverride_CoversDynamicSubsystemTimingsButNotCounts()
     {
