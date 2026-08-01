@@ -102,11 +102,22 @@ verify_content() {
     [[ $ok == 1 ]]
 }
 
-# Level.dat is the map itself, and the heightmap tiles are what this project needs to load one. The
-# expected grids below are the official Landscape maps in the depot; legacy maps without Landscape
-# tiles are intentionally excluded from --maps all because this project cannot load them.
-expected_all_maps() {
-    printf '%s\n' "Alpha Valley" Germany Monolith PEI Russia Tutorial Washington Yukon
+# Level.dat is the map itself, and the heightmap tiles are what this project needs to load one. Known
+# official grids get exact coordinate checks; --maps all discovers the loadable map set from the tree so
+# a new official map cannot be silently omitted from the receipt.
+all_maps() {
+    local root="$1" dir map
+    shopt -s nullglob
+    for dir in "$root"/Maps/*/; do
+        [[ -s "$dir/Level.dat" ]] || continue
+        map="${dir%/}"
+        map="${map##*/}"
+        case "$map" in
+            Destruction|Paintball_Arena_0) continue ;;
+        esac
+        printf '%s\n' "$map"
+    done
+    shopt -u nullglob
 }
 
 map_tile_bounds() {
@@ -129,6 +140,7 @@ receipt_has_map() {
 
 map_is_whole() {
     local root="$1" map="$2" ok=1 min_x max_x min_y max_y expected_count bounds
+    local minimum_unknown_tiles="${3:-1}"
     local map_root="$root/Maps/$map"
 
     if [[ -z "$map" ]]; then
@@ -159,10 +171,10 @@ map_is_whole() {
             done
         done
     else
-        # Workshop/preview maps are not part of the depot's fixed set. Require at least a 2x2 grid and
-        # make sure it has no holes, rather than accepting a directory containing one arbitrary tile.
-        if [[ ${#tiles[@]} -lt 4 ]]; then
-            echo "Missing: at least four heightmap tiles in $map_root/Landscape/Heightmaps" >&2
+        # Workshop/preview maps are not part of the depot's fixed set. Require a nonempty rectangular
+        # grid, while allowing legitimate one-tile maps.
+        if [[ ${#tiles[@]} -lt $minimum_unknown_tiles ]]; then
+            echo "Missing: at least $minimum_unknown_tiles heightmap tile(s) in $map_root/Landscape/Heightmaps" >&2
             ok=0
         else
             min_x=2147483647; max_x=-2147483648; min_y=2147483647; max_y=-2147483648
@@ -193,6 +205,7 @@ map_is_whole() {
 
 verify_all_maps() {
     local root="$1" require_receipt="$2" ok=1 map marker="$1/$COMPLETION_MARKER"
+    local found=0
 
     if [[ "$require_receipt" == 1 ]]; then
         if [[ ! -f "$marker" ]] || [[ "$(head -n 1 "$marker" 2>/dev/null)" != "selection=all" ]]; then
@@ -201,15 +214,41 @@ verify_all_maps() {
         fi
     fi
 
-    while IFS= read -r map; do
-        if [[ "$require_receipt" == 1 ]] && ! receipt_has_map "$marker" "$map"; then
-            echo "Completion receipt does not contain map: $map" >&2
-            ok=0
-        fi
-        map_is_whole "$root" "$map" || ok=0
-    done < <(expected_all_maps)
+    if [[ "$require_receipt" == 1 ]]; then
+        while IFS= read -r map; do
+            [[ -n "$map" ]] || continue
+            found=1
+            if ! map_list_contains "$root" "$map"; then
+                echo "Completion receipt contains a map no longer present: $map" >&2
+                ok=0
+            fi
+            map_is_whole "$root" "$map" 4 || ok=0
+        done < <(sed -n 's/^map=//p' "$marker")
 
-    [[ $ok == 1 ]]
+        while IFS= read -r map; do
+            [[ -n "$map" ]] || continue
+            if ! receipt_has_map "$marker" "$map"; then
+                echo "Completion receipt does not contain map: $map" >&2
+                ok=0
+            fi
+        done < <(all_maps "$root")
+    else
+        while IFS= read -r map; do
+            [[ -n "$map" ]] || continue
+            found=1
+            map_is_whole "$root" "$map" 4 || ok=0
+        done < <(all_maps "$root")
+    fi
+
+    [[ $ok == 1 && $found == 1 ]]
+}
+
+map_list_contains() {
+    local root="$1" wanted="$2" map
+    while IFS= read -r map; do
+        [[ "$map" == "$wanted" ]] && return 0
+    done < <(all_maps "$root")
+    return 1
 }
 
 write_completion_marker() {
@@ -218,7 +257,7 @@ write_completion_marker() {
         printf '%s\n' 'selection=all'
         while IFS= read -r map; do
             printf 'map=%s\n' "$map"
-        done < <(expected_all_maps)
+        done < <(all_maps "$dest")
     } > "$temp"
     mv -f -- "$temp" "$marker"
 }

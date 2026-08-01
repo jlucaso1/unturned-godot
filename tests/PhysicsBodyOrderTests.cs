@@ -789,6 +789,9 @@ public class PhysicsBodyOrderTests
         Assert.Contains("expected_count", source);
         Assert.Contains("write_completion_marker", source);
         Assert.Contains("verify_content \"$dest\" 0", source);
+        Assert.Contains("all_maps \"$root\"", source);
+        Assert.Contains("minimum_unknown_tiles=\"${3:-1}\"", source);
+        Assert.DoesNotContain("expected_all_maps", source);
         Assert.DoesNotContain("any_map_is_whole", source);
     }
 
@@ -811,8 +814,32 @@ public class PhysicsBodyOrderTests
 
         string source = File.ReadAllText(path);
         Assert.Contains("quarantine_incomplete_content", source);
-        Assert.Contains("mv -f -- \"$content_dir\" \"$quarantine\"", source);
+        Assert.Contains("mktemp -d \"${content_dir}.incomplete.XXXXXX\"", source);
+        Assert.Contains("mv -f -- \"$content_dir\" \"$quarantine/\"", source);
+        Assert.Contains("if ! quarantine_incomplete_content", source);
         Assert.DoesNotContain("quarantine_incomplete_content || true", source);
+    }
+
+    [Fact]
+    public void RealDataCacheKeyIncludesTheContentReceiptSchema()
+    {
+        if (FindRepositoryFile(Path.Combine(".github", "workflows", "real-data.yml")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}", source);
+    }
+
+    [Fact]
+    public void RuntimeBenchmarkTreatsSettledFoliageAsHigherIsBetter()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Benchmark", "RuntimeBenchmark.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        int higher = source.IndexOf("HigherIsBetter", StringComparison.Ordinal);
+        int settled = source.IndexOf("\"runtime.foliage.settled\"", higher, StringComparison.Ordinal);
+        Assert.True(higher >= 0 && settled > higher);
     }
 
     [Fact]

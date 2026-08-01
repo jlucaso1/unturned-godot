@@ -84,9 +84,13 @@ quarantine_incomplete_content() {
         return 0
     fi
 
-    local quarantine="${content_dir}.incomplete.$$.${RANDOM:-0}"
-    if mv -f -- "$content_dir" "$quarantine"; then
-        echo "[content] moved incomplete content aside: $quarantine" >&2
+    local quarantine
+    if ! quarantine="$(mktemp -d "${content_dir}.incomplete.XXXXXX")"; then
+        echo "[content] could not reserve quarantine path for $content_dir" >&2
+        return 1
+    fi
+    if mv -f -- "$content_dir" "$quarantine/"; then
+        echo "[content] moved incomplete content aside: $quarantine/$(basename "$content_dir")" >&2
     else
         echo "[content] could not quarantine incomplete content at $content_dir" >&2
         return 1
@@ -119,7 +123,10 @@ fi
 # A missing download is worth reporting but not worth failing the session over: every test that reads
 # real content self-skips, so the suite is still green, just smaller.
 if [[ $content_status -ne 0 ]]; then
-    quarantine_incomplete_content
+    if ! quarantine_incomplete_content; then
+        echo "Setup failed: incomplete content could not be quarantined." >&2
+        exit 1
+    fi
     echo
     echo "Warning: the game content could not be fetched (see $content_log)." >&2
     echo "The suite still runs; its data-backed tests will self-skip." >&2

@@ -55,7 +55,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/game-data
-          key: ${{ steps.content-key.outputs.key }}
+          # The receipt format is part of the verification contract. Bump this namespace when that
+          # contract changes so old entries without a complete-map receipt cannot be reused.
+          key: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}
 
       - name: Fetch the game content
         if: steps.content-cache.outputs.cache-hit != 'true'

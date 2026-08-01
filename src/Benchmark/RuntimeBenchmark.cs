@@ -123,6 +123,7 @@ public static class RuntimeBenchmark
         {
             "runtime.fps.fromMedian",
             "runtime.samples",
+            "runtime.foliage.settled",
         },
         ThresholdPrefixOverrides = new Dictionary<string, double>
         {
