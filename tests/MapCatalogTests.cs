@@ -413,8 +413,8 @@ public class MapCatalogTests
     {
         // One workshop item with a damaged Landscape folder used to take the whole catalogue with it:
         // the exception escaped the per-map read and the browser listed nothing at all.
-        if (Environment.GetEnvironmentVariable("USER") == "root" || !OperatingSystem.IsLinux())
-            return; // permissions do not bite root, and this is a POSIX mode check
+        if (!PosixPermissions.AreEnforced)
+            return; // this is a POSIX mode check, and the mode bits do not bite a privileged user
 
         using var dir = new TempDir();
         WriteMap(dir, Path.Combine("Maps", "Good"), tiles: new[] { (0, 0) });

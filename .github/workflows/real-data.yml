@@ -1,0 +1,83 @@
+name: Real data
+
+# ci.yml is deliberately hermetic: it never has the game, so every data-backed test self-skips there
+# and only the pure-logic half is proven. This workflow is the other half. It fetches the content from
+# Unturned's dedicated server (anonymous Steam download, nothing committed or redistributed) and runs
+# the same suite against it, so the parsers are checked against the bytes the game actually ships.
+#
+# Content lands in build/game-data, which is git-ignored, and is cached between runs keyed on the
+# depot manifest IDs, so a run only re-downloads when Valve ships an update.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Weekly, so a game update that breaks a parser surfaces on its own rather than on the next PR.
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: real-data-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  real-data:
+    name: tests against real content
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      # The downloader is pinned by version and checksum inside the script, so keying its cache on the
+      # script's own hash is exact: edit the pin, get a fresh tool.
+      - name: Cache DepotDownloader
+        uses: actions/cache@v4
+        with:
+          path: build/tools
+          key: depotdownloader-${{ hashFiles('scripts/fetch-game-data.sh') }}
+
+      # The depot manifest IDs change exactly when the game updates, so they make a cache key that is
+      # precise rather than time-based: same content, same key, no re-download.
+      - name: Resolve the content cache key
+        id: content-key
+        run: echo "key=$(./scripts/fetch-game-data.sh --manifest-key)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the game content
+        id: content-cache
+        uses: actions/cache@v4
+        with:
+          path: build/game-data
+          key: ${{ steps.content-key.outputs.key }}
+
+      - name: Fetch the game content
+        if: steps.content-cache.outputs.cache-hit != 'true'
+        run: ./scripts/fetch-game-data.sh
+
+      # Every data-backed test self-skips when the content is missing, which would leave this whole
+      # job green while proving nothing. Fail loudly instead. A stale cache entry that restored a
+      # partial tree is caught here too.
+      - name: Verify the content is really there
+        run: ./scripts/fetch-game-data.sh --verify
+
+      - name: Build
+        run: dotnet build unturned-godot.sln -c Release -warnaserror
+
+      - name: Test
+        env:
+          UNTURNED_PATH: ${{ github.workspace }}/build/game-data
+        run: dotnet test tests/UnturnedGodot.Tests.csproj -c Release --no-build
+
+      # The coverage gate lives in ci.yml too, but it runs there without the game: re-running it here
+      # proves the real-content paths do not drag the numbers below the bar either.
+      - name: Enforce core coverage above 95%
+        env:
+          UNTURNED_PATH: ${{ github.workspace }}/build/game-data
+        run: ./scripts/check-coverage.sh --no-build --no-restore
