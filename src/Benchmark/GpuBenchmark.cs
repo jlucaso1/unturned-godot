@@ -168,6 +168,8 @@ public static class GpuBenchmark
                     metrics["foliage.residentBufferBytes"] = foliage.ResidentBufferBytes;
                 }
                 metrics["foliage.maxQueued"] = foliage.MaximumQueued;
+                metrics["foliage.truncatedAdmissions"] = foliage.TruncatedAdmissions;
+                metrics["foliage.maxDeferredPrefetch"] = foliage.MaximumDeferredPrefetch;
                 metrics["foliage.maxDecodedBytes"] = foliage.MaximumDecodedBytes;
                 metrics["foliage.emergencyVisibleLoads"] = foliage.EmergencyVisibleLoads;
                 metrics["foliage.visibleSetMisses"] = foliage.VisibleSetMisses;
