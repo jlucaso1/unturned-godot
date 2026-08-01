@@ -100,7 +100,8 @@ public static class RuntimeBenchmark
             AddCounterMetrics(report.Metrics);
             AddFoliageMetrics(tree, report.Metrics, foliageSettled);
             BenchmarkRunner.Finish(report, $"{mapName}-runtime", DiffOptions(),
-                "timings are advisory; counts are deterministic for the same spawn view");
+                "timings are advisory; counts are deterministic for the same spawn view, "
+                    + "except foliage residency counts, which need runtime.foliage.settled=1 on both sides");
             failed = false;
         }
         catch (Exception e)
@@ -140,6 +141,10 @@ public static class RuntimeBenchmark
             [".totalMs"] = 0.15,
             [".meanMs"] = 0.15,
             [".maxMs"] = 0.15,
+            // A mid-fill snapshot describes how far the queue happened to get, which depends on the
+            // scheduler. Two unsettled runs would otherwise diff against each other and call that
+            // difference a regression. Keep the numbers, never classify them.
+            ["Unsettled"] = double.PositiveInfinity,
         },
         ThresholdOverrides = new Dictionary<string, double>
         {
@@ -187,15 +192,22 @@ public static class RuntimeBenchmark
             {
                 metrics["runtime.foliage.indexedChunks"] = foliage.IndexedChunks;
                 metrics["runtime.foliage.indexedInstances"] = foliage.IndexedInstances;
-                metrics["runtime.foliage.settled"] = includeResidencySnapshot && foliage.IsSettled ? 1 : 0;
-                if (includeResidencySnapshot && foliage.IsSettled)
-                {
-                    metrics["runtime.foliage.residentChunks"] = foliage.ResidentChunks;
-                    metrics["runtime.foliage.residentInstances"] = foliage.ResidentInstances;
-                    metrics["runtime.foliage.residentBufferBytes"] = foliage.ResidentBufferBytes;
-                    metrics["runtime.foliage.pendingChunks"] = foliage.PendingChunks;
-                }
+                // Always record the residency snapshot: omitting it left the reports that most need it —
+                // a slow or GPU-less box, where streaming is starved by the per-frame upload budget —
+                // with no record of what the streamer actually kept resident. A mid-fill snapshot is not
+                // comparable with a drained one, so it is recorded under its own keys instead: the
+                // baseline diff then reports it as added/removed and can never read it as a regression
+                // against a settled baseline's steady set.
+                bool settled = includeResidencySnapshot && foliage.IsSettled;
+                string state = settled ? "" : "Unsettled";
+                metrics["runtime.foliage.settled"] = settled ? 1 : 0;
+                metrics[$"runtime.foliage.residentChunks{state}"] = foliage.ResidentChunks;
+                metrics[$"runtime.foliage.residentInstances{state}"] = foliage.ResidentInstances;
+                metrics[$"runtime.foliage.residentBufferBytes{state}"] = foliage.ResidentBufferBytes;
+                metrics[$"runtime.foliage.pendingChunks{state}"] = foliage.PendingChunks;
                 metrics["runtime.foliage.maxQueued"] = foliage.MaximumQueued;
+                metrics["runtime.foliage.truncatedAdmissions"] = foliage.TruncatedAdmissions;
+                metrics["runtime.foliage.maxDeferredPrefetch"] = foliage.MaximumDeferredPrefetch;
                 metrics["runtime.foliage.maxDecodedBytes"] = foliage.MaximumDecodedBytes;
                 metrics["runtime.foliage.emergencyVisibleLoads"] = foliage.EmergencyVisibleLoads;
                 metrics["runtime.foliage.visibleSetMisses"] = foliage.VisibleSetMisses;
