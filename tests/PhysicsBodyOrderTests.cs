@@ -189,6 +189,15 @@ public class PhysicsBodyOrderTests
         Assert.True(source.IndexOf("_lifetimeCancellation.Cancel()", StringComparison.Ordinal)
             < source.LastIndexOf("Retire(index)", StringComparison.Ordinal));
 
+        // The emergency path is the streamer's only main-thread decode, so its cost must be timed, and
+        // timed in a finally: a cancelled or failed decode still spent the frame time it spent, and
+        // dropping those samples would make the total improve the more often the decode went wrong.
+        Assert.Contains("long startedTicks = Stopwatch.GetTimestamp();", source);
+        int started = source.IndexOf("long startedTicks", StringComparison.Ordinal);
+        int finallyBlock = source.IndexOf("finally", started, StringComparison.Ordinal);
+        int accumulate = source.IndexOf("_emergencyVisibleTicks += elapsed;", started, StringComparison.Ordinal);
+        Assert.True(started >= 0 && finallyBlock > started && accumulate > finallyBlock);
+
         if (FindRepositoryFile(Path.Combine("src", "Benchmark", "SceneMetrics.cs")) is { } metricsPath)
             Assert.Contains("foliageOwner.StructuralChunks", File.ReadAllText(metricsPath));
         if (FindRepositoryFile(Path.Combine("src", "Benchmark", "GpuBenchmark.cs")) is { } gpuPath)

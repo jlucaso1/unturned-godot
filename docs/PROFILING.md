@@ -183,7 +183,10 @@ the already-usable baked navigation graph is refined.
   both are zero when the bound is wide enough for the map. They are not failures — deferred work is
   refilled on later plans — but a prefetch ring that is persistently behind is what turns a chunk entering
   the visible radius into a synchronous main-thread decode, so size the bound with these two before
-  blaming frame-time tails on upload bursts.
+  blaming frame-time tails on upload bursts. `emergencyVisible.totalMs` and `emergencyVisible.maxMs`
+  price that synchronous work: `emergencyVisibleLoads` says how many chunks took it, these say what the
+  main thread paid for them. Both cover the whole session, including the deterministic burst at spawn,
+  so compare them across runs of the same map rather than reading one number as a budget.
 - `UG_FOLIAGE_TRAVERSAL=1` adds deterministic far-apart ground poses to Tier 2. It exercises teleport
   cancellation and retirement and is intended to be combined with the foliage counters; zero
   `visibleSetMisses` is the correctness gate.

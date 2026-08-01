@@ -196,6 +196,8 @@ public static class RuntimeBenchmark
                 metrics["runtime.foliage.maxDeferredPrefetch"] = foliage.MaximumDeferredPrefetch;
                 metrics["runtime.foliage.maxDecodedBytes"] = foliage.MaximumDecodedBytes;
                 metrics["runtime.foliage.emergencyVisibleLoads"] = foliage.EmergencyVisibleLoads;
+                metrics["runtime.foliage.emergencyVisible.totalMs"] = foliage.EmergencyVisibleTotalMs;
+                metrics["runtime.foliage.emergencyVisible.maxMs"] = foliage.EmergencyVisibleMaxMs;
                 metrics["runtime.foliage.visibleSetMisses"] = foliage.VisibleSetMisses;
                 metrics["runtime.foliage.retiredChunks"] = foliage.RetiredChunks;
                 metrics["runtime.foliage.staleResults"] = foliage.StaleResults;

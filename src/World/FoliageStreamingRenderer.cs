@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Godot;
@@ -53,6 +54,8 @@ public partial class FoliageStreamingRenderer : Node3D
     private int _staleResults;
     private int _maxQueued;
     private long _maxDecodedBytes;
+    private long _emergencyVisibleTicks;
+    private long _maxEmergencyVisibleTicks;
     private int _truncatedAdmissions;
     private int _maxDeferredPrefetch;
     private bool _needsRefill;
@@ -72,6 +75,13 @@ public partial class FoliageStreamingRenderer : Node3D
     public int DecodeFailures => _decodeFailures;
     public int MaximumQueued => _maxQueued;
     public long MaximumDecodedBytes => _maxDecodedBytes;
+    // What the emergency path cost the main thread. EmergencyVisibleLoads counts the chunks that had to
+    // be decoded and uploaded inside _Process; these price them, because the count alone cannot say
+    // whether the frame noticed. Sampled with the same clock in both tiers, including the spawn burst.
+    public double EmergencyVisibleTotalMs => Milliseconds(_emergencyVisibleTicks);
+    public double EmergencyVisibleMaxMs => Milliseconds(_maxEmergencyVisibleTicks);
+
+    private static double Milliseconds(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
     // How often admission hit UG_FOLIAGE_MAX_PENDING, and the largest single-plan shortfall behind it.
     // Both stay zero while the bound is wide enough for the map; neither is a failure on its own, since
     // the deferred work is refilled — they size the bound and explain a prefetch ring that stays behind.
@@ -192,12 +202,21 @@ public partial class FoliageStreamingRenderer : Node3D
             if (_resident.ContainsKey(index))
                 continue;
             _emergencyVisibleLoads++;
+            // Time it in a finally: a cancelled or failed decode still spent the frame time it spent,
+            // and dropping those samples would make the total look better the more often it went wrong.
+            long startedTicks = Stopwatch.GetTimestamp();
             try { Upload(index, _index.DecodeChunk(index, _lifetimeCancellation.Token)); }
             catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested) { return; }
             catch (Exception e)
             {
                 _decodeFailures++;
                 Log.PushWarning($"[foliage-stream] visible chunk {index} could not be decoded: {e.Message}");
+            }
+            finally
+            {
+                long elapsed = Stopwatch.GetTimestamp() - startedTicks;
+                _emergencyVisibleTicks += elapsed;
+                _maxEmergencyVisibleTicks = Math.Max(_maxEmergencyVisibleTicks, elapsed);
             }
             if (!_resident.ContainsKey(index))
                 _visibleSetMisses++;

@@ -172,6 +172,8 @@ public static class GpuBenchmark
                 metrics["foliage.maxDeferredPrefetch"] = foliage.MaximumDeferredPrefetch;
                 metrics["foliage.maxDecodedBytes"] = foliage.MaximumDecodedBytes;
                 metrics["foliage.emergencyVisibleLoads"] = foliage.EmergencyVisibleLoads;
+                metrics["foliage.emergencyVisible.totalMs"] = foliage.EmergencyVisibleTotalMs;
+                metrics["foliage.emergencyVisible.maxMs"] = foliage.EmergencyVisibleMaxMs;
                 metrics["foliage.visibleSetMisses"] = foliage.VisibleSetMisses;
                 metrics["foliage.retiredChunks"] = foliage.RetiredChunks;
                 metrics["foliage.staleResults"] = foliage.StaleResults;
@@ -233,6 +235,13 @@ public static class GpuBenchmark
         {
             ["gpu.frameMs.median."] = 0.10,
             ["cpu.processMonitorMs.median."] = 0.10,
+        },
+        // Wall-clock like every other timing here. Tier 3 already loosens the same two suffixes for its
+        // subsystem counters; Tier 2 needs them for the foliage emergency-decode cost.
+        ThresholdSuffixOverrides = new Dictionary<string, double>
+        {
+            [".totalMs"] = 0.15,
+            [".maxMs"] = 0.15,
         },
         ThresholdOverrides = new Dictionary<string, double>
         {
