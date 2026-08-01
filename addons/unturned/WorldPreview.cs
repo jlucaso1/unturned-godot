@@ -84,8 +84,9 @@ public static class WorldPreview
         Dictionary<(int x, int y), Guid[]> tiles =
             LevelHierarchy.ReadTileMaterials(Path.Combine(mapPath, "Level.hierarchy"));
         var materials = new Dictionary<Guid, LandscapeMaterialAsset>();
+        var claimantRoots = new Dictionary<Guid, string>();
         foreach (ContentSource source in sources)
-            LandscapeMaterialAsset.MergeFirstClaimants(materials,
+            LandscapeMaterialAsset.MergeFirstClaimants(materials, claimantRoots, source.Root,
                 LandscapeMaterialAsset.ScanDirectory(Path.Combine(source.AssetsDir, "Landscapes")));
 
         var needed = new HashSet<Guid>();
@@ -95,10 +96,10 @@ public static class WorldPreview
                     needed.Add(guid);
 
         Dictionary<string, TerrainLayerPlan.BundleWants> all =
-            TerrainLayerPlan.ByBundle(needed, materials, sources, MasterBundleConfig.Load);
+            TerrainLayerPlan.ByBundle(needed, materials, claimantRoots, sources, MasterBundleConfig.Load);
         Dictionary<Guid, string> owners = TerrainLayerPlan.MaterialBundlePaths(all);
         HashSet<Guid> missing = TerrainLayerCache.Missing(needed, owners, TerrainCacheDir);
-        return TerrainLayerPlan.ByBundle(missing, materials, sources, MasterBundleConfig.Load);
+        return TerrainLayerPlan.ByBundle(missing, materials, claimantRoots, sources, MasterBundleConfig.Load);
     }
 
     // Extracts everything `mapName` needs and is missing, straight into the shared cache. Pure parsing and

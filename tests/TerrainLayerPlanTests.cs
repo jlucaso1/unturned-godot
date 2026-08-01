@@ -186,6 +186,50 @@ public class TerrainLayerPlanTests
     }
 
     [Fact]
+    public void ByBundle_PrefersTheGuidClaimantWhenWorkshopBundleNamesCollide()
+    {
+        using var dir = new TempDir();
+        string install = Path.Combine(dir.Path, "steamapps", "common", "Unturned");
+        string workshop = Path.Combine("steamapps", "workshop", "content", "304930");
+        string first = Path.Combine(workshop, "1000000001");
+        string second = Path.Combine(workshop, "1000000002");
+        const string firstConfig = """
+            Asset_Bundle_Name shared.masterbundle
+            Asset_Prefix Assets/First
+            Asset_Bundle_Version 1
+            """;
+        const string secondConfig = """
+            Asset_Bundle_Name shared.masterbundle
+            Asset_Prefix Assets/Second
+            Asset_Bundle_Version 1
+            """;
+
+        dir.Write(Path.Combine(first, "MasterBundle.dat"), firstConfig);
+        dir.Write(Path.Combine(first, "shared_linux.masterbundle"), new byte[] { 1 });
+        dir.Write(Path.Combine(first, "Objects", "First", "First.dat"), "GUID 0\nType Small\n");
+        dir.Write(Path.Combine(second, "MasterBundle.dat"), secondConfig);
+        dir.Write(Path.Combine(second, "shared_linux.masterbundle"), new byte[] { 2 });
+        dir.Write(Path.Combine(second, "Objects", "Second", "Second.dat"), "GUID 0\nType Small\n");
+        WriteMaterial(dir, Path.Combine(second, "Assets", "Landscapes"), Grass,
+            "shared.masterbundle", "Terrain/Grass.png");
+
+        IReadOnlyList<ContentSource> sources =
+            ContentSource.Discover(install, UnturnedInstall.Platform.Linux);
+        var materials = new Dictionary<Guid, LandscapeMaterialAsset>();
+        var claimantRoots = new Dictionary<Guid, string>();
+        foreach (ContentSource source in sources)
+            LandscapeMaterialAsset.MergeFirstClaimants(materials, claimantRoots, source.Root,
+                LandscapeMaterialAsset.ScanDirectory(Path.Combine(source.AssetsDir, "Landscapes")));
+
+        Dictionary<string, TerrainLayerPlan.BundleWants> byBundle = TerrainLayerPlan.ByBundle(
+            new[] { Grass }, materials, claimantRoots, sources, MasterBundleConfig.Load);
+
+        TerrainLayerPlan.BundleWants wants = Assert.Single(byBundle).Value;
+        Assert.Equal(Path.Combine(dir.Path, second, "shared_linux.masterbundle"), wants.BundlePath);
+        Assert.Equal("assets/second/terrain/grass.png", Assert.Single(wants.ByContainerPath).Key);
+    }
+
+    [Fact]
     public void ByBundle_SourceWithoutABundle_IsSkipped()
     {
         using var dir = new TempDir();

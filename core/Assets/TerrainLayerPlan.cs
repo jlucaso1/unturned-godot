@@ -49,8 +49,47 @@ public static class TerrainLayerPlan
         IReadOnlyList<ContentSource> sources,
         Func<string, MasterBundleConfig?> configFor)
     {
+        return ByBundle(needed, materials, new Dictionary<Guid, string>(), sources, configFor);
+    }
+
+    // `claimantRoots` identifies the source whose Assets/Landscapes tree supplied each GUID. Prefer that
+    // source before matching by bundle name, because separate workshop items may legitimately reuse the
+    // same Asset_Bundle_Name. If the claimant does not carry the named bundle, scan all sources as a
+    // fallback so intentional cross-bundle references keep working.
+    public static Dictionary<string, BundleWants> ByBundle(IEnumerable<Guid> needed,
+        IReadOnlyDictionary<Guid, LandscapeMaterialAsset> materials,
+        IReadOnlyDictionary<Guid, string> claimantRoots,
+        IReadOnlyList<ContentSource> sources,
+        Func<string, MasterBundleConfig?> configFor)
+    {
         var byBundle = new Dictionary<string, BundleWants>(StringComparer.Ordinal);
         var configs = new Dictionary<string, MasterBundleConfig?>(StringComparer.Ordinal);
+        var sourcesByRoot = new Dictionary<string, ContentSource>(StringComparer.Ordinal);
+        foreach (ContentSource source in sources)
+            sourcesByRoot.TryAdd(source.Root, source);
+
+        MasterBundleConfig? ConfigFor(ContentSource source)
+        {
+            if (!configs.TryGetValue(source.Root, out MasterBundleConfig? config))
+                configs[source.Root] = config = configFor(source.Root);
+            return config;
+        }
+
+        bool Assign(ContentSource source, LandscapeMaterialAsset asset, Guid guid)
+        {
+            if (source.BundlePath.Length == 0)
+                return false;
+
+            MasterBundleConfig? config = ConfigFor(source);
+            if (config == null || !config.Matches(asset.TextureBundle))
+                return false;
+
+            if (!byBundle.TryGetValue(source.BundlePath, out BundleWants? wants))
+                byBundle[source.BundlePath] = wants = new BundleWants(source.BundlePath);
+
+            wants.Add(config.ContainerPath(asset.TexturePath), guid);
+            return true;
+        }
 
         foreach (Guid guid in needed)
         {
@@ -60,22 +99,19 @@ public static class TerrainLayerPlan
                 continue;
             }
 
+            ContentSource? claimant = null;
+            if (claimantRoots.TryGetValue(guid, out string? claimantRoot))
+                sourcesByRoot.TryGetValue(claimantRoot, out claimant);
+
+            if (claimant != null && Assign(claimant, asset, guid))
+                continue;
+
             foreach (ContentSource source in sources)
             {
-                if (source.BundlePath.Length == 0)
+                if (ReferenceEquals(source, claimant))
                     continue;
-
-                if (!configs.TryGetValue(source.Root, out MasterBundleConfig? config))
-                    configs[source.Root] = config = configFor(source.Root);
-
-                if (config == null || !config.Matches(asset.TextureBundle))
-                    continue;
-
-                if (!byBundle.TryGetValue(source.BundlePath, out BundleWants? wants))
-                    byBundle[source.BundlePath] = wants = new BundleWants(source.BundlePath);
-
-                wants.Add(config.ContainerPath(asset.TexturePath), guid);
-                break;
+                if (Assign(source, asset, guid))
+                    break;
             }
         }
 

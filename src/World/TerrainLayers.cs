@@ -46,8 +46,9 @@ public sealed class TerrainLayers
         // Landscape materials ship with the game and with any workshop mod that adds its own terrain art.
         IReadOnlyList<ContentSource> sources = ContentSource.Discover(unturnedPath);
         var materials = new Dictionary<Guid, LandscapeMaterialAsset>();
+        var claimantRoots = new Dictionary<Guid, string>();
         foreach (ContentSource source in sources)
-            LandscapeMaterialAsset.MergeFirstClaimants(materials,
+            LandscapeMaterialAsset.MergeFirstClaimants(materials, claimantRoots, source.Root,
                 LandscapeMaterialAsset.ScanDirectory(Path.Combine(source.AssetsDir, "Landscapes")));
 
         if (materials.Count == 0)
@@ -59,7 +60,8 @@ public sealed class TerrainLayers
                 if (guid != Guid.Empty && materials.ContainsKey(guid))
                     needed.Add(guid);
 
-        Dictionary<Guid, ImageTexture> textures = ResolveTextures(sources, materials, needed, shared);
+        Dictionary<Guid, ImageTexture> textures = ResolveTextures(sources, materials, claimantRoots, needed,
+            shared);
         layers.TextureCount = textures.Count;
 
         ImageTexture? unused = null;
@@ -99,13 +101,14 @@ public sealed class TerrainLayers
     // Cached entries first, then whatever the object pass decoded on its way through the same bundles, and
     // only then a pass of our own for anything still missing.
     private static Dictionary<Guid, ImageTexture> ResolveTextures(IReadOnlyList<ContentSource> sources,
-        Dictionary<Guid, LandscapeMaterialAsset> materials, HashSet<Guid> needed,
+        Dictionary<Guid, LandscapeMaterialAsset> materials, IReadOnlyDictionary<Guid, string> claimantRoots,
+        HashSet<Guid> needed,
         System.Threading.Tasks.Task<IReadOnlyDictionary<Guid, CachedTexture>>? shared)
     {
         var result = new Dictionary<Guid, ImageTexture>();
         var missing = new List<Guid>();
         Dictionary<string, TerrainLayerPlan.BundleWants> allWants =
-            TerrainLayerPlan.ByBundle(needed, materials, sources, MasterBundleConfig.Load);
+            TerrainLayerPlan.ByBundle(needed, materials, claimantRoots, sources, MasterBundleConfig.Load);
         Dictionary<Guid, string> bundlePaths = TerrainLayerPlan.MaterialBundlePaths(allWants);
 
         foreach (Guid guid in needed)
@@ -144,7 +147,7 @@ public sealed class TerrainLayers
 
         // Group what is left by the bundle its material names, since one bundle decode serves many.
         Dictionary<string, TerrainLayerPlan.BundleWants> byBundle =
-            TerrainLayerPlan.ByBundle(missing, materials, sources, MasterBundleConfig.Load);
+            TerrainLayerPlan.ByBundle(missing, materials, claimantRoots, sources, MasterBundleConfig.Load);
 
         foreach ((string bundlePath, TerrainLayerPlan.BundleWants bundle) in byBundle)
         {

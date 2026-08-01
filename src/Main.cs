@@ -815,7 +815,7 @@ public partial class Main : Node3D
         Image img = GetViewport().GetTexture().GetImage();
         img.SavePng(path);
         Log.Print($"[unturned-godot] Screenshot saved: {path}");
-        GetTree().Quit();
+        AppShutdown.RequestQuit(GetTree());
     }
 
     // Sun + sky/ambient from the map lighting, plus the debug overlay (windowed only). The camera/player is

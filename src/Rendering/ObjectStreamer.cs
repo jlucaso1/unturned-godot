@@ -236,8 +236,9 @@ public partial class ObjectStreamer : Node
                 return new Dictionary<string, TerrainLayerPlan.BundleWants>();
 
             var materials = new Dictionary<Guid, LandscapeMaterialAsset>();
+            var claimantRoots = new Dictionary<Guid, string>();
             foreach (ContentSource source in _sources)
-                LandscapeMaterialAsset.MergeFirstClaimants(materials,
+                LandscapeMaterialAsset.MergeFirstClaimants(materials, claimantRoots, source.Root,
                     LandscapeMaterialAsset.ScanDirectory(Path.Combine(source.AssetsDir, "Landscapes")));
 
             var needed = new HashSet<Guid>();
@@ -247,10 +248,10 @@ public partial class ObjectStreamer : Node
                         needed.Add(guid);
 
             Dictionary<string, TerrainLayerPlan.BundleWants> allWants =
-                TerrainLayerPlan.ByBundle(needed, materials, _sources, MasterBundleConfig.Load);
+                TerrainLayerPlan.ByBundle(needed, materials, claimantRoots, _sources, MasterBundleConfig.Load);
             Dictionary<Guid, string> bundlePaths = TerrainLayerPlan.MaterialBundlePaths(allWants);
             return TerrainLayerPlan.ByBundle(TerrainLayerCache.Missing(needed, bundlePaths), materials,
-                _sources, MasterBundleConfig.Load);
+                claimantRoots, _sources, MasterBundleConfig.Load);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {

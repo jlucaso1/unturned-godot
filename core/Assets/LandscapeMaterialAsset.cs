@@ -110,4 +110,21 @@ public sealed class LandscapeMaterialAsset
             if (!destination.ContainsKey(candidate.Key))
                 destination.Add(candidate.Key, candidate.Value);
     }
+
+    // As above, while retaining which content source supplied the winning GUID. Bundle names are not
+    // globally unique across workshop items, so terrain planning needs this ownership information to
+    // distinguish two mods that both call their bundle (for example) "shared.masterbundle".
+    public static void MergeFirstClaimants(IDictionary<Guid, LandscapeMaterialAsset> destination,
+        IDictionary<Guid, string> claimantRoots, string sourceRoot,
+        IEnumerable<KeyValuePair<Guid, LandscapeMaterialAsset>> candidates)
+    {
+        foreach (KeyValuePair<Guid, LandscapeMaterialAsset> candidate in candidates)
+        {
+            if (destination.ContainsKey(candidate.Key))
+                continue;
+
+            destination.Add(candidate.Key, candidate.Value);
+            claimantRoots.Add(candidate.Key, sourceRoot);
+        }
+    }
 }

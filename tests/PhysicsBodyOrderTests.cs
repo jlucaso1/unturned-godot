@@ -415,6 +415,23 @@ public class PhysicsBodyOrderTests
     }
 
     [Fact]
+    public void ScreenshotExitUsesCooperativeShutdown()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Main.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        int capture = source.IndexOf("private async System.Threading.Tasks.Task CaptureAndQuit",
+            StringComparison.Ordinal);
+        int nextMethod = source.IndexOf("private void SetupEnvironment", capture, StringComparison.Ordinal);
+        Assert.True(capture >= 0 && nextMethod > capture);
+
+        string method = source[capture..nextMethod];
+        Assert.Contains("AppShutdown.RequestQuit(GetTree());", method);
+        Assert.DoesNotContain("GetTree().Quit();", method);
+    }
+
+    [Fact]
     public void AudioDefinitionCacheKeysIncludeTheirFullAssetPath()
     {
         if (FindRepositoryFile(Path.Combine("src", "Rendering", "AudioExtractor.cs")) is not { } path)
