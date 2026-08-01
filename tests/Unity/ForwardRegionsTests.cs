@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using UnturnedGodot.Unity;
 using Xunit;
 
@@ -188,5 +189,54 @@ public class ForwardRegionsTests
         var reader = new Reader(Ramp(4));
         ForwardRegions.Read(reader.Read, 64, Array.Empty<ForwardRegions.Region>(), (_, _) => { });
         Assert.Equal(4, reader.Position);
+    }
+
+    [Fact]
+    public void Read_CancellationStopsADeepDrainAtTheNextChunk()
+    {
+        var reader = new Reader(Ramp(64));
+        using var cancelled = new CancellationTokenSource();
+
+        ForwardRegions.Read((buffer, offset, count) =>
+        {
+            int read = reader.Read(buffer, offset, count);
+            cancelled.Cancel();
+            return read;
+        }, 64, Array.Empty<ForwardRegions.Region>(), (_, _) => { }, scratchSize: 8,
+            cancellationToken: cancelled.Token);
+
+        Assert.Equal(8, reader.Position);
+    }
+
+    [Fact]
+    public void Read_AlreadyCancelledDoesNotTouchTheStreamOrEmit()
+    {
+        var reader = new Reader(Ramp(64));
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        bool emitted = false;
+
+        ForwardRegions.Read(reader.Read, 64, new[] { new ForwardRegions.Region(8, 4, 0) },
+            (_, _) => emitted = true, scratchSize: 8, cancellationToken: cancelled.Token);
+
+        Assert.Equal(0, reader.Position);
+        Assert.False(emitted);
+    }
+
+    [Fact]
+    public void Read_CancellationStopsWhileSkippingTowardARegion()
+    {
+        var reader = new Reader(Ramp(64));
+        using var cancelled = new CancellationTokenSource();
+
+        ForwardRegions.Read((buffer, offset, count) =>
+        {
+            int read = reader.Read(buffer, offset, count);
+            cancelled.Cancel();
+            return read;
+        }, 64, new[] { new ForwardRegions.Region(24, 4, 0) }, (_, _) => { }, scratchSize: 8,
+            cancellationToken: cancelled.Token);
+
+        Assert.Equal(8, reader.Position);
     }
 }

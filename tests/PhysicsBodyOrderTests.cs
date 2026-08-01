@@ -310,9 +310,42 @@ public class PhysicsBodyOrderTests
         Assert.Contains("_registry.ReleaseLoadingIndexes()", source);
         Assert.Contains("_plans.Clear()", source);
         Assert.Contains("_layersProduced.Clear()", source);
-        Assert.Contains("DeferUnlessQuitting(TryFinalizeLoadState)", source);
-        Assert.Contains("if (AppShutdown.IsShuttingDown)", source);
-        Assert.Contains("if (!AppShutdown.IsShuttingDown)", source);
+        Assert.Contains("DeferUnlessStopped(TryFinalizeLoadState)", source);
+        Assert.Contains("if (_loadCancellation.IsCancellationRequested)", source);
+        Assert.Contains("if (!_loadCancellation.IsCancellationRequested)", source);
+    }
+
+    [Fact]
+    public void FailedLoadsCancelAndDrainTheirWorkersBeforeTheMenuReturns()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Main.cs")) is not { } mainPath
+            || FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } streamerPath
+            || FindRepositoryFile(Path.Combine("src", "Rendering", "ModelExtractor.cs")) is not { } extractorPath)
+            return;
+
+        string main = File.ReadAllText(mainPath);
+        string streamer = File.ReadAllText(streamerPath);
+        string extractor = File.ReadAllText(extractorPath);
+        int cancel = main.IndexOf("await failedStreamer.CancelAsync();", StringComparison.Ordinal);
+        int menu = main.IndexOf("var menu = new MainMenu", cancel, StringComparison.Ordinal);
+        Assert.True(cancel >= 0 && menu > cancel);
+        Assert.Contains("await ObserveStopped(_prepTask);", streamer);
+        Assert.Contains("await ObserveStopped(_streamTask);", streamer);
+        Assert.Contains("cancellationToken: cancellation", streamer);
+        Assert.Contains("cancellationToken.IsCancellationRequested", extractor);
+    }
+
+    [Fact]
+    public void EditorPreviewTreatsObjectsAndFoliageAsIndependentSelections()
+    {
+        if (FindRepositoryFile(Path.Combine("addons", "unturned", "WorldPreview.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("public bool NeedsPlacements => Objects || Foliage;", source);
+        Assert.Contains("options.NeedsPlacements", source);
+        Assert.Contains("if (options.Objects)", source);
+        Assert.Contains("if (options.Foliage)", source);
     }
 
     [Fact]

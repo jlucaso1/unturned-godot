@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading;
 using Godot;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Dat;
@@ -108,15 +109,22 @@ public static class ModelExtractor
     // build; the interactive cold load uses StreamExtract instead.
     public static int ExtractMeshes(string bundlePath, string bundleTag, string objectBundlesDir,
         string treeBundlesDir, string assetsDir, HashSet<Guid> neededGuids, string cacheDir,
-        ObjectAssetDatabase db, IReadOnlyList<FoliageAsset>? foliageAssets = null)
+        ObjectAssetDatabase db, IReadOnlyList<FoliageAsset>? foliageAssets = null,
+        CancellationToken cancellationToken = default)
     {
+        if (cancellationToken.IsCancellationRequested)
+            return 0;
         byte[] raw = File.ReadAllBytes(bundlePath);
+        if (cancellationToken.IsCancellationRequested)
+            return 0;
         UnityBundle bundle = UnityBundle.Read(raw, SerializedFileCap(raw)); // SerializedFile only
         var produced = new HashSet<Guid>();
         int extracted = 0;
         int serializedFile = 0;
         foreach (KeyValuePair<string, byte[]> f in bundle.Files)
         {
+            if (cancellationToken.IsCancellationRequested)
+                return extracted;
             if (f.Key.EndsWith(".resS") || f.Key.EndsWith(".resource"))
                 continue;
 
@@ -124,7 +132,8 @@ public static class ModelExtractor
             extracted += ExtractMeshesFromSerializedFile(f.Value, fileTag, objectBundlesDir, treeBundlesDir,
                 assetsDir, neededGuids, cacheDir, db, neededTextures: null, foliageAssets, produced);
         }
-        RecordMisses(bundlePath, cacheDir, neededGuids, foliageAssets, produced);
+        if (!cancellationToken.IsCancellationRequested)
+            RecordMisses(bundlePath, cacheDir, neededGuids, foliageAssets, produced);
         AppShutdown.PrintUnlessQuitting($"[extract] meshes={extracted}");
         return extracted;
     }
@@ -163,19 +172,27 @@ public static class ModelExtractor
         ObjectAssetDatabase db, Action onMeshesReady, Action<string> onTextureWritten,
         IReadOnlyList<FoliageAsset>? foliageAssets = null, bool isCoreBundle = false,
         IReadOnlyDictionary<string, Guid[]>? layerWantsByPath = null,
-        Action<Guid, CachedTexture>? onLayerTexture = null)
+        Action<Guid, CachedTexture>? onLayerTexture = null,
+        CancellationToken cancellationToken = default)
     {
         IReadOnlyDictionary<string, Guid[]> layerWants =
             layerWantsByPath ?? new Dictionary<string, Guid[]>(StringComparer.Ordinal);
 
         using MasterBundleStream? stream = MasterBundleStream.OpenFile(bundlePath);
+        if (cancellationToken.IsCancellationRequested)
+            return;
         if (stream == null)
         {
             AppShutdown.PrintUnlessQuitting("[extract] bundle not single-block; falling back to two-pass decode.");
             ExtractMeshes(bundlePath, bundleTag, objectBundlesDir, treeBundlesDir, assetsDir, neededGuids,
-                cacheDir, db, foliageAssets);
+                cacheDir, db, foliageAssets, cancellationToken);
+            if (cancellationToken.IsCancellationRequested)
+                return;
             onMeshesReady();
-            ExtractTextures(bundlePath, bundleTag, cacheDir, textureCacheDir, onTextureWritten);
+            ExtractTextures(bundlePath, bundleTag, cacheDir, textureCacheDir, onTextureWritten,
+                cancellationToken);
+            if (cancellationToken.IsCancellationRequested)
+                return;
 
             // The terrain waits on this pass for its splat layers whichever route it took, so the fallback
             // owes them too: without this the map keeps its flat-colour terrain and the wait only ends
@@ -219,7 +236,7 @@ public static class ModelExtractor
 
         for (int i = 0; i < ordered.Count; i++)
         {
-            if (AppShutdown.IsShuttingDown)
+            if (AppShutdown.IsShuttingDown || cancellationToken.IsCancellationRequested)
                 return; // leaving: the cache keeps whatever completed and resumes next boot
 
             MasterBundleStream.Node node = ordered[i];
@@ -296,7 +313,10 @@ public static class ModelExtractor
                     foreach (Guid material in layerWants[layerPath])
                         onLayerTexture?.Invoke(material, cached);
                 }
-            });
+            }, cancellationToken: cancellationToken);
+
+            if (cancellationToken.IsCancellationRequested)
+                return;
 
             owedByFile.Remove(fileName);
             AppShutdown.PrintUnlessQuitting($"[extract] {Path.GetFileName(bundlePath)}: {regions.Count} "
@@ -750,12 +770,17 @@ public static class ModelExtractor
     // it is independent of phase 1 and resumable (skips textures already cached). Reports each written key
     // through onTextureWritten so a caller can hot-swap it into the live scene as it lands.
     public static int ExtractTextures(string bundlePath, string bundleTag, string cacheDir,
-        string textureCacheDir, Action<string>? onTextureWritten = null)
+        string textureCacheDir, Action<string>? onTextureWritten = null,
+        CancellationToken cancellationToken = default)
     {
+        if (cancellationToken.IsCancellationRequested)
+            return 0;
         if (NeededTextureIds(cacheDir, bundleTag, includeSecondary: true).Count == 0)
             return 0;
 
         UnityBundle bundle = UnityBundle.Read(File.ReadAllBytes(bundlePath)); // full decode (.resS needed)
+        if (cancellationToken.IsCancellationRequested)
+            return 0;
         Directory.CreateDirectory(textureCacheDir);
         int written = 0;
         int serializedFile = 0;
@@ -776,7 +801,7 @@ public static class ModelExtractor
 
             foreach (long texId in needed)
             {
-                if (AppShutdown.IsShuttingDown)
+                if (AppShutdown.IsShuttingDown || cancellationToken.IsCancellationRequested)
                     return written; // leaving: stop between textures, never mid-file
                 string texKey = TextureKey.For(fileTag, texId);
                 string outPath = Path.Combine(textureCacheDir, texKey + ".tex");

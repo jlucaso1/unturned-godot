@@ -60,6 +60,9 @@ public partial class ObjectStreamer : Node
     private bool _loadStateReleased;
     private Stopwatch _coldWatch = new();
     private Task _prepTask = Task.CompletedTask;
+    private Task _streamTask = Task.CompletedTask;
+    private readonly CancellationTokenSource _loadCancellation =
+        CancellationTokenSource.CreateLinkedTokenSource(AppShutdown.Token);
 
     // The cold load runs the bundle decode ahead of Begin(), so these two say what has landed: the decode
     // signalling its mesh phase, and the streamer being in the tree with the world around it.
@@ -104,6 +107,7 @@ public partial class ObjectStreamer : Node
             bool decodeWillSettleIt = false;
             try
             {
+                _loadCancellation.Token.ThrowIfCancellationRequested();
                 decodeWillSettleIt = Prepare(unturnedPath, level);
             }
             finally
@@ -117,6 +121,26 @@ public partial class ObjectStreamer : Node
                     _layerTextures.TrySetResult(_layersProduced);
             }
         }));
+    }
+
+    // A failed build can happen before this node joins the scene tree, so QueueFree cannot own its workers.
+    // Wait for preparation and the decode it may launch before another map is allowed to start loading.
+    public async Task CancelAsync()
+    {
+        _loadCancellation.Cancel();
+        await ObserveStopped(_prepTask);
+        await ObserveStopped(_streamTask);
+        _layerTextures.TrySetResult(_layersProduced);
+        _completion.TrySetCanceled(_loadCancellation.Token);
+    }
+
+    private static async Task ObserveStopped(Task task)
+    {
+        try
+        {
+            await task;
+        }
+        catch (Exception) { /* the failed load already reports the original error */ }
     }
 
     // Reads everything the extraction needs to know and, on a cold load, starts it. Returns true when
@@ -396,12 +420,14 @@ public partial class ObjectStreamer : Node
         // Registered so quitting mid-decode waits for the pass to reach its next checkpoint instead of
         // tearing the tree down underneath it.
         _streamStarted = true;
-        _ = AppShutdown.Track(Task.Run(() =>
+        CancellationToken cancellation = _loadCancellation.Token;
+        _streamTask = AppShutdown.Track(Task.Run(() =>
         {
             try
             {
-                Parallel.ForEach(pending, plan =>
+                Parallel.ForEach(pending, new ParallelOptions { CancellationToken = cancellation }, plan =>
                 {
+                    cancellation.ThrowIfCancellationRequested();
                     TerrainLayerPlan.BundleWants layers = LayerWantsFor(plan);
                     long megabytes = new FileInfo(plan.Source.BundlePath).Length >> 20;
                     AppShutdown.PrintUnlessQuitting($"[stream] decoding {plan.Source.Name} ({megabytes} MB) for "
@@ -413,7 +439,7 @@ public partial class ObjectStreamer : Node
                         onMeshesReady: () =>
                         {
                             if (Interlocked.Decrement(ref meshPhasesLeft) == 0)
-                                DeferUnlessQuitting(OnMeshPhaseDone);
+                                DeferUnlessStopped(OnMeshPhaseDone);
                         },
                         onTextureWritten: key => _readyKeys.Enqueue(key),
                         foliageAssets: plan.Foliage, isCoreBundle: plan.Source.IsCore,
@@ -428,36 +454,40 @@ public partial class ObjectStreamer : Node
                             // for the whole pass held the terrain back by seconds for nothing.
                             if (Interlocked.Decrement(ref _layersOutstanding) <= 0)
                                 _layerTextures.TrySetResult(_layersProduced);
-                        });
+                        }, cancellationToken: cancellation);
                 });
+            }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+            {
+                // Expected when a failed attempt returns to the map menu.
             }
             catch (Exception e)
             {
-                DeferUnlessQuitting(() => Log.PrintErr($"[stream] extraction failed: {e}"));
+                DeferUnlessStopped(() => Log.PrintErr($"[stream] extraction failed: {e}"));
                 // Unblock the pipeline: build whatever the cache holds so MeshesReady/Finished still fire
                 // (otherwise the loading screen would wait forever on a signal that never comes).
-                DeferUnlessQuitting(OnMeshPhaseDone);
+                DeferUnlessStopped(OnMeshPhaseDone);
             }
             finally
             {
                 // The terrain build blocks on this, so it has to be settled even when the pass died.
                 _layerTextures.TrySetResult(_layersProduced);
                 _texturesDone = true;
-                DeferUnlessQuitting(TryFinalizeLoadState);
+                DeferUnlessStopped(TryFinalizeLoadState);
             }
-        }));
+        }, cancellation));
     }
 
     // A tracked decoder normally finishes before AppShutdown quits. Its grace period is deliberately
     // finite, though, so a worker stuck in slow IO may outlive the tree. Never enqueue engine work after
     // cancellation, and check again when the callback runs in case shutdown began while it was queued.
-    private static void DeferUnlessQuitting(Action callback)
+    private void DeferUnlessStopped(Action callback)
     {
-        if (AppShutdown.IsShuttingDown)
+        if (_loadCancellation.IsCancellationRequested)
             return;
         Callable.From(() =>
         {
-            if (!AppShutdown.IsShuttingDown)
+            if (!_loadCancellation.IsCancellationRequested)
                 callback();
         }).CallDeferred();
     }

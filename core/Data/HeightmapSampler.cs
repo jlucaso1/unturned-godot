@@ -188,3 +188,11 @@ public sealed class HeightmapSampler
         return true;
     }
 }
+
+// Heightmap files retain Unity's +Z convention, while loaded Godot positions have already been mirrored
+// to -Z. Keep that boundary in core so every runtime/editor caller samples the same physical point.
+public static class TerrainCoordinates
+{
+    public static bool TrySampleGodotHeight(HeightmapSampler sampler, float godotX, float godotZ,
+        out float worldY) => sampler.TrySampleHeight(godotX, -godotZ, out worldY);
+}

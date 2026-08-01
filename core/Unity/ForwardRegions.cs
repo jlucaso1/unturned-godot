@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 
 namespace UnturnedGodot.Unity;
 
@@ -31,7 +32,8 @@ public static class ForwardRegions
     // whatever follows in the stream stays aligned. Ranges are read in offset order regardless of the
     // order given; a range the stream ends before completing is skipped.
     public static void Read(Func<byte[], int, int, int> read, long nodeSize, IEnumerable<Region> regions,
-        Action<int, byte[]> emit, int scratchSize = 4 * 1024 * 1024)
+        Action<int, byte[]> emit, int scratchSize = 4 * 1024 * 1024,
+        CancellationToken cancellationToken = default)
     {
         var ordered = new List<Region>(regions);
         ordered.Sort((a, b) => a.Offset.CompareTo(b.Offset));
@@ -43,6 +45,8 @@ public static class ForwardRegions
 
         foreach (Region region in ordered)
         {
+            if (cancellationToken.IsCancellationRequested)
+                return;
             if (region.Size < 0 || region.Offset < 0 || region.Offset + region.Size > nodeSize)
                 continue;
 
@@ -60,6 +64,8 @@ public static class ForwardRegions
 
             while (position < region.Offset + have) // skip the gap ahead of what is still missing
             {
+                if (cancellationToken.IsCancellationRequested)
+                    return;
                 int want = (int)Math.Min(scratch.Length, region.Offset + have - position);
                 int got = read(scratch, 0, want);
                 if (got <= 0)
@@ -69,6 +75,8 @@ public static class ForwardRegions
 
             while (have < buffer.Length)
             {
+                if (cancellationToken.IsCancellationRequested)
+                    return;
                 int got = read(buffer, have, buffer.Length - have);
                 if (got <= 0)
                     return;
@@ -90,6 +98,8 @@ public static class ForwardRegions
 
         while (position < nodeSize) // drain what is left of the node
         {
+            if (cancellationToken.IsCancellationRequested)
+                return;
             int want = (int)Math.Min(scratch.Length, nodeSize - position);
             int got = read(scratch, 0, want);
             if (got <= 0)

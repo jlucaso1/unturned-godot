@@ -33,6 +33,11 @@ public sealed class BaselineDiffOptions
     public IReadOnlyDictionary<string, double> ThresholdOverrides { get; init; } =
         new Dictionary<string, double>();
 
+    // Prefix policies cover metric families whose final segment is dynamic (for example benchmark pose
+    // names). The most-specific matching prefix wins; an exact override still takes precedence.
+    public IReadOnlyDictionary<string, double> ThresholdPrefixOverrides { get; init; } =
+        new Dictionary<string, double>();
+
     // Metrics where a larger value is an improvement. Everything else is lower-is-better.
     public IReadOnlySet<string> HigherIsBetter { get; init; } = new HashSet<string>();
 }
@@ -82,7 +87,7 @@ public static class BaselineDiff
     {
         double denom = baseline != 0.0 ? Math.Abs(baseline) : 1.0;
         double relative = (current - baseline) / denom;
-        double threshold = options.ThresholdOverrides.TryGetValue(name, out double t) ? t : options.RelativeThreshold;
+        double threshold = ThresholdFor(name, options);
         if (Math.Abs(relative) < threshold)
             return MetricStatus.Unchanged;
 
@@ -90,5 +95,21 @@ public static class BaselineDiff
         bool increased = current > baseline;
         bool better = increased == higherIsBetter;
         return better ? MetricStatus.Improved : MetricStatus.Regressed;
+    }
+
+    private static double ThresholdFor(string name, BaselineDiffOptions options)
+    {
+        if (options.ThresholdOverrides.TryGetValue(name, out double exact))
+            return exact;
+
+        double threshold = options.RelativeThreshold;
+        int bestLength = -1;
+        foreach ((string prefix, double candidate) in options.ThresholdPrefixOverrides)
+            if (prefix.Length > bestLength && name.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                threshold = candidate;
+                bestLength = prefix.Length;
+            }
+        return threshold;
     }
 }

@@ -330,7 +330,8 @@ public partial class Main : Node3D
             position = new Vector3(0, 60, 0);
         }
 
-        if (heights != null && heights.TrySampleHeight(position.X, position.Z, out float ground))
+        if (heights != null && TerrainCoordinates.TrySampleGodotHeight(heights, position.X, position.Z,
+            out float ground))
             position.Y = Mathf.Max(position.Y, ground + 0.5f);
 
         return (position, yaw);
@@ -384,8 +385,20 @@ public partial class Main : Node3D
     }
 
     // Returns to the map browser after a failed load, clearing whatever the attempt already built.
-    private void BackToMenu()
+    private ObjectStreamer? _activeLoadStreamer;
+    private bool _returningToMenu;
+
+    private async void BackToMenu()
     {
+        if (_returningToMenu)
+            return;
+        _returningToMenu = true;
+
+        ObjectStreamer? failedStreamer = _activeLoadStreamer;
+        _activeLoadStreamer = null;
+        if (failedStreamer != null)
+            await failedStreamer.CancelAsync();
+
         foreach (Node child in GetChildren())
             child.QueueFree();
 
@@ -404,6 +417,7 @@ public partial class Main : Node3D
                 LevelLighting.Load(System.IO.Path.Combine(mapEnvironment, "Lighting.dat")), joinTarget);
         };
         AddChild(menu);
+        _returningToMenu = false;
     }
 
     private async System.Threading.Tasks.Task BuildInteractiveWorld(string unturnedPath,
@@ -415,6 +429,7 @@ public partial class Main : Node3D
         // Start the object placement/asset IO now so it runs on a worker while the terrain builds; the
         // streamer joins the tree later, just before Begin().
         var streamer = new ObjectStreamer { Name = "ObjectStreamer" };
+        _activeLoadStreamer = streamer;
         streamer.StartPrepare(unturnedPath, level);
 
         loading.SetStatus("Building terrain…");
@@ -468,6 +483,8 @@ public partial class Main : Node3D
         // Stays with the load until the world is actually finished, so a failure while realising meshes or
         // building the scene reaches the handler above instead of leaving the screen up for good.
         await streamer.Completion;
+        if (ReferenceEquals(_activeLoadStreamer, streamer))
+            _activeLoadStreamer = null;
     }
 
     private async System.Threading.Tasks.Task NextFrame() =>

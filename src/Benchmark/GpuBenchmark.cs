@@ -195,22 +195,15 @@ public static class GpuBenchmark
     // regression. Counts (draw calls, primitives) are deterministic per view and stay strict.
     private static BaselineDiffOptions DiffOptions() => new()
     {
+        ThresholdPrefixOverrides = new Dictionary<string, double>
+        {
+            ["gpu.frameMs.median."] = 0.10,
+            ["cpu.processMonitorMs.median."] = 0.10,
+        },
         ThresholdOverrides = new Dictionary<string, double>
         {
             ["gpu.frameMs.median"] = 0.10,
-            ["gpu.frameMs.median.overhead"] = 0.10,
-            ["gpu.frameMs.median.oblique_n"] = 0.10,
-            ["gpu.frameMs.median.oblique_e"] = 0.10,
-            ["gpu.frameMs.median.oblique_s"] = 0.10,
-            ["gpu.frameMs.median.zoom"] = 0.10,
-            ["gpu.frameMs.median.tight"] = 0.10,
             ["cpu.processMonitorMs.median"] = 0.10,
-            ["cpu.processMonitorMs.median.overhead"] = 0.10,
-            ["cpu.processMonitorMs.median.oblique_n"] = 0.10,
-            ["cpu.processMonitorMs.median.oblique_e"] = 0.10,
-            ["cpu.processMonitorMs.median.oblique_s"] = 0.10,
-            ["cpu.processMonitorMs.median.zoom"] = 0.10,
-            ["cpu.processMonitorMs.median.tight"] = 0.10,
             ["gpu.videoMemBytes"] = 0.05,
             ["gpu.bufferMemBytes"] = 0.05,
             ["gpu.textureMemBytes"] = 0.05,
@@ -334,7 +327,7 @@ public static class GpuBenchmark
         {
             float x = centre.X + ox * step;
             float z = centre.Z + oz * step;
-            if (heights.TrySampleHeight(x, z, out float y))
+            if (TerrainCoordinates.TrySampleGodotHeight(heights, x, z, out float y))
             {
                 point = new Vector3(x, y, z);
                 return true;

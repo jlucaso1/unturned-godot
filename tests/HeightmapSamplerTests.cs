@@ -87,6 +87,19 @@ public class HeightmapSamplerTests
     }
 
     [Fact]
+    public void GodotTerrainSampling_MirrorsZBackToTheSourceTile()
+    {
+        // Source height rises along Unity +Z. The same physical point is Godot -Z after import.
+        HeightmapSampler sampler = Tile(0, 0, (hx, _) => 0.2f + (0.001f * hx));
+        float godotZ = -10f * Cell;
+
+        Assert.True(TerrainCoordinates.TrySampleGodotHeight(sampler, 4f * Cell, godotZ, out float mirrored));
+        Assert.True(sampler.TrySampleHeight(4f * Cell, -godotZ, out float source));
+        Assert.Equal(source, mirrored, 5);
+        Assert.False(sampler.TrySampleHeight(4f * Cell, godotZ, out _));
+    }
+
+    [Fact]
     public void SampleNormal_FlatTile_PointsStraightUp()
     {
         HeightmapSampler sampler = Flat(0.5f);

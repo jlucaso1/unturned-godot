@@ -108,6 +108,7 @@ public static class WorldPreview
     // directional shadow spanning 4 km of terrain is the heaviest single thing in the frame.
     public readonly record struct PreviewOptions(bool Objects, bool Foliage, bool Shadows)
     {
+        public bool NeedsPlacements => Objects || Foliage;
         // Terrain, roads, water and sky, with objects but no foliage and no shadows: the combination that
         // is both quick to build and smooth to fly through.
         public static PreviewOptions Default => new(Objects: true, Foliage: false, Shadows: false);
@@ -140,7 +141,7 @@ public static class WorldPreview
         // Placements and the asset database are pure file parsing: start them on a worker so they overlap
         // the terrain build below, exactly as the game does.
         onStatus("Reading placements…");
-        System.Threading.Tasks.Task<Placements>? placements = options.Objects
+        System.Threading.Tasks.Task<Placements>? placements = options.NeedsPlacements
             ? System.Threading.Tasks.Task.Run(() => ReadPlacements(unturnedPath, level))
             : null;
 
@@ -248,14 +249,15 @@ public static class WorldPreview
 
         // No collider library: nothing simulates in the editor, so the shapes and their BVH are pure cost.
         var noColliders = new Dictionary<Guid, List<CachedCollider>>();
-        Try(report, "objects", () =>
-        {
-            root.AddChild(ObjectsBuilder.Build(placements.Objects, placements.Db, meshLibrary, noColliders,
-                out int withMesh));
-            int missing = placements.Objects.Count - withMesh;
-            report.Add($"  {withMesh}/{placements.Objects.Count} objects, {meshLibrary.Count} unique meshes" +
-                (missing > 0 ? $" ({missing} as fallback boxes — warm the cache to fill them in)" : ""));
-        });
+        if (options.Objects)
+            Try(report, "objects", () =>
+            {
+                root.AddChild(ObjectsBuilder.Build(placements.Objects, placements.Db, meshLibrary, noColliders,
+                    out int withMesh));
+                int missing = placements.Objects.Count - withMesh;
+                report.Add($"  {withMesh}/{placements.Objects.Count} objects, {meshLibrary.Count} unique meshes" +
+                    (missing > 0 ? $" ({missing} as fallback boxes — warm the cache to fill them in)" : ""));
+            });
 
         if (options.Foliage)
         {

@@ -71,6 +71,63 @@ public class BaselineDiffTests
     }
 
     [Fact]
+    public void ThresholdPrefixOverride_CoversDynamicMetricNames()
+    {
+        var options = new BaselineDiffOptions
+        {
+            ThresholdPrefixOverrides = new Dictionary<string, double>
+            {
+                ["gpu.frameMs.median."] = 0.10,
+            },
+        };
+        var r = BaselineDiff.Compare(
+            new Dictionary<string, double> { ["gpu.frameMs.median.ground_diag"] = 100 },
+            new Dictionary<string, double> { ["gpu.frameMs.median.ground_diag"] = 108 }, options);
+
+        Assert.Equal(MetricStatus.Unchanged, Delta(r, "gpu.frameMs.median.ground_diag").Status);
+    }
+
+    [Fact]
+    public void ExactThresholdWinsOverTheMostSpecificPrefix()
+    {
+        var options = new BaselineDiffOptions
+        {
+            ThresholdPrefixOverrides = new Dictionary<string, double>
+            {
+                ["gpu."] = 0.50,
+                ["gpu.frameMs."] = 0.10,
+            },
+            ThresholdOverrides = new Dictionary<string, double>
+            {
+                ["gpu.frameMs.median.ground"] = 0.01,
+            },
+        };
+        var r = BaselineDiff.Compare(
+            new Dictionary<string, double> { ["gpu.frameMs.median.ground"] = 100 },
+            new Dictionary<string, double> { ["gpu.frameMs.median.ground"] = 105 }, options);
+
+        Assert.Equal(MetricStatus.Regressed, Delta(r, "gpu.frameMs.median.ground").Status);
+    }
+
+    [Fact]
+    public void MostSpecificThresholdPrefixWins()
+    {
+        var options = new BaselineDiffOptions
+        {
+            ThresholdPrefixOverrides = new Dictionary<string, double>
+            {
+                ["gpu."] = 0.50,
+                ["gpu.frameMs."] = 0.10,
+            },
+        };
+        var r = BaselineDiff.Compare(
+            new Dictionary<string, double> { ["gpu.frameMs.median.ground"] = 100 },
+            new Dictionary<string, double> { ["gpu.frameMs.median.ground"] = 120 }, options);
+
+        Assert.Equal(MetricStatus.Regressed, Delta(r, "gpu.frameMs.median.ground").Status);
+    }
+
+    [Fact]
     public void ZeroBaseline_HandlesPercentAndClassification()
     {
         var r = BaselineDiff.Compare(
