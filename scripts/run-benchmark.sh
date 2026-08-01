@@ -122,7 +122,8 @@ case "$tier" in
         # UG_HEADLESS_INTERACTIVE is the no-renderer control for attributing RSS, so it must not be
         # handed a swapchain: wrapping it in Xvfb would silently measure lavapipe again and report the
         # renderer's memory as the game's — the exact confusion the flag exists to remove.
-        if [[ "${UG_HEADLESS_INTERACTIVE:-}" == "1" ]]; then
+        # Mirror Main's own precedence: a screenshot needs something drawn, so it keeps the swapchain.
+        if [[ "${UG_HEADLESS_INTERACTIVE:-}" == "1" && -z "${SCREENSHOT_PATH:-}" ]]; then
             UG_RUNTIME_BENCH_SECS="${UG_RUNTIME_BENCH_SECS:-12}" SOLO=1 \
                 "$godot" --headless --audio-driver Dummy --path "$repo_dir" -- "$@"
         else

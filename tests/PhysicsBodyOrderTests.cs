@@ -62,9 +62,20 @@ public class PhysicsBodyOrderTests
         if (FindRepositoryFile(Path.Combine("scripts", "run-benchmark.sh")) is not { } scriptPath)
             return;
 
+        // A load failure has no reachable way out without a display, so it must fail the process rather
+        // than present a Back button no one can press and leave a benchmark waiting on it forever.
+        int failure = source.IndexOf("loading.Fail(", StringComparison.Ordinal);
+        int headlessQuit = source.LastIndexOf("if (_headlessInteractive)", failure, StringComparison.Ordinal);
+        Assert.True(headlessQuit >= 0 && headlessQuit < failure,
+            "the headless route must quit before the on-screen failure path");
+        Assert.Contains("GetTree().Quit(1);", source[headlessQuit..failure]);
+
         string script = File.ReadAllText(scriptPath);
         int runtimeTier = script.IndexOf("    runtime)", StringComparison.Ordinal);
-        int guard = script.IndexOf("\"${UG_HEADLESS_INTERACTIVE:-}\" == \"1\"", runtimeTier,
+        // The same screenshot precedence Main applies: a capture keeps the swapchain, or the run reaches
+        // the quit-after-load branch and writes no PNG at all.
+        int guard = script.IndexOf(
+            "\"${UG_HEADLESS_INTERACTIVE:-}\" == \"1\" && -z \"${SCREENSHOT_PATH:-}\"", runtimeTier,
             StringComparison.Ordinal);
         int headlessLaunch = script.IndexOf("\"$godot\" --headless", guard, StringComparison.Ordinal);
         int windowed = script.IndexOf("run_windowed", guard, StringComparison.Ordinal);

@@ -154,6 +154,7 @@ public partial class Main : Node3D
         // needs something drawn.
         bool headlessInteractive = headless && OS.GetEnvironment("UG_HEADLESS_INTERACTIVE") == "1"
             && string.IsNullOrEmpty(shot);
+        _headlessInteractive = headlessInteractive;
         if (headlessInteractive)
             Log.Print("[unturned-godot] Headless interactive: no rendering driver; "
                 + "view-dependent metrics (draw calls, primitives, frame time) do not apply.");
@@ -405,6 +406,14 @@ public partial class Main : Node3D
         catch (System.Exception e)
         {
             Log.PrintErr($"[unturned-godot] Failed to load {_mapName}: {e}");
+            if (_headlessInteractive)
+            {
+                // The way back is a button, and this session has neither a display to draw it on nor an
+                // input to press it with. Reporting on screen would leave a benchmark waiting on a
+                // loading screen that can never resolve, so fail the process instead.
+                GetTree().Quit(1);
+                return;
+            }
             loading.Fail($"{e.GetType().Name}: {e.Message}", BackToMenu);
         }
     }
@@ -412,6 +421,7 @@ public partial class Main : Node3D
     // Returns to the map browser after a failed load, clearing whatever the attempt already built.
     private ObjectStreamer? _activeLoadStreamer;
     private bool _returningToMenu;
+    private bool _headlessInteractive;
 
     private async void BackToMenu()
     {
