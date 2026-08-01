@@ -413,7 +413,7 @@ public partial class ObjectStreamer : Node
                         onMeshesReady: () =>
                         {
                             if (Interlocked.Decrement(ref meshPhasesLeft) == 0)
-                                Callable.From(OnMeshPhaseDone).CallDeferred();
+                                DeferUnlessQuitting(OnMeshPhaseDone);
                         },
                         onTextureWritten: key => _readyKeys.Enqueue(key),
                         foliageAssets: plan.Foliage, isCoreBundle: plan.Source.IsCore,
@@ -433,19 +433,33 @@ public partial class ObjectStreamer : Node
             }
             catch (Exception e)
             {
-                Callable.From(() => Log.PrintErr($"[stream] extraction failed: {e}")).CallDeferred();
+                DeferUnlessQuitting(() => Log.PrintErr($"[stream] extraction failed: {e}"));
                 // Unblock the pipeline: build whatever the cache holds so MeshesReady/Finished still fire
                 // (otherwise the loading screen would wait forever on a signal that never comes).
-                Callable.From(OnMeshPhaseDone).CallDeferred();
+                DeferUnlessQuitting(OnMeshPhaseDone);
             }
             finally
             {
                 // The terrain build blocks on this, so it has to be settled even when the pass died.
                 _layerTextures.TrySetResult(_layersProduced);
                 _texturesDone = true;
-                Callable.From(TryFinalizeLoadState).CallDeferred();
+                DeferUnlessQuitting(TryFinalizeLoadState);
             }
         }));
+    }
+
+    // A tracked decoder normally finishes before AppShutdown quits. Its grace period is deliberately
+    // finite, though, so a worker stuck in slow IO may outlive the tree. Never enqueue engine work after
+    // cancellation, and check again when the callback runs in case shutdown began while it was queued.
+    private static void DeferUnlessQuitting(Action callback)
+    {
+        if (AppShutdown.IsShuttingDown)
+            return;
+        Callable.From(() =>
+        {
+            if (!AppShutdown.IsShuttingDown)
+                callback();
+        }).CallDeferred();
     }
 
     // Final release is gated by both consumers: Finished says the main-thread scene no longer needs the

@@ -572,6 +572,8 @@ public sealed class BakedNavGraph
             workspace.Begin();
             workspace.Set(start, 0f, -1);
             workspace.Frontier.Enqueue(start, Heuristic(start, goal));
+            int closestReachable = start;
+            float closestDistance = Heuristic(start, goal);
 
             try
             {
@@ -593,13 +595,26 @@ public sealed class BakedNavGraph
                             continue;
                         workspace.Set(edge.To, candidate, current);
                         workspace.Frontier.Enqueue(edge.To, candidate + Heuristic(edge.To, goal));
+                        float distanceToGoal = Heuristic(edge.To, goal);
+                        if (distanceToGoal < closestDistance - 1e-6f
+                            || (MathF.Abs(distanceToGoal - closestDistance) <= 1e-6f
+                                && edge.To < closestReachable))
+                        {
+                            closestReachable = edge.To;
+                            closestDistance = distanceToGoal;
+                        }
                     }
                 }
-                if (workspace.GetCameFrom(goal) < 0)
-                    return false;
+
+                // Match NavigationServer's partial-path behavior. A collision-pruned band or authored
+                // island can disconnect the target, but the closest explored face still gives the zombie
+                // a collision-aware continuation instead of making a newly aggroed zombie stand still.
+                bool complete = workspace.GetCameFrom(goal) >= 0;
+                int routeGoal = complete ? goal : closestReachable;
+                Vector3 destination = complete ? to : _centres[routeGoal];
 
                 List<int> reverse = workspace.Reverse;
-                for (int at = goal; at != start; at = workspace.GetCameFrom(at))
+                for (int at = routeGoal; at != start; at = workspace.GetCameFrom(at))
                     reverse.Add(at);
                 reverse.Add(start);
                 reverse.Reverse();
@@ -627,8 +642,8 @@ public sealed class BakedNavGraph
                         }
                     }
                 }
-                portals.Add(new Portal(to, to));
-                AppendFunnel(output, portals, to);
+                portals.Add(new Portal(destination, destination));
+                AppendFunnel(output, portals, destination);
                 return true;
             }
             finally

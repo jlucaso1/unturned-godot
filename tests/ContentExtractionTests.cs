@@ -32,6 +32,31 @@ public class ContentExtractionTests
         Assert.NotNull(db.ResolveByGuid(NoBundleGuid));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ScanAssets_UnreadableTreeDoesNotDiscardOtherContent(bool unauthorized)
+    {
+        using var dir = new TempDir();
+        IReadOnlyList<ContentSource> sources = BuildSources(dir);
+        ContentSource mod = Assert.Single(sources, source => source.Name == "california2.masterbundle");
+
+        ObjectAssetDatabase db = ContentExtraction.ScanAssets(sources, path =>
+        {
+            if (path == mod.ObjectsDir)
+                throw unauthorized
+                    ? new UnauthorizedAccessException("test tree is unreadable")
+                    : new IOException("test tree disappeared");
+            return ObjectAssetDatabase.ScanDirectory(path);
+        });
+
+        Assert.NotNull(db.ResolveByGuid(CoreGuid));
+        Assert.Null(db.ResolveByGuid(ModGuid));
+        // The mod's independent Resources tree and later sources are still scanned.
+        Assert.NotNull(db.ResolveByGuid(FoliageGuid));
+        Assert.NotNull(db.ResolveByGuid(NoBundleGuid));
+    }
+
     [Fact]
     public void Plan_RoutesEachAssetAndFoliageToItsBundleAndChecksBothCaches()
     {

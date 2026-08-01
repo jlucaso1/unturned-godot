@@ -18,13 +18,32 @@ public static class ContentExtraction
 
     // Every asset directory that could hold objects or trees, for the asset-database scan. First
     // registration wins: Discover orders core before workshop content, matching asset resolution.
-    public static ObjectAssetDatabase ScanAssets(IReadOnlyList<ContentSource> sources)
+    public static ObjectAssetDatabase ScanAssets(IReadOnlyList<ContentSource> sources) =>
+        ScanAssets(sources, ObjectAssetDatabase.ScanDirectory);
+
+    // Scanner injection keeps the failure boundary deterministic in tests. A subscribed workshop item is
+    // unrelated to the map currently being loaded, so an unreadable or concurrently removed asset tree
+    // must cost only that tree, never the whole installed library.
+    internal static ObjectAssetDatabase ScanAssets(IReadOnlyList<ContentSource> sources,
+        Func<string, ObjectAssetDatabase> scanDirectory)
     {
         var db = new ObjectAssetDatabase();
         foreach (ContentSource source in sources)
             foreach (string directory in new[] { source.ObjectsDir, source.TreesDir })
-                foreach (ObjectAsset asset in ObjectAssetDatabase.ScanDirectory(directory).All)
+            {
+                ObjectAssetDatabase scanned;
+                try
+                {
+                    scanned = scanDirectory(directory);
+                }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+                {
+                    continue;
+                }
+
+                foreach (ObjectAsset asset in scanned.All)
                     db.AddIfAbsent(asset);
+            }
 
         return db;
     }

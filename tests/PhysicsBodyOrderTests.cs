@@ -308,7 +308,9 @@ public class PhysicsBodyOrderTests
         Assert.Contains("_registry.ReleaseLoadingIndexes()", source);
         Assert.Contains("_plans.Clear()", source);
         Assert.Contains("_layersProduced.Clear()", source);
-        Assert.Contains("Callable.From(TryFinalizeLoadState).CallDeferred()", source);
+        Assert.Contains("DeferUnlessQuitting(TryFinalizeLoadState)", source);
+        Assert.Contains("if (AppShutdown.IsShuttingDown)", source);
+        Assert.Contains("if (!AppShutdown.IsShuttingDown)", source);
     }
 
     [Fact]
@@ -361,6 +363,41 @@ public class PhysicsBodyOrderTests
         int prepare = source.IndexOf("PrepareRange(groups", System.StringComparison.Ordinal);
         Assert.True(group >= 0 && prepare > group);
         Assert.DoesNotContain("ExactContentKey.Bytes(data)", source);
+    }
+
+    [Fact]
+    public void EditorCacheScanPublishesOnlyTheLatestMapRequest()
+    {
+        if (FindRepositoryFile(Path.Combine("addons", "unturned", "MapPreviewDock.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("int generation = ++_cacheScanGeneration;", source);
+        Assert.Contains("generation != _cacheScanGeneration || !ReferenceEquals(Selected, map)", source);
+        Assert.Contains("private void ScanInstall()\n    {\n        // Invalidate", source);
+    }
+
+    [Fact]
+    public void RuntimeBenchmarkOmitsEmptyPhysicsFrameBuckets()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Benchmark", "RuntimeBenchmark.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("AddFrameBucket(report.Metrics, \"withPhysics\", withPhysicsFrameMs)", source);
+        Assert.Contains("AddFrameBucket(report.Metrics, \"withoutPhysics\", withoutPhysicsFrameMs)", source);
+        Assert.Contains("if (values.Count == 0)\n            return;", source);
+    }
+
+    [Fact]
+    public void GpuBenchmarkUsesLooseThresholdsForEveryCpuTimingPose()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Benchmark", "GpuBenchmark.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        foreach (string suffix in new[] { "", ".overhead", ".oblique_n", ".oblique_e", ".oblique_s", ".zoom", ".tight" })
+            Assert.Contains($"[\"cpu.processMonitorMs.median{suffix}\"] = 0.10", source);
     }
 
     // Walks up from the test assembly to the repository root (the folder holding the solution).

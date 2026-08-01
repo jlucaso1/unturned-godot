@@ -67,7 +67,7 @@ public class BakedNavGraphTests
     }
 
     [Fact]
-    public void RemovedBandDisconnectsTheGraph()
+    public void RemovedBandReturnsAClosestReachablePartialPath()
     {
         NavFlag flag = Strip(3);
         var removed = new Dictionary<NavFlag, HashSet<int>>
@@ -76,8 +76,14 @@ public class BakedNavGraphTests
         };
         BakedNavGraph graph = BakedNavGraph.Build(new[] { flag }, removed);
 
-        Assert.False(graph.TryPath(
-            new Vector3(0.1f, 0, 0.5f), new Vector3(2.9f, 0, 0.5f), new List<Vector3>()));
+        var from = new Vector3(0.1f, 0, 0.5f);
+        var target = new Vector3(2.9f, 0, 0.5f);
+        var path = new List<Vector3>();
+
+        Assert.True(graph.TryPath(from, target, path));
+        Assert.Equal(from, path[0]);
+        Assert.NotEqual(target, path[^1]);
+        Assert.InRange(path[^1].X, 0f, 1f);
     }
 
     [Fact]
@@ -89,7 +95,10 @@ public class BakedNavGraphTests
         Assert.True(graph.TryPath(from, to, new List<Vector3>()));
 
         Assert.Equal(2, graph.Disable(flag, new HashSet<int> { 2, 3 }));
-        Assert.False(graph.TryPath(from, to, new List<Vector3>()));
+        var partial = new List<Vector3>();
+        Assert.True(graph.TryPath(from, to, partial));
+        Assert.NotEqual(to, partial[^1]);
+        Assert.InRange(partial[^1].X, 0f, 1f);
         Assert.Equal(0, graph.Disable(flag, new HashSet<int> { 2, 3, -1, 99 }));
     }
 

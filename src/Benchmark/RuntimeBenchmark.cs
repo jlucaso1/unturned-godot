@@ -71,10 +71,6 @@ public static class RuntimeBenchmark
                     ["runtime.frameMs.p95"] = MetricStats.Percentile(frameMs, 95),
                     ["runtime.frameMs.p99"] = MetricStats.Percentile(frameMs, 99),
                     ["runtime.frameMs.max"] = MetricStats.Percentile(frameMs, 100),
-                    ["runtime.frameMs.withPhysics.median"] = MetricStats.Median(withPhysicsFrameMs),
-                    ["runtime.frameMs.withPhysics.p95"] = MetricStats.Percentile(withPhysicsFrameMs, 95),
-                    ["runtime.frameMs.withoutPhysics.median"] = MetricStats.Median(withoutPhysicsFrameMs),
-                    ["runtime.frameMs.withoutPhysics.p95"] = MetricStats.Percentile(withoutPhysicsFrameMs, 95),
                     ["runtime.framesOver4_17Ms.percent"] = PercentageOver(frameMs, 1000.0 / 240.0),
                     ["runtime.framesOver8_33Ms.percent"] = PercentageOver(frameMs, 1000.0 / 120.0),
                     ["runtime.fps.fromMedian"] = 1000.0 / medianFrame,
@@ -95,6 +91,8 @@ public static class RuntimeBenchmark
                     ["runtime.scriptedMovement"] = OS.GetEnvironment("UG_RUNTIME_BENCH_MOVE") == "1" ? 1 : 0,
                 },
             };
+            AddFrameBucket(report.Metrics, "withPhysics", withPhysicsFrameMs);
+            AddFrameBucket(report.Metrics, "withoutPhysics", withoutPhysicsFrameMs);
             AddCounterMetrics(report.Metrics);
             BenchmarkRunner.Finish(report, $"{mapName}-runtime", new BaselineDiffOptions
             {
@@ -127,6 +125,18 @@ public static class RuntimeBenchmark
     }
 
     private static double Mon(Performance.Monitor monitor) => Performance.GetMonitor(monitor);
+
+    // At or below the physics tick rate, every rendered frame can include a physics step and leave the
+    // complementary bucket empty. An absent metric describes that run honestly; asking MetricStats to
+    // aggregate zero samples would instead abort the entire benchmark before its report is written.
+    private static void AddFrameBucket(SortedDictionary<string, double> metrics, string name,
+        IReadOnlyList<double> values)
+    {
+        if (values.Count == 0)
+            return;
+        metrics[$"runtime.frameMs.{name}.median"] = MetricStats.Median(values);
+        metrics[$"runtime.frameMs.{name}.p95"] = MetricStats.Percentile(values, 95);
+    }
 
     private static void AddCounterMetrics(SortedDictionary<string, double> metrics)
     {

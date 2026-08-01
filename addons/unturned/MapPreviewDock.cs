@@ -41,6 +41,7 @@ public partial class MapPreviewDock : VBoxContainer
     private IReadOnlyList<MapEntry> _catalog = Array.Empty<MapEntry>();
     private bool _busy;
     private double _sinceCameraPoll;
+    private int _cacheScanGeneration;
 
     public override void _Ready()
     {
@@ -146,6 +147,8 @@ public partial class MapPreviewDock : VBoxContainer
 
     private void ScanInstall()
     {
+        // Invalidate a cache scan from the previous catalog even when discovery exits early.
+        _cacheScanGeneration++;
         _maps.Clear();
         _unturnedPath = WorldPreview.FindInstall();
         if (_unturnedPath == null)
@@ -184,6 +187,7 @@ public partial class MapPreviewDock : VBoxContainer
     {
         if (_unturnedPath is not { } install || Selected is not { } map)
             return;
+        int generation = ++_cacheScanGeneration;
 
         string scale = $"{map.TileCount} tiles, {map.SizeMetres:0} m across";
         _cache.Text = $"{scale}\nChecking cache…";
@@ -207,7 +211,7 @@ public partial class MapPreviewDock : VBoxContainer
         // The dock can be torn down while the worker runs — closing the project, disabling the plugin, or
         // a headless export, which loads and drops the editor plugins in one pass. Touching the Label then
         // throws ObjectDisposedException out of the continuation, where nothing can catch it.
-        if (!Alive)
+        if (!Alive || generation != _cacheScanGeneration || !ReferenceEquals(Selected, map))
             return;
         _cache.Text = scale + "\n" + result;
     }
