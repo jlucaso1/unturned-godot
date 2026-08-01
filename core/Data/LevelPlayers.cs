@@ -47,7 +47,7 @@ public static class LevelPlayers
         {
             bytes = File.ReadAllBytes(path);
         }
-        catch (IOException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
             return spawns;
         }

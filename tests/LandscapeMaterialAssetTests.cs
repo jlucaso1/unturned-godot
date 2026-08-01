@@ -142,6 +142,42 @@ public class LandscapeMaterialAssetTests
     }
 
     [Fact]
+    public void ScanDirectory_InaccessibleNestedTree_DoesNotEscapeTheSource()
+    {
+        if (OperatingSystem.IsWindows())
+            return; // POSIX permissions only
+
+        using var dir = new TempDir();
+        dir.Write("Grass.asset", PeiGrass);
+        string locked = Path.Combine(dir.Path, "Locked");
+        dir.Write(Path.Combine("Locked", "Snow.asset"), PeiGrass.Replace(
+            "3d7717c2bc074401853b2fdacd9db1ba", "33333333333333333333333333333333"));
+        File.SetUnixFileMode(locked, UnixFileMode.None);
+
+        try
+        {
+            try
+            {
+                Directory.EnumerateFiles(locked).GetEnumerator().MoveNext();
+                return; // running as root: modes do not apply
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // expected
+            }
+
+            Dictionary<Guid, LandscapeMaterialAsset> materials =
+                LandscapeMaterialAsset.ScanDirectory(dir.Path);
+            Assert.DoesNotContain(Guid.Parse("33333333333333333333333333333333"), materials.Keys);
+        }
+        finally
+        {
+            File.SetUnixFileMode(locked,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    [Fact]
     public void ScanDirectory_MissingRoot_IsEmpty()
     {
         using var dir = new TempDir();

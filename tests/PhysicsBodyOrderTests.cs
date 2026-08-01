@@ -283,6 +283,8 @@ public class PhysicsBodyOrderTests
         Assert.Contains("_retainedMeshes.Add(entry.Mesh)", render);
         Assert.Contains("_localTransforms.Add(entry.Transform)", render);
         Assert.Contains("_entries = new List<Entry>()", render);
+        Assert.Contains("NotificationVisibilityChanged", render);
+        Assert.Contains("InstanceSetVisible(instance, visible)", render);
     }
 
     [Fact]

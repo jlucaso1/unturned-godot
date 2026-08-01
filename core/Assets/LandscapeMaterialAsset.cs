@@ -74,20 +74,28 @@ public sealed class LandscapeMaterialAsset
         if (!Directory.Exists(root))
             return result;
 
-        foreach (string file in Directory.EnumerateFiles(root, "*.asset", SearchOption.AllDirectories))
+        try
         {
-            DatDictionary parsed;
-            try
+            foreach (string file in Directory.EnumerateFiles(root, "*.asset", SearchOption.AllDirectories))
             {
-                parsed = DatParser.Parse(File.ReadAllText(file));
-            }
-            catch (IOException)
-            {
-                continue;
-            }
+                DatDictionary parsed;
+                try
+                {
+                    parsed = DatParser.Parse(File.ReadAllText(file));
+                }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+                {
+                    continue;
+                }
 
-            if (TryParse(parsed, out LandscapeMaterialAsset asset))
-                result.TryAdd(asset.Guid, asset);
+                if (TryParse(parsed, out LandscapeMaterialAsset asset))
+                    result.TryAdd(asset.Guid, asset);
+            }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // A workshop item can disappear or become unreadable while its lazy recursive enumeration is
+            // in progress. Keep any materials already found and isolate the failure to this source tree.
         }
 
         return result;

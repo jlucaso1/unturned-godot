@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using Godot;
@@ -81,6 +82,37 @@ public class LevelPlayersTests
         // Held exclusively: spawns are a nice-to-have, so the map still loads without them.
         using var handle = new FileStream(path, FileMode.Open, System.IO.FileAccess.Read, FileShare.None);
         Assert.Empty(LevelPlayers.Load(dir.Path));
+    }
+
+    [Fact]
+    public void Load_AccessDeniedFile_ReturnsEmpty()
+    {
+        if (OperatingSystem.IsWindows())
+            return; // POSIX permissions only
+
+        using var dir = new TempDir();
+        string path = dir.Write(Path.Combine("Spawns", "Players.dat"),
+            File(4, (new Vector3(1, 2, 3), 0, false)));
+        File.SetUnixFileMode(path, UnixFileMode.None);
+
+        try
+        {
+            try
+            {
+                File.ReadAllBytes(path);
+                return; // running as root: modes do not apply
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // expected
+            }
+
+            Assert.Empty(LevelPlayers.Load(dir.Path));
+        }
+        finally
+        {
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
     }
 
     [Fact]

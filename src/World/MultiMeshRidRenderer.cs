@@ -62,10 +62,16 @@ public partial class MultiMeshRidRenderer : Node3D
         }
         if (compact)
             _entries = new List<Entry>();
+        UpdateVisibility();
     }
 
     public override void _Notification(int what)
     {
+        if (what == NotificationVisibilityChanged)
+        {
+            UpdateVisibility();
+            return;
+        }
         if (what != NotificationTransformChanged)
             return;
         if (_localTransforms.Count == _instances.Count)
@@ -74,6 +80,13 @@ public partial class MultiMeshRidRenderer : Node3D
         else if (_entries.Count == _instances.Count)
             for (int i = 0; i < _instances.Count; i++)
                 RenderingServer.InstanceSetTransform(_instances[i], GlobalTransform * _entries[i].Transform);
+    }
+
+    private void UpdateVisibility()
+    {
+        bool visible = IsVisibleInTree();
+        foreach (Rid instance in _instances)
+            RenderingServer.InstanceSetVisible(instance, visible);
     }
 
     public override void _ExitTree()
