@@ -105,11 +105,38 @@ verify_content() {
 # Level.dat is the map itself, and the heightmap tiles are what this project needs to load one. Known
 # official grids get exact coordinate checks; --maps all discovers the loadable map set from the tree so
 # a new official map cannot be silently omitted from the receipt.
+#
+# Which directories have to be whole maps is the whole question. Deriving that from Level.dat alone makes
+# an interrupted download self-consistent: the half-written map drops out of the expected set, the maps
+# that did finish verify, and the receipt is published without ever mentioning the one that is missing.
+# Treating every directory as a map is wrong in the other direction — the game keeps editor scratch under
+# Maps/ (MapCatalogTests models exactly that), and a scratch folder would fail every run for lacking a
+# Level.dat it was never going to have.
+#
+# So ask the downloader. DepotDownloader mirrors the tree it materializes under .DepotDownloader/staging
+# and leaves that skeleton behind, so staging/Maps names exactly the maps this fetcher created — the one
+# whose Level.dat never landed included. That is the record the receipt should be built from.
+#
+# A tree this script did not produce (UNTURNED_PATH on a real install) has no staging directory. There,
+# fall back to what a map looks like on disk: Level.dat, or the Landscape/Level folders every official
+# map ships. A directory with none of the three is not a map and is left alone.
 all_maps() {
-    local root="$1" dir map
+    local root="$1" dir map staging="$1/.DepotDownloader/staging/Maps"
+    local dirs=()
+
     shopt -s nullglob
-    for dir in "$root"/Maps/*/; do
-        [[ -s "$dir/Level.dat" ]] || continue
+    if [[ -d "$staging" ]]; then
+        dirs=("$staging"/*/)
+    else
+        for dir in "$root"/Maps/*/; do
+            if [[ -s "$dir/Level.dat" || -d "$dir/Landscape" || -d "$dir/Level" ]]; then
+                dirs+=("$dir")
+            fi
+        done
+    fi
+    shopt -u nullglob
+
+    for dir in "${dirs[@]}"; do
         map="${dir%/}"
         map="${map##*/}"
         case "$map" in
@@ -117,7 +144,6 @@ all_maps() {
         esac
         printf '%s\n' "$map"
     done
-    shopt -u nullglob
 }
 
 map_tile_bounds() {
