@@ -794,13 +794,21 @@ public class PhysicsBodyOrderTests
         Assert.DoesNotContain("expected_all_maps", source);
         Assert.DoesNotContain("any_map_is_whole", source);
 
-        // A map directory with no Level.dat yet is what an interrupted --maps all leaves behind. Filtering
-        // it out of all_maps would drop it from both the expected set and the receipt, so the maps that
-        // did finish would verify and publish a receipt that never mentions the one that did not.
+        // A map directory with no Level.dat yet is what an interrupted --maps all leaves behind. Deriving
+        // the expected set from Level.dat alone would drop it from both the set and the receipt, so the
+        // maps that did finish would verify and publish a receipt that never names the one that did not.
+        // DepotDownloader's staging skeleton is the record of what it actually materialized.
         int allMaps = source.IndexOf("all_maps() {", StringComparison.Ordinal);
         int allMapsEnd = source.IndexOf("\n}", allMaps, StringComparison.Ordinal);
         Assert.True(allMaps >= 0 && allMapsEnd > allMaps);
-        Assert.DoesNotContain("Level.dat", source[allMaps..allMapsEnd]);
+        string body = source[allMaps..allMapsEnd];
+        Assert.Contains("staging=\"$1/.DepotDownloader/staging/Maps\"", body);
+        Assert.Contains("dirs=(\"$staging\"/*/)", body);
+
+        // The fallback, for a tree this script did not produce: the game keeps editor scratch under Maps/
+        // (MapCatalogTests models it), so a directory that is not a map must not fail the run for lacking
+        // a Level.dat it was never going to have.
+        Assert.Contains("-s \"$dir/Level.dat\" || -d \"$dir/Landscape\" || -d \"$dir/Level\"", body);
     }
 
     [Fact]
@@ -914,9 +922,30 @@ public class PhysicsBodyOrderTests
         Assert.Contains("--verify --maps \"$MAP\"", source);
 
         // MapCatalog.IsSupported is TileCount > 0. A legacy workshop map has Level.dat and no Landscape
-        // tiles, so accepting it on Level.dat alone would benchmark an empty world and report it.
-        Assert.Contains("workshop_tiles=(\"$workshop_map/Landscape/Heightmaps\"/*.heightmap)", source);
+        // tiles, so accepting it on Level.dat alone would benchmark an empty world and report it. The
+        // count has to follow LevelInfo.EnumerateTiles' naming rule, not a bare *.heightmap glob: a
+        // stray or malformed file makes the glob nonempty while TileCount stays zero.
+        Assert.Contains("^Tile_(-?[0-9]+)_(-?[0-9]+)_Source\\.heightmap$", source);
         Assert.Contains("${#workshop_tiles[@]} -eq 0", source);
+    }
+
+    [Fact]
+    public void ShutdownKeepsTheFirstFailureCodeAcrossRepeatedQuitRequests()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "AppShutdown.cs")) is not { } path)
+            return;
+
+        // A pause-menu quit or an expired QUIT_AFTER can ask to leave before Tier 3 reports its failure.
+        // The IsShuttingDown early return makes every later call a no-op, so the code cannot be captured
+        // after it -- a dropped 1 there is a failed benchmark that reports success.
+        string source = File.ReadAllText(path);
+        int capture = source.IndexOf("if (exitCode != 0 && ExitCode == 0)", StringComparison.Ordinal);
+        int guard = source.IndexOf("if (IsShuttingDown)", capture, StringComparison.Ordinal);
+        Assert.True(capture >= 0 && guard > capture);
+
+        // Read when the deferred call runs, not when it is scheduled, so a failure raised in between lands.
+        Assert.Contains("Callable.From(() => tree.Quit(ExitCode)).CallDeferred();", source);
+        Assert.Contains("tree.Quit(ExitCode);", source);
     }
 
     [Fact]

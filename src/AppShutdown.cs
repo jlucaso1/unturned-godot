@@ -85,10 +85,20 @@ public static class AppShutdown
             Log.PushWarning(message);
     }
 
+    // What the process will report. A failure can arrive after teardown has already started — Tier 3
+    // calls RequestQuit(tree, 1) with no report written, while an expired QUIT_AFTER or the pause-menu
+    // button may already have asked for 0 — and the early return below would drop it, leaving the run
+    // looking successful to whatever reads the exit status. So the code lives here, outside the guard,
+    // and the first failure wins over any later or earlier request to leave cleanly.
+    private static int ExitCode;
+
     // The single way out of a loaded world. Safe to call more than once. exitCode is what the process
     // reports; a headless caller that failed passes nonzero so its wrapper script can tell.
     public static void RequestQuit(SceneTree tree, int exitCode = 0)
     {
+        if (exitCode != 0 && ExitCode == 0)
+            ExitCode = exitCode;
+
         if (IsShuttingDown)
             return;
         Source.Cancel();
@@ -97,19 +107,20 @@ public static class AppShutdown
         if (running == 0)
         {
             Log.Print("[shutdown] leaving");
-            // Deferred: never tear the tree down inside the signal handler that asked for it.
-            tree.CallDeferred(SceneTree.MethodName.Quit, exitCode);
+            // Deferred: never tear the tree down inside the signal handler that asked for it. The code is
+            // read when the call runs, not when it is scheduled, so a failure raised in between still lands.
+            Callable.From(() => tree.Quit(ExitCode)).CallDeferred();
             return;
         }
 
         Log.Print($"[shutdown] leaving; waiting for {running} background task(s) to stop");
-        _ = WaitForBackgroundThenQuit(tree, exitCode);
+        _ = WaitForBackgroundThenQuit(tree);
     }
 
     // Polls on the main thread rather than blocking it: the workers hand their last results back through
     // CallDeferred, which only runs while frames keep being processed. Blocking here would deadlock a
     // task that is waiting for the main thread to drain.
-    private static async Task WaitForBackgroundThenQuit(SceneTree tree, int exitCode)
+    private static async Task WaitForBackgroundThenQuit(SceneTree tree)
     {
         var waited = Stopwatch.StartNew();
         while (StillRunning() > 0 && waited.Elapsed < Grace)
@@ -120,6 +131,6 @@ public static class AppShutdown
             ? $"[shutdown] background work stopped after {waited.ElapsedMilliseconds} ms"
             : $"[shutdown] {left} background task(s) still busy after {waited.ElapsedMilliseconds} ms; leaving anyway");
 
-        tree.Quit(exitCode);
+        tree.Quit(ExitCode);
     }
 }

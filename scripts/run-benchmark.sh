@@ -49,8 +49,19 @@ if [[ "$MAP" == workshop:* ]]; then
     # Level.dat alone is not enough to load one. MapCatalog.IsSupported is TileCount > 0, and a pre-2020
     # workshop map keeps its terrain in a single legacy heightmap this port does not read: it opens as a
     # zero-tile world, so Tier 1 would write a structurally meaningless report instead of refusing.
+    #
+    # Counting *.heightmap would not answer the same question the loader does. LevelInfo.EnumerateTiles
+    # keeps only Tile_<x>_<y>_Source.heightmap with parseable coordinates, so a stray or malformed file
+    # in that directory makes a glob nonempty while TileCount stays zero — the exact zero-tile world this
+    # check exists to reject. Match the loader's rule instead.
     shopt -s nullglob
-    workshop_tiles=("$workshop_map/Landscape/Heightmaps"/*.heightmap)
+    workshop_tiles=()
+    for tile in "$workshop_map/Landscape/Heightmaps"/*.heightmap; do
+        # An `&&` one-liner here would be a set -e trap: the whole list fails on every non-matching file.
+        if [[ "${tile##*/}" =~ ^Tile_(-?[0-9]+)_(-?[0-9]+)_Source\.heightmap$ ]]; then
+            workshop_tiles+=("$tile")
+        fi
+    done
     shopt -u nullglob
     if [[ ${#workshop_tiles[@]} -eq 0 ]]; then
         echo "Workshop map $workshop_map has no Landscape heightmap tiles; this port cannot load it." >&2
