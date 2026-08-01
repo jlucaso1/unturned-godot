@@ -51,6 +51,10 @@ in view.
 
 Nothing else is needed: the master bundle, maps and assets are read directly out of that install.
 
+To *develop* rather than play, the Steam install is optional: `./scripts/fetch-game-data.sh` pulls the
+same content out of Unturned's anonymously-downloadable dedicated server, which is what CI and the agent
+sandboxes use. See [Game content without a Steam install](#game-content-without-a-steam-install).
+
 ## Run
 
 Open the project in the Godot editor and press play, or from a terminal:
@@ -162,7 +166,24 @@ Style and analyzers are enforced via `.editorconfig` + `Directory.Build.props` (
 `EnforceCodeStyleInBuild`); builds are warning-clean and CI builds with `-warnaserror`.
 
 The tests that touch real game data self-skip when Unturned is not installed, so the suite is green on a
-bare machine, which is what CI runs, on Linux, Windows and macOS.
+bare machine, which is what `ci.yml` runs, on Linux, Windows and macOS.
+
+### Game content without a Steam install
+
+Unturned's dedicated server is downloadable through Steam's anonymous account, and it carries the same
+content the client reads. That is enough for the whole suite, and it needs no Steam login, no owned copy
+and no Steam client:
+
+```sh
+./scripts/fetch-game-data.sh                       # bundles + PEI (~165 MB) into build/game-data
+export UNTURNED_PATH="$(./scripts/fetch-game-data.sh --print-dir)"
+dotnet test tests/UnturnedGodot.Tests.csproj       # now with the data-backed tests running for real
+```
+
+`real-data.yml` runs exactly that in CI, caching the content on the depot manifest IDs. For a whole
+machine at once — .NET SDK, NuGet cache and content — `./scripts/setup-cloud-env.sh` does the lot; see
+[docs/CLOUD-ENVIRONMENTS.md](docs/CLOUD-ENVIRONMENTS.md) for wiring it into Claude Code's cloud
+environments or Codex.
 
 If your Godot came from a distro package and its exact `GodotSharp`/`Godot.NET.Sdk` version is not on
 nuget.org yet, register the local nupkg folder per machine (never in the repo's `nuget.config`, where a missing
