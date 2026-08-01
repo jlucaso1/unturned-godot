@@ -26,6 +26,12 @@ set -euo pipefail
 readonly APP_ID=1110390                      # Unturned Dedicated Server, anonymous-downloadable
 readonly DD_VERSION=3.4.0
 
+# Receipt a finished run leaves in the destination, naming the selection it completed. Only "all"
+# needs it — the set of maps that exists is a Steam-side fact, so nothing on disk can stand in for it
+# — which keeps every other selection verifiable against a tree this script never wrote, such as a
+# real Steam install someone points --dir at.
+readonly COMPLETION_MARKER=.unturned-fetch-complete
+
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 dest="$repo_dir/build/game-data"
 maps="PEI"
@@ -86,21 +92,64 @@ verify_content() {
     fi
 
     if [[ "$maps" == "all" ]]; then
-        # "Every map Valve currently ships" is not knowable from disk, so this can never be confirmed
-        # offline. Report it unverified and let the caller re-run the downloader, which is incremental.
-        echo "Cannot verify --maps all without asking Steam what the full set is." >&2
-        ok=0
+        # "Every map Valve currently ships" is not knowable from disk, so the only honest evidence is
+        # the receipt a completed run leaves behind. Without it, fall through to the downloader, which
+        # is incremental; with it, still require that the maps on disk are themselves whole.
+        if [[ "$(cat "$1/$COMPLETION_MARKER" 2>/dev/null)" != "all" ]]; then
+            echo "No record of a completed --maps all download in $1." >&2
+            ok=0
+        elif ! any_map_is_whole "$1"; then
+            echo "Missing: any loadable map under $1/Maps" >&2
+            ok=0
+        fi
     else
-        # Level.dat is the map itself; Landscape is the tile set this project needs to load one. Maps
-        # that predate Landscape tiles (Destruction, Paintball Arena) therefore never verify, which
-        # matches the fact that the project cannot load them either.
         while read -r map; do
-            [[ -f "$1/Maps/$map/Level.dat" ]] || { echo "Missing: $1/Maps/$map/Level.dat" >&2; ok=0; }
-            [[ -d "$1/Maps/$map/Landscape" ]] || { echo "Missing: $1/Maps/$map/Landscape" >&2; ok=0; }
+            map_is_whole "$1" "$map" || ok=0
         done < <(selected_maps)
     fi
 
     [[ $ok == 1 ]]
+}
+
+# Level.dat is the map itself, and the heightmap tiles are what this project needs to load one. The
+# tiles are checked as files rather than as a directory because an interrupted download leaves the
+# directory behind: DepotDownloader creates the tree before it has written everything into it. Maps
+# predating Landscape tiles (Destruction, Paintball Arena) therefore never pass, which matches the
+# fact that the project cannot load them either.
+map_is_whole() {
+    local root="$1" map="$2" ok=1
+
+    if [[ -z "$map" ]]; then
+        echo "Missing: any map under $root/Maps" >&2
+        return 1
+    fi
+
+    [[ -f "$root/Maps/$map/Level.dat" ]] || { echo "Missing: $root/Maps/$map/Level.dat" >&2; ok=0; }
+
+    shopt -s nullglob
+    local tiles=("$root/Maps/$map/Landscape/Heightmaps"/*.heightmap)
+    shopt -u nullglob
+    if [[ ${#tiles[@]} -eq 0 ]]; then
+        echo "Missing: heightmap tiles in $root/Maps/$map/Landscape/Heightmaps" >&2
+        ok=0
+    fi
+
+    [[ $ok == 1 ]]
+}
+
+# For "all", the maps Valve ships include pre-Landscape ones this project cannot load, so the bar is
+# that at least one map came down whole rather than that every directory did.
+any_map_is_whole() {
+    local dir
+    shopt -s nullglob
+    for dir in "$1"/Maps/*/; do
+        if map_is_whole "$1" "$(basename "$dir")" 2>/dev/null; then
+            shopt -u nullglob
+            return 0
+        fi
+    done
+    shopt -u nullglob
+    return 1
 }
 
 if [[ "$mode" == "verify" ]]; then
@@ -137,7 +186,9 @@ downloader="$tools_dir/DepotDownloader"
 
 if [[ ! -x "$downloader" ]]; then
     echo "Fetching DepotDownloader $DD_VERSION ($dd_platform)..." >&2
-    archive="$(mktemp "${TMPDIR:-/tmp}/depotdownloader.XXXXXX.zip")"
+    # The X run has to end the template: BSD mktemp, which is what macOS ships, rejects a suffix after
+    # it. unzip does not care what the file is called.
+    archive="$(mktemp "${TMPDIR:-/tmp}/depotdownloader.XXXXXX")"
     curl -fsSL -o "$archive" \
         "https://github.com/SteamRE/DepotDownloader/releases/download/DepotDownloader_$DD_VERSION/DepotDownloader-$dd_platform.zip"
 
@@ -216,13 +267,11 @@ echo "Downloading Unturned content (app $APP_ID, maps: $maps, bundle: $os_name) 
 run_downloader -app "$APP_ID" -os "$os_name" -filelist "$filelist" -dir "$dest"
 
 # A download that reports success but left the tree short is worth catching here rather than in a
-# confusing test failure later. "all" is unverifiable offline, so it only gets the shallow check.
-if [[ "$maps" == "all" ]]; then
-    if [[ ! -d "$dest/Bundles" || ! -d "$dest/Maps" ]]; then
-        echo "Download finished but $dest does not look like an install (no Bundles/ or Maps/)." >&2
-        exit 1
-    fi
-elif ! verify_content "$dest"; then
+# confusing test failure later. The receipt goes down first because verifying an "all" selection reads
+# it, and comes back off if the tree does not hold up, so it never outlives a good download.
+printf '%s\n' "$maps" > "$dest/$COMPLETION_MARKER"
+if ! verify_content "$dest"; then
+    rm -f "$dest/$COMPLETION_MARKER"
     echo "Download finished but $dest is incomplete." >&2
     exit 1
 fi
