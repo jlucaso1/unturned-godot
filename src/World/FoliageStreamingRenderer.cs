@@ -53,6 +53,8 @@ public partial class FoliageStreamingRenderer : Node3D
     private int _staleResults;
     private int _maxQueued;
     private long _maxDecodedBytes;
+    private int _truncatedAdmissions;
+    private int _maxDeferredPrefetch;
     private bool _needsRefill;
     private bool _acceptDecoded = true;
 
@@ -70,6 +72,11 @@ public partial class FoliageStreamingRenderer : Node3D
     public int DecodeFailures => _decodeFailures;
     public int MaximumQueued => _maxQueued;
     public long MaximumDecodedBytes => _maxDecodedBytes;
+    // How often admission hit UG_FOLIAGE_MAX_PENDING, and the largest single-plan shortfall behind it.
+    // Both stay zero while the bound is wide enough for the map; neither is a failure on its own, since
+    // the deferred work is refilled — they size the bound and explain a prefetch ring that stays behind.
+    public int TruncatedAdmissions => _truncatedAdmissions;
+    public int MaximumDeferredPrefetch => _maxDeferredPrefetch;
     public bool IsSettled => _focused && !_needsRefill && _pending.Count == 0 && _queue.Count == 0
         && _decoded.IsEmpty && Volatile.Read(ref _workers) == 0;
     public IEnumerable<MultiMesh> MultiMeshes
@@ -207,6 +214,9 @@ public partial class FoliageStreamingRenderer : Node3D
             _pending.Add(index);
         }
         _needsRefill = plan.PrefetchTruncated;
+        if (plan.PrefetchTruncated)
+            _truncatedAdmissions++;
+        _maxDeferredPrefetch = Math.Max(_maxDeferredPrefetch, plan.PrefetchDeferred);
         _maxQueued = Math.Max(_maxQueued, _pending.Count);
     }
 

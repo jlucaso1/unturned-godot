@@ -192,6 +192,8 @@ public static class RuntimeBenchmark
                     metrics["runtime.foliage.pendingChunks"] = foliage.PendingChunks;
                 }
                 metrics["runtime.foliage.maxQueued"] = foliage.MaximumQueued;
+                metrics["runtime.foliage.truncatedAdmissions"] = foliage.TruncatedAdmissions;
+                metrics["runtime.foliage.maxDeferredPrefetch"] = foliage.MaximumDeferredPrefetch;
                 metrics["runtime.foliage.maxDecodedBytes"] = foliage.MaximumDecodedBytes;
                 metrics["runtime.foliage.emergencyVisibleLoads"] = foliage.EmergencyVisibleLoads;
                 metrics["runtime.foliage.visibleSetMisses"] = foliage.VisibleSetMisses;

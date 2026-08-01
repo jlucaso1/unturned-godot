@@ -10,7 +10,11 @@ public sealed record FoliageResidencyPlan(
     IReadOnlyList<int> VisibleMissing,
     IReadOnlyList<int> Prefetch,
     IReadOnlyList<int> Retire,
-    bool PrefetchTruncated);
+    bool PrefetchTruncated,
+    // How many in-range chunks this plan had to leave out because the pending bound was already spent.
+    // PrefetchTruncated only says the cap was hit; this says by how far, which is what sizing the bound
+    // against a map's chunk count needs.
+    int PrefetchDeferred);
 
 // Pure spatial policy shared by tests and the renderer. VisibilityRadius already contains the authored
 // draw distance, chunk extent, and scaled mesh radius; prefetch and hysteresis only add safety/lifecycle
@@ -58,9 +62,10 @@ public static class FoliageResidencyPlanner
         // enqueueing midway through this list without PrefetchTruncated recording the omitted work.
         int availablePrefetch = Math.Max(0, maximumPrefetch - pending.Count);
         bool truncated = prefetch.Count > availablePrefetch;
+        int deferred = truncated ? prefetch.Count - availablePrefetch : 0;
         if (truncated)
-            prefetch.RemoveRange(availablePrefetch, prefetch.Count - availablePrefetch);
-        return new FoliageResidencyPlan(Indices(visible), Indices(prefetch), retire, truncated);
+            prefetch.RemoveRange(availablePrefetch, deferred);
+        return new FoliageResidencyPlan(Indices(visible), Indices(prefetch), retire, truncated, deferred);
     }
 
     private static int CompareDistance((int Index, float DistanceSquared) a,
