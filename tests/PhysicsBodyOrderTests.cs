@@ -428,7 +428,7 @@ public class PhysicsBodyOrderTests
         string cache = File.ReadAllText(cachePath);
         Assert.Contains("MatchesSource", cache);
         Assert.Contains("LastWriteTimeUtc", cache);
-        Assert.Contains("File.WriteAllText(StampPathFor(material), stamp)", cache);
+        Assert.Contains("File.WriteAllText(StampPathFor(material, cacheDirectory), stamp)", cache);
         Assert.Contains("TerrainLayerCache.Missing(needed, bundlePaths)", File.ReadAllText(streamerPath));
         Assert.Contains("TerrainLayerCache.Read(guid, bundlePath)", File.ReadAllText(layersPath));
     }
