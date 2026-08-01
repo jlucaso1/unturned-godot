@@ -42,6 +42,7 @@ public partial class ObjectStreamer : Node
     private ObjectAssetDatabase _db = null!;
     private Dictionary<Guid, FoliageAsset.Owned> _foliageAssets = new();
     private LevelFoliageChunks? _foliage;
+    private FoliageResidencyIndex? _foliageIndex;
 
     // Every GUID this map needs a mesh for: placed objects, trees and the resolved foliage types. Drives
     // both the cold-load check and which slice of the shared cache is realised.
@@ -277,13 +278,28 @@ public partial class ObjectStreamer : Node
 
         Task foliage = Task.Run(() =>
         {
-            _foliage = LevelFoliageChunks.Load(Path.Combine(_level.Path, "Foliage.blob"),
-                FoliageBuilder.RuntimeChunkTiles);
+            string blobPath = Path.Combine(_level.Path, "Foliage.blob");
+            if (FoliageBuilder.SpatialResidencyEnabled && File.Exists(blobPath))
+            {
+                string indexDirectory = ProjectSettings.GlobalizePath("user://foliage_index");
+                string indexPath = Path.Combine(indexDirectory,
+                    FoliageResidencyIndex.CacheFileName(blobPath));
+                var watch = Stopwatch.StartNew();
+                _foliageIndex = FoliageResidencyIndex.LoadOrBuild(blobPath, indexPath,
+                    FoliageBuilder.RuntimeChunkTiles, out bool cacheHit);
+                AppShutdown.PrintUnlessQuitting($"[foliage-stream] {(cacheHit ? "loaded" : "built")} index "
+                    + $"with {_foliageIndex?.Chunks.Count ?? 0} chunks in {watch.ElapsedMilliseconds} ms");
+            }
+            else
+            {
+                _foliage = LevelFoliageChunks.Load(blobPath, FoliageBuilder.RuntimeChunkTiles);
+            }
             // Across every source, not just the core Assets folder: a workshop map's own grass and pebble
             // assets live next to its bundle, and scanning core alone leaves them unresolved — no needed
             // GUID, no extraction, no foliage on the map.
-            if (_foliage != null)
-                _foliageAssets = FoliageAsset.ScanSources(_sources, new HashSet<Guid>(_foliage.AssetGuids));
+            IReadOnlyList<Guid>? foliageGuids = _foliageIndex?.AssetGuids ?? _foliage?.AssetGuids;
+            if (foliageGuids != null)
+                _foliageAssets = FoliageAsset.ScanSources(_sources, new HashSet<Guid>(foliageGuids));
         });
 
         Task.WaitAll(placements, assets, foliage);
@@ -384,7 +400,9 @@ public partial class ObjectStreamer : Node
         AddChild(root);
         double attachMs = stage.Elapsed.TotalMilliseconds;
         stage.Restart();
-        AddChild(FoliageBuilder.Build(_foliage, meshLibrary));
+        AddChild(_foliageIndex != null
+            ? FoliageBuilder.Build(_foliageIndex, meshLibrary)
+            : FoliageBuilder.Build(_foliage, meshLibrary));
         Log.Print($"[stream] objects build {buildMs:0} ms, attach {attachMs:0} ms, "
             + $"foliage {stage.Elapsed.TotalMilliseconds:0} ms");
         _totalTextureKeys = _registry.PendingKeyCount;
@@ -395,6 +413,7 @@ public partial class ObjectStreamer : Node
         // copies and the streaming worker already captured _db by value. Drop them so the ~32 MB foliage
         // transform graph and the placement/asset lists don't live on this node for the whole session.
         _foliage = null;
+        _foliageIndex = null;
         _objects = null!;
         _db = null!;
         _foliageAssets = new(); // consumed by the streaming worker / mesh extraction; drop it too
@@ -515,6 +534,7 @@ public partial class ObjectStreamer : Node
         _foliageAssets.Clear();
         _foliageAssets = new Dictionary<Guid, FoliageAsset.Owned>();
         _foliage = null;
+        _foliageIndex = null;
         _objects = null!;
         _db = null!;
         _level = null!;

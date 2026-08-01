@@ -130,6 +130,7 @@ public static class GpuBenchmark
             SceneMetricsResult sm = SceneMetrics.Collect(new Node[] { world.Terrain, world.Objects, world.Foliage });
             BenchmarkReport report = BuildReport(mapName, frameMs, processMs, drawCalls, primitives,
                 renderObjects, sm, poses.Count, perPose);
+            AddFoliageMetrics(tree, report.Metrics);
             BenchmarkRunner.Finish(report, $"{mapName}-gpu", DiffOptions(),
                 "gpu.frameMs.* are wall-clock medians — noisy, and CPU-bound when draw-call limited");
         }
@@ -145,6 +146,27 @@ public static class GpuBenchmark
 
     private readonly record struct PoseMetrics(string Name, double FrameMs, double ProcessMs,
         double DrawCalls, double Primitives, double RenderObjects);
+
+    private static void AddFoliageMetrics(SceneTree tree, SortedDictionary<string, double> metrics)
+    {
+        foreach (Node node in tree.GetNodesInGroup("foliage_streaming"))
+            if (node is FoliageStreamingRenderer foliage)
+            {
+                metrics["foliage.indexedChunks"] = foliage.IndexedChunks;
+                metrics["foliage.indexedInstances"] = foliage.IndexedInstances;
+                metrics["foliage.residentChunks"] = foliage.ResidentChunks;
+                metrics["foliage.residentInstances"] = foliage.ResidentInstances;
+                metrics["foliage.residentBufferBytes"] = foliage.ResidentBufferBytes;
+                metrics["foliage.maxQueued"] = foliage.MaximumQueued;
+                metrics["foliage.maxDecodedBytes"] = foliage.MaximumDecodedBytes;
+                metrics["foliage.emergencyVisibleLoads"] = foliage.EmergencyVisibleLoads;
+                metrics["foliage.visibleSetMisses"] = foliage.VisibleSetMisses;
+                metrics["foliage.retiredChunks"] = foliage.RetiredChunks;
+                metrics["foliage.staleResults"] = foliage.StaleResults;
+                metrics["foliage.decodeFailures"] = foliage.DecodeFailures;
+                break;
+            }
+    }
 
     private static BenchmarkReport BuildReport(string mapName, List<double> frameMs, List<double> processMs,
         List<double> drawCalls, List<double> primitives, List<double> renderObjects, SceneMetricsResult sm,
@@ -308,7 +330,35 @@ public static class GpuBenchmark
             poses.Add(("ground_diag", Look(ground + new Vector3(0, 12f, 0),
                 ground + new Vector3(80f, 2f, -80f), Vector3.Up)));
         }
+        if (OS.GetEnvironment("UG_FOLIAGE_TRAVERSAL") == "1")
+            AddFoliageTraversalPoses(poses, bounds, heights);
         return poses;
+    }
+
+    private static void AddFoliageTraversalPoses(List<(string, Transform3D)> poses, Aabb bounds,
+        HeightmapSampler heights)
+    {
+        Vector3 centre = bounds.Position + bounds.Size * 0.5f;
+        float stepX = bounds.Size.X / 8f;
+        float stepZ = bounds.Size.Z / 8f;
+        ReadOnlySpan<(int X, int Z)> offsets =
+        [
+            (-3, -3), (3, 3), (-3, 3), (3, -3),
+            (-2, 0), (2, 0), (0, -2), (0, 2),
+        ];
+        int added = 0;
+        foreach ((int ox, int oz) in offsets)
+        {
+            float x = centre.X + ox * stepX;
+            float z = centre.Z + oz * stepZ;
+            if (!TerrainCoordinates.TrySampleGodotHeight(heights, x, z, out float y))
+                continue;
+            var point = new Vector3(x, y + 3f, z);
+            poses.Add(($"foliage_traverse_{added}", Look(point, point + new Vector3(0, -1f, -100f),
+                Vector3.Up)));
+            if (++added == 4)
+                break;
+        }
     }
 
     private static bool TryGroundPoint(Aabb bounds, HeightmapSampler heights, out Vector3 point)

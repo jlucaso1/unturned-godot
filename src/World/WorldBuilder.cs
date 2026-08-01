@@ -176,10 +176,24 @@ public static class WorldBuilder
 
         // Resolve the foliage types the map's Foliage.blob uses, so their meshes are extracted too. Scanned
         // across every source: a workshop map's foliage assets sit next to its own bundle, not the game's.
-        LevelFoliageChunks? foliageData = LevelFoliageChunks.Load(
-            System.IO.Path.Combine(level.Path, "Foliage.blob"), FoliageBuilder.RuntimeChunkTiles);
-        var foliageAssets = foliageData != null
-            ? FoliageAsset.ScanSources(sources, new HashSet<Guid>(foliageData.AssetGuids))
+        string foliagePath = System.IO.Path.Combine(level.Path, "Foliage.blob");
+        LevelFoliageChunks? foliageData = null;
+        FoliageResidencyIndex? foliageIndex = null;
+        if (FoliageBuilder.SpatialResidencyEnabled && System.IO.File.Exists(foliagePath))
+        {
+            string indexDirectory = ProjectSettings.GlobalizePath("user://foliage_index");
+            string indexPath = System.IO.Path.Combine(indexDirectory,
+                FoliageResidencyIndex.CacheFileName(foliagePath));
+            foliageIndex = FoliageResidencyIndex.LoadOrBuild(foliagePath, indexPath,
+                FoliageBuilder.RuntimeChunkTiles, out _);
+        }
+        else
+        {
+            foliageData = LevelFoliageChunks.Load(foliagePath, FoliageBuilder.RuntimeChunkTiles);
+        }
+        IReadOnlyList<Guid>? foliageGuids = foliageIndex?.AssetGuids ?? foliageData?.AssetGuids;
+        var foliageAssets = foliageGuids != null
+            ? FoliageAsset.ScanSources(sources, new HashSet<Guid>(foliageGuids))
             : new Dictionary<Guid, FoliageAsset.Owned>();
 
         var neededGuids = new HashSet<Guid>();
@@ -229,7 +243,9 @@ public static class WorldBuilder
             ? ObjectsBuilder.Build(objects, db, meshLibrary, colliderLibrary, out withMesh)
             : new Node3D { Name = "Objects" };
 
-        Node3D foliageRoot = FoliageBuilder.Build(foliageData, meshLibrary);
+        Node3D foliageRoot = foliageIndex != null
+            ? FoliageBuilder.Build(foliageIndex, meshLibrary)
+            : FoliageBuilder.Build(foliageData, meshLibrary);
         registry.ApplyAllAvailable();
         Log.Print($"[unturned-godot] Rendered {withMesh}/{objects.Count} objects with real meshes " +
             $"({meshLibrary.Count} unique)");

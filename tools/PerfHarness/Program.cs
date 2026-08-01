@@ -181,6 +181,35 @@ public static class Program
         LevelFoliage foliage = LevelFoliage.Parse(blob);
         LevelFoliageChunks direct = LevelFoliageChunks.Load(path, 4)
             ?? throw new InvalidDataException("Direct foliage load unexpectedly returned null.");
+        var indexWatch = Stopwatch.StartNew();
+        FoliageResidencyIndex residency = FoliageResidencyIndex.Build(path, 4);
+        indexWatch.Stop();
+        var allChunkIndices = new int[residency.Chunks.Count];
+        for (int i = 0; i < allChunkIndices.Length; i++) allChunkIndices[i] = i;
+        IReadOnlyList<FoliageChunk> indexedChunks = residency.DecodeChunks(allChunkIndices);
+        direct.RebaseAll(parallel: false);
+        if (direct.Chunks.Count != indexedChunks.Count)
+            throw new InvalidOperationException("Residency index changed the foliage chunk count.");
+        for (int i = 0; i < indexedChunks.Count; i++)
+            if (direct.Chunks[i].Key != indexedChunks[i].Key
+                || direct.Chunks[i].Bounds != indexedChunks[i].Bounds
+                || direct.Chunks[i].Origin != indexedChunks[i].Origin
+                || !direct.Chunks[i].Packed.AsSpan().SequenceEqual(indexedChunks[i].Packed))
+                throw new InvalidOperationException($"Residency chunk {i} differs from all-resident output.");
+        string indexCache = Path.Combine(Path.GetTempPath(),
+            $"unturned-foliage-{Guid.NewGuid():N}.fidx");
+        residency.Write(indexCache);
+        long indexBytes = new FileInfo(indexCache).Length;
+        var cacheWatch = Stopwatch.StartNew();
+        if (!FoliageResidencyIndex.TryRead(indexCache, path, 4, out FoliageResidencyIndex? reused))
+            throw new InvalidOperationException("Fresh foliage residency index did not reload.");
+        cacheWatch.Stop();
+        File.Delete(indexCache);
+        Console.WriteLine($"  residency index: {residency.Chunks.Count:N0} chunks / "
+            + $"{residency.IndexedInstances:N0} instances, {indexBytes / 1048576.0:0.00} MiB sidecar, "
+            + $"build {indexWatch.Elapsed.TotalMilliseconds:0.0} ms, validated reload "
+            + $"{cacheWatch.Elapsed.TotalMilliseconds:0.0} ms; all chunks byte-identical");
+        GC.KeepAlive(reused);
         long instances = 0;
         foreach (FoliageChunk chunk in direct.Chunks) instances += chunk.Count;
         long legacyInstances = 0;

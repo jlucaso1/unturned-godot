@@ -166,6 +166,30 @@ public class PhysicsBodyOrderTests
     }
 
     [Fact]
+    public void FoliageStreamingKeepsDecodeOffThreadAndRidLifecycleOnTheMainThread()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "World", "FoliageStreamingRenderer.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("Task.Run(() => Decode", source);
+        Assert.Contains("_index.DecodeChunk(index, cancellation.Token)", source);
+        Assert.Contains("private void PublishDecoded", source);
+        Assert.Contains("lock (_decodedGate)", source);
+        Assert.Contains("_acceptDecoded = false", source);
+        Assert.Contains("private void Upload(int index, FoliageChunk chunk)", source);
+        Assert.Contains("RenderingServer.InstanceCreate()", source);
+        Assert.Contains("visibilityEnd + FoliageBuilder.FadeMarginValue", source);
+        Assert.Contains("private void Retire(int index)", source);
+        Assert.Contains("RenderingServer.FreeRid(resident.Instance)", source);
+        Assert.Contains("_lifetimeCancellation.Cancel()", source);
+        Assert.Contains("_reservedDecodeBytes", source);
+        Assert.DoesNotContain("Interlocked.Exchange(ref _reservedDecodeBytes, 0)", source);
+        Assert.True(source.IndexOf("_lifetimeCancellation.Cancel()", StringComparison.Ordinal)
+            < source.LastIndexOf("Retire(index)", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void PostLoadReclaimHasMeasuredOneAndTwoPassControls()
     {
         if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } path)

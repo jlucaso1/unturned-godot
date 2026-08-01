@@ -42,17 +42,13 @@ public static class SceneMetrics
         r.Nodes++;
         switch (node)
         {
+            case FoliageStreamingRenderer foliageOwner:
+                foreach (MultiMesh mm in foliageOwner.MultiMeshes)
+                    AccountMultiMesh(mm, r, meshes, materials);
+                break;
             case MultiMeshRidRenderer ridOwner:
                 foreach (MultiMesh mm in ridOwner.MultiMeshes)
-                {
-                    r.MultiMeshInstances++;
-                    r.MultiMeshTotalInstances += mm.InstanceCount;
-                    AccountMesh(mm.Mesh, r, meshes);
-                    AccountMultiMeshMaterials(mm, materials);
-                    double ridSpread = InstanceOriginSpread(mm);
-                    if (ridSpread > r.MaxMultiMeshSpread)
-                        r.MaxMultiMeshSpread = ridSpread;
-                }
+                    AccountMultiMesh(mm, r, meshes, materials);
                 break;
             case MultiMeshInstance3D { Multimesh: { } mm } mmi:
                 r.MultiMeshInstances++;
@@ -73,6 +69,18 @@ public static class SceneMetrics
 
         foreach (Node child in node.GetChildren())
             Walk(child, r, meshes, materials);
+    }
+
+    private static void AccountMultiMesh(MultiMesh mm, SceneMetricsResult r, HashSet<ulong> meshes,
+        HashSet<ulong> materials)
+    {
+        r.MultiMeshInstances++;
+        r.MultiMeshTotalInstances += mm.InstanceCount;
+        AccountMesh(mm.Mesh, r, meshes);
+        AccountMultiMeshMaterials(mm, materials);
+        double spread = InstanceOriginSpread(mm);
+        if (spread > r.MaxMultiMeshSpread)
+            r.MaxMultiMeshSpread = spread;
     }
 
     // Geometry is charged once per unique mesh resource: 16 distinct terrain tiles all count, but the one
