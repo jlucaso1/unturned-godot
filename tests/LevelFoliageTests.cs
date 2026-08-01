@@ -558,6 +558,7 @@ public class LevelFoliageTests
 
         Assert.Equal(new[] { 1 }, capped.Prefetch);
         Assert.True(capped.PrefetchTruncated);
+        Assert.Equal(1, capped.PrefetchDeferred);
 
         // Once the active decode becomes resident, the next refill must recover every candidate that was
         // omitted only because the prior pending work occupied the total cap.
@@ -566,12 +567,44 @@ public class LevelFoliageTests
             unloadHysteresis: 20, maximumPrefetch: 2);
         Assert.Equal(new[] { 1, 2 }, refilled.Prefetch);
         Assert.False(refilled.PrefetchTruncated);
+        Assert.Equal(0, refilled.PrefetchDeferred);
 
         FoliageResidencyPlan full = FoliageResidencyPlanner.Plan(Vector3.Zero, items,
             new HashSet<int>(), new HashSet<int> { 0, 1 }, prefetchMargin: 100,
             unloadHysteresis: 20, maximumPrefetch: 2);
         Assert.Empty(full.Prefetch);
         Assert.True(full.PrefetchTruncated);
+        // Only chunk 2 is a candidate here: 0 and 1 are already pending, and pending work is counted
+        // against the bound rather than re-offered, so the shortfall is that one chunk.
+        Assert.Equal(1, full.PrefetchDeferred);
+    }
+
+    // The deferred count is what sizes UG_FOLIAGE_MAX_PENDING against a map: it must be the exact
+    // shortfall behind the bound, and must not count work the bound could still admit.
+    [Fact]
+    public void ResidencyPlanner_ReportsTheExactPrefetchShortfallBehindTheBound()
+    {
+        var items = new FoliageResidencyItem[16];
+        for (int i = 0; i < items.Length; i++)
+            items[i] = new FoliageResidencyItem(i, new Vector3(10 + i, 0, 0), 0);
+
+        FoliageResidencyPlan exact = FoliageResidencyPlanner.Plan(Vector3.Zero, items,
+            new HashSet<int>(), new HashSet<int>(), prefetchMargin: 100,
+            unloadHysteresis: 20, maximumPrefetch: items.Length);
+        Assert.False(exact.PrefetchTruncated);
+        Assert.Equal(0, exact.PrefetchDeferred);
+
+        FoliageResidencyPlan starved = FoliageResidencyPlanner.Plan(Vector3.Zero, items,
+            new HashSet<int>(), new HashSet<int>(), prefetchMargin: 100,
+            unloadHysteresis: 20, maximumPrefetch: 5);
+        Assert.Equal(5, starved.Prefetch.Count);
+        Assert.Equal(items.Length - 5, starved.PrefetchDeferred);
+
+        // Chunks already resident are not candidates, so they cannot inflate the shortfall.
+        FoliageResidencyPlan resident = FoliageResidencyPlanner.Plan(Vector3.Zero, items,
+            new HashSet<int> { 0, 1, 2, 3 }, new HashSet<int>(), prefetchMargin: 100,
+            unloadHysteresis: 20, maximumPrefetch: 5);
+        Assert.Equal(items.Length - 4 - 5, resident.PrefetchDeferred);
     }
 
     [Fact]
