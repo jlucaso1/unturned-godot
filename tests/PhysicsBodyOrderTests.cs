@@ -204,7 +204,52 @@ public class PhysicsBodyOrderTests
         {
             string gpu = File.ReadAllText(gpuPath);
             Assert.Contains("FoliageBenchmarkSettling.WaitAsync", gpu);
-            Assert.Contains("if (settled)", gpu);
+            Assert.Contains("metrics[\"foliage.settled\"] = settled ? 1 : 0;", gpu);
+        }
+    }
+
+    // The residency snapshot is the only direct evidence of what spatial residency keeps in memory. A
+    // machine that never settles within the wait is exactly the one whose report needs it, so neither
+    // tier may put those counts back behind the settled flag — and an unsettled snapshot must land on
+    // its own keys, so a mid-fill state can never be diffed against a settled baseline's steady set.
+    [Fact]
+    public void BenchmarkReportsResidencyCountsEvenWhenStreamingNeverSettles()
+    {
+        foreach (string file in new[] { "RuntimeBenchmark.cs", "GpuBenchmark.cs" })
+        {
+            if (FindRepositoryFile(Path.Combine("src", "Benchmark", file)) is not { } path)
+                continue;
+
+            string source = File.ReadAllText(path);
+            string prefix = file == "RuntimeBenchmark.cs" ? "runtime.foliage" : "foliage";
+            Assert.Contains("string state = settled ? \"\" : \"Unsettled\";", source);
+            foreach (string metric in new[] { "residentChunks", "residentInstances", "residentBufferBytes" })
+                Assert.Contains($"metrics[$\"{prefix}.{metric}{{state}}\"]", source);
+            Assert.DoesNotContain("if (settled)", source);
+            Assert.DoesNotContain("if (includeResidencySnapshot && foliage.IsSettled)", source);
+            // Two unsettled runs would otherwise diff their mid-fill snapshots against each other and
+            // call the scheduler's doing a regression, so the keys must stay out of classification.
+            Assert.Contains("[\"Unsettled\"] = double.PositiveInfinity,", source);
+        }
+    }
+
+    // Settling is the signal that the streamer submitted the whole visible set. A baseline that settled
+    // against a run that timed out is less of the map drawn, so both tiers must score it higher-is-better;
+    // the GPU tier scoring it as an improvement is what made a starved run look like a win.
+    [Fact]
+    public void BothBenchmarkTiersTreatSettledFoliageAsHigherIsBetter()
+    {
+        foreach ((string file, string key) in new[]
+            { ("RuntimeBenchmark.cs", "runtime.foliage.settled"), ("GpuBenchmark.cs", "foliage.settled") })
+        {
+            if (FindRepositoryFile(Path.Combine("src", "Benchmark", file)) is not { } path)
+                continue;
+
+            string source = File.ReadAllText(path);
+            int higher = source.IndexOf("HigherIsBetter", StringComparison.Ordinal);
+            Assert.True(higher >= 0, $"{file} must declare HigherIsBetter");
+            Assert.True(source.IndexOf($"\"{key}\"", higher, StringComparison.Ordinal) > higher,
+                $"{file} must score {key} as higher-is-better");
         }
     }
 
@@ -783,7 +828,9 @@ public class PhysicsBodyOrderTests
         int snapshot = source.IndexOf("AddFoliageMetrics(tree, report.Metrics, foliageSettled)", report,
             StringComparison.Ordinal);
         Assert.True(disable >= 0 && settle > disable && report > settle && snapshot > report);
-        Assert.Contains("if (includeResidencySnapshot && foliage.IsSettled)", source);
+        // The settling wait still runs before the snapshot, so a machine that drains its queue reports
+        // the same stable counts it always did; only the omission on a machine that cannot settle is gone.
+        Assert.Contains("bool settled = includeResidencySnapshot && foliage.IsSettled;", source);
     }
 
     [Fact]
