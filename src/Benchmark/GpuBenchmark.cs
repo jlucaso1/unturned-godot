@@ -105,6 +105,14 @@ public static class GpuBenchmark
                     $"primitives {metrics.Primitives:0}, objects {metrics.RenderObjects:0}");
             }
 
+            // Snapshot the final sampled pose before an optional screenshot moves the camera elsewhere.
+            // Residency metrics therefore describe the same pose regardless of UG_SHOT.
+            bool foliageSettled = await FoliageBenchmarkSettling.WaitAsync(context, tree);
+            SceneMetricsResult sm = SceneMetrics.Collect(new Node[] { world.Terrain, world.Objects, world.Foliage });
+            BenchmarkReport report = BuildReport(mapName, frameMs, processMs, drawCalls, primitives,
+                renderObjects, sm, poses.Count, perPose);
+            AddFoliageMetrics(tree, report.Metrics, foliageSettled);
+
             // Optional visual check: UG_SHOT=<path> saves a PNG from a low near-ground flyover — the only
             // vantage where directional shadows (capped ~100 m from the camera) actually render, so
             // shadow-quality changes (e.g. cascade count) can be compared side by side, not just by timing.
@@ -127,11 +135,6 @@ public static class GpuBenchmark
                 Log.Print($"[benchmark] screenshot saved: {shotPath}");
             }
 
-            await WaitForFoliageSettledAsync(context, tree);
-            SceneMetricsResult sm = SceneMetrics.Collect(new Node[] { world.Terrain, world.Objects, world.Foliage });
-            BenchmarkReport report = BuildReport(mapName, frameMs, processMs, drawCalls, primitives,
-                renderObjects, sm, poses.Count, perPose);
-            AddFoliageMetrics(tree, report.Metrics);
             BenchmarkRunner.Finish(report, $"{mapName}-gpu", DiffOptions(),
                 "gpu.frameMs.* are wall-clock medians — noisy, and CPU-bound when draw-call limited");
         }
@@ -148,15 +151,17 @@ public static class GpuBenchmark
     private readonly record struct PoseMetrics(string Name, double FrameMs, double ProcessMs,
         double DrawCalls, double Primitives, double RenderObjects);
 
-    private static void AddFoliageMetrics(SceneTree tree, SortedDictionary<string, double> metrics)
+    private static void AddFoliageMetrics(SceneTree tree, SortedDictionary<string, double> metrics,
+        bool includeResidencySnapshot)
     {
         foreach (Node node in tree.GetNodesInGroup("foliage_streaming"))
             if (node is FoliageStreamingRenderer foliage)
             {
                 metrics["foliage.indexedChunks"] = foliage.IndexedChunks;
                 metrics["foliage.indexedInstances"] = foliage.IndexedInstances;
-                metrics["foliage.settled"] = foliage.IsSettled ? 1 : 0;
-                if (foliage.IsSettled)
+                bool settled = includeResidencySnapshot && foliage.IsSettled;
+                metrics["foliage.settled"] = settled ? 1 : 0;
+                if (settled)
                 {
                     metrics["foliage.residentChunks"] = foliage.ResidentChunks;
                     metrics["foliage.residentInstances"] = foliage.ResidentInstances;
@@ -171,30 +176,6 @@ public static class GpuBenchmark
                 metrics["foliage.decodeFailures"] = foliage.DecodeFailures;
                 break;
             }
-    }
-
-    private static async Task WaitForFoliageSettledAsync(Node context, SceneTree tree)
-    {
-        int stableFrames = 0;
-        ulong deadline = Time.GetTicksUsec() + 10_000_000;
-        while (Time.GetTicksUsec() < deadline)
-        {
-            bool found = false;
-            bool settled = true;
-            foreach (Node node in tree.GetNodesInGroup("foliage_streaming"))
-                if (node is FoliageStreamingRenderer foliage)
-                {
-                    found = true;
-                    settled &= foliage.IsSettled;
-                }
-            if (!found || (settled && ++stableFrames >= 3))
-                return;
-            if (!settled)
-                stableFrames = 0;
-            await context.ToSignal(tree, SceneTree.SignalName.ProcessFrame);
-        }
-        Log.PushWarning("[benchmark] foliage streaming did not settle in 10 s; "
-            + "residency counts will be omitted from the report");
     }
 
     private static BenchmarkReport BuildReport(string mapName, List<double> frameMs, List<double> processMs,

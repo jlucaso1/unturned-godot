@@ -55,7 +55,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/game-data
-          key: ${{ steps.content-key.outputs.key }}
+          # The receipt format is part of the verification contract. Bump this namespace when that
+          # contract changes so old entries without a complete-map receipt cannot be reused.
+          key: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}
 
       - name: Fetch the game content
         if: steps.content-cache.outputs.cache-hit != 'true'
@@ -125,13 +127,14 @@ jobs:
       # the better part of a minute. What it writes is a function of the bundle *and* of the code that
       # reads it: the on-disk caches validate themselves against a format magic and the bundle's stamp,
       # neither of which moves when extraction logic changes, so keying on the manifest IDs alone would
-      # let a stale tree satisfy the very gate that is supposed to notice. core/ is the coarse but safe
-      # choice — over-invalidating costs a minute, under-invalidating costs a false green.
+      # let a stale tree satisfy the very gate that is supposed to notice. The core and rendering/world
+      # producers are the coarse but safe key — over-invalidating costs a minute, under-invalidating
+      # costs a false green.
       - name: Restore the extracted asset cache
         uses: actions/cache@v4
         with:
           path: ~/.local/share/godot/app_userdata/unturned-godot
-          key: godot-userdata-${{ steps.content-key.outputs.key }}-${{ hashFiles('core/**/*.cs') }}
+          key: godot-userdata-${{ steps.content-key.outputs.key }}-${{ hashFiles('core/**/*.cs', 'src/Rendering/**/*.cs', 'src/World/**/*.cs') }}
 
       # This tier renders nothing, so it needs no GPU and no display: --headless is enough, and the
       # installer's software-Vulkan half goes unused here.

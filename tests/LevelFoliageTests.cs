@@ -543,6 +543,58 @@ public class LevelFoliageTests
     }
 
     [Fact]
+    public void ResidencyPlanner_ExistingPendingWorkConsumesTheTotalPrefetchCapacity()
+    {
+        var items = new[]
+        {
+            new FoliageResidencyItem(0, new Vector3(10, 0, 0), 0),
+            new FoliageResidencyItem(1, new Vector3(20, 0, 0), 0),
+            new FoliageResidencyItem(2, new Vector3(30, 0, 0), 0),
+        };
+
+        FoliageResidencyPlan capped = FoliageResidencyPlanner.Plan(Vector3.Zero, items,
+            new HashSet<int>(), new HashSet<int> { 0 }, prefetchMargin: 100,
+            unloadHysteresis: 20, maximumPrefetch: 2);
+
+        Assert.Equal(new[] { 1 }, capped.Prefetch);
+        Assert.True(capped.PrefetchTruncated);
+
+        // Once the active decode becomes resident, the next refill must recover every candidate that was
+        // omitted only because the prior pending work occupied the total cap.
+        FoliageResidencyPlan refilled = FoliageResidencyPlanner.Plan(Vector3.Zero, items,
+            new HashSet<int> { 0 }, new HashSet<int>(), prefetchMargin: 100,
+            unloadHysteresis: 20, maximumPrefetch: 2);
+        Assert.Equal(new[] { 1, 2 }, refilled.Prefetch);
+        Assert.False(refilled.PrefetchTruncated);
+
+        FoliageResidencyPlan full = FoliageResidencyPlanner.Plan(Vector3.Zero, items,
+            new HashSet<int>(), new HashSet<int> { 0, 1 }, prefetchMargin: 100,
+            unloadHysteresis: 20, maximumPrefetch: 2);
+        Assert.Empty(full.Prefetch);
+        Assert.True(full.PrefetchTruncated);
+    }
+
+    [Fact]
+    public void FoliageSettlingTracker_RequiresConsecutiveStableObservationsAndResetsOnWork()
+    {
+        var tracker = new FoliageSettlingTracker(requiredStableObservations: 3);
+
+        Assert.False(tracker.Observe(foundRenderer: true, allSettled: true));
+        Assert.False(tracker.Observe(foundRenderer: true, allSettled: true));
+        Assert.False(tracker.Observe(foundRenderer: true, allSettled: false));
+        Assert.False(tracker.Observe(foundRenderer: true, allSettled: true));
+        Assert.False(tracker.Observe(foundRenderer: true, allSettled: true));
+        Assert.True(tracker.Observe(foundRenderer: true, allSettled: true));
+    }
+
+    [Fact]
+    public void FoliageSettlingTracker_NoRendererIsImmediatelyStableAndInvalidCountsAreRejected()
+    {
+        Assert.True(new FoliageSettlingTracker(3).Observe(foundRenderer: false, allSettled: false));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new FoliageSettlingTracker(0));
+    }
+
+    [Fact]
     public void ResidencyPlanner_HysteresisPreventsBoundaryChurnAndTeleportRetiresOldRegion()
     {
         var items = new[]

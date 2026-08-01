@@ -40,9 +40,17 @@ content="${UNTURNED_PATH:-$("$repo_dir/scripts/fetch-game-data.sh" --print-dir)}
 # Verify the map this run will actually load, not the fetcher's default: benchmarking Washington against
 # a PEI-only tree would otherwise pass here and fail inside Godot, and a Washington-only tree would be
 # rejected for missing a map nobody asked for.
-if ! "$repo_dir/scripts/fetch-game-data.sh" --verify --maps "$MAP" --dir "$content" > /dev/null 2>&1; then
-    echo "No $MAP content at $content. Run ./scripts/fetch-game-data.sh --maps $MAP, or set UNTURNED_PATH." >&2
-    exit 1
+if [[ "$MAP" == workshop:* ]]; then
+    workshop_map="${MAP#workshop:}"
+    if [[ ! -s "$workshop_map/Level.dat" || ! -d "$content/Bundles" ]]; then
+        echo "No workshop map $MAP or Unturned content at $content." >&2
+        exit 1
+    fi
+else
+    if ! "$repo_dir/scripts/fetch-game-data.sh" --verify --maps "$MAP" --dir "$content" > /dev/null 2>&1; then
+        echo "No $MAP content at $content. Run ./scripts/fetch-game-data.sh --maps $MAP, or set UNTURNED_PATH." >&2
+        exit 1
+    fi
 fi
 export UNTURNED_PATH="$content"
 
