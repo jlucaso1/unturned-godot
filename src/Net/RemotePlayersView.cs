@@ -17,6 +17,19 @@ public partial class RemotePlayersView : Node3D
         public CharacterSkeleton? Rig;
         public Vector3 LastPosition;
 
+        // Mirrors of the last values submitted to the scene tree. Remote snapshots often hold a
+        // stationary player for many render frames; avoid crossing the Godot boundary and rebuilding
+        // the animation-state string when the value is unchanged. This is the same dirty-state pattern
+        // Veloren uses for replicated/rendered state, and is presentation-only: sampling, interpolation
+        // and movement audio still run every frame.
+        public bool PoseApplied;
+        public float LastYaw;
+        public bool StateApplied;
+        public EPlayerStance LastStance;
+        public bool LastMoving;
+        public bool PitchApplied;
+        public float LastPitch;
+
         // State-derived movement audio: footsteps/landings computed locally from the REPLICATED stance,
         // moving and grounded flags — never inferred from interpolated motion (stalled interpolation used
         // to fake mid-air touchdowns and double-thud jumps).
@@ -57,17 +70,35 @@ public partial class RemotePlayersView : Node3D
                 _avatars[id] = avatar = Spawn(id, remote.Name);
 
             PoseSnapshot pose = remote.Sample(now);
-            avatar.Root.Position = pose.Position;
-            avatar.Root.RotationDegrees = new Vector3(0, pose.Yaw, 0);
+            if (!avatar.PoseApplied || avatar.LastPosition != pose.Position)
+            {
+                avatar.Root.Position = pose.Position;
+                avatar.LastPosition = pose.Position;
+            }
+            if (!avatar.PoseApplied || avatar.LastYaw != pose.Yaw)
+                avatar.Root.RotationDegrees = new Vector3(0, pose.Yaw, 0);
+            avatar.PoseApplied = true;
+            avatar.LastYaw = pose.Yaw;
 
             // Animate from the replicated input-derived flag, exactly what the owner's controller uses:
             // position deltas would flicker walk/idle during in-place jumps (vertical motion) and packet
             // stalls, restarting the crossfade mid-air.
-            avatar.Rig?.SetState(remote.Stance, remote.Moving);
-            avatar.Rig?.SetPitch(pose.Pitch - 90f); // wire pitch (0..180) -> Godot pitch (-90..+90)
+            if (!avatar.StateApplied || avatar.LastStance != remote.Stance || avatar.LastMoving != remote.Moving)
+            {
+                avatar.Rig?.SetState(remote.Stance, remote.Moving);
+                avatar.StateApplied = true;
+                avatar.LastStance = remote.Stance;
+                avatar.LastMoving = remote.Moving;
+            }
+            float pitch = pose.Pitch - 90f;
+            if (!avatar.PitchApplied || avatar.LastPitch != pitch)
+            {
+                avatar.Rig?.SetPitch(pitch); // wire pitch (0..180) -> Godot pitch (-90..+90)
+                avatar.PitchApplied = true;
+                avatar.LastPitch = pitch;
+            }
 
             avatar.Audio?.Tick(remote.Stance, remote.Moving, remote.Grounded, pose.Position, (float)delta);
-            avatar.LastPosition = pose.Position;
         }
 
         // Drop avatars for players that left.
