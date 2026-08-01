@@ -37,6 +37,25 @@ if [[ ! -x "$godot" ]]; then
 fi
 
 content="${UNTURNED_PATH:-$("$repo_dir/scripts/fetch-game-data.sh" --print-dir)}"
+# LevelInfo.EnumerateTiles parses both tile coordinates with int.TryParse, so digits that overflow a
+# 32-bit integer name no tile the loader will count. Bash arithmetic is 64-bit and wraps silently on a
+# long enough run of digits, and a leading zero is read as octal, so bound the digit count first (after
+# stripping the leading zeros int.TryParse itself accepts) and force base 10.
+tile_coord_is_int32() {
+    local digits="${1#-}"
+    while [[ ${#digits} -gt 1 && "$digits" == 0* ]]; do
+        digits="${digits#0}"
+    done
+    [[ ${#digits} -le 10 ]] || return 1
+
+    local value=$((10#$digits))
+    if [[ "$1" == -* ]]; then
+        ((value <= 2147483648))
+    else
+        ((value <= 2147483647))
+    fi
+}
+
 # Verify the map this run will actually load, not the fetcher's default: benchmarking Washington against
 # a PEI-only tree would otherwise pass here and fail inside Godot, and a Washington-only tree would be
 # rejected for missing a map nobody asked for.
@@ -44,6 +63,29 @@ if [[ "$MAP" == workshop:* ]]; then
     workshop_map="${MAP#workshop:}"
     if [[ ! -s "$workshop_map/Level.dat" || ! -d "$content/Bundles" ]]; then
         echo "No workshop map $MAP or Unturned content at $content." >&2
+        exit 1
+    fi
+    # Level.dat alone is not enough to load one. MapCatalog.IsSupported is TileCount > 0, and a pre-2020
+    # workshop map keeps its terrain in a single legacy heightmap this port does not read: it opens as a
+    # zero-tile world, so Tier 1 would write a structurally meaningless report instead of refusing.
+    #
+    # Counting *.heightmap would not answer the same question the loader does. LevelInfo.EnumerateTiles
+    # keeps only Tile_<x>_<y>_Source.heightmap whose coordinates int.TryParse accepts, so a stray,
+    # malformed or out-of-range name makes a glob nonempty while TileCount stays zero — the exact
+    # zero-tile world this check exists to reject. Match the loader's rule, both halves of it.
+    shopt -s nullglob
+    workshop_tiles=()
+    for tile in "$workshop_map/Landscape/Heightmaps"/*.heightmap; do
+        # An `&&` one-liner here would be a set -e trap: the whole list fails on every non-matching file.
+        if [[ "${tile##*/}" =~ ^Tile_(-?[0-9]+)_(-?[0-9]+)_Source\.heightmap$ ]] \
+            && tile_coord_is_int32 "${BASH_REMATCH[1]}" \
+            && tile_coord_is_int32 "${BASH_REMATCH[2]}"; then
+            workshop_tiles+=("$tile")
+        fi
+    done
+    shopt -u nullglob
+    if [[ ${#workshop_tiles[@]} -eq 0 ]]; then
+        echo "Workshop map $workshop_map has no Landscape heightmap tiles; this port cannot load it." >&2
         exit 1
     fi
 else

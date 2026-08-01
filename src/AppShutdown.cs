@@ -85,9 +85,39 @@ public static class AppShutdown
             Log.PushWarning(message);
     }
 
-    // The single way out of a loaded world. Safe to call more than once.
-    public static void RequestQuit(SceneTree tree)
+    // What the process will report. A failure can arrive after teardown has already started — Tier 3
+    // calls RequestQuit(tree, 1) with no report written, while an expired QUIT_AFTER or the pause-menu
+    // button may already have asked for 0 — and the early return below would drop it, leaving the run
+    // looking successful to whatever reads the exit status. So the code lives here, outside the guard,
+    // and the first failure wins over any later or earlier request to leave cleanly.
+    private static int ExitCode;
+
+    // Raised while a benchmark tier owns the process's exit status and has not written its report yet.
+    //
+    // Capturing a late failure is not enough on its own. When something else asks to leave mid-run — an
+    // expired QUIT_AFTER, the pause-menu button — the deferred quit lands on the next idle frame, which
+    // is sooner than the tier gets another frame to reach its finally, so there is no late failure to
+    // capture: the process just exits 0 with no report. The tier cannot defend itself here, so the
+    // invariant lives on this side. Leaving while a measurement is in flight *is* a failed measurement,
+    // whoever asked to leave.
+    private static bool BenchmarkInFlight;
+
+    // Brackets a tier whose report decides the exit status. Tier 3 only: it is the tier that runs the
+    // full interactive path, and so the only one reachable by a quit it did not ask for.
+    public static void BeginBenchmark() => BenchmarkInFlight = true;
+
+    public static void EndBenchmark() => BenchmarkInFlight = false;
+
+    // The single way out of a loaded world. Safe to call more than once. exitCode is what the process
+    // reports; a headless caller that failed passes nonzero so its wrapper script can tell.
+    public static void RequestQuit(SceneTree tree, int exitCode = 0)
     {
+        if (exitCode == 0 && BenchmarkInFlight)
+            exitCode = 1;
+
+        if (exitCode != 0 && ExitCode == 0)
+            ExitCode = exitCode;
+
         if (IsShuttingDown)
             return;
         Source.Cancel();
@@ -96,8 +126,9 @@ public static class AppShutdown
         if (running == 0)
         {
             Log.Print("[shutdown] leaving");
-            // Deferred: never tear the tree down inside the signal handler that asked for it.
-            tree.CallDeferred(SceneTree.MethodName.Quit);
+            // Deferred: never tear the tree down inside the signal handler that asked for it. The code is
+            // read when the call runs, not when it is scheduled, so a failure raised in between still lands.
+            Callable.From(() => tree.Quit(ExitCode)).CallDeferred();
             return;
         }
 
@@ -119,6 +150,6 @@ public static class AppShutdown
             ? $"[shutdown] background work stopped after {waited.ElapsedMilliseconds} ms"
             : $"[shutdown] {left} background task(s) still busy after {waited.ElapsedMilliseconds} ms; leaving anyway");
 
-        tree.Quit();
+        tree.Quit(ExitCode);
     }
 }

@@ -50,22 +50,48 @@ jobs:
         id: content-key
         run: echo "key=$(./scripts/fetch-game-data.sh --manifest-key)" >> "$GITHUB_OUTPUT"
 
+      # Restore and save are split on purpose. actions/cache skips its teardown save after an exact-key
+      # hit, so repairing a bad entry in place would fix this run and then throw the repair away — every
+      # later run would restore the same bad entry and download the game again. Saving under a run-scoped
+      # key and restoring by prefix means the next run finds the repair, not the entry it replaced.
+      #
+      # The receipt format is part of the verification contract. Bump this namespace when that contract
+      # changes so old entries without a complete-map receipt cannot be reused. Nothing is ever saved
+      # under the bare prefix, so `key` never hits exactly; restore-keys is what actually resolves it.
       - name: Restore the game content
-        id: content-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: build/game-data
-          # The receipt format is part of the verification contract. Bump this namespace when that
-          # contract changes so old entries without a complete-map receipt cannot be reused.
-          key: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}
+          key: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-
+          restore-keys: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-
 
+      # A cache hit is a claim, not a fact: GitHub caches are immutable for a key, so an entry saved
+      # before the verification contract tightened stays restorable forever under a key that is still
+      # current. Ask the fetcher whether what came back is whole, and download when it is not, rather
+      # than wedging every run until the depot moves or someone deletes the entry by hand.
       - name: Fetch the game content
-        if: steps.content-cache.outputs.cache-hit != 'true'
-        run: ./scripts/fetch-game-data.sh
+        id: content
+        run: |
+          if ./scripts/fetch-game-data.sh --verify 2> /dev/null; then
+            echo "Restored content verified; skipping the download."
+          else
+            ./scripts/fetch-game-data.sh
+            echo "downloaded=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Only after a download: an untouched restore has nothing new to store. The job suffix keeps the
+      # two jobs from reserving one key in the same run, and losing that race is not worth failing a job
+      # whose content is already verified — the other job is storing the same tree.
+      - name: Save the game content
+        if: steps.content.outputs.downloaded == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: build/game-data
+          key: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-${{ github.run_id }}-${{ github.job }}
 
       # Every data-backed test self-skips when the content is missing, which would leave this whole
-      # job green while proving nothing. Fail loudly instead. A stale cache entry that restored a
-      # partial tree is caught here too.
+      # job green while proving nothing. Fail loudly instead.
       - name: Verify the content is really there
         run: ./scripts/fetch-game-data.sh --verify
 
@@ -112,16 +138,36 @@ jobs:
         id: content-key
         run: echo "key=$(./scripts/fetch-game-data.sh --manifest-key)" >> "$GITHUB_OUTPUT"
 
+      # Same receipt namespace, and the same restore/save split, as the real-data job: both read the tree
+      # through the same verifier, so both have to stop reusing entries that predate a change to what
+      # "whole" means, and both have to keep the repair when they make one.
       - name: Restore the game content
-        id: content-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: build/game-data
-          key: ${{ steps.content-key.outputs.key }}
+          key: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-
+          restore-keys: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-
 
+      # As in the real-data job: verify what the cache handed back instead of trusting the hit. Without
+      # this, one bad entry under a still-current key would fail run-benchmark.sh on every run of this
+      # job, with no way to replace it — cache entries are immutable for a given key.
       - name: Fetch the game content
-        if: steps.content-cache.outputs.cache-hit != 'true'
-        run: ./scripts/fetch-game-data.sh
+        id: content
+        run: |
+          if ./scripts/fetch-game-data.sh --verify 2> /dev/null; then
+            echo "Restored content verified; skipping the download."
+          else
+            ./scripts/fetch-game-data.sh
+            echo "downloaded=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save the game content
+        if: steps.content.outputs.downloaded == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: build/game-data
+          key: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-${{ github.run_id }}-${{ github.job }}
 
       # The first run walks the masterbundle to extract every mesh and texture the map needs, which is
       # the better part of a minute. What it writes is a function of the bundle *and* of the code that

@@ -26,8 +26,20 @@ write=0
 
 [[ "${1:-}" == "--write" ]] && write=1
 
-# Godot writes the report under user://, which on Linux is $XDG_DATA_HOME/godot/app_userdata/<project>.
-user_dir="${XDG_DATA_HOME:-$HOME/.local/share}/godot/app_userdata/unturned-godot"
+# Godot writes the report under user://, and where that lands depends on the host: Linux uses
+# $XDG_DATA_HOME, macOS ~/Library/Application Support, Windows %APPDATA%. Same three candidates
+# tools/PerfHarness/Program.cs already walks. Getting this wrong does not misreport a number — it
+# reports that the benchmark wrote nothing, on a run that succeeded.
+case "$(uname -s)" in
+    Darwin) user_dir="$HOME/Library/Application Support/Godot/app_userdata/unturned-godot" ;;
+    MINGW*|MSYS*|CYGWIN*)
+        appdata="${APPDATA:-$HOME/AppData/Roaming}"
+        # Git Bash hands %APPDATA% back in Windows form; the shell needs the POSIX path.
+        command -v cygpath > /dev/null && appdata="$(cygpath -u "$appdata")"
+        user_dir="$appdata/Godot/app_userdata/unturned-godot"
+        ;;
+    *) user_dir="${XDG_DATA_HOME:-$HOME/.local/share}/godot/app_userdata/unturned-godot" ;;
+esac
 report="$user_dir/bench/$map-latest.json"
 
 rm -f "$report"

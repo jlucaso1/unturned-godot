@@ -14,6 +14,10 @@ public static class RuntimeBenchmark
     public static async Task RunAsync(Node context, string mapName, double seconds, double loadMs)
     {
         SceneTree tree = context.GetTree();
+        bool failed = true;
+        // From here until the report is written, any quit — including one this tier never asked for —
+        // has to report a failure. See AppShutdown.BenchmarkInFlight.
+        AppShutdown.BeginBenchmark();
         try
         {
             seconds = Math.Clamp(seconds, 3.0, 120.0);
@@ -101,6 +105,8 @@ public static class RuntimeBenchmark
             BenchmarkRunner.Finish(report, $"{mapName}-runtime", DiffOptions(),
                 "timings are advisory; counts are deterministic for the same spawn view, "
                     + "except foliage residency counts, which need runtime.foliage.settled=1 on both sides");
+            failed = false;
+            AppShutdown.EndBenchmark();
         }
         catch (Exception e)
         {
@@ -109,7 +115,9 @@ public static class RuntimeBenchmark
         finally
         {
             RuntimeCounters.Disable();
-            AppShutdown.RequestQuit(tree);
+            // A throw here leaves no report, so the status has to say so: scripts/run-benchmark.sh runtime
+            // returns this code, and a zero would let automation record a failed run as a measurement.
+            AppShutdown.RequestQuit(tree, failed ? 1 : 0);
         }
     }
 

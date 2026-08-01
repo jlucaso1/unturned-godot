@@ -33,6 +33,7 @@ public partial class MapPicker : PanelContainer
     private Label _facts = null!;
     private RichTextLabel _description = null!;
     private Button _play = null!;
+    private HoverTooltip _hint = null!;
 
     public static MapPicker Create(IReadOnlyList<MapEntry> maps, string? initialSelection)
     {
@@ -47,6 +48,11 @@ public partial class MapPicker : PanelContainer
     public override void _Ready()
     {
         AddThemeStyleboxOverride("panel", UnturnedUi.Panel(new Color(0.09f, 0.10f, 0.08f, 0.86f)));
+
+        // Added before the rows so MakeItem can wire hover hints into it. It is top-level, so being a
+        // child of the panel costs it nothing in layout and keeps it out of the list's scroll clip.
+        _hint = HoverTooltip.Create();
+        AddChild(_hint);
 
         var margin = new MarginContainer();
         foreach (string side in new[] { "left", "right", "top", "bottom" })
@@ -114,10 +120,16 @@ public partial class MapPicker : PanelContainer
             ButtonGroup = _group,
             CustomMinimumSize = new Vector2(0, 54),
             SizeFlagsHorizontal = SizeFlags.ExpandFill,
-            TooltipText = map.IsSupported
-                ? map.Path
-                : "Legacy terrain: this map predates Landscape tiles, which this port does not read yet.",
         };
+
+        // Deliberately not TooltipText: the engine's tooltip is a Popup, and hiding an embedded Popup in
+        // a release export prints two "Attempt to disconnect a nonexistent connection" errors
+        // (godotengine/godot#87626). HoverTooltip draws the same hint without one.
+        string hint = map.IsSupported
+            ? map.Path
+            : "Legacy terrain: this map predates Landscape tiles, which this port does not read yet.";
+        button.MouseEntered += () => _hint.ShowHint(hint);
+        button.MouseExited += () => _hint.Dismiss();
         button.AddThemeStyleboxOverride("normal", UnturnedUi.Bar(tint.Darkened(0.35f)));
         button.AddThemeStyleboxOverride("hover", UnturnedUi.Bar(tint.Darkened(0.15f)));
         button.AddThemeStyleboxOverride("pressed", UnturnedUi.Bar(tint));
@@ -214,6 +226,7 @@ public partial class MapPicker : PanelContainer
             CustomMinimumSize = new Vector2(DetailWidth, 96),
             SizeFlagsVertical = SizeFlags.ExpandFill,
             Modulate = new Color(1, 1, 1, 0.85f),
+            ContextMenuEnabled = false, // a PopupMenu is a Popup; see HoverTooltip for why we avoid them
         };
         _description.AddThemeFontSizeOverride("normal_font_size", 13);
         _detail.AddChild(_description);
