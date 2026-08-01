@@ -395,4 +395,192 @@ public class LevelFoliageTests
         }
         finally { File.Delete(path); }
     }
+
+    [Fact]
+    public void ResidencyIndex_DecodesEveryChunkIdenticallyToTheAllResidentPath()
+    {
+        Guid a = Guid.NewGuid();
+        byte[] bytes = Build(2, a,
+            (-5, -1, new[] { Translation(-20, 3, 7), Translation(11, -4, 90) }),
+            (-4, 0, new[] { Translation(5, 6, 7) }),
+            (7, 8, new[] { Translation(500, 25, -600), Translation(20, 30, 40) }));
+        using var dir = new TempDir();
+        string path = dir.Write("Foliage.blob", bytes);
+        LevelFoliageChunks expected = LevelFoliageChunks.Load(path, 4)!;
+        expected.RebaseAll(parallel: false);
+
+        FoliageResidencyIndex index = FoliageResidencyIndex.Build(path, 4);
+
+        Assert.Equal(expected.AssetGuids, index.AssetGuids);
+        Assert.Equal(expected.Chunks.Count, index.Chunks.Count);
+        Assert.Equal(expected.StorageBytes, index.DecodedStorageBytes);
+        for (int i = 0; i < expected.Chunks.Count; i++)
+        {
+            FoliageChunk decoded = index.DecodeChunk(i);
+            Assert.Equal(expected.Chunks[i].Key, decoded.Key);
+            Assert.Equal(expected.Chunks[i].Bounds, decoded.Bounds);
+            Assert.Equal(expected.Chunks[i].Origin, decoded.Origin);
+            Assert.Equal(expected.Chunks[i].Packed, decoded.Packed);
+        }
+    }
+
+    [Fact]
+    public void ResidencyIndex_CacheRoundTripsAndRejectsSameLengthContentChanges()
+    {
+        Guid asset = Guid.NewGuid();
+        using var dir = new TempDir();
+        string source = dir.Write("Foliage.blob",
+            Build(2, asset, (0, 0, new[] { Translation(1, 2, 3) })));
+        string cache = Path.Combine(dir.Path, "cache", "map.fidx");
+        FoliageResidencyIndex built = FoliageResidencyIndex.Build(source, 4);
+        built.Write(cache);
+
+        Assert.True(FoliageResidencyIndex.TryRead(cache, source, 4, out FoliageResidencyIndex? loaded));
+        Assert.Equal(built.DecodeChunk(0).Packed, loaded!.DecodeChunk(0).Packed);
+        Assert.False(FoliageResidencyIndex.TryRead(cache, source, 8, out _));
+
+        DateTime timestamp = File.GetLastWriteTimeUtc(source);
+        byte[] changed = File.ReadAllBytes(source);
+        changed[^6] ^= 0x40;
+        File.WriteAllBytes(source, changed);
+        File.SetLastWriteTimeUtc(source, timestamp); // unchanged path, size, and timestamp: hash must catch it
+        Assert.False(FoliageResidencyIndex.TryRead(cache, source, 4, out _));
+    }
+
+    [Fact]
+    public void ResidencyIndex_CorruptOrInterruptedCacheFallsBackToRebuild()
+    {
+        using var dir = new TempDir();
+        string source = dir.Write("Foliage.blob", Build(2, Guid.NewGuid()));
+        string cache = dir.Write("map.fidx", new byte[] { 1, 2, 3 });
+
+        Assert.False(FoliageResidencyIndex.TryRead(cache, source, 4, out _));
+        FoliageResidencyIndex rebuilt = FoliageResidencyIndex.LoadOrBuild(source, cache, 4,
+            out bool cacheHit)!;
+        Assert.False(cacheHit);
+        Assert.True(FoliageResidencyIndex.TryRead(cache, source, 4, out FoliageResidencyIndex? reused));
+        Assert.Empty(rebuilt.Chunks);
+        Assert.NotNull(reused);
+
+        // An interrupted atomic replacement can retain a valid header and only part of the body.
+        byte[] complete = File.ReadAllBytes(cache);
+        File.WriteAllBytes(cache, complete.AsSpan(0, complete.Length / 2).ToArray());
+        Assert.False(FoliageResidencyIndex.TryRead(cache, source, 4, out _));
+        FoliageResidencyIndex recovered = FoliageResidencyIndex.LoadOrBuild(source, cache, 4,
+            out bool truncatedHit)!;
+        Assert.False(truncatedHit);
+        Assert.Empty(recovered.Chunks);
+
+        // BinaryReader.ReadString throws FormatException for a malformed 7-bit length prefix.
+        File.WriteAllBytes(cache, new byte[] { 0x80, 0x80, 0x80, 0x80, 0x80 });
+        Assert.False(FoliageResidencyIndex.TryRead(cache, source, 4, out _));
+    }
+
+    [Fact]
+    public void ResidencyIndex_DecodeObservesCancellationAndBoundsChecks()
+    {
+        using var dir = new TempDir();
+        string source = dir.Write("Foliage.blob",
+            Build(2, Guid.NewGuid(), (0, 0, new[] { Translation(1, 2, 3) })));
+        FoliageResidencyIndex index = FoliageResidencyIndex.Build(source);
+        using var cancelled = new System.Threading.CancellationTokenSource();
+        cancelled.Cancel();
+
+        Assert.Throws<OperationCanceledException>(() => index.DecodeChunk(0, cancelled.Token));
+        Assert.Throws<ArgumentOutOfRangeException>(() => index.DecodeChunk(-1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => index.DecodeChunk(index.Chunks.Count));
+    }
+
+    [Fact]
+    public void ResidencyIndex_Version1AndDifferentMapReuseRemainIsolated()
+    {
+        using var dir = new TempDir();
+        Guid firstAsset = Guid.NewGuid(), secondAsset = Guid.NewGuid();
+        string first = dir.Write(Path.Combine("first", "Foliage.blob"),
+            Build(1, firstAsset, (0, 0, new[] { Translation(1, 2, 3) })));
+        string second = dir.Write(Path.Combine("second", "Foliage.blob"),
+            Build(2, secondAsset, (8, 8, new[] { Translation(4, 5, 6) })));
+        string cache = Path.Combine(dir.Path, "shared.fidx");
+
+        FoliageResidencyIndex firstIndex = FoliageResidencyIndex.LoadOrBuild(first, cache, 4,
+            out bool firstHit)!;
+        FoliageResidencyIndex secondIndex = FoliageResidencyIndex.LoadOrBuild(second, cache, 4,
+            out bool secondHit)!;
+
+        Assert.False(firstHit);
+        Assert.False(secondHit); // same cache path cannot cross map/source identity
+        Assert.Equal(firstAsset, Assert.Single(firstIndex.AssetGuids));
+        Assert.Equal(secondAsset, Assert.Single(secondIndex.AssetGuids));
+        Assert.Equal(new Vector3(1, 2, -3), firstIndex.DecodeChunk(0).Origin);
+        Assert.Equal(new Vector3(4, 5, -6), secondIndex.DecodeChunk(0).Origin);
+    }
+
+    [Fact]
+    public void ResidencyPlanner_OrdersNearFirstCapsWorkAndKeepsVisibleChunksMandatory()
+    {
+        var items = new[]
+        {
+            new FoliageResidencyItem(0, new Vector3(10, 0, 0), 20),
+            new FoliageResidencyItem(1, new Vector3(40, 0, 0), 20),
+            new FoliageResidencyItem(2, new Vector3(30, 0, 0), 20),
+            new FoliageResidencyItem(3, new Vector3(500, 0, 0), 20),
+        };
+
+        FoliageResidencyPlan plan = FoliageResidencyPlanner.Plan(Vector3.Zero, items,
+            new HashSet<int>(), new HashSet<int>(), prefetchMargin: 30, unloadHysteresis: 20,
+            maximumPrefetch: 1);
+
+        Assert.Equal(new[] { 0 }, plan.VisibleMissing);
+        Assert.Equal(new[] { 2 }, plan.Prefetch); // 30 m wins over item 1 at 40 m
+        Assert.Empty(plan.Retire);
+        Assert.True(plan.PrefetchTruncated);
+
+        // Pending work does not satisfy visibility: the runtime must take its synchronous emergency path
+        // rather than allowing an in-flight prefetch to create one frame of pop-in.
+        FoliageResidencyPlan pendingVisible = FoliageResidencyPlanner.Plan(Vector3.Zero, items,
+            new HashSet<int>(), new HashSet<int> { 0 }, 30, 20, 1);
+        Assert.Equal(new[] { 0 }, pendingVisible.VisibleMissing);
+    }
+
+    [Fact]
+    public void ResidencyPlanner_HysteresisPreventsBoundaryChurnAndTeleportRetiresOldRegion()
+    {
+        var items = new[]
+        {
+            new FoliageResidencyItem(0, Vector3.Zero, 20),
+            new FoliageResidencyItem(1, new Vector3(1000, 0, 0), 20),
+        };
+        var resident = new HashSet<int> { 0 };
+
+        Assert.Empty(FoliageResidencyPlanner.Plan(new Vector3(55, 0, 0), items, resident,
+            new HashSet<int>(), 30, 20, 8).Retire); // load edge is 50; unload edge is 70
+        Assert.Equal(new[] { 0 }, FoliageResidencyPlanner.Plan(new Vector3(71, 0, 0), items, resident,
+            new HashSet<int>(), 30, 20, 8).Retire);
+        FoliageResidencyPlan teleported = FoliageResidencyPlanner.Plan(new Vector3(1000, 0, 0), items,
+            resident, new HashSet<int>(), 30, 20, 8);
+        Assert.Equal(new[] { 1 }, teleported.VisibleMissing);
+        Assert.Equal(new[] { 0 }, teleported.Retire);
+    }
+
+    [Fact]
+    public void ResidencyPlanner_PrefetchCoversDeterministicHighSpeedTraversalWithoutGrowth()
+    {
+        var items = new List<FoliageResidencyItem>();
+        for (int i = 0; i < 40; i++)
+            items.Add(new FoliageResidencyItem(i, new Vector3(i * 128, 0, 0), 200));
+        var resident = new HashSet<int>();
+        var pending = new HashSet<int>();
+
+        for (int x = 0; x <= 3000; x += 64)
+        {
+            FoliageResidencyPlan plan = FoliageResidencyPlanner.Plan(new Vector3(x, 0, 0), items,
+                resident, pending, prefetchMargin: 256, unloadHysteresis: 128, maximumPrefetch: 40);
+            if (x > 0)
+                Assert.Empty(plan.VisibleMissing); // prior prefetch covers the next 64 m high-speed step
+            resident.UnionWith(plan.VisibleMissing); // runtime's synchronous initial/teleport guarantee
+            resident.ExceptWith(plan.Retire);
+            resident.UnionWith(plan.Prefetch);
+            Assert.InRange(resident.Count, 1, 12); // no unbounded cache of previously visited chunks
+        }
+    }
 }

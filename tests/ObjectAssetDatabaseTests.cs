@@ -72,6 +72,24 @@ public class ObjectAssetDatabaseTests
         Assert.Equal(1, db.Count);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ScanFiles_PerFileIoOrAccessFailureDoesNotEscapeParallelScan(bool unauthorized)
+    {
+        string good = Path.Combine(Path.GetTempPath(), "good.dat");
+        string bad = Path.Combine(Path.GetTempPath(), "bad.dat");
+        ObjectAssetDatabase db = ObjectAssetDatabase.ScanFiles(new[] { good, bad }, path =>
+        {
+            if (path == bad)
+                throw unauthorized ? new UnauthorizedAccessException() : new IOException();
+            return "GUID 2e698a7b85e94c019b3f91ec8796a961\nType Small\nID 1\n";
+        });
+
+        Assert.Equal(1, db.Count);
+        Assert.NotNull(db.ResolveById(1));
+    }
+
     [Fact]
     public void Resolve_GuidWins_ThenFallsBackToId()
     {

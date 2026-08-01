@@ -27,6 +27,15 @@ public static class FoliageBuilder
     private static readonly float FadeMargin = Math.Min(32f, DrawDistance * 0.25f);
     private static readonly int PackBatchChunks = EnvInt("UG_FOLIAGE_PACK_BATCH", 256, 1, 65536);
     public static int RuntimeChunkTiles => ChunkTiles;
+    public static float FadeMarginValue => FadeMargin;
+    public static bool SpatialResidencyEnabled =>
+        System.Environment.GetEnvironmentVariable("UG_FOLIAGE_RESIDENCY") != "0"
+        && System.Environment.GetEnvironmentVariable("UG_NODE_MULTIMESH") != "1";
+
+    public static Node3D Build(FoliageResidencyIndex? foliage,
+        IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary) => foliage == null
+            ? new Node3D { Name = "Foliage" }
+            : FoliageStreamingRenderer.Create(foliage, meshLibrary, DrawDistance);
 
     public static Node3D Build(LevelFoliageChunks? foliage,
         IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary)

@@ -1,3 +1,4 @@
+using System;
 using System.IO;
 using UnturnedGodot.Tests.Helpers;
 using UnturnedGodot.Unity;
@@ -55,6 +56,25 @@ public class TextureCacheTests
         {
             Directory.Delete(dir, recursive: true);
         }
+    }
+
+    [Fact]
+    public void SourceOwner_RequiresTheSameBundlePathAndStamp()
+    {
+        using var dir = new TempDir();
+        string texture = dir.Write("cache/item.tex", Array.Empty<byte>());
+        using (FileStream stream = File.Create(texture))
+            TextureCache.Write(stream, new CachedTexture(3, 1, 1, 1, new byte[] { 1 }));
+        string firstBundle = dir.Write("first/masterbundle", new byte[] { 1 });
+        string secondBundle = dir.Write("second/masterbundle", new byte[] { 1 });
+
+        TextureCache.RecordSource(texture, firstBundle, 123);
+
+        Assert.True(TextureCache.IsCurrentForSource(texture, firstBundle, 123));
+        Assert.False(TextureCache.IsCurrentForSource(texture, firstBundle, 124));
+        Assert.False(TextureCache.IsCurrentForSource(texture, secondBundle, 123));
+        File.WriteAllBytes(TextureCache.SourcePath(texture), new byte[] { 1, 2, 3 });
+        Assert.False(TextureCache.IsCurrentForSource(texture, firstBundle, 123));
     }
 
     [Fact]

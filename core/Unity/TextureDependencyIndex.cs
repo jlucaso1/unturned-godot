@@ -57,15 +57,34 @@ public static class TextureDependencyIndex
     }
 
     public static HashSet<long> MissingTextureIds(string meshCacheDir, string textureCacheDir,
-        string bundleTag, IEnumerable<Guid> neededGuids)
+        string bundleTag, IEnumerable<Guid> neededGuids, string bundlePath, long sourceStamp)
     {
         HashSet<string> keys = NeededTextureKeys(meshCacheDir, bundleTag, neededGuids, includeSecondary: true);
-        keys.RemoveWhere(key => TextureCache.IsCurrent(Path.Combine(textureCacheDir, key + ".tex")));
+        keys.RemoveWhere(key => TextureCache.IsCurrentForSource(
+            Path.Combine(textureCacheDir, key + ".tex"), bundlePath, sourceStamp));
         var ids = new HashSet<long>();
         foreach (string key in keys)
             if (TextureKey.TryParse(key, out _, out long id))
                 ids.Add(id);
         return ids;
+    }
+
+    // The fallback two-pass extractor signals its scene between the mesh and texture passes. Remove only
+    // dependencies whose source proof is stale before that signal, so the main thread cannot briefly
+    // upload pixels from the previous bundle revision while the replacement pass is starting.
+    public static int RemoveStaleTextures(string meshCacheDir, string textureCacheDir, string bundleTag,
+        IEnumerable<Guid> neededGuids, string bundlePath, long sourceStamp)
+    {
+        int removed = 0;
+        foreach (string key in NeededTextureKeys(meshCacheDir, bundleTag, neededGuids, includeSecondary: true))
+        {
+            string path = Path.Combine(textureCacheDir, key + ".tex");
+            if (!File.Exists(path) || TextureCache.IsCurrentForSource(path, bundlePath, sourceStamp))
+                continue;
+            TextureCache.Remove(path);
+            removed++;
+        }
+        return removed;
     }
 
     // StreamExtract names the first SerializedFile with the base tag and later files with -2, -3, ... .

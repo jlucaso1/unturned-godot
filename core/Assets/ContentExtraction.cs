@@ -101,7 +101,7 @@ public static class ContentExtraction
             plans.Add(new BundlePlan(sources[i], needed,
                 ExtractionIndex.MissingMeshes(cacheDir, needed, misses, sources[i].BundlePath, sourceStamp),
                 TextureDependencyIndex.MissingTextureIds(cacheDir, textureCacheDir,
-                    sources[i].CacheTag, needed), foliageAssets));
+                    sources[i].CacheTag, needed, sources[i].BundlePath, sourceStamp), foliageAssets));
         }
 
         return plans;

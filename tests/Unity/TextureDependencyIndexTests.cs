@@ -16,15 +16,17 @@ public class TextureDependencyIndexTests
         using var dir = new TempDir();
         string meshes = Directory.CreateDirectory(Path.Combine(dir.Path, "meshes")).FullName;
         string textures = Directory.CreateDirectory(Path.Combine(dir.Path, "textures")).FullName;
+        string bundle = dir.Write("california2.masterbundle", new byte[] { 1 });
+        long stamp = ExtractionIndex.StampFor(bundle);
         Guid needed = Guid.NewGuid(), unrelated = Guid.NewGuid();
 
         WriteMesh(meshes, needed, TextureKey.For("california2", 10),
             TextureKey.For("california2", 20), TextureKey.For("core", 30), "");
         WriteMesh(meshes, unrelated, TextureKey.For("california2", 40));
-        WriteTexture(textures, TextureKey.For("california2", 10));
+        WriteTexture(textures, TextureKey.For("california2", 10), bundle, stamp);
 
         HashSet<long> missing = TextureDependencyIndex.MissingTextureIds(
-            meshes, textures, "california2", new[] { needed });
+            meshes, textures, "california2", new[] { needed }, bundle, stamp);
 
         Assert.Equal(new HashSet<long> { 20 }, missing);
     }
@@ -56,18 +58,27 @@ public class TextureDependencyIndexTests
         using var dir = new TempDir();
         string meshes = Directory.CreateDirectory(Path.Combine(dir.Path, "meshes")).FullName;
         string textures = Directory.CreateDirectory(Path.Combine(dir.Path, "textures")).FullName;
+        string bundle = dir.Write("mod.masterbundle", new byte[] { 1 });
+        long stamp = ExtractionIndex.StampFor(bundle);
         Guid needed = Guid.NewGuid();
 
         // The second SerializedFile uses the bundle-2 namespace. A current base-tag file with the same
         // path ID must not make the secondary texture appear complete.
         WriteMesh(meshes, needed, TextureKey.For("mod-2", 42));
-        WriteTexture(textures, TextureKey.For("mod", 42));
+        WriteTexture(textures, TextureKey.For("mod", 42), bundle, stamp);
         Assert.Equal(new HashSet<long> { 42 }, TextureDependencyIndex.MissingTextureIds(
-            meshes, textures, "mod", new[] { needed }));
+            meshes, textures, "mod", new[] { needed }, bundle, stamp));
 
-        WriteTexture(textures, TextureKey.For("mod-2", 42));
+        WriteTexture(textures, TextureKey.For("mod-2", 42), bundle, stamp);
         Assert.Empty(TextureDependencyIndex.MissingTextureIds(
-            meshes, textures, "mod", new[] { needed }));
+            meshes, textures, "mod", new[] { needed }, bundle, stamp));
+
+        // A bundle update can keep the same PathID and cache key. Its old pixels are still stale.
+        Assert.Equal(new HashSet<long> { 42 }, TextureDependencyIndex.MissingTextureIds(
+            meshes, textures, "mod", new[] { needed }, bundle, stamp + 1));
+        Assert.Equal(1, TextureDependencyIndex.RemoveStaleTextures(
+            meshes, textures, "mod", new[] { needed }, bundle, stamp + 1));
+        Assert.False(File.Exists(Path.Combine(textures, TextureKey.For("mod-2", 42) + ".tex")));
     }
 
     private static void WriteMesh(string directory, Guid guid, params string[] keys)
@@ -80,9 +91,12 @@ public class TextureDependencyIndexTests
         MeshCache.Write(stream, Array.Empty<Vector3>(), Array.Empty<Vector3>(), Array.Empty<Vector2>(), submeshes);
     }
 
-    private static void WriteTexture(string directory, string key)
+    private static void WriteTexture(string directory, string key, string bundlePath, long stamp)
     {
-        using FileStream stream = File.Create(Path.Combine(directory, key + ".tex"));
+        string path = Path.Combine(directory, key + ".tex");
+        using FileStream stream = File.Create(path);
         TextureCache.Write(stream, new CachedTexture(4, 1, 1, 1, new byte[] { 255, 255, 255, 255 }));
+        stream.Dispose();
+        TextureCache.RecordSource(path, bundlePath, stamp);
     }
 }

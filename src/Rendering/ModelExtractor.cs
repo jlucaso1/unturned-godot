@@ -185,6 +185,7 @@ public static class ModelExtractor
     {
         IReadOnlyDictionary<string, Guid[]> layerWants =
             layerWantsByPath ?? new Dictionary<string, Guid[]>(StringComparer.Ordinal);
+        long textureSourceStamp = ExtractionIndex.StampFor(bundlePath);
 
         using MasterBundleStream? stream = MasterBundleStream.OpenFile(bundlePath);
         if (cancellationToken.IsCancellationRequested)
@@ -196,6 +197,8 @@ public static class ModelExtractor
                 cacheDir, db, foliageAssets, cancellationToken);
             if (cancellationToken.IsCancellationRequested)
                 return;
+            TextureDependencyIndex.RemoveStaleTextures(cacheDir, textureCacheDir, bundleTag, neededGuids,
+                bundlePath, textureSourceStamp);
             onMeshesReady();
             ExtractTextures(bundlePath, bundleTag, cacheDir, textureCacheDir, onTextureWritten,
                 cancellationToken);
@@ -265,7 +268,7 @@ public static class ModelExtractor
                 // already, and anything extracted on an earlier boot only needs its key handed back. Both
                 // then stay out of the plan, so the pass reads no further than it truly owes.
                 CollectOwed(neededTextures, layerTextures, resolved, textureCacheDir,
-                    onTextureWritten, owedByFile, written);
+                    bundlePath, textureSourceStamp, onTextureWritten, owedByFile, written);
 
                 // Only once the LAST serialized file is in: the scene is built off this signal, and firing
                 // it after the first of several left the objects from the rest as fallback boxes.
@@ -314,7 +317,7 @@ public static class ModelExtractor
                 (string tag, long texId, string? layerPath, UnityTexture texture) = written[index];
                 if (layerPath == null)
                     WriteStreamedTextureBytes(tag, texId, texture, pixels, textureCacheDir,
-                        onTextureWritten);
+                        bundlePath, textureSourceStamp, onTextureWritten);
                 else
                 {
                     CachedTexture cached = CachedTexture.From(texture, pixels);
@@ -339,7 +342,7 @@ public static class ModelExtractor
     // "owed by a stream file" (planned when that node comes round). Each texture is settled once.
     private static void CollectOwed(Dictionary<(string Tag, long Id), UnityTexture> neededTextures,
         Dictionary<string, UnityTexture> layerTextures, HashSet<(string, long)> resolved,
-        string textureCacheDir, Action<string> onTextureWritten,
+        string textureCacheDir, string bundlePath, long sourceStamp, Action<string> onTextureWritten,
         Dictionary<string, List<BundlePass.Want>> owedByFile,
         List<(string Tag, long TexId, string? LayerPath, UnityTexture Texture)> written)
     {
@@ -355,11 +358,11 @@ public static class ModelExtractor
                 // why two of this map's textures never arrived.
                 if (texture.InlineData.Length > 0)
                     WriteStreamedTextureBytes(tag, texId, texture, texture.InlineData,
-                        textureCacheDir, onTextureWritten);
+                        textureCacheDir, bundlePath, sourceStamp, onTextureWritten);
                 continue;
             }
 
-            if (AlreadyCached(tag, texId, textureCacheDir, onTextureWritten))
+            if (AlreadyCached(tag, texId, textureCacheDir, bundlePath, sourceStamp, onTextureWritten))
                 continue;
 
             Owe(owedByFile, texture.StreamFileName).Add(new BundlePass.Want(texture.StreamFileName,
@@ -470,23 +473,30 @@ public static class ModelExtractor
     // True when this texture is already on disk in the current cache format, in which case the caller is
     // told about it and the bytes never have to be decoded again.
     private static bool AlreadyCached(string bundleTag, long texId, string textureCacheDir,
-        Action<string> onTextureWritten)
+        string bundlePath, long sourceStamp, Action<string> onTextureWritten)
     {
         string texKey = TextureKey.For(bundleTag, texId);
         string path = Path.Combine(textureCacheDir, texKey + ".tex");
-        if (!File.Exists(path) || !TextureCache.IsCurrent(path))
+        if (!TextureCache.IsCurrentForSource(path, bundlePath, sourceStamp))
+        {
+            // Do not let the scene briefly upload pixels from the previous bundle revision while the
+            // current .resS range is still streaming. Missing/invalid source metadata is conservative:
+            // remove only this cache key and let the normal extraction path recreate it.
+            TextureCache.Remove(path);
             return false;
+        }
 
         onTextureWritten(texKey);
         return true;
     }
 
     private static void WriteStreamedTextureBytes(string bundleTag, long texId, UnityTexture tex,
-        byte[] pixels, string textureCacheDir, Action<string> onTextureWritten)
+        byte[] pixels, string textureCacheDir, string bundlePath, long sourceStamp,
+        Action<string> onTextureWritten)
     {
         string texKey = TextureKey.For(bundleTag, texId);
         string outPath = Path.Combine(textureCacheDir, texKey + ".tex");
-        if (File.Exists(outPath) && TextureCache.IsCurrent(outPath))
+        if (TextureCache.IsCurrentForSource(outPath, bundlePath, sourceStamp))
         {
             onTextureWritten(texKey);
             return;
@@ -495,6 +505,7 @@ public static class ModelExtractor
             return;
         using (var stream = File.Create(outPath))
             TextureCache.Write(stream, CachedTexture.From(tex, pixels));
+        TextureCache.RecordSource(outPath, bundlePath, sourceStamp);
         onTextureWritten(texKey);
     }
 
@@ -788,6 +799,7 @@ public static class ModelExtractor
         if (cancellationToken.IsCancellationRequested)
             return 0;
         Directory.CreateDirectory(textureCacheDir);
+        long sourceStamp = ExtractionIndex.StampFor(bundlePath);
         int written = 0;
         int serializedFile = 0;
         foreach (KeyValuePair<string, byte[]> f in bundle.Files)
@@ -811,12 +823,13 @@ public static class ModelExtractor
                     return written; // leaving: stop between textures, never mid-file
                 string texKey = TextureKey.For(fileTag, texId);
                 string outPath = Path.Combine(textureCacheDir, texKey + ".tex");
-                if (File.Exists(outPath) && TextureCache.IsCurrent(outPath))
+                if (TextureCache.IsCurrentForSource(outPath, bundlePath, sourceStamp))
                 {
                     onTextureWritten?.Invoke(texKey); // already cached (resume) — still let the caller apply it
                     written++;
                     continue;
                 }
+                TextureCache.Remove(outPath);
                 if (!objectsByPathId.TryGetValue(texId, out SerializedObject? texObj))
                     continue;
 
@@ -827,6 +840,7 @@ public static class ModelExtractor
 
                 using (var stream = File.Create(outPath))
                     TextureCache.Write(stream, CachedTexture.From(tex, pixels));
+                TextureCache.RecordSource(outPath, bundlePath, sourceStamp);
                 written++;
                 onTextureWritten?.Invoke(texKey);
             }

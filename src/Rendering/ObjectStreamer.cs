@@ -42,6 +42,7 @@ public partial class ObjectStreamer : Node
     private ObjectAssetDatabase _db = null!;
     private Dictionary<Guid, FoliageAsset.Owned> _foliageAssets = new();
     private LevelFoliageChunks? _foliage;
+    private FoliageResidencyIndex? _foliageIndex;
 
     // Every GUID this map needs a mesh for: placed objects, trees and the resolved foliage types. Drives
     // both the cold-load check and which slice of the shared cache is realised.
@@ -277,13 +278,37 @@ public partial class ObjectStreamer : Node
 
         Task foliage = Task.Run(() =>
         {
-            _foliage = LevelFoliageChunks.Load(Path.Combine(_level.Path, "Foliage.blob"),
-                FoliageBuilder.RuntimeChunkTiles);
+            string blobPath = Path.Combine(_level.Path, "Foliage.blob");
+            if (FoliageBuilder.SpatialResidencyEnabled && File.Exists(blobPath))
+            {
+                string indexDirectory = ProjectSettings.GlobalizePath("user://foliage_index");
+                string indexPath = Path.Combine(indexDirectory,
+                    FoliageResidencyIndex.CacheFileName(blobPath));
+                var watch = Stopwatch.StartNew();
+                _foliageIndex = FoliageResidencyIndex.LoadOrBuild(blobPath, indexPath,
+                    FoliageBuilder.RuntimeChunkTiles, out bool cacheHit);
+                if (_foliageIndex == null)
+                {
+                    _foliage = LevelFoliageChunks.Load(blobPath, FoliageBuilder.RuntimeChunkTiles);
+                    AppShutdown.PrintUnlessQuitting("[foliage-stream] source disappeared during indexing; "
+                        + "using the legacy foliage loader");
+                }
+                else
+                {
+                    AppShutdown.PrintUnlessQuitting($"[foliage-stream] {(cacheHit ? "loaded" : "built")} "
+                        + $"index with {_foliageIndex.Chunks.Count} chunks in {watch.ElapsedMilliseconds} ms");
+                }
+            }
+            else
+            {
+                _foliage = LevelFoliageChunks.Load(blobPath, FoliageBuilder.RuntimeChunkTiles);
+            }
             // Across every source, not just the core Assets folder: a workshop map's own grass and pebble
             // assets live next to its bundle, and scanning core alone leaves them unresolved — no needed
             // GUID, no extraction, no foliage on the map.
-            if (_foliage != null)
-                _foliageAssets = FoliageAsset.ScanSources(_sources, new HashSet<Guid>(_foliage.AssetGuids));
+            IReadOnlyList<Guid>? foliageGuids = _foliageIndex?.AssetGuids ?? _foliage?.AssetGuids;
+            if (foliageGuids != null)
+                _foliageAssets = FoliageAsset.ScanSources(_sources, new HashSet<Guid>(foliageGuids));
         });
 
         Task.WaitAll(placements, assets, foliage);
@@ -384,7 +409,9 @@ public partial class ObjectStreamer : Node
         AddChild(root);
         double attachMs = stage.Elapsed.TotalMilliseconds;
         stage.Restart();
-        AddChild(FoliageBuilder.Build(_foliage, meshLibrary));
+        AddChild(_foliageIndex != null
+            ? FoliageBuilder.Build(_foliageIndex, meshLibrary)
+            : FoliageBuilder.Build(_foliage, meshLibrary));
         Log.Print($"[stream] objects build {buildMs:0} ms, attach {attachMs:0} ms, "
             + $"foliage {stage.Elapsed.TotalMilliseconds:0} ms");
         _totalTextureKeys = _registry.PendingKeyCount;
@@ -395,6 +422,7 @@ public partial class ObjectStreamer : Node
         // copies and the streaming worker already captured _db by value. Drop them so the ~32 MB foliage
         // transform graph and the placement/asset lists don't live on this node for the whole session.
         _foliage = null;
+        _foliageIndex = null;
         _objects = null!;
         _db = null!;
         _foliageAssets = new(); // consumed by the streaming worker / mesh extraction; drop it too
@@ -515,6 +543,7 @@ public partial class ObjectStreamer : Node
         _foliageAssets.Clear();
         _foliageAssets = new Dictionary<Guid, FoliageAsset.Owned>();
         _foliage = null;
+        _foliageIndex = null;
         _objects = null!;
         _db = null!;
         _level = null!;
@@ -541,21 +570,31 @@ public partial class ObjectStreamer : Node
     // worker; _Process applies them (once this registry exists) as their keys land in the queue.
     private void OnMeshesExtracted()
     {
-        double meshMs = _coldWatch.Elapsed.TotalMilliseconds;
-        BuildObjects();
-        _sceneBuilt = true;
+        try
+        {
+            double meshMs = _coldWatch.Elapsed.TotalMilliseconds;
+            BuildObjects();
+            _sceneBuilt = true;
 
-        // Whatever the decode already produced goes on before the world is shown. Applying a texture
-        // changes the material's shader key (an albedo map appears, the filter may switch to nearest, a
-        // cutout swaps shader), so a material that reaches the scene bare and is textured a frame later
-        // makes the renderer build its pipelines twice. Everything still arriving keeps streaming through
-        // _Process; this only closes the gap for what was ready all along, at a cost of tens of ms.
-        _appliedTextures += _registry.ApplyAllAvailable();
+            // Whatever the decode already produced goes on before the world is shown. Applying a texture
+            // changes the material's shader key (an albedo map appears, the filter may switch to nearest, a
+            // cutout swaps shader), so a material that reaches the scene bare and is textured a frame later
+            // makes the renderer build its pipelines twice. Everything still arriving keeps streaming through
+            // _Process; this only closes the gap for what was ready all along, at a cost of tens of ms.
+            _appliedTextures += _registry.ApplyAllAvailable();
 
-        EmitSignal(SignalName.MeshesReady, meshMs);
-        EmitSignal(SignalName.Progress, _appliedTextures, _totalTextureKeys);
-        Log.Print($"[stream] playable in {meshMs:0} ms ({_appliedTextures}/{_totalTextureKeys} "
-            + "textures already applied); the rest stream in...");
+            EmitSignal(SignalName.MeshesReady, meshMs);
+            EmitSignal(SignalName.Progress, _appliedTextures, _totalTextureKeys);
+            Log.Print($"[stream] playable in {meshMs:0} ms ({_appliedTextures}/{_totalTextureKeys} "
+                + "textures already applied); the rest stream in...");
+        }
+        catch (Exception e)
+        {
+            // This callback is deferred from the extraction worker, so an exception cannot fault that
+            // worker. Settle the task the loading flow actually awaits; Main will cancel the remaining
+            // texture pass and return to the menu with the original build error.
+            _completion.TrySetException(e);
+        }
     }
 
     public override void _Process(double delta)

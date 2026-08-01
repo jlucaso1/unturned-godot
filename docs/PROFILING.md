@@ -110,8 +110,21 @@ the already-usable baked navigation graph is refined.
   bounded file batch (default 512). `UG_FOLIAGE_STREAM_LOAD=0` restores whole-file loading for memory A/B.
 - `UG_FOLIAGE_PACK_BATCH=<1..65536>` bounds how many chunk buffers coexist before upload (default 256);
   65536 reproduces the old all-at-once peak on current maps.
+- `UG_FOLIAGE_RESIDENCY=0` restores the all-resident foliage renderer for visual and memory A/B checks.
+  The default path keeps a versioned seek index in `user://foliage_index`, synchronously guarantees the
+  camera-visible set, decodes the wider prefetch ring on a worker, and retires chunks beyond the unload
+  hysteresis radius. Its tuning controls are `UG_FOLIAGE_PREFETCH_MARGIN` (256 m),
+  `UG_FOLIAGE_UNLOAD_HYSTERESIS` (128 m), `UG_FOLIAGE_TELEPORT_DISTANCE` (512 m),
+  `UG_FOLIAGE_MAX_PENDING` (256), `UG_FOLIAGE_DECODE_WORKERS` (1),
+  `UG_FOLIAGE_UPLOADS_PER_FRAME` (16), and `UG_FOLIAGE_DECODED_MIB` (32 MiB). The runtime and GPU JSON
+  reports include resident/indexed chunks and instances, buffer bytes, maximum queue/decoded bytes,
+  retirements, stale results, failures, and visible-set misses.
+- `UG_FOLIAGE_TRAVERSAL=1` adds deterministic far-apart ground poses to Tier 2. It exercises teleport
+  cancellation and retirement and is intended to be combined with the foliage counters; zero
+  `visibleSetMisses` is the correctness gate.
 - `UG_COMPACT_HEIGHTMAP=0` keeps the resident terrain sampler in floats for memory/CPU A/B instead of
   the default exact source `ushort` representation.
+
 - `UG_DEDUP_GPU=0` disables byte-exact sharing of cached meshes, textures and terrain control maps.
 - `UG_DEDUP_COLLIDERS=0`, `UG_KEEP_PHYSICS_PLACEMENTS=1`, and `UG_NODE_MULTIMESH=1` restore respectively
   per-GUID collider parsing/shapes, retained physics placement tuples, and one Node3D wrapper per render
@@ -137,5 +150,23 @@ the already-usable baked navigation graph is refined.
   valid hits deserialize the graph directly, while misses build and write it off the main thread.
 - `UG_RUNTIME_BENCH_MOVE=1` makes Tier 3 alternate forward/back once per second, exercising real movement
   collision and the loopback multiplayer position stream instead of profiling only an idle player.
+
+### Foliage residency reference A/B
+
+On 2026-08-01, one paired California2 Release run on the profiling machine above measured:
+
+| Metric | all-resident (`UG_FOLIAGE_RESIDENCY=0`) | spatial residency | Delta |
+|---|---:|---:|---:|
+| Tier 3 load | 3,045 ms | 2,595 ms | -14.8% |
+| Tier 3 RSS | 2,303,627,264 B | 1,391,706,112 B | -39.6% |
+| Tier 3 video-memory monitor | 625,598,368 B | 366,269,616 B | -41.5% |
+| Tier 2 GPU buffers | 335,129,156 B | 146,663,060 B | -56.2% |
+| Tier 2 total video memory | 616,933,648 B | 300,016,992 B | -51.4% |
+
+The streamed run kept 534 of 14,601 renderable chunks (5,683,776 transform-buffer bytes) at the
+interactive spawn. The deterministic far-pose run retired 704 chunks before reporting, remained at 326
+resident chunks, and recorded zero visible-set misses, stale results, and decode failures. Frame timing is
+intentionally not summarized from one pair; use repeated reports because compositor and host scheduling
+noise is larger than the observed difference.
 
 Profiling output (`*.nettrace`, `heaptrack.*.zst`, `massif.out.*`, `perf.data`, `*.rgp`) is git-ignored.

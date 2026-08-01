@@ -166,6 +166,94 @@ public class PhysicsBodyOrderTests
     }
 
     [Fact]
+    public void FoliageStreamingKeepsDecodeOffThreadAndRidLifecycleOnTheMainThread()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "World", "FoliageStreamingRenderer.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("Task.Run(() => Decode", source);
+        Assert.Contains("_index.DecodeChunk(index, cancellation.Token)", source);
+        Assert.Contains("private void PublishDecoded", source);
+        Assert.Contains("lock (_decodedGate)", source);
+        Assert.Contains("_acceptDecoded = false", source);
+        Assert.Contains("private void Upload(int index, FoliageChunk chunk)", source);
+        Assert.Contains("RenderingServer.InstanceCreate()", source);
+        Assert.Contains("visibilityEnd + FoliageBuilder.FadeMarginValue", source);
+        Assert.Contains("private void Retire(int index)", source);
+        Assert.Contains("RenderingServer.FreeRid(resident.Instance)", source);
+        Assert.Contains("resident.Mesh.Dispose()", source);
+        Assert.Contains("_lifetimeCancellation.Cancel()", source);
+        Assert.Contains("_reservedDecodeBytes", source);
+        Assert.DoesNotContain("Interlocked.Exchange(ref _reservedDecodeBytes, 0)", source);
+        Assert.True(source.IndexOf("_lifetimeCancellation.Cancel()", StringComparison.Ordinal)
+            < source.LastIndexOf("Retire(index)", StringComparison.Ordinal));
+
+        if (FindRepositoryFile(Path.Combine("src", "Benchmark", "SceneMetrics.cs")) is { } metricsPath)
+            Assert.Contains("foliageOwner.StructuralChunks", File.ReadAllText(metricsPath));
+        if (FindRepositoryFile(Path.Combine("src", "Benchmark", "GpuBenchmark.cs")) is { } gpuPath)
+        {
+            string gpu = File.ReadAllText(gpuPath);
+            Assert.Contains("WaitForFoliageSettledAsync", gpu);
+            Assert.Contains("if (foliage.IsSettled)", gpu);
+        }
+    }
+
+    [Fact]
+    public void ColdSceneBuildFaultsCompletionInsteadOfLeavingLoadingPending()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } path)
+            return;
+        string source = File.ReadAllText(path);
+        int method = source.IndexOf("private void OnMeshesExtracted()", StringComparison.Ordinal);
+        int nextMethod = source.IndexOf("public override void _Process", method + 1, StringComparison.Ordinal);
+        Assert.True(method >= 0 && nextMethod > method);
+        string body = source.Substring(method, nextMethod - method);
+        Assert.Contains("try", body);
+        Assert.Contains("catch (Exception e)", body);
+        Assert.Contains("_completion.TrySetException(e)", body);
+    }
+
+    [Fact]
+    public void DistantZombieRigMirrorStartsInTheEnabledEngineState()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Net", "ZombiesView.cs")) is not { } path)
+            return;
+        string source = File.ReadAllText(path);
+        Assert.Contains("public bool AnimationActive = true", source);
+        Assert.Contains("nearby != avatar.AnimationActive", source);
+        Assert.Contains("rig.ProcessMode = nearby ? ProcessModeEnum.Inherit : ProcessModeEnum.Disabled", source);
+    }
+
+    [Fact]
+    public void ViewportBackupUsesEditorGlobalConfigurationStorage()
+    {
+        if (FindRepositoryFile(Path.Combine("addons", "unturned", "ViewportTuning.cs")) is not { } path)
+            return;
+        string source = File.ReadAllText(path);
+        Assert.Contains("GetEditorPaths().GetConfigDir()", source);
+        Assert.DoesNotContain("private const string BackupPath = \"user://", source);
+        Assert.Contains("Directory.CreateDirectory", source);
+    }
+
+    [Fact]
+    public void FoliageSelectionIsWorkerSafeAndKeepsTheLegacyFallback()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "World", "FoliageBuilder.cs")) is not { } builderPath
+            || FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } streamerPath
+            || FindRepositoryFile(Path.Combine("src", "World", "WorldBuilder.cs")) is not { } worldPath)
+            return;
+        string builder = File.ReadAllText(builderPath);
+        string streamer = File.ReadAllText(streamerPath);
+        string world = File.ReadAllText(worldPath);
+        Assert.Contains("System.Environment.GetEnvironmentVariable(\"UG_FOLIAGE_RESIDENCY\")", builder);
+        Assert.Contains("if (_foliageIndex == null)", streamer);
+        Assert.Contains("_foliage = LevelFoliageChunks.Load", streamer);
+        Assert.Contains("if (foliageIndex == null)", world);
+        Assert.Contains("foliageData = LevelFoliageChunks.Load", world);
+    }
+
+    [Fact]
     public void PostLoadReclaimHasMeasuredOneAndTwoPassControls()
     {
         if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } path)

@@ -42,17 +42,17 @@ public static class SceneMetrics
         r.Nodes++;
         switch (node)
         {
+            case FoliageStreamingRenderer foliageOwner:
+                // Tier 1 attaches no camera and advances no frame, so a spatial renderer intentionally
+                // has no resident GPU buffers yet. Its index is nevertheless the complete deterministic
+                // scene structure and must contribute the same counts, meshes and materials as the legacy
+                // all-resident path.
+                foreach (FoliageStructuralChunk chunk in foliageOwner.StructuralChunks)
+                    AccountMultiMesh(chunk.Mesh, chunk.Count, chunk.OriginSpread, r, meshes, materials);
+                break;
             case MultiMeshRidRenderer ridOwner:
                 foreach (MultiMesh mm in ridOwner.MultiMeshes)
-                {
-                    r.MultiMeshInstances++;
-                    r.MultiMeshTotalInstances += mm.InstanceCount;
-                    AccountMesh(mm.Mesh, r, meshes);
-                    AccountMultiMeshMaterials(mm, materials);
-                    double ridSpread = InstanceOriginSpread(mm);
-                    if (ridSpread > r.MaxMultiMeshSpread)
-                        r.MaxMultiMeshSpread = ridSpread;
-                }
+                    AccountMultiMesh(mm, r, meshes, materials);
                 break;
             case MultiMeshInstance3D { Multimesh: { } mm } mmi:
                 r.MultiMeshInstances++;
@@ -73,6 +73,30 @@ public static class SceneMetrics
 
         foreach (Node child in node.GetChildren())
             Walk(child, r, meshes, materials);
+    }
+
+    private static void AccountMultiMesh(MultiMesh mm, SceneMetricsResult r, HashSet<ulong> meshes,
+        HashSet<ulong> materials)
+    {
+        r.MultiMeshInstances++;
+        r.MultiMeshTotalInstances += mm.InstanceCount;
+        AccountMesh(mm.Mesh, r, meshes);
+        AccountMultiMeshMaterials(mm, materials);
+        double spread = InstanceOriginSpread(mm);
+        if (spread > r.MaxMultiMeshSpread)
+            r.MaxMultiMeshSpread = spread;
+    }
+
+    private static void AccountMultiMesh(ArrayMesh mesh, int count, double spread, SceneMetricsResult r,
+        HashSet<ulong> meshes, HashSet<ulong> materials)
+    {
+        r.MultiMeshInstances++;
+        r.MultiMeshTotalInstances += count;
+        AccountMesh(mesh, r, meshes);
+        for (int s = 0; s < mesh.GetSurfaceCount(); s++)
+            AccountMaterial(mesh.SurfaceGetMaterial(s), materials);
+        if (spread > r.MaxMultiMeshSpread)
+            r.MaxMultiMeshSpread = spread;
     }
 
     // Geometry is charged once per unique mesh resource: 16 distinct terrain tiles all count, but the one

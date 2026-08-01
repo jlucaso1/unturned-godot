@@ -94,6 +94,7 @@ public static class RuntimeBenchmark
             AddFrameBucket(report.Metrics, "withPhysics", withPhysicsFrameMs);
             AddFrameBucket(report.Metrics, "withoutPhysics", withoutPhysicsFrameMs);
             AddCounterMetrics(report.Metrics);
+            AddFoliageMetrics(tree, report.Metrics);
             BenchmarkRunner.Finish(report, $"{mapName}-runtime", DiffOptions(),
                 "timings are advisory; counts are deterministic for the same spawn view");
         }
@@ -168,6 +169,28 @@ public static class RuntimeBenchmark
             metrics[$"{prefix}.meanMs"] = sample.MeanMs;
             metrics[$"{prefix}.maxMs"] = sample.MaxMs;
         }
+    }
+
+    private static void AddFoliageMetrics(SceneTree tree, SortedDictionary<string, double> metrics)
+    {
+        foreach (Node node in tree.GetNodesInGroup("foliage_streaming"))
+            if (node is FoliageStreamingRenderer foliage)
+            {
+                metrics["runtime.foliage.indexedChunks"] = foliage.IndexedChunks;
+                metrics["runtime.foliage.indexedInstances"] = foliage.IndexedInstances;
+                metrics["runtime.foliage.residentChunks"] = foliage.ResidentChunks;
+                metrics["runtime.foliage.residentInstances"] = foliage.ResidentInstances;
+                metrics["runtime.foliage.residentBufferBytes"] = foliage.ResidentBufferBytes;
+                metrics["runtime.foliage.pendingChunks"] = foliage.PendingChunks;
+                metrics["runtime.foliage.maxQueued"] = foliage.MaximumQueued;
+                metrics["runtime.foliage.maxDecodedBytes"] = foliage.MaximumDecodedBytes;
+                metrics["runtime.foliage.emergencyVisibleLoads"] = foliage.EmergencyVisibleLoads;
+                metrics["runtime.foliage.visibleSetMisses"] = foliage.VisibleSetMisses;
+                metrics["runtime.foliage.retiredChunks"] = foliage.RetiredChunks;
+                metrics["runtime.foliage.staleResults"] = foliage.StaleResults;
+                metrics["runtime.foliage.decodeFailures"] = foliage.DecodeFailures;
+                break;
+            }
     }
 
     private static double PercentageOver(List<double> samples, double thresholdMs)
