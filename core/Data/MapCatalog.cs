@@ -24,6 +24,12 @@ public sealed class MapEntry
     public string? Description { get; init; }
     public string? Category { get; init; }
 
+    // Folder names are not unique across Steam workshop items. Official map names remain convenient
+    // command-line keys, while workshop selections carry the exact discovered path through the UI.
+    public string SelectionKey => Source == MapSource.Workshop
+        ? "workshop:" + System.IO.Path.GetFullPath(Path)
+        : FolderName;
+
     // Landscape tiles found on disk, and the square they span (TILE_SIZE metres each).
     public int TileCount { get; init; }
     public float SizeMetres { get; init; }
@@ -48,7 +54,8 @@ public static class MapCatalog
     public static IReadOnlyList<MapEntry> Scan(string installRoot)
     {
         var maps = new List<MapEntry>();
-        var seen = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var preferredByName = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var seenPaths = new HashSet<string>(PathComparer);
 
         foreach ((string directory, MapSource source) in SearchDirectories(installRoot))
             foreach (string candidate in SafeEnumerateDirectories(directory))
@@ -74,16 +81,32 @@ public static class MapCatalog
 
         void Add(MapEntry entry)
         {
-            // The game copies subscribed maps into its own folders, so the same map can turn up twice.
-            // Keep the first copy seen, unless a later one is the only one with terrain to load.
-            if (!seen.TryGetValue(entry.FolderName, out int index))
+            string fullPath = Path.GetFullPath(entry.Path);
+            if (!seenPaths.Add(fullPath))
+                return;
+
+            // An unsupported official folder and the game's internal Workshop/Maps folder can be stale
+            // placeholders for a subscribed map. The first Steam source replaces such a placeholder, but
+            // the name slot is then released: subsequent Steam items with the same nested folder name are
+            // independent maps and retain their own path-based selection keys.
+            bool bundledCopy = IsBundledWorkshopCopy(installRoot, fullPath);
+            bool placeholder = bundledCopy
+                || (entry.Source == MapSource.Official && !entry.IsSupported);
+            if (!preferredByName.TryGetValue(entry.FolderName, out int index))
             {
-                seen[entry.FolderName] = maps.Count;
+                if (placeholder)
+                    preferredByName[entry.FolderName] = maps.Count;
                 maps.Add(entry);
             }
-            else if (entry.IsSupported && !maps[index].IsSupported)
+            else if (entry.Source == MapSource.Workshop && !bundledCopy)
             {
                 maps[index] = entry;
+                preferredByName.Remove(entry.FolderName);
+            }
+            else
+            {
+                if (entry.IsSupported && !maps[index].IsSupported)
+                    maps[index] = entry;
             }
         }
     }
@@ -92,7 +115,11 @@ public static class MapCatalog
     // fallback path, so command-line/server callers can reject typos and removed maps before listening.
     public static MapEntry? Find(string installRoot, string mapName)
     {
-        foreach (MapEntry entry in Scan(installRoot))
+        IReadOnlyList<MapEntry> entries = Scan(installRoot);
+        foreach (MapEntry entry in entries)
+            if (string.Equals(entry.SelectionKey, mapName, PathComparison))
+                return entry;
+        foreach (MapEntry entry in entries)
             if (string.Equals(entry.FolderName, mapName, StringComparison.OrdinalIgnoreCase))
                 return entry;
         return null;
@@ -108,42 +135,23 @@ public static class MapCatalog
     // take the first LOADABLE match, and only fall back to a merely-present one when nothing is loadable.
     public static string ResolvePath(string installRoot, string mapName)
     {
-        string? firstMatch = null;
-
-        foreach ((string directory, MapSource source) in SearchDirectories(installRoot))
-            foreach (string candidate in SafeEnumerateDirectories(directory))
-            {
-                if (Consider(candidate) is { } supported)
-                    return supported;
-
-                if (source != MapSource.Workshop)
-                    continue;
-
-                foreach (string nested in SafeEnumerateDirectories(candidate))
-                    if (Consider(nested) is { } supportedNested)
-                        return supportedNested;
-            }
-
-        return firstMatch ?? Path.Combine(installRoot, "Maps", mapName);
-
-        // Returns the directory when it is this map AND loadable; otherwise remembers the first match so
-        // an unsupported map still resolves to a real folder (the menu lists those too, greyed out).
-        string? Consider(string directory)
-        {
-            if (!IsMapNamed(directory, mapName))
-                return null;
-            if (MeasureLandscape(directory).Count > 0)
-                return directory;
-
-            firstMatch ??= directory;
-            return null;
-        }
+        return Find(installRoot, mapName)?.Path ?? Path.Combine(installRoot, "Maps", mapName);
     }
 
-    private static bool IsMapNamed(string directory, string mapName) =>
-        string.Equals(Path.GetFileName(Path.TrimEndingDirectorySeparator(directory)), mapName,
-            StringComparison.OrdinalIgnoreCase)
-        && File.Exists(Path.Combine(directory, "Level.dat"));
+    private static bool IsBundledWorkshopCopy(string installRoot, string path)
+    {
+        string root = Path.GetFullPath(Path.Combine(installRoot, "Bundles", "Workshop", "Maps"));
+        return path.StartsWith(Path.TrimEndingDirectorySeparator(root) + Path.DirectorySeparatorChar,
+            PathComparison);
+    }
+
+    private static StringComparer PathComparer => OperatingSystem.IsWindows()
+        ? StringComparer.OrdinalIgnoreCase
+        : StringComparer.Ordinal;
+
+    private static StringComparison PathComparison => OperatingSystem.IsWindows()
+        ? StringComparison.OrdinalIgnoreCase
+        : StringComparison.Ordinal;
 
     // The directories that contain map folders, most authoritative first.
     public static IReadOnlyList<(string Directory, MapSource Source)> SearchDirectories(string installRoot)

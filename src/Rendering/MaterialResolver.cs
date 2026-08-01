@@ -4,6 +4,7 @@ using System.IO;
 using Godot;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Dat;
+using UnturnedGodot.Data;
 using UnturnedGodot.Unity;
 
 namespace UnturnedGodot;
@@ -114,14 +115,12 @@ public sealed class MaterialResolver
     private static Dictionary<Guid, MaterialPalette> ScanPalettes(string assetsDir)
     {
         var palettes = new Dictionary<Guid, MaterialPalette>();
-        if (!Directory.Exists(assetsDir))
-            return palettes;
-
-        foreach (string path in Directory.EnumerateFiles(assetsDir, "*.asset", SearchOption.AllDirectories))
+        foreach (string path in SafeFileTree.EnumerateFiles(assetsDir, "*.asset"))
         {
             MaterialPalette? palette;
             try { palette = MaterialPalette.Read(DatParser.Parse(File.ReadAllText(path))); }
             catch (IOException) { continue; }
+            catch (UnauthorizedAccessException) { continue; }
             if (palette != null && palette.MaterialPaths.Count > 0)
                 palettes[palette.Guid] = palette;
         }

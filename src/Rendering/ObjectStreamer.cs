@@ -405,10 +405,10 @@ public partial class ObjectStreamer : Node
         Log.Print("[stream] cold load: streaming meshes then textures from one decode pass...");
         _coldWatch = Stopwatch.StartNew();
 
-        // One decode pass per bundle that owes this map something, all of them at once: each is a single
-        // LZMA stream, so one bundle can only ever use one core, and a workshop map's own bundle is
-        // usually the larger of the two. The scene waits for the mesh phase of ALL of them, so a workshop
-        // map does not flash its custom objects in as boxes first.
+        // One decode pass per bundle that owes this map something. A decoded serialized-file node can be
+        // hundreds of MiB, so passes are deliberately serialized: compressed file size does not safely
+        // predict their resident expansion, and overlapping core plus workshop nodes caused multi-GiB
+        // cold-load peaks. The scene still waits for the mesh phase of every pass.
         var pending = new List<ContentExtraction.BundlePlan>();
         foreach (ContentExtraction.BundlePlan plan in _plans)
             if (plan.NeedsExtraction || LayerWantsFor(plan).ByContainerPath.Count > 0)
@@ -426,7 +426,7 @@ public partial class ObjectStreamer : Node
         {
             try
             {
-                Parallel.ForEach(pending, new ParallelOptions { CancellationToken = cancellation }, plan =>
+                foreach (ContentExtraction.BundlePlan plan in pending)
                 {
                     cancellation.ThrowIfCancellationRequested();
                     TerrainLayerPlan.BundleWants layers = LayerWantsFor(plan);
@@ -456,7 +456,7 @@ public partial class ObjectStreamer : Node
                             if (Interlocked.Decrement(ref _layersOutstanding) <= 0)
                                 _layerTextures.TrySetResult(_layersProduced);
                         }, cancellationToken: cancellation);
-                });
+                }
             }
             catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
             {

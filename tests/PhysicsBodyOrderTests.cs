@@ -85,6 +85,61 @@ public class PhysicsBodyOrderTests
     }
 
     [Fact]
+    public void CollisionReconciliationReentersAPhysicsFrameBeforeEachDirectSpaceQueryBatch()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Net", "ZombieNavigation.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        int loop = source.IndexOf("foreach (NavFlag flag in _flags)", StringComparison.Ordinal);
+        int physicsFrame = source.IndexOf("SceneTree.SignalName.PhysicsFrame", loop,
+            StringComparison.Ordinal);
+        int ray = source.IndexOf("space.IntersectRay(ray)", loop, StringComparison.Ordinal);
+
+        Assert.True(loop >= 0 && physicsFrame > loop && ray > physicsFrame,
+            "every per-flag ray batch must enter a physics notification after worker/file awaits");
+    }
+
+    [Fact]
+    public void BundleDecodePassesAreSerializedToBoundPeakMemory()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        int start = source.IndexOf("private void StartStreaming()", StringComparison.Ordinal);
+        int end = source.IndexOf("private void DeferUnlessStopped", start, StringComparison.Ordinal);
+        string method = source[start..end];
+
+        Assert.DoesNotContain("Parallel.ForEach(pending", method);
+        Assert.Contains("foreach (ContentExtraction.BundlePlan plan in pending)", method);
+    }
+
+    [Fact]
+    public void PaletteDiscoveryUsesTheInaccessibleSubtreeSafeWalker()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Rendering", "MaterialResolver.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("SafeFileTree.EnumerateFiles(assetsDir, \"*.asset\")", source);
+        Assert.Contains("catch (UnauthorizedAccessException)", source);
+    }
+
+    [Fact]
+    public void MapMenuPassesTheExactSelectionKeyForWorkshopMaps()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "UI", "MainMenu.cs")) is not { } menuPath
+            || FindRepositoryFile(Path.Combine("src", "UI", "MapPicker.cs")) is not { } pickerPath)
+            return;
+
+        string menu = File.ReadAllText(menuPath);
+        string picker = File.ReadAllText(pickerPath);
+        Assert.Equal(2, CountOccurrences(menu, "OnStart?.Invoke(map.SelectionKey"));
+        Assert.Contains("_maps[i].SelectionKey", picker);
+    }
+
+    [Fact]
     public void RuntimeMultiMeshesUseOneRidOwnerWithExplicitLifecycle()
     {
         if (FindRepositoryFile(Path.Combine("src", "World", "MultiMeshRidRenderer.cs")) is not { } ownerPath

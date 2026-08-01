@@ -114,7 +114,7 @@ public partial class Main : Node3D
                 return;
             }
 
-            _mapName = serverMap.FolderName;
+            _mapName = serverMap.SelectionKey;
             (Vector3 serverSpawn, _) = ResolveSpawn(unturnedPath, _mapName, heights: null);
             AddChild(DedicatedServer.Create(unturnedPath, _mapName, serverSpawn, serverPort));
             return;

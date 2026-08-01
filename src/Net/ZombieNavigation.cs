@@ -423,6 +423,14 @@ public sealed class ZombieNavigation
         {
             if (_unreachable.ContainsKey(flag))
                 continue;
+
+            // PublishProgressGraphAsync, reachability computation and checkpoint persistence can resume
+            // on the idle synchronization context. DirectSpaceState queries are only valid from a physics
+            // notification when Godot runs physics on a separate thread, so explicitly re-enter one for
+            // every batch instead of relying on where the previous await happened to resume.
+            await owner.ToSignal(owner.GetTree(), SceneTree.SignalName.PhysicsFrame);
+            if (_disposed || AppShutdown.IsShuttingDown)
+                return;
             int count = flag.Triangles.Length / 3;
             var surface = new float[count];
             var known = new bool[count];

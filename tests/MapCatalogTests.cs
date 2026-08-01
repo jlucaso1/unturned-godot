@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using UnturnedGodot.Data;
 using UnturnedGodot.Tests.Helpers;
 using Xunit;
@@ -171,6 +172,33 @@ public class MapCatalogTests
         Assert.Equal("California2", map.FolderName);
         Assert.Equal(MapSource.Workshop, map.Source);
         Assert.True(map.IsSupported); // the workshop copy with tiles won, not the empty one
+    }
+
+    [Fact]
+    public void Scan_RetainsSameNamedMapsFromDifferentWorkshopItems_AndResolvesTheirSelectionKeys()
+    {
+        using var dir = new TempDir();
+        string install = Path.Combine(dir.Path, "steamapps", "common", "Unturned");
+        Directory.CreateDirectory(install);
+        // A game-managed copy must not turn the folder name into a permanent deduplication key.
+        WriteMap(dir, Path.Combine("steamapps", "common", "Unturned", "Bundles", "Workshop", "Maps",
+            "Arena"));
+        string first = WriteMap(dir,
+            Path.Combine("steamapps", "workshop", "content", "304930", "111", "Arena"),
+            english: "Name First Arena\n", tiles: new[] { (0, 0) });
+        string second = WriteMap(dir,
+            Path.Combine("steamapps", "workshop", "content", "304930", "222", "Arena"),
+            english: "Name Second Arena\n", tiles: new[] { (0, 0), (1, 0) });
+
+        IReadOnlyList<MapEntry> matches = MapCatalog.Scan(install)
+            .Where(map => map.FolderName == "Arena").ToArray();
+
+        Assert.Equal(2, matches.Count);
+        Assert.Equal(2, matches.Select(map => map.SelectionKey).Distinct().Count());
+        Assert.Equal(first, MapCatalog.ResolvePath(install,
+            Assert.Single(matches, map => map.DisplayName == "First Arena").SelectionKey));
+        Assert.Equal(second, MapCatalog.ResolvePath(install,
+            Assert.Single(matches, map => map.DisplayName == "Second Arena").SelectionKey));
     }
 
     [Fact]

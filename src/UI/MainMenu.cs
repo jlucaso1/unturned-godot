@@ -83,7 +83,7 @@ public partial class MainMenu : CanvasLayer
         pickerRow.AddChild(new Control { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
 
         _picker = MapPicker.Create(MapCatalog.Scan(UnturnedPath), InitialMap);
-        _picker.OnPlay = map => OnStart?.Invoke(map.FolderName, null);
+        _picker.OnPlay = map => OnStart?.Invoke(map.SelectionKey, null);
         _picker.SizeFlagsVertical = Control.SizeFlags.ExpandFill;
         pickerRow.AddChild(_picker);
 
@@ -147,6 +147,6 @@ public partial class MainMenu : CanvasLayer
             return;
         }
         _status.Text = $"Connecting to {address} on {map.DisplayName}…";
-        OnStart?.Invoke(map.FolderName, address);
+        OnStart?.Invoke(map.SelectionKey, address);
     }
 }

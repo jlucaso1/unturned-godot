@@ -240,7 +240,11 @@ public partial class MapPicker : PanelContainer
 
         int index = 0;
         for (int i = 0; i < _maps.Count; i++)
-            if (string.Equals(_maps[i].FolderName, _initialSelection, System.StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(_maps[i].SelectionKey, _initialSelection,
+                    System.OperatingSystem.IsWindows() ? System.StringComparison.OrdinalIgnoreCase
+                        : System.StringComparison.Ordinal)
+                || string.Equals(_maps[i].FolderName, _initialSelection,
+                    System.StringComparison.OrdinalIgnoreCase))
             {
                 index = i;
                 break;
