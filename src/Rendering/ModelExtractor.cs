@@ -149,14 +149,22 @@ public static class ModelExtractor
         string indexPath = Path.Combine(cacheDir, ExtractionIndex.FileNameFor(bundlePath));
         long stamp = ExtractionIndex.StampFor(bundlePath);
         HashSet<Guid> misses = ExtractionIndex.Load(indexPath, stamp);
+        var failed = new HashSet<Guid>();
 
         foreach (Guid guid in neededGuids)
             if (guid != Guid.Empty)
-                misses.Add(guid);
+                failed.Add(guid);
         if (foliageAssets != null)
             foreach (FoliageAsset fa in foliageAssets)
-                misses.Add(fa.Guid);
+                failed.Add(fa.Guid);
+        failed.ExceptWith(produced);
+        misses.UnionWith(failed);
         misses.ExceptWith(produced);
+
+        foreach (Guid guid in produced)
+            ExtractionIndex.RecordMeshOwner(cacheDir, guid, bundlePath, stamp);
+        foreach (Guid guid in failed)
+            ExtractionIndex.RemoveCachedAsset(cacheDir, guid);
 
         ExtractionIndex.Save(indexPath, stamp, misses);
     }
@@ -623,11 +631,13 @@ public static class ModelExtractor
             producedGuids?.Add(asset.Guid);
 
             // Cache the object's colliders next to its mesh (Unity units; converted when the body is built).
+            string colliderPath = Path.Combine(cacheDir, asset.Guid.ToString("N") + ".collider");
+            File.Delete(colliderPath); // never retain a previous source's collider for a colliding GUID
             if (graph.CollidersByKey.TryGetValue(key, out List<ColliderPart>? colliderParts))
             {
                 List<CachedCollider> colliders = BuildColliders(colliderParts, graph, file);
                 if (colliders.Count > 0)
-                    using (var cs = File.Create(Path.Combine(cacheDir, asset.Guid.ToString("N") + ".collider")))
+                    using (var cs = File.Create(colliderPath))
                         ColliderCache.Write(cs, colliders);
             }
         }
@@ -687,11 +697,6 @@ public static class ModelExtractor
         foreach (FoliageAsset fa in foliageAssets)
         {
             string outPath = Path.Combine(cacheDir, fa.Guid.ToString("N") + ".mesh");
-            if (File.Exists(outPath) && MeshCache.IsCurrent(outPath))
-            {
-                producedGuids?.Add(fa.Guid); // already cached from an earlier map: still not a miss
-                continue;
-            }
 
             string meshKey = graph.AssetPrefix + fa.MeshPath.Replace('\\', '/').ToLowerInvariant();
             if (!graph.ContainerByPath.TryGetValue(meshKey, out long meshId) ||
@@ -722,6 +727,7 @@ public static class ModelExtractor
 
             using (var stream = File.Create(outPath))
                 MeshCache.Write(stream, mesh.Vertices, normals, uvs, submeshes);
+            File.Delete(Path.Combine(cacheDir, fa.Guid.ToString("N") + ".collider"));
             extracted++;
             producedGuids?.Add(fa.Guid);
         }

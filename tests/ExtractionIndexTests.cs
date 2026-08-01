@@ -110,6 +110,65 @@ public sealed class ExtractionIndexTests : IDisposable
         Assert.Single(ExtractionIndex.MissingMeshes(_dir, new[] { guid }, new HashSet<Guid>()));
     }
 
+    [Fact]
+    public void SourceStampRejectsACurrentMeshOwnedByAnotherBundle()
+    {
+        Guid guid = Guid.NewGuid();
+        WriteCachedMesh(guid);
+        string first = Path.Combine(_dir, "first.masterbundle");
+        string second = Path.Combine(_dir, "second.masterbundle");
+        File.WriteAllBytes(first, new byte[11]);
+        File.WriteAllBytes(second, new byte[22]);
+        long firstStamp = ExtractionIndex.StampFor(first);
+        long secondStamp = ExtractionIndex.StampFor(second);
+        ExtractionIndex.RecordMeshOwner(_dir, guid, first, firstStamp);
+
+        Assert.Empty(ExtractionIndex.MissingMeshes(_dir, new[] { guid }, new HashSet<Guid>(),
+            first, firstStamp));
+        Assert.Single(ExtractionIndex.MissingMeshes(_dir, new[] { guid }, new HashSet<Guid>(),
+            second, secondStamp));
+
+        ExtractionIndex.RecordMeshOwner(_dir, guid, second, secondStamp);
+        Assert.Single(ExtractionIndex.MissingMeshes(_dir, new[] { guid }, new HashSet<Guid>(),
+            first, firstStamp));
+        Assert.Empty(ExtractionIndex.MissingMeshes(_dir, new[] { guid }, new HashSet<Guid>(),
+            second, secondStamp));
+    }
+
+    [Fact]
+    public void SourceStampInvalidatesWhenTheOwningBundleChanges()
+    {
+        Guid guid = Guid.NewGuid();
+        WriteCachedMesh(guid);
+        string bundle = Path.Combine(_dir, "mod.masterbundle");
+        File.WriteAllBytes(bundle, new byte[8]);
+        long oldStamp = ExtractionIndex.StampFor(bundle);
+        ExtractionIndex.RecordMeshOwner(_dir, guid, bundle, oldStamp);
+
+        File.WriteAllBytes(bundle, new byte[64]);
+        long newStamp = ExtractionIndex.StampFor(bundle);
+
+        Assert.Single(ExtractionIndex.MissingMeshes(_dir, new[] { guid }, new HashSet<Guid>(),
+            bundle, newStamp));
+    }
+
+    [Fact]
+    public void RemovingAFailedAssetClearsMeshColliderAndOwner()
+    {
+        Guid guid = Guid.NewGuid();
+        WriteCachedMesh(guid);
+        string bundle = Path.Combine(_dir, "mod.masterbundle");
+        File.WriteAllBytes(bundle, new byte[8]);
+        ExtractionIndex.RecordMeshOwner(_dir, guid, bundle, ExtractionIndex.StampFor(bundle));
+        File.WriteAllBytes(Path.Combine(_dir, guid.ToString("N") + ".collider"), new byte[] { 1 });
+
+        ExtractionIndex.RemoveCachedAsset(_dir, guid);
+
+        Assert.False(File.Exists(Path.Combine(_dir, guid.ToString("N") + ".mesh")));
+        Assert.False(File.Exists(Path.Combine(_dir, guid.ToString("N") + ".collider")));
+        Assert.False(ExtractionIndex.MeshBelongsTo(_dir, guid, bundle, ExtractionIndex.StampFor(bundle)));
+    }
+
     // An unreadable path must not take the caller down: the stamp only decides whether cached misses
     // are still valid, and losing it costs one extra extraction pass, never a crash mid-load.
     [Fact]

@@ -88,6 +88,16 @@ public static class MapCatalog
         }
     }
 
+    // Resolves only entries the catalog actually discovered. Unlike ResolvePath, this never invents a
+    // fallback path, so command-line/server callers can reject typos and removed maps before listening.
+    public static MapEntry? Find(string installRoot, string mapName)
+    {
+        foreach (MapEntry entry in Scan(installRoot))
+            if (string.Equals(entry.FolderName, mapName, StringComparison.OrdinalIgnoreCase))
+                return entry;
+        return null;
+    }
+
     // The folder a map name refers to: Maps/<name> when the game ships it, otherwise the workshop item
     // that holds it. Falls back to Maps/<name> so callers report a path the player recognizes.
     //

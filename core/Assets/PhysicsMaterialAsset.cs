@@ -93,6 +93,10 @@ public sealed class PhysicsMaterialBank
     // Merged across several asset trees (the game's and each workshop mod's), so a mod's own surfaces
     // resolve to footstep sounds like the game's do.
     public static PhysicsMaterialBank ScanDirectories(IEnumerable<string> roots)
+        => ScanDirectories(roots, ScanDirectory);
+
+    internal static PhysicsMaterialBank ScanDirectories(IEnumerable<string> roots,
+        Func<string, PhysicsMaterialBank> scanDirectory)
     {
         // First claimant wins, and the roots arrive with the game's own first: a workshop item is free to
         // reuse an official GUID or a Unity alias like "Concrete", and letting it take that registration
@@ -100,8 +104,14 @@ public sealed class PhysicsMaterialBank
         // wrong bundle. Same rule the object database follows.
         var merged = new PhysicsMaterialBank();
         foreach (string root in roots)
-            foreach (PhysicsMaterialAsset asset in ScanDirectory(root)._byGuid.Values)
+        {
+            PhysicsMaterialBank scanned;
+            try { scanned = scanDirectory(root); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }
+
+            foreach (PhysicsMaterialAsset asset in scanned._byGuid.Values)
                 merged.AddIfAbsent(asset);
+        }
 
         return merged;
     }
@@ -111,17 +121,21 @@ public sealed class PhysicsMaterialBank
         var bank = new PhysicsMaterialBank();
         if (!Directory.Exists(root))
             return bank;
-        foreach (string file in Directory.EnumerateFiles(root, "*.asset", SearchOption.AllDirectories))
+        try
         {
-            DatDictionary parsed;
-            try { parsed = DatParser.Parse(File.ReadAllText(file)); }
-            catch (IOException) { continue; }
-            if (TryParseFile(parsed, out PhysicsMaterialAsset asset))
+            foreach (string file in Directory.EnumerateFiles(root, "*.asset", SearchOption.AllDirectories))
             {
-                asset.Directory = Path.GetDirectoryName(file) ?? root;
-                bank.Add(asset);
+                DatDictionary parsed;
+                try { parsed = DatParser.Parse(File.ReadAllText(file)); }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }
+                if (TryParseFile(parsed, out PhysicsMaterialAsset asset))
+                {
+                    asset.Directory = Path.GetDirectoryName(file) ?? root;
+                    bank.Add(asset);
+                }
             }
         }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
         return bank;
     }
 

@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 
 namespace UnturnedGodot.Unity;
 
@@ -17,6 +18,7 @@ namespace UnturnedGodot.Unity;
 public static class ExtractionIndex
 {
     private const uint Magic = 0x31584755; // "UGX1"
+    private const uint OwnerMagic = 0x314F4755; // "UGO1"
 
     // Sits next to the per-GUID meshes. Keep one index per bundle: misses in the game's bundle say
     // nothing about the contents of a workshop bundle, and vice versa.
@@ -84,17 +86,95 @@ public static class ExtractionIndex
     // yet (which a "is the cache directory empty?" check can never notice).
     public static HashSet<Guid> MissingMeshes(string cacheDir, IEnumerable<Guid> needed,
         IReadOnlySet<Guid> misses)
+        => MissingMeshes(cacheDir, needed, misses,
+            guid => MeshCache.IsCurrent(Path.Combine(cacheDir, guid.ToString("N") + ".mesh")));
+
+    // Same completeness check, but tied to the bundle that owns the GUID. Mesh GUIDs are not globally
+    // unique across workshop content, so format magic alone cannot prove that a shared-cache entry came
+    // from the source selected by first-claimant asset resolution.
+    public static HashSet<Guid> MissingMeshes(string cacheDir, IEnumerable<Guid> needed,
+        IReadOnlySet<Guid> misses, string bundlePath, long stamp)
+        => MissingMeshes(cacheDir, needed, misses,
+            guid => MeshBelongsTo(cacheDir, guid, bundlePath, stamp));
+
+    private static HashSet<Guid> MissingMeshes(string cacheDir, IEnumerable<Guid> needed,
+        IReadOnlySet<Guid> misses, Func<Guid, bool> isCached)
     {
         var missing = new HashSet<Guid>();
         foreach (Guid guid in needed)
         {
             if (guid == Guid.Empty || misses.Contains(guid))
                 continue;
-            if (!MeshCache.IsCurrent(Path.Combine(cacheDir, guid.ToString("N") + ".mesh")))
+            if (!isCached(guid))
                 missing.Add(guid);
         }
         return missing;
     }
+
+    public static bool MeshBelongsTo(string cacheDir, Guid guid, string bundlePath, long stamp)
+    {
+        if (!MeshCache.IsCurrent(Path.Combine(cacheDir, guid.ToString("N") + ".mesh")))
+            return false;
+
+        try
+        {
+            byte[] data = File.ReadAllBytes(OwnerPath(cacheDir, guid));
+            if (data.Length < 16 || BinaryPrimitives.ReadUInt32LittleEndian(data) != OwnerMagic ||
+                BinaryPrimitives.ReadInt64LittleEndian(data.AsSpan(4)) != stamp)
+                return false;
+
+            int pathLength = BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(12));
+            if (pathLength < 0 || 16L + pathLength != data.Length)
+                return false;
+            string recorded = Encoding.UTF8.GetString(data, 16, pathLength);
+            return string.Equals(recorded, CanonicalBundlePath(bundlePath),
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    // Written only after a complete bundle scan. If the process dies between the mesh and this stamp,
+    // the next boot safely treats the entry as cold and regenerates it.
+    public static void RecordMeshOwner(string cacheDir, Guid guid, string bundlePath, long stamp)
+    {
+        try
+        {
+            byte[] path = Encoding.UTF8.GetBytes(CanonicalBundlePath(bundlePath));
+            var data = new byte[16 + path.Length];
+            BinaryPrimitives.WriteUInt32LittleEndian(data, OwnerMagic);
+            BinaryPrimitives.WriteInt64LittleEndian(data.AsSpan(4), stamp);
+            BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(12), path.Length);
+            path.CopyTo(data.AsSpan(16));
+            File.WriteAllBytes(OwnerPath(cacheDir, guid), data);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            // Best-effort: an absent stamp causes a safe re-extraction on the next load.
+        }
+    }
+
+    // A failed attempt must not leave another bundle's render mesh or collider visible under the same
+    // GUID. The miss index prevents retries, while removal prevents runtime consumers loading stale data.
+    public static void RemoveCachedAsset(string cacheDir, Guid guid)
+    {
+        foreach (string path in new[]
+        {
+            Path.Combine(cacheDir, guid.ToString("N") + ".mesh"),
+            Path.Combine(cacheDir, guid.ToString("N") + ".collider"),
+            OwnerPath(cacheDir, guid),
+        })
+            try { File.Delete(path); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+    }
+
+    private static string OwnerPath(string cacheDir, Guid guid) =>
+        Path.Combine(cacheDir, guid.ToString("N") + ".mesh.owner");
+
+    private static string CanonicalBundlePath(string bundlePath) =>
+        Path.GetFullPath(bundlePath);
 
     // The identity of the masterbundle the index was built from: its last-write time and size. Matches
     // TypeTreeCache's stamp so both caches invalidate together on a game update.

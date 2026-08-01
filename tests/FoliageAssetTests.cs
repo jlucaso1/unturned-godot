@@ -332,4 +332,29 @@ public class FoliageAssetTests
         Assert.Equal(0, owned[core].SourceIndex);
         Assert.Equal("Terrain/Foliage/Grass/Grass_00_Mesh.fbx", owned[core].Asset.MeshPath);
     }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ScanSources_FailedWorkshopTreeDoesNotDiscardOtherSources(bool unauthorized)
+    {
+        using var dir = new TempDir();
+        IReadOnlyList<ContentSource> sources =
+            ContentSource.Discover(LibraryWithMod(dir), UnturnedInstall.Platform.Linux);
+        var core = new Guid("c928fb99bae9434795563319a64f6461");
+        var mod = new Guid("703378589e9f404db3bf2d539b740593");
+
+        Dictionary<Guid, FoliageAsset.Owned> owned = FoliageAsset.ScanSources(sources,
+            new HashSet<Guid> { core, mod }, (root, needed) =>
+            {
+                if (root == sources[1].AssetsDir)
+                    throw unauthorized
+                        ? new UnauthorizedAccessException("workshop tree is locked")
+                        : new IOException("workshop tree was removed");
+                return FoliageAsset.ScanForGuids(root, needed);
+            });
+
+        Assert.True(owned.ContainsKey(core));
+        Assert.False(owned.ContainsKey(mod));
+    }
 }

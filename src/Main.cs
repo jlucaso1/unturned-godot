@@ -105,6 +105,16 @@ public partial class Main : Node3D
                     _mapName = arg[6..];
             }
 
+            MapEntry? serverMap = MapCatalog.Find(unturnedPath, _mapName);
+            if (serverMap is not { IsSupported: true })
+            {
+                string reason = serverMap == null ? "was not found" : "uses an unsupported terrain format";
+                Log.PrintErr($"[server] Map '{_mapName}' {reason}; the listener was not started.");
+                GetTree().Quit(1);
+                return;
+            }
+
+            _mapName = serverMap.FolderName;
             (Vector3 serverSpawn, _) = ResolveSpawn(unturnedPath, _mapName, heights: null);
             AddChild(DedicatedServer.Create(unturnedPath, _mapName, serverSpawn, serverPort));
             return;

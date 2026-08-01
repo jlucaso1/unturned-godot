@@ -267,6 +267,18 @@ public class MapCatalogTests
     }
 
     [Fact]
+    public void Find_ReturnsOnlyCataloguedMapsAndPreservesSupportState()
+    {
+        using var dir = new TempDir();
+        WriteMap(dir, Path.Combine("Maps", "PEI"), tiles: new[] { (0, 0) });
+        WriteMap(dir, Path.Combine("Maps", "Legacy"));
+
+        Assert.True(MapCatalog.Find(dir.Path, "pei")!.IsSupported);
+        Assert.False(MapCatalog.Find(dir.Path, "Legacy")!.IsSupported);
+        Assert.Null(MapCatalog.Find(dir.Path, "Ghost"));
+    }
+
+    [Fact]
     public void Scan_UnreadableDirectory_IsSkipped()
     {
         if (OperatingSystem.IsWindows())

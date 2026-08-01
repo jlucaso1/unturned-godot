@@ -71,6 +71,8 @@ public class ContentExtractionTests
         string meshes = Directory.CreateDirectory(Path.Combine(dir.Path, "mesh-cache")).FullName;
         string textures = Directory.CreateDirectory(Path.Combine(dir.Path, "texture-cache")).FullName;
         WriteMesh(meshes, CoreGuid, TextureKey.For(core.CacheTag, 17));
+        ExtractionIndex.RecordMeshOwner(meshes, CoreGuid, core.BundlePath,
+            ExtractionIndex.StampFor(core.BundlePath));
 
         Guid unknown = Guid.Parse("55555555555555555555555555555555");
         ExtractionIndex.Save(Path.Combine(meshes, ExtractionIndex.FileNameFor(core.BundlePath)),

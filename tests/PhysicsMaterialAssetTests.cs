@@ -258,6 +258,32 @@ public class PhysicsMaterialAssetTests
         Assert.NotNull(merged.FindAudioDefPath("CA_SAND", "FootstepWalk"));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ScanDirectories_FailedSourceDoesNotDiscardOtherMaterials(bool unauthorized)
+    {
+        using var game = new TempDir();
+        using var mod = new TempDir();
+        game.Write("Concrete.asset", Asset("CONCRETE", "11111111111111111111111111111111"));
+        mod.Write("Sand.asset", Asset("CA_SAND", "22222222222222222222222222222222"));
+        string broken = Path.Combine(mod.Path, "broken");
+
+        PhysicsMaterialBank merged = PhysicsMaterialBank.ScanDirectories(
+            new[] { game.Path, broken, mod.Path }, root =>
+            {
+                if (root == broken)
+                    throw unauthorized
+                        ? new UnauthorizedAccessException("locked source")
+                        : new IOException("removed source");
+                return PhysicsMaterialBank.ScanDirectory(root);
+            });
+
+        Assert.Equal(2, merged.Count);
+        Assert.NotNull(merged.FindAudioDefPath("CONCRETE", "FootstepWalk"));
+        Assert.NotNull(merged.FindAudioDefPath("CA_SAND", "FootstepWalk"));
+    }
+
     private static string Asset(string unityName, string guid) => $$"""
         Metadata
         {

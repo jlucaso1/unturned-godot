@@ -95,11 +95,11 @@ public static class ContentExtraction
             if ((needed.Count == 0 && !owesLayers) || sources[i].BundlePath.Length == 0)
                 continue;
 
+            long sourceStamp = ExtractionIndex.StampFor(sources[i].BundlePath);
             HashSet<Guid> misses = ExtractionIndex.Load(
-                Path.Combine(cacheDir, ExtractionIndex.FileNameFor(sources[i].BundlePath)),
-                ExtractionIndex.StampFor(sources[i].BundlePath));
+                Path.Combine(cacheDir, ExtractionIndex.FileNameFor(sources[i].BundlePath)), sourceStamp);
             plans.Add(new BundlePlan(sources[i], needed,
-                ExtractionIndex.MissingMeshes(cacheDir, needed, misses),
+                ExtractionIndex.MissingMeshes(cacheDir, needed, misses, sources[i].BundlePath, sourceStamp),
                 TextureDependencyIndex.MissingTextureIds(cacheDir, textureCacheDir,
                     sources[i].CacheTag, needed), foliageAssets));
         }

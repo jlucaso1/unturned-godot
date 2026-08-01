@@ -144,6 +144,31 @@ public class LandscapePhysicsTests
         Assert.Equal("SAND", merged.PhysicsNameOf(Guid.Parse("22222222222222222222222222222222")));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ScanDirectories_FailedSourceDoesNotDiscardOtherLandscapes(bool unauthorized)
+    {
+        using var game = new TempDir();
+        using var mod = new TempDir();
+        game.Write("Grass.asset", Asset("11111111111111111111111111111111", "FOLIAGE_STATIC"));
+        mod.Write("Sand.asset", Asset("22222222222222222222222222222222", "SAND"));
+        string broken = Path.Combine(mod.Path, "broken");
+
+        LandscapePhysics merged = LandscapePhysics.ScanDirectories(
+            new[] { game.Path, broken, mod.Path }, root =>
+            {
+                if (root == broken)
+                    throw unauthorized
+                        ? new UnauthorizedAccessException("locked source")
+                        : new IOException("removed source");
+                return LandscapePhysics.ScanDirectory(root);
+            });
+
+        Assert.Equal("Foliage", merged.PhysicsNameOf(Guid.Parse("11111111111111111111111111111111")));
+        Assert.Equal("SAND", merged.PhysicsNameOf(Guid.Parse("22222222222222222222222222222222")));
+    }
+
     private static string Asset(string guid, string physicsMaterial) => $$"""
         Metadata
         {

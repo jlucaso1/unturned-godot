@@ -67,12 +67,28 @@ public sealed class FoliageAsset
     // Sources are searched in order (the game first) and the first to declare a GUID keeps it, which is
     // what the original does — an asset whose GUID is already registered is rejected.
     public static Dictionary<Guid, Owned> ScanSources(IReadOnlyList<ContentSource> sources, ISet<Guid> needed)
+        => ScanSources(sources, needed, ScanForGuids);
+
+    internal static Dictionary<Guid, Owned> ScanSources(IReadOnlyList<ContentSource> sources,
+        ISet<Guid> needed, Func<string, ISet<Guid>, Dictionary<Guid, FoliageAsset>> scanSource)
     {
         var owned = new Dictionary<Guid, Owned>();
         for (int i = 0; i < sources.Count; i++)
-            foreach (KeyValuePair<Guid, FoliageAsset> entry in ScanForGuids(sources[i].AssetsDir, needed))
+        {
+            Dictionary<Guid, FoliageAsset> scanned;
+            try
+            {
+                scanned = scanSource(sources[i].AssetsDir, needed);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                continue;
+            }
+
+            foreach (KeyValuePair<Guid, FoliageAsset> entry in scanned)
                 if (!owned.ContainsKey(entry.Key))
                     owned[entry.Key] = new Owned(entry.Value, i);
+        }
 
         return owned;
     }
@@ -84,14 +100,21 @@ public sealed class FoliageAsset
         if (!Directory.Exists(root))
             return result;
 
-        foreach (string file in Directory.EnumerateFiles(root, "*.asset", SearchOption.AllDirectories))
+        try
         {
-            DatDictionary parsed;
-            try { parsed = DatParser.Parse(File.ReadAllText(file)); }
-            catch (IOException) { continue; }
+            foreach (string file in Directory.EnumerateFiles(root, "*.asset", SearchOption.AllDirectories))
+            {
+                DatDictionary parsed;
+                try { parsed = DatParser.Parse(File.ReadAllText(file)); }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }
 
-            if (TryParse(parsed, out FoliageAsset asset) && needed.Contains(asset.Guid))
-                result[asset.Guid] = asset;
+                if (TryParse(parsed, out FoliageAsset asset) && needed.Contains(asset.Guid))
+                    result[asset.Guid] = asset;
+            }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // Keep entries already read from this source; callers continue with the next source.
         }
         return result;
     }
