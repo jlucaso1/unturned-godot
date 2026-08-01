@@ -167,6 +167,18 @@ runners. Use it when the work is in `core/` logic that has no data dependency.
 To pull more than PEI, set `UNTURNED_SETUP_MAPS=PEI,Washington` (or `all`). Only PEI is required — it is
 the only map the test suite reads.
 
+## Adding Godot
+
+Set `UNTURNED_SETUP_GODOT=1` and the setup also installs Godot 4.7 .NET, Mesa's software Vulkan driver
+and Xvfb, so the session can run the game and the benchmark tiers on a container with no GPU. It is off
+by default because it adds roughly 350 MB and a minute to a setup that most work in this repo — `core/`
+logic, the parsers, the test suite — never touches.
+
+Turn it on for rendering, streaming or performance work. The [environment cache](#claude-code-on-the-web)
+keeps what it installs, so only the first session in the environment pays for it. See
+[docs/PROFILING.md](PROFILING.md) for which benchmark numbers mean anything without a real GPU: the
+counts survive software rendering exactly, the timings do not.
+
 ## GitHub Actions
 
 Two workflows split along the same line:
@@ -174,7 +186,7 @@ Two workflows split along the same line:
 - [`ci.yml`](../.github/workflows/ci.yml) is hermetic: no game data, on Linux, Windows and macOS. The
   data-backed tests self-skip, so it proves the pure-logic half on all three platforms.
 - [`real-data.yml`](../.github/workflows/real-data.yml) fetches the content and runs the same suite plus
-  the coverage gate against it. The content is cached on the depot manifest IDs, via
+  the coverage gate against it, and gates the structural benchmark metrics in a second job. The content is cached on the depot manifest IDs, via
   `fetch-game-data.sh --manifest-key`, so a run re-downloads only when Valve ships an update. It also
   asserts the content really is on disk before testing, since a silently missing download would leave the
   job green while proving nothing.

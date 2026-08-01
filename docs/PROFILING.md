@@ -66,6 +66,47 @@ the one-time load's transient heap is compacted back to the OS: a quick steady-s
 `UG_RECLAIM_PASSES=1|2` reproduces the measured one/two-compaction A/B; one pass is the default because
 California2 returned at least as much RSS in less time in repeated runs.
 
+## Running without a GPU
+
+On a machine with no GPU at all — an agent sandbox, a CI runner — `./scripts/install-godot.sh` lays down
+Godot 4.7 .NET plus Mesa's lavapipe, which answers as a real Vulkan 1.4 device on the CPU, and Xvfb for
+the window the GPU tiers want. `./scripts/run-benchmark.sh` then runs any tier without you assembling
+the incantation:
+
+```sh
+./scripts/install-godot.sh              # Godot + software Vulkan + Xvfb
+./scripts/run-benchmark.sh structural   # Tier 1 — needs neither, --headless renders nothing
+./scripts/run-benchmark.sh gpu          # Tier 2 — lavapipe under Xvfb
+./scripts/run-benchmark.sh runtime      # Tier 3 — same
+```
+
+**What survives software rendering, measured rather than assumed.** Two identical runs of each tier on a
+GPU-less 4-vCPU container:
+
+| Tier | Metrics | Reproduced exactly | Drifted |
+|---|---|---|---|
+| 1 (structural) | 16 | 13 | the 3 `*.ms` timings, ±18% |
+| 2 (GPU) | 67 | 49 | the 18 `gpu.frameMs.*` / `cpu.processMonitorMs.*`, ±2.5% |
+
+Every count reproduced bit-for-bit: draw calls, primitives and render objects per pose, VRAM and buffer
+and texture bytes, pipeline compilations, and even the foliage streaming counters. Only the clock moved.
+That is what `scripts/check-structural-metrics.sh` gates in CI, and it is why it gates nothing timed.
+
+**What the numbers do not mean.** A lavapipe `gpu.frameMs` is a CPU rasterizing, so it neither predicts a
+real GPU's frame time nor ranks changes the way a GPU would — shading, bandwidth and overdraw all price
+differently there. Its VRAM figures are system memory. And comparing against a baseline recorded on real
+hardware is worse than useless: `gpu.primitives.median` reads 176k here against 1,237k on an RX 6600 for
+the same pose, because at 400+ ms a frame the foliage streamer never settles (`foliage.settled: 0`) and
+most of the map's grass is simply never submitted. The harness notices the mismatch and says so:
+
+```
+WARNING: environment differs from baseline (baseline vulkan/AMD Radeon RX 6600 (RADV NAVI23)
+         vs current vulkan/llvmpipe (LLVM 20.1.2, 256 bits)) — deltas may be noise.
+```
+
+Keep a separate baseline per environment, and read the timed half of any GPU-less run as scaffolding
+rather than as a measurement.
+
 ## Running without a window (Linux)
 
 - **No window** (Wayland/X): wrap every GPU or interactive benchmark in a headless nested compositor so

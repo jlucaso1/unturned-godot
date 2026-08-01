@@ -81,3 +81,61 @@ jobs:
         env:
           UNTURNED_PATH: ${{ github.workspace }}/build/game-data
         run: ./scripts/check-coverage.sh --no-build --no-restore
+
+  structural:
+    # The tests prove the parsers read the right bytes; nothing proves the world they build keeps its
+    # shape. This runs the structural benchmark tier and gates its counts — meshes and materials
+    # surviving deduplication, scene nodes, uploaded geometry — so a batching, culling or dedup change
+    # that quietly alters the render graph shows up as a diff instead of as a surprise on someone's
+    # frame time. Timings are deliberately not gated: see scripts/check-structural-metrics.sh.
+    name: structural metrics
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      # Both tools are pinned by version and checksum in their scripts, so the scripts' hashes are an
+      # exact key for what lands in build/tools.
+      - name: Cache the downloader and Godot
+        uses: actions/cache@v4
+        with:
+          path: build/tools
+          key: tools-${{ hashFiles('scripts/fetch-game-data.sh', 'scripts/install-godot.sh') }}
+
+      - name: Resolve the content cache key
+        id: content-key
+        run: echo "key=$(./scripts/fetch-game-data.sh --manifest-key)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the game content
+        id: content-cache
+        uses: actions/cache@v4
+        with:
+          path: build/game-data
+          key: ${{ steps.content-key.outputs.key }}
+
+      - name: Fetch the game content
+        if: steps.content-cache.outputs.cache-hit != 'true'
+        run: ./scripts/fetch-game-data.sh
+
+      # The first run walks the masterbundle to extract every mesh and texture the map needs, which is
+      # the better part of a minute. What it writes is a pure function of the bundle, so it keys on the
+      # same manifest IDs as the content itself.
+      - name: Restore the extracted asset cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/godot/app_userdata/unturned-godot
+          key: godot-userdata-${{ steps.content-key.outputs.key }}
+
+      # This tier renders nothing, so it needs no GPU and no display: --headless is enough, and the
+      # installer's software-Vulkan half goes unused here.
+      - name: Install Godot
+        run: ./scripts/install-godot.sh
+
+      - name: Check the structural metrics
+        env:
+          UNTURNED_PATH: ${{ github.workspace }}/build/game-data
+        run: ./scripts/check-structural-metrics.sh
