@@ -136,6 +136,9 @@ public static class RuntimeBenchmark
         {
             ["interactive.loadMs"] = 0.10,
             ["runtime.rssBytes"] = 0.05,
+            // Includes dead objects awaiting a nondeterministically timed collection. The forced-GC
+            // managedLiveBytes metric remains at the strict default threshold.
+            ["runtime.managedBytes"] = 0.15,
             ["runtime.videoMemoryBytes"] = 0.05,
         },
     };

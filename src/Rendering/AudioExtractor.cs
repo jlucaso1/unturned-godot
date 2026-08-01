@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using Godot;
+using UnturnedGodot.Data;
 using UnturnedGodot.Unity;
 
 namespace UnturnedGodot;
@@ -202,8 +203,10 @@ public static class AudioExtractor
                     byte[]? ogg = RebuildOgg(resource, offset, size, name);
                     if (ogg == null)
                         continue;
-                    string fileName = name + ".ogg";
-                    File.WriteAllBytes(Path.Combine(defDir, fileName), ogg);
+                    string fileName = SafeCachePath.FileName(name, $"clip_{clipId:x}", ".ogg");
+                    if (!SafeCachePath.TryResolveChild(defDir, fileName, out string clipOutput))
+                        continue;
+                    File.WriteAllBytes(clipOutput, ogg);
                     clipFiles.Add(fileName);
                 }
             }
@@ -247,8 +250,10 @@ public static class AudioExtractor
                 byte[]? ogg = RebuildOgg(resource, offset, size, name);
                 if (ogg == null)
                     continue;
-                string fileName = name + ".ogg";
-                File.WriteAllBytes(Path.Combine(groupDir, fileName), ogg);
+                string fileName = SafeCachePath.FileName(name, $"clip_{clipId:x}", ".ogg");
+                if (!SafeCachePath.TryResolveChild(groupDir, fileName, out string clipOutput))
+                    continue;
+                File.WriteAllBytes(clipOutput, ogg);
                 clipFiles.Add(fileName);
             }
             if (clipFiles.Count == 0)

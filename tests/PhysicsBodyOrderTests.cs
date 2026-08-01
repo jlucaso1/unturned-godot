@@ -440,6 +440,26 @@ public class PhysicsBodyOrderTests
         string source = File.ReadAllText(path);
         Assert.Contains("TextureKey.Discriminate(prefix, assetPath)", source);
         Assert.DoesNotContain("bundleTag + \"_\" + DefNameOf(assetPath)", source);
+        Assert.Equal(2, CountOccurrences(source, "SafeCachePath.FileName(name, $\"clip_{clipId:x}\", \".ogg\")"));
+        Assert.Equal(2, CountOccurrences(source, "SafeCachePath.TryResolveChild"));
+    }
+
+    [Fact]
+    public void WholeBundleAudioExtractionRunsOnePassAtATime()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Main.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        int start = source.IndexOf("_pendingAudioExtraction = () =>", StringComparison.Ordinal);
+        int end = source.IndexOf("Log.Print($\"[audio] footsteps ready", start, StringComparison.Ordinal);
+        Assert.True(start >= 0 && end > start);
+        string block = source.Substring(start, end - start);
+        int task = block.IndexOf("AppShutdown.Track(System.Threading.Tasks.Task.Run", StringComparison.Ordinal);
+        int loop = block.IndexOf("foreach ((string bundle", StringComparison.Ordinal);
+        Assert.True(task >= 0 && loop > task);
+        Assert.Equal(1, CountOccurrences(block, "Task.Run"));
+        Assert.Contains("AudioExtractor.Extract(bundle, tag, paths, audioCacheDir, groups);", block);
     }
 
     [Fact]
@@ -456,6 +476,25 @@ public class PhysicsBodyOrderTests
         Assert.Contains("[\".totalMs\"] = 0.15", source);
         Assert.Contains("[\".meanMs\"] = 0.15", source);
         Assert.Contains("[\".maxMs\"] = 0.15", source);
+        Assert.Contains("[\"runtime.managedBytes\"] = 0.15", source);
+        Assert.DoesNotContain("[\"runtime.managedLiveBytes\"]", source[source.IndexOf("private static BaselineDiffOptions DiffOptions", StringComparison.Ordinal)..]);
+    }
+
+    [Fact]
+    public void ThirdPersonCollisionRayRunsOnlyFromPhysicsCameraUpdate()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Player", "PlayerController.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        int apply = source.IndexOf("private void ApplyPerspective()", StringComparison.Ordinal);
+        int place = source.IndexOf("private void PlaceThirdPersonCamera()", apply, StringComparison.Ordinal);
+        Assert.True(apply >= 0 && place > apply);
+        Assert.DoesNotContain("PlaceThirdPersonCamera();", source.Substring(apply, place - apply));
+
+        int update = source.IndexOf("private void UpdateCamera(float dt)", StringComparison.Ordinal);
+        Assert.True(update >= 0 && update < apply);
+        Assert.Contains("PlaceThirdPersonCamera();", source.Substring(update, apply - update));
     }
 
     [Fact]

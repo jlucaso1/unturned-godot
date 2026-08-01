@@ -702,22 +702,24 @@ public partial class Main : Node3D
         // Deferred until the world streamer finishes: a cold load already runs one full 1.4 GB bundle
         // decode, and racing a second one for audio doubles peak CPU/memory and can stall weak machines.
         // Each bundle's definitions are cached under that bundle's tag, so two bundles naming one the same
-        // thing stay apart — and the parallel passes never write each other's directory. The zombie clip
-        // groups only exist in the game's own bundle, so they ride along with its pass.
+        // thing stay apart. The zombie clip groups only exist in the game's own bundle, so they ride along
+        // with its pass. Whole-bundle passes remain serial: each retains its compressed file plus decoded
+        // audio nodes, and overlapping core/workshop passes can otherwise create a multi-gigabyte peak.
         string TagOf(string bundle) => BundleTagOf(sources, bundle)
             ?? UnturnedGodot.Unity.TextureKey.TagFor(System.IO.Path.GetFileNameWithoutExtension(bundle));
 
-        _pendingAudioExtraction = () =>
+        _pendingAudioExtraction = () => AppShutdown.Track(System.Threading.Tasks.Task.Run(() =>
         {
             foreach ((string bundle, System.Collections.Generic.HashSet<string> paths) in defPathsByBundle)
             {
+                if (AppShutdown.IsShuttingDown)
+                    break;
                 System.Collections.Generic.List<AudioExtractor.RawClipGroup>? groups =
                     bundle == bundlePath ? clipGroups : null;
                 string tag = TagOf(bundle);
-                AppShutdown.Track(System.Threading.Tasks.Task.Run(
-                    () => AudioExtractor.Extract(bundle, tag, paths, audioCacheDir, groups)));
+                AudioExtractor.Extract(bundle, tag, paths, audioCacheDir, groups);
             }
-        };
+        }));
 
         Log.Print($"[audio] footsteps ready: {bank.Count} physics materials, {landscape.Count} landscape " +
             $"materials, {splat.TileCount} splat tiles");

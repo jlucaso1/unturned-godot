@@ -117,6 +117,22 @@ public class BakedNavGraphTests
     }
 
     [Fact]
+    public void TargetInExpandedBoundsSnapsToTheNearestAuthoredFace()
+    {
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { Strip(4) });
+        var from = new Vector3(0.2f, 0, 0.5f);
+        var target = new Vector3(36f, 0, 0.5f); // outside forcedBounds, inside its 64 m Bounds.dat expansion
+        var path = new List<Vector3>();
+
+        Assert.True(graph.TryPath(from, target, path));
+        Assert.Equal(from, path[0]);
+        Assert.NotEqual(target, path[^1]);
+        Assert.InRange(path[^1].X, 3.9f, 4f);
+
+        Assert.False(graph.TryPath(from, new Vector3(70f, 0, 0.5f), new List<Vector3>()));
+    }
+
+    [Fact]
     public void SameTriangleStillStartsWhereItWasAsked()
     {
         BakedNavGraph graph = BakedNavGraph.Build(new[] { Strip(1) });

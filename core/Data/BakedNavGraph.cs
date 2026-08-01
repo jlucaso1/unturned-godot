@@ -16,6 +16,7 @@ public sealed class BakedNavGraph
 {
     private const uint CacheMagic = 0x43424755; // UGBC
     private const int CacheVersion = 1;
+    private const float EndpointSnapMargin = 64f; // Bounds.dat expands authored navigation by this distance
     private readonly List<FlagGraph> _flags;
 
     private BakedNavGraph(List<FlagGraph> flags) => _flags = flags;
@@ -35,14 +36,28 @@ public sealed class BakedNavGraph
 
     public bool TryPath(Vector3 from, Vector3 to, List<Vector3> path)
     {
-        // Navigation flags are separate authored graphs. Prefer one whose bounds contain both endpoints;
-        // overlapping flags are resolved by whichever produces the shorter endpoint snap.
+        // Navigation flags are separate authored graphs. The start must belong to the graph, but a target
+        // may stand in Bounds.dat's 64 m expansion around it and snap to the nearest reachable face. If the
+        // target is inside another authored flag, do not silently route it on this disconnected graph.
         FlagGraph? best = null;
         int bestFrom = -1, bestTo = -1;
+        Vector3 bestDestination = to;
         float bestScore = float.MaxValue;
+        bool destinationInsideAny = false;
+        foreach (FlagGraph flag in _flags)
+            if (flag.Source.ContainsXZ(to))
+            {
+                destinationInsideAny = true;
+                break;
+            }
+
         foreach (FlagGraph flag in _flags)
         {
-            if (!flag.Source.ContainsXZ(from) || !flag.Source.ContainsXZ(to))
+            if (!flag.Source.ContainsXZ(from))
+                continue;
+            bool destinationInside = flag.Source.ContainsXZ(to);
+            if (!destinationInside
+                && (destinationInsideAny || !ContainsExpandedXZ(flag.Source, to, EndpointSnapMargin)))
                 continue;
             int a = flag.ClosestTriangle(from, out float fromScore);
             int b = flag.ClosestTriangle(to, out float toScore);
@@ -51,11 +66,16 @@ public sealed class BakedNavGraph
                 best = flag;
                 bestFrom = a;
                 bestTo = b;
+                bestDestination = destinationInside ? to : flag.ClosestPointXZ(b, to);
                 bestScore = fromScore + toScore;
             }
         }
-        return best != null && best.FindPath(bestFrom, bestTo, from, to, path);
+        return best != null && best.FindPath(bestFrom, bestTo, from, bestDestination, path);
     }
+
+    private static bool ContainsExpandedXZ(NavFlag flag, Vector3 point, float margin) =>
+        Mathf.Abs(point.X - flag.Center.X) <= (flag.Size.X * 0.5f) + margin
+        && Mathf.Abs(point.Z - flag.Center.Z) <= (flag.Size.Z * 0.5f) + margin;
 
     // Progressive collision reconciliation disables faces monotonically. Keeping the original CSR edges
     // is safe: endpoint lookup and A* both reject disabled faces, while edges between surviving faces are
@@ -510,6 +530,37 @@ public sealed class BakedNavGraph
             }
 
             return closest;
+        }
+
+        public Vector3 ClosestPointXZ(int triangle, Vector3 point)
+        {
+            Vector3 a = Source.Vertices[Source.Triangles[triangle * 3]];
+            Vector3 b = Source.Vertices[Source.Triangles[(triangle * 3) + 1]];
+            Vector3 c = Source.Vertices[Source.Triangles[(triangle * 3) + 2]];
+            Vector3 best = a;
+            float score = float.MaxValue;
+            ConsiderEdge(a, b);
+            ConsiderEdge(b, c);
+            ConsiderEdge(c, a);
+            return best;
+
+            void ConsiderEdge(Vector3 start, Vector3 end)
+            {
+                float dx = end.X - start.X, dz = end.Z - start.Z;
+                float lengthSquared = (dx * dx) + (dz * dz);
+                if (lengthSquared <= 1e-8f)
+                    return;
+                float t = Math.Clamp((((point.X - start.X) * dx) + ((point.Z - start.Z) * dz))
+                    / lengthSquared, 0f, 1f);
+                Vector3 candidate = start.Lerp(end, t);
+                float x = point.X - candidate.X, z = point.Z - candidate.Z;
+                float candidateScore = (x * x) + (z * z);
+                if (candidateScore < score)
+                {
+                    score = candidateScore;
+                    best = candidate;
+                }
+            }
         }
 
         public int Disable(IReadOnlySet<int> triangles)

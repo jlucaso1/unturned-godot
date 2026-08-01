@@ -267,9 +267,10 @@ public partial class PlayerController : CharacterBody3D
     private void ApplyPerspective()
     {
         _model.Visible = _thirdPerson; // hide own body in first person
-        if (_thirdPerson)
-            PlaceThirdPersonCamera();
-        else
+        // The third-person collision ray belongs to UpdateCamera in _PhysicsProcess. _Ready and _Input
+        // both call this method outside a physics notification, where separate-threaded physics can have
+        // its direct space locked. The next physics tick places a newly enabled third-person camera.
+        if (!_thirdPerson)
             _camera.Position = Vector3.Zero;
     }
 
