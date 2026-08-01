@@ -25,6 +25,11 @@ case "$tier" in
     *) sed -n '2,18p' "${BASH_SOURCE[0]}"; exit 2 ;;
 esac
 
+# Pin the map before Godot starts. Main._Ready only reads MAP when it is set, and otherwise falls back
+# to whatever the last interactive session left in user://menu.cfg — so leaving it unset would silently
+# benchmark whichever map someone last picked in the menu, and write that map's report.
+export MAP="${MAP:-PEI}"
+
 godot="${GODOT:-$("$repo_dir/scripts/install-godot.sh" --print-path)}"
 if [[ ! -x "$godot" ]]; then
     echo "No Godot at $godot. Run ./scripts/install-godot.sh, or set GODOT." >&2
@@ -32,8 +37,11 @@ if [[ ! -x "$godot" ]]; then
 fi
 
 content="${UNTURNED_PATH:-$("$repo_dir/scripts/fetch-game-data.sh" --print-dir)}"
-if ! "$repo_dir/scripts/fetch-game-data.sh" --verify --dir "$content" > /dev/null 2>&1; then
-    echo "No game content at $content. Run ./scripts/fetch-game-data.sh, or set UNTURNED_PATH." >&2
+# Verify the map this run will actually load, not the fetcher's default: benchmarking Washington against
+# a PEI-only tree would otherwise pass here and fail inside Godot, and a Washington-only tree would be
+# rejected for missing a map nobody asked for.
+if ! "$repo_dir/scripts/fetch-game-data.sh" --verify --maps "$MAP" --dir "$content" > /dev/null 2>&1; then
+    echo "No $MAP content at $content. Run ./scripts/fetch-game-data.sh --maps $MAP, or set UNTURNED_PATH." >&2
     exit 1
 fi
 export UNTURNED_PATH="$content"

@@ -32,6 +32,14 @@ coverage/
 coverage.opencover.xml
 coverage.json
 
+# Benchmark baselines are per-machine: they hold wall-clock timings measured on whoever ran them, and
+# the only sound way to read one is "me, on this machine, before vs after my change". Shared across
+# machines they are noise — a 4-vCPU container reports +9760% on build.total.ms against a desktop's
+# numbers — and a committed one silently rots as the code moves on. Record your own with
+# `--write-baseline`. The machine-independent counts live in bench/structural/ instead, and those ARE
+# committed: see scripts/check-structural-metrics.sh.
+/bench/baseline/
+
 # Profiling traces (dotnet-trace, heaptrack, valgrind, perf, AMD RGP)
 *.nettrace
 *.speedscope.json

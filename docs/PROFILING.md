@@ -5,7 +5,8 @@ themselves work anywhere Godot runs.
 
 ## The three benchmark tiers
 
-All three print a JSON report and diff it against the previous run (baselines live in `bench/baseline/`):
+All three print a JSON report and diff it against your own previous run (baselines live in
+`bench/baseline/`, which is git-ignored — see [Baselines are yours](#baselines-are-yours)):
 
 ```sh
 "$GODOT" --headless -- --benchmark   # Tier 1: build times, mesh/material counts, static memory
@@ -29,6 +30,24 @@ therefore originate from a physics notification; code started by an idle-frame s
 `MoveAndSlide`, step-up, networking and zombie-view costs independently.
 
 Add `--write-baseline` to record the current numbers as the new baseline.
+
+### Baselines are yours
+
+`bench/baseline/` is git-ignored, so a fresh clone has none and the first run of each tier says so:
+
+```
+[benchmark] No baseline at bench/baseline/PEI.json — run once with `--write-baseline` to capture one.
+```
+
+That is deliberate. A baseline holds wall-clock timings measured on one machine, and the only sound way
+to read one is *me, on this machine, before and after my change*. Shared across machines it is noise: a
+4-vCPU container reports `+9760%` on `build.total.ms` against a desktop's numbers, which says nothing
+about the code. A committed baseline also rots — the one this repo used to carry drifted to `nodes: 1824`
+against a tree that builds 40, because nobody re-recorded it for 46 commits.
+
+The counts, which *are* machine-independent, live in `bench/structural/` instead and are committed and
+gated in CI. `./scripts/check-structural-metrics.sh` diffs them and `--write` re-records when a change is
+meant; see [the gate](#running-without-a-gpu) for what it does and does not cover.
 
 ## Parsers in isolation
 

@@ -39,13 +39,16 @@ if [[ ! -f "$report" ]]; then
 fi
 
 python3 - "$report" "$reference" "$write" << 'PY'
-import json, os, sys
+import json, os, re, sys
 
 report_path, reference_path, write = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
 
-# Everything that is a stopwatch reading rather than a count.
+# Everything that is a stopwatch reading rather than a count. The two tiers spell milliseconds
+# differently -- Tier 1 has `build.total.ms`, Tier 2 has `gpu.frameMs.median` and
+# `cpu.processMonitorMs.median` -- so matching only the dotted suffix would quietly let every GPU-tier
+# timing into the gate the moment anyone points this at Tier 2.
 def is_timing(name):
-    return name.endswith(".ms") or ".ms." in name
+    return re.search(r"(^|\.)[a-zA-Z]*[Mm]s(\.|$)", name) is not None
 
 metrics = json.load(open(report_path))["metrics"]
 structural = {k: v for k, v in sorted(metrics.items()) if not is_timing(k)}

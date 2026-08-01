@@ -122,13 +122,16 @@ jobs:
         run: ./scripts/fetch-game-data.sh
 
       # The first run walks the masterbundle to extract every mesh and texture the map needs, which is
-      # the better part of a minute. What it writes is a pure function of the bundle, so it keys on the
-      # same manifest IDs as the content itself.
+      # the better part of a minute. What it writes is a function of the bundle *and* of the code that
+      # reads it: the on-disk caches validate themselves against a format magic and the bundle's stamp,
+      # neither of which moves when extraction logic changes, so keying on the manifest IDs alone would
+      # let a stale tree satisfy the very gate that is supposed to notice. core/ is the coarse but safe
+      # choice — over-invalidating costs a minute, under-invalidating costs a false green.
       - name: Restore the extracted asset cache
         uses: actions/cache@v4
         with:
           path: ~/.local/share/godot/app_userdata/unturned-godot
-          key: godot-userdata-${{ steps.content-key.outputs.key }}
+          key: godot-userdata-${{ steps.content-key.outputs.key }}-${{ hashFiles('core/**/*.cs') }}
 
       # This tier renders nothing, so it needs no GPU and no display: --headless is enough, and the
       # installer's software-Vulkan half goes unused here.
