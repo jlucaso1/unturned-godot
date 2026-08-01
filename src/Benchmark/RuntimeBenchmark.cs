@@ -59,6 +59,9 @@ public static class RuntimeBenchmark
 
             double medianFrame = MetricStats.Median(frameMs);
             RuntimeCounters.Disable();
+            // Keep settling outside the timed sample, then snapshot only a stable residency state. A cold
+            // disk or short benchmark can otherwise make counts depend on scheduler speed.
+            bool foliageSettled = await FoliageBenchmarkSettling.WaitAsync(context, tree);
             var report = new BenchmarkReport
             {
                 Timestamp = BenchmarkRunner.Timestamp(),
@@ -94,7 +97,7 @@ public static class RuntimeBenchmark
             AddFrameBucket(report.Metrics, "withPhysics", withPhysicsFrameMs);
             AddFrameBucket(report.Metrics, "withoutPhysics", withoutPhysicsFrameMs);
             AddCounterMetrics(report.Metrics);
-            AddFoliageMetrics(tree, report.Metrics);
+            AddFoliageMetrics(tree, report.Metrics, foliageSettled);
             BenchmarkRunner.Finish(report, $"{mapName}-runtime", DiffOptions(),
                 "timings are advisory; counts are deterministic for the same spawn view");
         }
@@ -120,6 +123,7 @@ public static class RuntimeBenchmark
         {
             "runtime.fps.fromMedian",
             "runtime.samples",
+            "runtime.foliage.settled",
         },
         ThresholdPrefixOverrides = new Dictionary<string, double>
         {
@@ -171,17 +175,22 @@ public static class RuntimeBenchmark
         }
     }
 
-    private static void AddFoliageMetrics(SceneTree tree, SortedDictionary<string, double> metrics)
+    private static void AddFoliageMetrics(SceneTree tree, SortedDictionary<string, double> metrics,
+        bool includeResidencySnapshot)
     {
         foreach (Node node in tree.GetNodesInGroup("foliage_streaming"))
             if (node is FoliageStreamingRenderer foliage)
             {
                 metrics["runtime.foliage.indexedChunks"] = foliage.IndexedChunks;
                 metrics["runtime.foliage.indexedInstances"] = foliage.IndexedInstances;
-                metrics["runtime.foliage.residentChunks"] = foliage.ResidentChunks;
-                metrics["runtime.foliage.residentInstances"] = foliage.ResidentInstances;
-                metrics["runtime.foliage.residentBufferBytes"] = foliage.ResidentBufferBytes;
-                metrics["runtime.foliage.pendingChunks"] = foliage.PendingChunks;
+                metrics["runtime.foliage.settled"] = includeResidencySnapshot && foliage.IsSettled ? 1 : 0;
+                if (includeResidencySnapshot && foliage.IsSettled)
+                {
+                    metrics["runtime.foliage.residentChunks"] = foliage.ResidentChunks;
+                    metrics["runtime.foliage.residentInstances"] = foliage.ResidentInstances;
+                    metrics["runtime.foliage.residentBufferBytes"] = foliage.ResidentBufferBytes;
+                    metrics["runtime.foliage.pendingChunks"] = foliage.PendingChunks;
+                }
                 metrics["runtime.foliage.maxQueued"] = foliage.MaximumQueued;
                 metrics["runtime.foliage.maxDecodedBytes"] = foliage.MaximumDecodedBytes;
                 metrics["runtime.foliage.emergencyVisibleLoads"] = foliage.EmergencyVisibleLoads;

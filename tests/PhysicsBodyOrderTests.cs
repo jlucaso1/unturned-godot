@@ -194,8 +194,8 @@ public class PhysicsBodyOrderTests
         if (FindRepositoryFile(Path.Combine("src", "Benchmark", "GpuBenchmark.cs")) is { } gpuPath)
         {
             string gpu = File.ReadAllText(gpuPath);
-            Assert.Contains("WaitForFoliageSettledAsync", gpu);
-            Assert.Contains("if (foliage.IsSettled)", gpu);
+            Assert.Contains("FoliageBenchmarkSettling.WaitAsync", gpu);
+            Assert.Contains("if (settled)", gpu);
         }
     }
 
@@ -745,6 +745,101 @@ public class PhysicsBodyOrderTests
         Assert.Contains("[\"gpu.frameMs.median\"] = 0.10", source);
         Assert.Contains("[\"cpu.processMonitorMs.median\"] = 0.10", source);
         Assert.DoesNotContain("cpu.processMonitorMs.median.ground", source);
+    }
+
+    [Fact]
+    public void GpuBenchmarkSnapshotsSettledFoliageBeforeTheOptionalScreenshotPose()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Benchmark", "GpuBenchmark.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        int settle = source.IndexOf("await FoliageBenchmarkSettling.WaitAsync", StringComparison.Ordinal);
+        int collect = source.IndexOf("SceneMetricsResult sm", settle, StringComparison.Ordinal);
+        int shot = source.IndexOf("string shotPath", collect, StringComparison.Ordinal);
+        Assert.True(settle >= 0 && collect > settle && shot > collect);
+    }
+
+    [Fact]
+    public void RuntimeBenchmarkSettlesBeforeSnapshottingFoliageResidency()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Benchmark", "RuntimeBenchmark.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        int disable = source.IndexOf("RuntimeCounters.Disable();", StringComparison.Ordinal);
+        int settle = source.IndexOf("await FoliageBenchmarkSettling.WaitAsync", disable,
+            StringComparison.Ordinal);
+        int report = source.IndexOf("var report = new BenchmarkReport", settle, StringComparison.Ordinal);
+        int snapshot = source.IndexOf("AddFoliageMetrics(tree, report.Metrics, foliageSettled)", report,
+            StringComparison.Ordinal);
+        Assert.True(disable >= 0 && settle > disable && report > settle && snapshot > report);
+        Assert.Contains("if (includeResidencySnapshot && foliage.IsSettled)", source);
+    }
+
+    [Fact]
+    public void FetchGameDataRequiresEveryExpectedHeightmapAndRecordsAllMapCompletion()
+    {
+        if (FindRepositoryFile(Path.Combine("scripts", "fetch-game-data.sh")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("map_tile_bounds", source);
+        Assert.Contains("PEI|Washington|Yukon", source);
+        Assert.Contains("expected_count", source);
+        Assert.Contains("write_completion_marker", source);
+        Assert.Contains("verify_content \"$dest\" 0", source);
+        Assert.Contains("all_maps \"$root\"", source);
+        Assert.Contains("minimum_unknown_tiles=\"${3:-1}\"", source);
+        Assert.DoesNotContain("expected_all_maps", source);
+        Assert.DoesNotContain("any_map_is_whole", source);
+    }
+
+    [Fact]
+    public void FetchGameDataManifestKeyUsesPortableDirectoryIteration()
+    {
+        if (FindRepositoryFile(Path.Combine("scripts", "fetch-game-data.sh")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("for manifest in \"$key_dir\"/manifest_*.txt", source);
+        Assert.DoesNotContain("find \"$key_dir\" -maxdepth", source);
+    }
+
+    [Fact]
+    public void CloudSetupQuarantinesAnIncompleteConfiguredInstall()
+    {
+        if (FindRepositoryFile(Path.Combine("scripts", "setup-cloud-env.sh")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("quarantine_incomplete_content", source);
+        Assert.Contains("mktemp -d \"${content_dir}.incomplete.XXXXXX\"", source);
+        Assert.Contains("mv -f -- \"$content_dir\" \"$quarantine/\"", source);
+        Assert.Contains("if ! quarantine_incomplete_content", source);
+        Assert.DoesNotContain("quarantine_incomplete_content || true", source);
+    }
+
+    [Fact]
+    public void RealDataCacheKeyIncludesTheContentReceiptSchema()
+    {
+        if (FindRepositoryFile(Path.Combine(".github", "workflows", "real-data.yml")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}", source);
+    }
+
+    [Fact]
+    public void RuntimeBenchmarkTreatsSettledFoliageAsHigherIsBetter()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Benchmark", "RuntimeBenchmark.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        int higher = source.IndexOf("HigherIsBetter", StringComparison.Ordinal);
+        int settled = source.IndexOf("\"runtime.foliage.settled\"", higher, StringComparison.Ordinal);
+        Assert.True(higher >= 0 && settled > higher);
     }
 
     [Fact]
