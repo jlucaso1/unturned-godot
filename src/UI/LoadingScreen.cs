@@ -8,8 +8,13 @@ namespace UnturnedGodot;
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class LoadingScreen : CanvasLayer
 {
+    // The map being loaded, shown in the title. Set before the screen enters the tree.
+    public string MapName { get; init; } = "";
+
     private Control _root = null!;
+    private VBoxContainer _column = null!;
     private Label _status = null!;
+    private bool _failed;
     private ColorRect _sweep = null!;
     private float _sweepPhase;
 
@@ -47,11 +52,16 @@ public partial class LoadingScreen : CanvasLayer
         var center = new CenterContainer { AnchorRight = 1, AnchorBottom = 1 };
         _root.AddChild(center);
 
-        var column = new VBoxContainer();
-        column.AddThemeConstantOverride("separation", 14);
-        center.AddChild(column);
+        _column = new VBoxContainer();
+        _column.AddThemeConstantOverride("separation", 14);
+        center.AddChild(_column);
+        VBoxContainer column = _column;
 
-        var title = new Label { Text = "Loading PEI", HorizontalAlignment = HorizontalAlignment.Center };
+        var title = new Label
+        {
+            Text = string.IsNullOrEmpty(MapName) ? "Loading" : $"Loading {MapName}",
+            HorizontalAlignment = HorizontalAlignment.Center,
+        };
         title.AddThemeFontSizeOverride("font_size", 26);
         title.AddThemeColorOverride("font_shadow_color", new Color(0, 0, 0, 0.5f));
         title.AddThemeConstantOverride("shadow_offset_y", 2);
@@ -87,6 +97,9 @@ public partial class LoadingScreen : CanvasLayer
 
     public override void _Process(double delta)
     {
+        if (_failed)
+            return;
+
         _sweepPhase = Mathf.PosMod(_sweepPhase + (float)delta * 1.4f, 1.3f);
         _sweep.Position = new Vector2((_sweepPhase - 0.15f) * 340f / 1.0f, 0);
 
@@ -99,6 +112,19 @@ public partial class LoadingScreen : CanvasLayer
     }
 
     public void SetStatus(string text) => _status.Text = text;
+
+    // The load died: say so and offer the way back instead of sweeping the bar forever. Some maps use
+    // formats this port does not read yet, and that has to be visible rather than look like a hang.
+    public void Fail(string message, System.Action onBack)
+    {
+        _failed = true;
+        _sweep.Visible = false;
+        _status.Text = $"Could not load this map.\n{message}";
+
+        Button back = UnturnedUi.MakeBar("←", "Back to maps", UnturnedUi.Brown, onBack);
+        back.CustomMinimumSize = new Vector2(320, 40);
+        _column.AddChild(back);
+    }
 
     // Fades out and frees itself; the world is already visible underneath.
     public void Finish()

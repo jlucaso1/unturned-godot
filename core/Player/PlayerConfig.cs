@@ -50,6 +50,15 @@ public static class PlayerConfig
 
     public const float MaxWalkableSlopeDegrees = 59f; // default (LevelInfo Max_Walkable_Slope -1 -> 59)
 
+    // Unity's CharacterController silently lifts the capsule over obstacles up to m_StepOffset, and
+    // Godot's CharacterBody3D has no equivalent — MoveAndSlide just stops at the ledge. Read straight
+    // out of the masterbundle: every CharacterController in the game data carries m_StepOffset 0.5,
+    // m_SkinWidth 0.1, m_SlopeLimit 75 (and PlayerMovement.SKIN_WIDTH is the same 0.1). Without this the
+    // player is stopped by kerbs, stair treads and window sills the game walks straight over — a 0.83 m
+    // jump (JUMP 7 against gravity 29.43) clears a sill only WITH the step-up on top of it.
+    public const float StepOffset = 0.5f;
+    public const float SkinWidth = 0.1f;             // CharacterController m_SkinWidth
+
     public static float SpeedFor(EPlayerStance stance) => stance switch
     {
         EPlayerStance.Sprint => SpeedSprint,

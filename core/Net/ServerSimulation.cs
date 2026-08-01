@@ -114,6 +114,8 @@ public sealed class ServerSimulation
         // after already moving would otherwise be rejected forever, frozen at spawn for everyone else).
         public bool HasVerifiedPosition;
         public uint LastAcceptedTick;
+        public bool HasReceivedPositionFrame;
+        public uint LastReceivedPositionFrame;
     }
 
     private readonly IMoveSolver _solver;
@@ -149,8 +151,21 @@ public sealed class ServerSimulation
 
     public void QueueInput(byte id, in InputCommand input)
     {
-        if (_players.TryGetValue(id, out Entry? entry))
-            entry.Inputs.Enqueue(input);
+        if (!_players.TryGetValue(id, out Entry? entry))
+            return;
+
+        // UDP may duplicate or reorder input datagrams. A trusted-position command older than one already
+        // queued/processed must never rewind the player. Signed subtraction is the standard wrap-safe
+        // sequence comparison as long as the sender cannot be over 2^31 frames ahead.
+        if (input.HasPosition)
+        {
+            if (entry.HasReceivedPositionFrame
+                && unchecked((int)(input.Frame - entry.LastReceivedPositionFrame)) <= 0)
+                return;
+            entry.HasReceivedPositionFrame = true;
+            entry.LastReceivedPositionFrame = input.Frame;
+        }
+        entry.Inputs.Enqueue(input);
     }
 
     // Advances one 0.08 s step for every player and returns the broadcastable snapshot list.
@@ -200,9 +215,15 @@ public sealed class ServerSimulation
         }
 
         uint elapsedTicks = Math.Max(1, Tick - entry.LastAcceptedTick);
-        float budget = (PlayerConfig.SpeedSprint - PlayerConfig.TerminalVelocity)
-            * (elapsedTicks * TickRate) * 1.5f;
-        if ((input.Position - entry.State.Position).Length() <= budget)
+        float elapsed = elapsedTicks * TickRate;
+        Vector3 delta = input.Position - entry.State.Position;
+        float horizontal = new Vector2(delta.X, delta.Z).Length();
+        // Horizontal motion is bounded by sprint, while vertical motion independently allows terminal
+        // fall speed. Combining them into one 107 m/s scalar budget let a client move ~12.8 m sideways in
+        // one 80 ms tick. The 1.5x allowance absorbs tick jitter/step-up without granting that loophole.
+        float horizontalBudget = PlayerConfig.SpeedSprint * elapsed * 1.5f;
+        float verticalBudget = -PlayerConfig.TerminalVelocity * elapsed * 1.5f;
+        if (horizontal <= horizontalBudget && MathF.Abs(delta.Y) <= verticalBudget)
         {
             entry.State.Position = input.Position;
             entry.LastAcceptedTick = Tick;

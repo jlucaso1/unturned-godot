@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Dat;
+using UnturnedGodot.Tests.Helpers;
 using Xunit;
 
 namespace UnturnedGodot.Tests;
@@ -232,5 +233,138 @@ public class PhysicsMaterialAssetTests
         {
             Directory.Delete(dir, recursive: true);
         }
+    }
+
+    [Fact]
+    public void ScanDirectories_MergesEveryAssetTree()
+    {
+        // The game's assets plus a workshop mod's: a map placed by the mod resolves surfaces from both.
+        using var game = new TempDir();
+        using var mod = new TempDir();
+        game.Write(Path.Combine("PhysicsMaterials", "Concrete.asset"), Asset("CONCRETE",
+            "11111111111111111111111111111111"));
+        mod.Write(Path.Combine("PhysicsMaterials", "CA_Sand.asset"), Asset("CA_SAND",
+            "22222222222222222222222222222222"));
+
+        PhysicsMaterialBank merged = PhysicsMaterialBank.ScanDirectories(new[]
+        {
+            Path.Combine(game.Path, "PhysicsMaterials"),
+            Path.Combine(mod.Path, "PhysicsMaterials"),
+            Path.Combine(mod.Path, "Missing"), // a source that ships none
+        });
+
+        Assert.Equal(2, merged.Count);
+        Assert.NotNull(merged.FindAudioDefPath("CONCRETE", "FootstepWalk"));
+        Assert.NotNull(merged.FindAudioDefPath("CA_SAND", "FootstepWalk"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ScanDirectories_FailedSourceDoesNotDiscardOtherMaterials(bool unauthorized)
+    {
+        using var game = new TempDir();
+        using var mod = new TempDir();
+        game.Write("Concrete.asset", Asset("CONCRETE", "11111111111111111111111111111111"));
+        mod.Write("Sand.asset", Asset("CA_SAND", "22222222222222222222222222222222"));
+        string broken = Path.Combine(mod.Path, "broken");
+
+        PhysicsMaterialBank merged = PhysicsMaterialBank.ScanDirectories(
+            new[] { game.Path, broken, mod.Path }, root =>
+            {
+                if (root == broken)
+                    throw unauthorized
+                        ? new UnauthorizedAccessException("locked source")
+                        : new IOException("removed source");
+                return PhysicsMaterialBank.ScanDirectory(root);
+            });
+
+        Assert.Equal(2, merged.Count);
+        Assert.NotNull(merged.FindAudioDefPath("CONCRETE", "FootstepWalk"));
+        Assert.NotNull(merged.FindAudioDefPath("CA_SAND", "FootstepWalk"));
+    }
+
+    private static string Asset(string unityName, string guid) => $$"""
+        Metadata
+        {
+            GUID {{guid}}
+            Type SDG.Unturned.PhysicsMaterialAsset
+        }
+        Asset
+        {
+            UnityNames
+            [
+                {{unityName}}
+            ]
+            AudioDefs
+            {
+                FootstepWalk Sounds/Footsteps/{{unityName}}/Walk.asset
+            }
+        }
+        """;
+
+    [Fact]
+    public void FindAudioDef_NamesTheAssetThatDefinedTheKey_AndWhereItCameFrom()
+    {
+        // The definition is packaged in the bundle of whichever source shipped THAT asset, so a surface
+        // that falls back to a core material must report the core material, not itself: extracting the
+        // audio from the mod's bundle would find nothing and leave the surface silent.
+        using var dir = new TempDir();
+        dir.Write("Core/Foliage.asset", """
+            Metadata
+            {
+                GUID 11111111111111111111111111111111
+                Type SDG.Unturned.PhysicsMaterialAsset, Assembly-CSharp
+            }
+            Asset
+            {
+                UnityNames
+                [
+                    FOLIAGE_STATIC
+                ]
+                AudioDefs
+                {
+                    FootstepWalk Sounds/Footsteps/Foliage_Walk.asset
+                }
+            }
+            """);
+        dir.Write("Mod/CaliforniaGrass.asset", """
+            Metadata
+            {
+                GUID 22222222222222222222222222222222
+                Type SDG.Unturned.PhysicsMaterialAsset, Assembly-CSharp
+            }
+            Asset
+            {
+                UnityNames
+                [
+                    CA_GRASS
+                ]
+                Fallback 11111111111111111111111111111111
+                AudioDefs
+                {
+                    FootstepRun Sounds/CA/Grass_Run.asset
+                }
+            }
+            """);
+
+        PhysicsMaterialBank bank = PhysicsMaterialBank.ScanDirectory(dir.Path);
+
+        // Defined by the mod material itself.
+        (string Path, PhysicsMaterialAsset Owner)? run = bank.FindAudioDef("CA_GRASS", "FootstepRun");
+        Assert.NotNull(run);
+        Assert.Equal("Sounds/CA/Grass_Run.asset", run!.Value.Path);
+        Assert.EndsWith("Mod", run.Value.Owner.Directory);
+
+        // Reached through the fallback: the core asset is the owner.
+        (string Path, PhysicsMaterialAsset Owner)? walk = bank.FindAudioDef("CA_GRASS", "FootstepWalk");
+        Assert.NotNull(walk);
+        Assert.Equal("Sounds/Footsteps/Foliage_Walk.asset", walk!.Value.Path);
+        Assert.EndsWith("Core", walk.Value.Owner.Directory);
+
+        // The old shape still answers the same paths.
+        Assert.Equal("Sounds/CA/Grass_Run.asset", bank.FindAudioDefPath("CA_GRASS", "FootstepRun"));
+        Assert.Null(bank.FindAudioDef("CA_GRASS", "BipedLand"));
+        Assert.Null(bank.FindAudioDef("NOTHING", "FootstepWalk"));
     }
 }

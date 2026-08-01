@@ -59,7 +59,7 @@ public partial class PauseMenu : CanvasLayer
         column.AddChild(UnturnedUi.MakeBar("▶", "Resume", UnturnedUi.Olive, Close));
         _lanButton = UnturnedUi.MakeBar("⇄", "Open to LAN", UnturnedUi.Olive, OpenToLan);
         column.AddChild(_lanButton);
-        column.AddChild(UnturnedUi.MakeBar("◀", "Quit game", UnturnedUi.Brown, () => GetTree().Quit()));
+        column.AddChild(UnturnedUi.MakeBar("◀", "Quit game", UnturnedUi.Brown, () => AppShutdown.RequestQuit(GetTree())));
 
         _status = new Label
         {

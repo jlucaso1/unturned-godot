@@ -56,6 +56,43 @@ public sealed class FoliageAsset
         return true;
     }
 
+    // A foliage type, paired with the index of the ContentSource whose bundle carries its mesh.
+    public readonly record struct Owned(FoliageAsset Asset, int SourceIndex);
+
+    // Resolves the foliage types a map scatters across EVERY installed source, not just the game's own.
+    // A workshop map ships its grass, flower and pebble assets next to its own bundle; scanning only the
+    // core Assets folder leaves those GUIDs unresolved, so they never enter the needed set, their meshes
+    // are never extracted, and the map renders with no foliage at all.
+    //
+    // Sources are searched in order (the game first) and the first to declare a GUID keeps it, which is
+    // what the original does — an asset whose GUID is already registered is rejected.
+    public static Dictionary<Guid, Owned> ScanSources(IReadOnlyList<ContentSource> sources, ISet<Guid> needed)
+        => ScanSources(sources, needed, ScanForGuids);
+
+    internal static Dictionary<Guid, Owned> ScanSources(IReadOnlyList<ContentSource> sources,
+        ISet<Guid> needed, Func<string, ISet<Guid>, Dictionary<Guid, FoliageAsset>> scanSource)
+    {
+        var owned = new Dictionary<Guid, Owned>();
+        for (int i = 0; i < sources.Count; i++)
+        {
+            Dictionary<Guid, FoliageAsset> scanned;
+            try
+            {
+                scanned = scanSource(sources[i].AssetsDir, needed);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                continue;
+            }
+
+            foreach (KeyValuePair<Guid, FoliageAsset> entry in scanned)
+                if (!owned.ContainsKey(entry.Key))
+                    owned[entry.Key] = new Owned(entry.Value, i);
+        }
+
+        return owned;
+    }
+
     // Scans a bundle tree for foliage .asset files, keeping those whose GUID the map actually uses.
     public static Dictionary<Guid, FoliageAsset> ScanForGuids(string root, ISet<Guid> needed)
     {
@@ -63,14 +100,21 @@ public sealed class FoliageAsset
         if (!Directory.Exists(root))
             return result;
 
-        foreach (string file in Directory.EnumerateFiles(root, "*.asset", SearchOption.AllDirectories))
+        try
         {
-            DatDictionary parsed;
-            try { parsed = DatParser.Parse(File.ReadAllText(file)); }
-            catch (IOException) { continue; }
+            foreach (string file in Directory.EnumerateFiles(root, "*.asset", SearchOption.AllDirectories))
+            {
+                DatDictionary parsed;
+                try { parsed = DatParser.Parse(File.ReadAllText(file)); }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }
 
-            if (TryParse(parsed, out FoliageAsset asset) && needed.Contains(asset.Guid))
-                result[asset.Guid] = asset;
+                if (TryParse(parsed, out FoliageAsset asset) && needed.Contains(asset.Guid))
+                    result[asset.Guid] = asset;
+            }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // Keep entries already read from this source; callers continue with the next source.
         }
         return result;
     }

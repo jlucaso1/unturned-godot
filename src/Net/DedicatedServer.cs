@@ -16,7 +16,10 @@ public partial class DedicatedServer : Node
 
     public static DedicatedServer Create(string unturnedPath, string mapName, Vector3 spawn, ushort port)
     {
-        var level = new LevelInfo(System.IO.Path.Combine(unturnedPath, "Maps", mapName));
+        // Through the catalog, not Maps/<name>: a workshop map lives in the workshop content folder, and
+        // hard-coding the shipped location left the server advertising that map while loading no terrain
+        // and no zombies from it. The client's spawn resolution already goes through the same lookup.
+        var level = new LevelInfo(MapCatalog.ResolvePath(unturnedPath, mapName));
         var tiles = new List<HeightmapTile>();
         foreach ((int x, int y) in level.EnumerateTiles())
             tiles.Add(HeightmapTile.Read(level.HeightmapPath(x, y), x, y));
@@ -37,12 +40,15 @@ public partial class DedicatedServer : Node
         {
             node._zombieNavigation = ZombieNavigation.Build(zombies.Navmesh);
             if (node._zombieNavigation != null)
+            {
                 zombies.PathQuery = node._zombieNavigation.Query;
+                zombies.PathReady = () => node._zombieNavigation?.IsReady == true;
+            }
             _ = new UnturnedGodot.Zombies.ZombieHost(zombies, node._server);
-            GD.Print($"[server] {zombies.Zombies.Count} zombies spawned");
+            Log.Print($"[server] {zombies.Zombies.Count} zombies spawned");
         }
 
-        GD.Print($"[server] dedicated server for {mapName} listening on UDP {port} ({tiles.Count} height tiles)");
+        Log.Print($"[server] dedicated server for {mapName} listening on UDP {port} ({tiles.Count} height tiles)");
         return node;
     }
 
@@ -54,7 +60,7 @@ public partial class DedicatedServer : Node
         if (NetworkManager.Now - _lastStatus >= 10.0)
         {
             _lastStatus = NetworkManager.Now;
-            GD.Print($"[server] {_server.PlayerCount} player(s) online");
+            Log.Print($"[server] {_server.PlayerCount} player(s) online");
         }
     }
 

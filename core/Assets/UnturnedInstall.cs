@@ -181,6 +181,23 @@ public static class UnturnedInstall
         return paths;
     }
 
+    // Unturned's Steam app id, whose workshop content directory holds subscribed maps and mods.
+    private const string WorkshopAppId = "304930";
+
+    // <library>/steamapps/workshop/content/304930 for this install, or null when the install is not laid
+    // out like a Steam library (a copied folder, say).
+    public static string? WorkshopContentDirectory(string installRoot)
+    {
+        // <library>/steamapps/common/Unturned -> <library>/steamapps
+        if (Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(installRoot)) is not { } common
+            || Path.GetDirectoryName(common) is not { } steamapps)
+        {
+            return null;
+        }
+
+        return Path.Combine(steamapps, "workshop", "content", WorkshopAppId);
+    }
+
     // The masterbundle for this install, or null when it is missing (a partial/corrupt download, or
     // a path that is not an Unturned install at all).
     [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage] // selects on the running OS
@@ -194,11 +211,16 @@ public static class UnturnedInstall
         FindMasterBundle(installRoot, CurrentPlatform)
         ?? Path.Combine(installRoot, "Bundles", MasterBundleFileNames(CurrentPlatform)[0]);
 
-    public static string? FindMasterBundle(string installRoot, Platform platform)
+    public static string? FindMasterBundle(string installRoot, Platform platform) =>
+        FindBundle(Path.Combine(installRoot, "Bundles"), "core", platform);
+
+    // A bundle file in a directory, given its base name ("core", "california2"): the variant for this
+    // platform first, then the others. Workshop mods ship the same three variants as the game.
+    public static string? FindBundle(string directory, string baseName, Platform platform)
     {
-        foreach (string name in MasterBundleFileNames(platform))
+        foreach (string suffix in BundleSuffixes(platform))
         {
-            string candidate = Path.Combine(installRoot, "Bundles", name);
+            string candidate = Path.Combine(directory, baseName + suffix + ".masterbundle");
             if (File.Exists(candidate))
                 return candidate;
         }
@@ -213,17 +235,19 @@ public static class UnturnedInstall
     // materials and textures this project reads are identical across all three.
     public static IReadOnlyList<string> MasterBundleFileNames(Platform platform)
     {
-        const string windows = "core.masterbundle";
-        const string linux = "core_linux.masterbundle";
-        const string mac = "core_mac.masterbundle";
-
-        return platform switch
-        {
-            Platform.Windows => new[] { windows, linux, mac },
-            Platform.Mac => new[] { mac, windows, linux },
-            _ => new[] { linux, windows, mac },
-        };
+        var names = new List<string>();
+        foreach (string suffix in BundleSuffixes(platform))
+            names.Add("core" + suffix + ".masterbundle");
+        return names;
     }
+
+    // The platform suffix a bundle file name carries, native first: Windows builds are unsuffixed.
+    private static IReadOnlyList<string> BundleSuffixes(Platform platform) => platform switch
+    {
+        Platform.Windows => new[] { "", "_linux", "_mac" },
+        Platform.Mac => new[] { "_mac", "", "_linux" },
+        _ => new[] { "_linux", "", "_mac" },
+    };
 
     private static string? TryReadAllText(string path)
     {

@@ -1,3 +1,4 @@
+using System;
 using System.IO;
 
 namespace UnturnedGodot.Data;
@@ -10,22 +11,11 @@ public sealed class SplatmapTile
 {
     public const int LAYERS = 8; // SPLATMAP_COUNT(2) * SPLATMAP_CHANNELS(4)
 
-    // byte / 255 for all 256 byte values, precomputed once — the splatmap has ~524k of these per tile.
-    private static readonly float[] ByteToUnitFloat = BuildByteToUnitFloat();
-
-    private static float[] BuildByteToUnitFloat()
-    {
-        var lut = new float[256];
-        for (int i = 0; i < 256; i++)
-            lut[i] = i / 255f;
-        return lut;
-    }
-
     public readonly int CoordX;
     public readonly int CoordY;
-    public readonly float[] Weights; // flat; address with WeightIndex / WeightAt
+    public readonly byte[] Weights; // authoritative source bytes; address with WeightIndex / WeightAt
 
-    private SplatmapTile(int coordX, int coordY, float[] weights)
+    private SplatmapTile(int coordX, int coordY, byte[] weights)
     {
         CoordX = coordX;
         CoordY = coordY;
@@ -35,7 +25,7 @@ public sealed class SplatmapTile
     public static int WeightIndex(int x, int y, int layer) =>
         (x * Landscape.SPLATMAP_RESOLUTION + y) * LAYERS + layer;
 
-    public float WeightAt(int x, int y, int layer) => Weights[WeightIndex(x, y, layer)];
+    public float WeightAt(int x, int y, int layer) => Weights[WeightIndex(x, y, layer)] / 255f;
 
     public static SplatmapTile Parse(byte[] data, int coordX, int coordY)
     {
@@ -44,12 +34,9 @@ public sealed class SplatmapTile
         if (data.Length < expected)
             throw new IOException($"Splatmap has {data.Length} bytes, expected {expected}");
 
-        // The source byte order (x-outer, y-inner, layer-innermost) is exactly the flat layout. A 256-entry
-        // lookup turns each of the ~524k per-tile normalizations from a float divide into a table load.
-        var weights = new float[expected];
-        for (int i = 0; i < expected; i++)
-            weights[i] = ByteToUnitFloat[data[i]];
-
+        // The renderer uploads these exact values into RGBA8 control maps. Expanding to float here used
+        // four times the memory only to quantize every value back to its original byte during upload.
+        byte[] weights = data.Length == expected ? data : data.AsSpan(0, expected).ToArray();
         return new SplatmapTile(coordX, coordY, weights);
     }
 

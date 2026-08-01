@@ -33,7 +33,7 @@ public static class NodesBuilder
                 Name = $"Location_{loc.Name}",
             });
         }
-        GD.Print($"[unturned-godot] Locations: {locations.Count}");
+        Log.Print($"[unturned-godot] Locations: {locations.Count}");
         return root;
     }
 }

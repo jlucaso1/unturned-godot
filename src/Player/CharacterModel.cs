@@ -61,6 +61,9 @@ public static class CharacterModel
         FaceIndex = 19,
     };
 
+    private static readonly Color MegaZombieSkin =
+        new(89f / 255f, 99f / 255f, 89f / 255f);
+
     // Ports Unturned's Standard/Clothes body compositing (the parts a bare survivor uses): a flat skin
     // colour with the face overlaid where the mesh UV falls in the face patch. Unturned places the face by
     // UV, not geometry: faceUV = uv * 8 - (6, 7), i.e. the atlas region [6/8..7/8] x [7/8..1] maps to the
@@ -93,6 +96,35 @@ public static class CharacterModel
     public static Node3D? BuildZombie(string unturnedPath, bool isMega) =>
         BuildEntity(unturnedPath, ZombieEntity(isMega));
 
+    // Both zombie looks use the same prefab, mesh, skeleton, skin and animation clips. Import that large
+    // resources.assets payload once, then give the mega template only its tiny material variant. Besides
+    // halving warm-up work, this guarantees that meeting the first mega later cannot trigger another full
+    // synchronous character import in the gameplay frame.
+    public static (Node3D? Normal, Node3D? Mega) BuildZombieTemplates(string unturnedPath)
+    {
+        Node3D? normal = BuildZombie(unturnedPath, isMega: false);
+        Node3D? mega = Clone(normal);
+        bool materialChanged = false;
+        if (mega?.GetChildOrNull<MeshInstance3D>(0) is { } megaBody
+            && megaBody.Mesh?.SurfaceGetMaterial(0) is ShaderMaterial sourceMaterial)
+        {
+            var material = (ShaderMaterial)sourceMaterial.Duplicate();
+            material.SetShaderParameter("skin_color", MegaZombieSkin);
+            megaBody.MaterialOverride = material;
+            materialChanged = true;
+        }
+
+        // A future game version may replace the clothes shader/material shape. Preserve appearance in
+        // that case by paying the second import here, behind loading, instead of silently making megas
+        // normal-green or deferring the work to their first gameplay frame.
+        if (normal != null && !materialChanged)
+        {
+            mega?.Free();
+            mega = BuildZombie(unturnedPath, isMega: true);
+        }
+        return (normal, mega);
+    }
+
     // Cheap copy of an already-imported character: rebuilds the bone hierarchy and shares the mesh,
     // skin and decoded clips with the template, so populating hundreds of entities decodes the game
     // data exactly once per look.
@@ -114,7 +146,13 @@ public static class CharacterModel
         }
         skeleton.ResetBonePoses();
 
-        var body = new MeshInstance3D { Mesh = sourceBody.Mesh, Skin = sourceBody.Skin, Name = "CharacterBody" };
+        var body = new MeshInstance3D
+        {
+            Mesh = sourceBody.Mesh,
+            Skin = sourceBody.Skin,
+            MaterialOverride = sourceBody.MaterialOverride,
+            Name = "CharacterBody",
+        };
         skeleton.AddChild(body);
         body.Skeleton = body.GetPathTo(skeleton);
 
@@ -131,7 +169,7 @@ public static class CharacterModel
         }
         catch (System.Exception e)
         {
-            GD.PrintErr($"[unturned-godot] Character: failed to load real {entity.Root} ({e.GetType().Name}: {e.Message}); using placeholder.\n{e.StackTrace}");
+            Log.PrintErr($"[unturned-godot] Character: failed to load real {entity.Root} ({e.GetType().Name}: {e.Message}); using placeholder.\n{e.StackTrace}");
             return null;
         }
     }
@@ -235,7 +273,7 @@ public static class CharacterModel
         skeleton.BindPitchBones(boneByName.GetValueOrDefault("Spine", -1), boneByName.GetValueOrDefault("Skull", -1));
         skeleton.Play(entity.PrimaryIdle);
 
-        GD.Print($"[unturned-godot] Character: real {entity.Root} skinned body loaded ({boneCount} bones, " +
+        Log.Print($"[unturned-godot] Character: real {entity.Root} skinned body loaded ({boneCount} bones, " +
             (skeleton.HasAnyPose ? "animated" : "bind pose") + ").");
         return skeleton;
     }
@@ -425,7 +463,7 @@ public static class CharacterModel
                 byte[]? pixels = tex.GetPixels(_ => null); // inline
                 return pixels == null || pixels.Length == 0
                     ? null
-                    : new CachedTexture(tex.Format, tex.Width, tex.Height, tex.MipCount, pixels);
+                    : CachedTexture.From(tex, pixels);
             }
         }
         return null;

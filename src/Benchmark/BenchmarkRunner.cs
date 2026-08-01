@@ -23,7 +23,7 @@ public static class BenchmarkRunner
             return;
         }
 
-        GD.Print("[benchmark] Tier 1 (structural) starting...");
+        Log.Print("[benchmark] Tier 1 (structural) starting...");
         WorldBuildResult world = WorldBuilder.Build(unturnedPath, mapName);
         context.AddChild(world.Terrain);
         context.AddChild(world.Objects);
@@ -87,7 +87,7 @@ public static class BenchmarkRunner
         double seconds = double.TryParse(System.Environment.GetEnvironmentVariable("UG_PROFILE_SECS"),
             System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture,
             out double s) ? s : 30.0;
-        GD.Print($"[benchmark] profile-loop: rebuilding world for {seconds:0}s — attach dotnet-trace now, " +
+        Log.Print($"[benchmark] profile-loop: rebuilding world for {seconds:0}s — attach dotnet-trace now, " +
             "stop it BEFORE this ends (a clean trace needs the process still alive at stop).");
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -99,9 +99,9 @@ public static class BenchmarkRunner
             w.Objects.Free();
             w.Foliage.Free(); // leaking this left ~1k MultiMesh RIDs per rebuild, poisoning long traces
             i++;
-            GD.Print($"[benchmark] profile-loop: build {i} done at {sw.Elapsed.TotalSeconds:0.0}s");
+            Log.Print($"[benchmark] profile-loop: build {i} done at {sw.Elapsed.TotalSeconds:0.0}s");
         }
-        GD.Print($"[benchmark] profile-loop: {i} builds in {sw.Elapsed.TotalSeconds:0.0}s");
+        Log.Print($"[benchmark] profile-loop: {i} builds in {sw.Elapsed.TotalSeconds:0.0}s");
     }
 
     internal static BenchmarkEnvironment BuildEnvironment(string mapName)
@@ -135,7 +135,7 @@ public static class BenchmarkRunner
     {
         string json = report.ToJson();
         Write(GlobalPath($"{LatestDir}/{baselineKey}-latest.json"), json);
-        GD.Print($"[benchmark] Report:\n{json}");
+        Log.Print($"[benchmark] Report:\n{json}");
 
         bool writeBaseline = Array.IndexOf(OS.GetCmdlineUserArgs(), "--write-baseline") >= 0;
         string baselinePath = GlobalPath($"{BaselineDir}/{baselineKey}.json");
@@ -143,13 +143,13 @@ public static class BenchmarkRunner
         if (writeBaseline)
         {
             Write(baselinePath, json);
-            GD.Print($"[benchmark] Baseline saved to {BaselineDir}/{baselineKey}.json");
+            Log.Print($"[benchmark] Baseline saved to {BaselineDir}/{baselineKey}.json");
             return;
         }
 
         if (!System.IO.File.Exists(baselinePath))
         {
-            GD.Print($"[benchmark] No baseline at {BaselineDir}/{baselineKey}.json — " +
+            Log.Print($"[benchmark] No baseline at {BaselineDir}/{baselineKey}.json — " +
                 "run once with `--write-baseline` to capture one.");
             return;
         }
@@ -157,7 +157,7 @@ public static class BenchmarkRunner
         BenchmarkReport? baseline = BenchmarkReport.FromJson(System.IO.File.ReadAllText(baselinePath));
         if (baseline is null)
         {
-            GD.PrintErr("[benchmark] Baseline file is unreadable; skipping diff.");
+            Log.PrintErr("[benchmark] Baseline file is unreadable; skipping diff.");
             return;
         }
 
@@ -167,17 +167,17 @@ public static class BenchmarkRunner
     private static void PrintDiff(BenchmarkReport baseline, BenchmarkReport current, BaselineDiffOptions options, string note)
     {
         if (baseline.Environment != current.Environment)
-            GD.Print("[benchmark] WARNING: environment differs from baseline " +
+            Log.Print("[benchmark] WARNING: environment differs from baseline " +
                 $"(baseline {baseline.Environment.RenderingDriver}/{baseline.Environment.Gpu} vs " +
                 $"current {current.Environment.RenderingDriver}/{current.Environment.Gpu}) — deltas may be noise.");
 
         IReadOnlyList<MetricDelta> deltas = BaselineDiff.Compare(baseline.Metrics, current.Metrics, options);
-        GD.Print($"[benchmark] vs baseline ({note}):");
-        GD.Print($"  {"metric",-28} {"baseline",16} {"current",16} {"delta",16} {"%",9}  status");
+        Log.Print($"[benchmark] vs baseline ({note}):");
+        Log.Print($"  {"metric",-28} {"baseline",16} {"current",16} {"delta",16} {"%",9}  status");
         foreach (MetricDelta d in deltas)
         {
             string pct = double.IsInfinity(d.PercentDelta) ? "  inf" : d.PercentDelta.ToString("+0.0;-0.0;0.0", CultureInfo.InvariantCulture);
-            GD.Print($"  {d.Name,-28} {Fmt(d.Baseline),16} {Fmt(d.Current),16} " +
+            Log.Print($"  {d.Name,-28} {Fmt(d.Baseline),16} {Fmt(d.Current),16} " +
                 $"{Fmt(d.AbsoluteDelta),16} {pct,8}  {Tag(d.Status)}");
         }
     }

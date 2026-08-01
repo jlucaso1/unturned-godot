@@ -92,6 +92,19 @@ public class MeshCacheTests
     }
 
     [Fact]
+    public void IsCurrent_OverBytes_MatchesTheFileCheck()
+    {
+        // The span overload exists so a caller that already read the file does not open it twice.
+        using var ms = new MemoryStream();
+        MeshCache.Write(ms, System.Array.Empty<Vector3>(), System.Array.Empty<Vector3>(),
+            System.Array.Empty<Vector2>(), System.Array.Empty<CachedSubmesh>());
+
+        Assert.True(MeshCache.IsCurrent(ms.ToArray()));
+        Assert.False(MeshCache.IsCurrent(new byte[] { 1, 2, 3 }));          // shorter than the magic
+        Assert.False(MeshCache.IsCurrent(new byte[] { 9, 9, 9, 9, 0, 0 })); // an older format version
+    }
+
+    [Fact]
     public void Read_BadMagic_Throws()
     {
         using var stream = new MemoryStream(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });

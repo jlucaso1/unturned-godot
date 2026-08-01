@@ -16,9 +16,9 @@ and checked byte-for-byte against the game's own data, using
 
 | Area | State |
 |---|---|
-| **Terrain** | Landscape heightmaps + splatmaps, real layer textures (`Terrain/Materials.unity3d`) blended per layer, physics materials |
-| **Objects** | All placed objects and trees with their real meshes, materials and textures, streamed in with per-GUID collision |
-| **Foliage** | `Foliage.blob` grass, flowers and pebbles as chunked MultiMeshes (~667k instances on PEI) |
+| **Terrain** | Landscape heightmaps + splatmaps, each tile's own eight layer textures resolved through `Level.hierarchy` and the master bundles, physics materials |
+| **Objects** | All placed objects and trees with their real meshes, materials and textures, streamed in with per-GUID collision. Workshop maps also load the objects from their mod's own master bundle |
+| **Foliage** | `Foliage.blob` grass, flowers and pebbles as chunked MultiMeshes (~667k instances on PEI, 7.2M on Germany) |
 | **Roads / water** | Bezier splines lofted through the port of `Road.buildMesh`, real road textures; sea plane from the map's lighting |
 | **Lighting** | Day/night cycle driven by the map's `Lighting.dat` keyframes: sun, ambient, fog, ported skybox (sun disc, stars, moon phases, clouds) |
 | **Player** | Port of `PlayerMovement`/`PlayerLook`/`PlayerStance` with the game's own constants; real character model, skeleton and animations; first/third person |
@@ -31,13 +31,15 @@ in view.
 
 ### Not done yet
 
-- **Compressed / stream-data meshes**: not needed for PEI (no object there uses them), so `m_CompressedMesh`
-  and vertex data in `.resS` are not decoded; such meshes fall back to boxes. (Texture pixels *are* read
-  from `.resS`.)
+- **Stream-data meshes**: vertex data kept in the `.resS` stream is not decoded, so those meshes fall back
+  to boxes. Quantized geometry (`m_CompressedMesh`), which workshop bundles lean on heavily, *is* decoded,
+  as are texture pixels in `.resS`.
 - **Gameplay**: no items, inventory, vehicles, building, damage or survival stats. Zombies exist and hunt,
   but you cannot fight back.
-- **Maps other than PEI**: other maps load to the extent they use the same features; PEI is what gets
-  verified.
+- **Old road bundles**: maps built before Unity 2018 (Alpha Valley, Washington, Yukon, and many workshop
+  maps) keep `Environment/Roads.unity3d` in a SerializedFile version this reader does not decode yet, so
+  their roads fall back to the procedural asphalt/dirt material. Terrain layers are unaffected: those come
+  from the master bundle.
 
 ## Requirements
 
@@ -56,7 +58,7 @@ Open the project in the Godot editor and press play, or from a terminal:
 ```sh
 # Linux / macOS: point GODOT at your Godot 4.7 .NET binary
 GODOT=/usr/bin/godot-mono
-"$GODOT"                                   # windowed, boots to the main menu
+"$GODOT"                                   # windowed, boots to the map browser
 "$GODOT" --headless                        # load + validate the data, then exit
 SCREENSHOT_PATH=/tmp/pei.png "$GODOT" --resolution 1600x900   # render one frame to a PNG
 ```
@@ -67,8 +69,14 @@ $env:UNTURNED_PATH = "D:\SteamLibrary\steamapps\common\Unturned"   # only if aut
 & "C:\Godot\Godot_v4.7-stable_mono_win64.exe"
 ```
 
+**Picking a map.** The menu lists every map installed on this machine: the ones that ship with the game,
+anything under `Bundles/Workshop/Maps`, and Steam Workshop subscriptions, each with its own artwork, blurb
+and size. Pick one and press Play; the choice is remembered for next time. Maps whose terrain predates
+Landscape tiles (Destruction, Paintball Arena) are listed but cannot load, and say so.
+
 First launch extracts models, textures and audio out of the master bundle into Godot's `user://` cache.
-That takes a few minutes once; later runs start from the cache.
+That takes a few minutes once; later runs start from the cache, and picking a map with assets that were
+never extracted streams in just those.
 
 **Controls** (Unturned's own defaults, from `PlayerSettings`): `WASD` move, mouse look, `Space` jump,
 `Shift` sprint, `X` crouch, `Z` prone, `H` (or `F5`) toggle first/third person, `Esc` pause. In free-camera
@@ -78,12 +86,13 @@ mode: `WASD` + `Q`/`E` down/up, `Shift` to boost. `F3` toggles the performance H
 LAN* in the pause menu, or run a dedicated server:
 
 ```sh
-"$GODOT" --headless -- --server --port=27015
+"$GODOT" --headless -- --server --port=27015 --map=Washington
 ```
 
-**Useful environment flags** (mostly for automation and screenshots): `UNTURNED_PATH`, `SOLO=1` (boot
-straight into a local session), `FREECAM=1`, `JOIN=host:port`, `OPEN_LAN=1`, `PLAYER=1`, `SCREENSHOT_PATH`,
-`TIME_OF_DAY=0..1`, `DAY_SPEED=N`, `NAV_DEBUG=1`, `AUDIO_DEBUG=1`.
+**Useful environment flags** (mostly for automation and screenshots): `UNTURNED_PATH`, `MAP=Washington`
+(skip the browser and load that map), `SOLO=1` (boot straight into a local session), `FREECAM=1`,
+`JOIN=host:port`, `OPEN_LAN=1`, `PLAYER=1`, `SCREENSHOT_PATH`, `TIME_OF_DAY=0..1`, `DAY_SPEED=N`,
+`NAV_DEBUG=1`, `AUDIO_DEBUG=1`.
 
 ### Export
 
@@ -96,15 +105,26 @@ straight into a local session), `FREECAM=1`, `JOIN=host:port`, `OPEN_LAN=1`, `PL
 "$GODOT" --headless --export-release macOS
 ```
 
+The game project publishes with NativeAOT, and NativeAOT compiles through the host toolchain, so the
+Windows export only builds on Windows. Exporting it from Linux fails in ILCompiler with "Cross-OS native
+compilation is not supported". Set `AllowNonAotWindowsExport=1` to export a plain IL build instead:
+
+```sh
+AllowNonAotWindowsExport=1 "$GODOT" --headless --export-release "Windows Desktop"
+```
+
+That build runs on the .NET runtime shipped with the export template and drops every AOT tuning in
+`unturned-godot.csproj`, so it is for local checks only; the shipping Windows build has to come from Windows.
+
 Export secrets, if you ever add any, land in `export_credentials.cfg`, which is git-ignored, so never commit it.
 
 ## Structure
 
 | Project | What it holds | Engine dependency |
 |---|---|---|
-| `core/` (`UnturnedGodot.Core`) | Pure logic: binary/text parsers, terrain math, netcode, zombie AI, asset resolution. Only uses managed Godot structs. | none, runs under xUnit |
+| `core/` (`UnturnedGodot.Core`) | Pure logic: binary/text parsers, terrain math, netcode, zombie AI, asset/extraction planning. Only uses managed Godot structs. | none, runs under xUnit |
 | `src/` (`unturned-godot`) | Godot glue: `Main`, world builders, UI, player/zombie nodes. `[ExcludeFromCodeCoverage]`. | Godot.NET.Sdk |
-| `tests/` (`UnturnedGodot.Tests`) | xUnit suite; 100% line + branch coverage of `core/`. | none |
+| `tests/` (`UnturnedGodot.Tests`) | xUnit suite; CI requires more than 95% line and branch coverage of `core/`. | none |
 | `tools/PerfHarness` | Standalone micro-benchmarks over the Core parsers. | none |
 
 Keeping the parsers engine-free is what makes full unit-test coverage possible. `core/`, `tests/` and
@@ -117,7 +137,8 @@ Non-Godot binaries (core + tests, Debug and Release) go to `build/<project>/<con
 
 `core/Unity/` is a from-scratch reader for the game's `core_*.masterbundle`: UnityFS container, LZ4 (own
 decoder) + LZMA (SharpCompress) blocks, SerializedFile v22, TypeTree-driven object reader, meshes (vertex
-channels, UVs, submeshes, skinning), materials (`_Color`/`_MainTex`) and Texture2D (DXT1/DXT5/RGB/RGBA).
+channels, UVs, submeshes, skinning), materials (`_Color`/`_MainTex`) and Texture2D (DXT1/DXT5/BC7/RGB/RGBA,
+plus a Crunch decoder for the crunched variants workshop maps lean on).
 
 The bundle is one ~1.4 GB LZMA block, so it is walked **once** (`ModelExtractor`): each placed object's GUID
 maps to its highest-detail LOD mesh and, through the object's `MaterialPalette`, to each submesh's flat
@@ -133,8 +154,8 @@ dotnet test tests/UnturnedGodot.Tests.csproj                       # run the sui
 dotnet format unturned-godot.sln --verify-no-changes               # lint (fails on style drift)
 dotnet format unturned-godot.sln                                   # auto-format
 
-# Coverage (excludes source-generated code via coverlet.runsettings)
-dotnet test tests/UnturnedGodot.Tests.csproj --settings coverlet.runsettings
+# Coverage gate (excludes generated code; requires >95% for both lines and branches)
+./scripts/check-coverage.sh
 ```
 
 Style and analyzers are enforced via `.editorconfig` + `Directory.Build.props` (`EnableNETAnalyzers`,

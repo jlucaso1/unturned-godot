@@ -31,6 +31,9 @@ public partial class CharacterSkeleton : Skeleton3D
     private float _pitchBend; // Godot pitch degrees, split across spine + skull
     private int _spine = -1;
     private int _skull = -1;
+    private bool _stateApplied;
+    private EPlayerStance _lastStateStance;
+    private bool _lastStateMoving;
 
     // C#-side rest cache + written-channel tracking: bones the previous frame animated and this frame
     // doesn't fall back to these rests, everything else is left untouched (it already rests).
@@ -63,7 +66,21 @@ public partial class CharacterSkeleton : Skeleton3D
     public void SetPitch(float godotPitchDegrees) => _pitchBend = godotPitchDegrees;
 
     // Picks and crossfades to the clip for a stance (Unturned's PlayerAnimator.updateState mapping).
-    public void SetState(EPlayerStance stance, bool moving) => Play(ClipFor(stance, moving));
+    // Keep the discrete state dirty: local and remote callers commonly invoke this from their render or
+    // physics loop, but the clip name cannot change while stance/movement are unchanged.
+    public void SetState(EPlayerStance stance, bool moving)
+    {
+        if (_stateApplied && _lastStateStance == stance && _lastStateMoving == moving)
+            return;
+
+        string clip = ClipFor(stance, moving);
+        if (!_clips.ContainsKey(clip))
+            return;
+        Play(clip);
+        _stateApplied = true;
+        _lastStateStance = stance;
+        _lastStateMoving = moving;
+    }
 
     // Restarts a clip from its beginning even when it is already the current one — an attack swing
     // re-triggering, where Play's already-playing early-out would swallow the restart.
@@ -83,6 +100,7 @@ public partial class CharacterSkeleton : Skeleton3D
     {
         if (clip == _current || !_clips.ContainsKey(clip))
             return; // already playing, or the clip isn't present -> keep going
+        _stateApplied = false;
         // Snapshot to blend out of — an owned copy, since CurrentPose refills the shared buffer every frame.
         _fromPose = _current.Length > 0 ? new Dictionary<int, BonePose>(CurrentPose()) : null;
         _current = clip;

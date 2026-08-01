@@ -1,10 +1,11 @@
+using System.Collections.Generic;
 using Godot;
 using UnturnedGodot.Data;
 
 namespace UnturnedGodot;
 
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
-public static class TerrainBuilder
+public static partial class TerrainBuilder
 {
     // One material shared by every tile (#4): 16 identical StandardMaterial3D instances become one, so
     // the renderer batches state instead of switching per tile. Back-face culling (#3) halves fill rate
@@ -78,18 +79,23 @@ public static class TerrainBuilder
     public readonly struct TileMesh
     {
         public readonly ImporterMesh Importer;
-        public readonly float[] Heights;
+        public readonly ushort[]? Heights16;
+        public readonly float[]? Heights32;
         public readonly int X;
         public readonly int Y;
         public readonly SplatmapTile? Splat;
-        public TileMesh(ImporterMesh importer, float[] heights, int x, int y, SplatmapTile? splat)
+        public TileMesh(ImporterMesh importer, ushort[]? heights16, float[]? heights32,
+            int x, int y, SplatmapTile? splat)
         {
             Importer = importer;
-            Heights = heights;
+            Heights16 = heights16;
+            Heights32 = heights32;
             X = x;
             Y = y;
             Splat = splat;
         }
+        public float HeightAt(int index) => Heights16 != null
+            ? Heights16[index] / (float)ushort.MaxValue : Heights32![index];
     }
 
     // Phase 1 — safe to run on a worker thread: read + tessellate the tile at a subsampled resolution and
@@ -125,7 +131,7 @@ public static class TerrainBuilder
             {
                 int idx = x * res + y;
                 int hx = x * LodStep, hy = y * LodStep; // full-res heightmap sample
-                float h01 = tile.Heights[hx, hy];
+                float h01 = tile.HeightAt(hx, hy);
                 Vector3 unity = Landscape.GetWorldPosition(tile.CoordX, tile.CoordY, hx, hy, h01);
                 positions[idx] = Landscape.UnityToGodot(unity);
                 if (colors != null)
@@ -216,33 +222,71 @@ public static class TerrainBuilder
         // Carry the full-resolution heightmap (row-major, normalized) so the on-demand player collision
         // stays full-res and correct — the visual mesh is decimated/LOD'd and meshoptimizer reorders its
         // vertices, so collision can't be reconstructed from it.
-        int fullRes = Landscape.HEIGHTMAP_RESOLUTION;
-        var flat = new float[fullRes * fullRes];
-        for (int hx = 0; hx < fullRes; hx++)
-            for (int hy = 0; hy < fullRes; hy++)
-                flat[(hx * fullRes) + hy] = tile.Heights[hx, hy];
-        return new TileMesh(importer, flat, tile.CoordX, tile.CoordY, splat);
+        float[]? flat = null;
+        if (tile.RawSamples == null)
+        {
+            int fullRes = Landscape.HEIGHTMAP_RESOLUTION;
+            flat = new float[fullRes * fullRes];
+            for (int hx = 0; hx < fullRes; hx++)
+                for (int hy = 0; hy < fullRes; hy++)
+                    flat[(hx * fullRes) + hy] = tile.HeightAt(hx, hy);
+        }
+        return new TileMesh(importer, tile.RawSamples, flat, tile.CoordX, tile.CoordY, splat);
     }
 
     // Phase 2 — main thread only: realise the LOD mesh (GetMesh creates the ArrayMesh RenderingServer
     // resource) and attach the per-tile splat material (its control textures are GPU resources). The
     // full-res heightmap rides along in metadata for AddHeightfieldCollision.
-    public static MeshInstance3D FinishTile(in TileMesh tm, ImageTexture[]? layerTextures)
+    public sealed class ControlTextureCache
+    {
+        private readonly Dictionary<string, ImageTexture> _textures = new();
+
+        public ImageTexture GetOrCreate(byte[] bytes)
+        {
+            if (System.Environment.GetEnvironmentVariable("UG_DEDUP_GPU") == "0")
+            {
+                const int rawRes = Landscape.SPLATMAP_RESOLUTION;
+                return ImageTexture.CreateFromImage(
+                    Image.CreateFromData(rawRes, rawRes, false, Image.Format.Rgba8, bytes));
+            }
+            string key = ExactContentKey.Bytes(bytes);
+            if (!_textures.TryGetValue(key, out ImageTexture? texture))
+            {
+                const int res = Landscape.SPLATMAP_RESOLUTION;
+                texture = ImageTexture.CreateFromImage(
+                    Image.CreateFromData(res, res, false, Image.Format.Rgba8, bytes));
+                _textures[key] = texture;
+            }
+            return texture;
+        }
+    }
+
+    public static MeshInstance3D FinishTile(in TileMesh tm, ImageTexture[]? layerTextures,
+        ControlTextureCache? controls = null)
     {
         ArrayMesh mesh = tm.Importer.GetMesh();
         mesh.SurfaceSetMaterial(0, layerTextures != null && tm.Splat != null
-            ? BuildSplatMaterial(layerTextures, tm.Splat)
+            ? BuildSplatMaterial(layerTextures, tm.Splat, controls)
             : SharedMaterial);
 
-        var node = new MeshInstance3D
+        var node = new TerrainTileNode
         {
             Mesh = mesh,
             Name = $"Tile_{tm.X}_{tm.Y}",
+            CollisionHeights16 = tm.Heights16,
+            CollisionHeights32 = tm.Heights32,
+            TileX = tm.X,
+            TileY = tm.Y,
         };
-        node.SetMeta("hf_heights", tm.Heights);
-        node.SetMeta("hf_x", tm.X);
-        node.SetMeta("hf_y", tm.Y);
         return node;
+    }
+
+    private sealed partial class TerrainTileNode : MeshInstance3D
+    {
+        public ushort[]? CollisionHeights16;
+        public float[]? CollisionHeights32;
+        public int TileX;
+        public int TileY;
     }
 
     // Gives a rendered terrain tile a cheap full-resolution heightfield StaticBody (a 257x257
@@ -251,18 +295,14 @@ public static class TerrainBuilder
     // render surface exactly by TerrainHeightfieldTests.
     public static void AddHeightfieldCollision(MeshInstance3D tile)
     {
-        if (!tile.HasMeta("hf_heights"))
+        if (tile is not TerrainTileNode terrainTile
+            || (terrainTile.CollisionHeights16 == null && terrainTile.CollisionHeights32 == null))
             return;
 
         const int res = Landscape.HEIGHTMAP_RESOLUTION;
-        float[] flat = tile.GetMeta("hf_heights").AsFloat32Array();
-        int tileX = tile.GetMeta("hf_x").AsInt32();
-        int tileY = tile.GetMeta("hf_y").AsInt32();
-
-        var heights = new float[res, res];
-        for (int hx = 0; hx < res; hx++)
-            for (int hy = 0; hy < res; hy++)
-                heights[hx, hy] = flat[(hx * res) + hy];
+        float[] mapData = terrainTile.CollisionHeights16 != null
+            ? TerrainHeightfield.MapData(terrainTile.CollisionHeights16)
+            : MapDataFromFlat(terrainTile.CollisionHeights32!);
 
         var body = new StaticBody3D { Name = "TerrainCollision" };
         body.AddChild(new CollisionShape3D
@@ -271,38 +311,50 @@ public static class TerrainBuilder
             {
                 MapWidth = res,
                 MapDepth = res,
-                MapData = TerrainHeightfield.MapData(heights),
+                MapData = mapData,
             },
-            Transform = TerrainHeightfield.CollisionTransform(tileX, tileY),
+            Transform = TerrainHeightfield.CollisionTransform(terrainTile.TileX, terrainTile.TileY),
         });
         tile.AddChild(body);
 
         // The heightfield now lives in the physics server's HeightMapShape3D; drop the ~264 KB/tile source
         // copy the tile carried in metadata (collision is built once and never rebuilt).
-        tile.RemoveMeta("hf_heights");
-        tile.RemoveMeta("hf_x");
-        tile.RemoveMeta("hf_y");
+        terrainTile.CollisionHeights16 = null;
+        terrainTile.CollisionHeights32 = null;
+    }
+
+    private static float[] MapDataFromFlat(float[] heights)
+    {
+        const int res = Landscape.HEIGHTMAP_RESOLUTION;
+        var data = new float[heights.Length];
+        for (int hx = 0; hx < res; hx++)
+            for (int hy = 0; hy < res; hy++)
+                data[(res - 1 - hx) * res + hy] = (-Landscape.TILE_HEIGHT / 2f)
+                    + (heights[(hx * res) + hy] * Landscape.TILE_HEIGHT);
+        return data;
     }
 
     // A per-tile ShaderMaterial: the shared 8 layer textures plus this tile's two splat control textures
     // (the 8 weights packed into two RGBA8 images, sampled by UV2).
-    private static ShaderMaterial BuildSplatMaterial(ImageTexture[] layers, SplatmapTile splat)
+    private static ShaderMaterial BuildSplatMaterial(ImageTexture[] layers, SplatmapTile splat,
+        ControlTextureCache? controls)
     {
         var material = new ShaderMaterial { Shader = SplatShader };
         for (int i = 0; i < layers.Length; i++)
             material.SetShaderParameter($"layer{i}", layers[i]);
-        material.SetShaderParameter("control0", ControlTexture(splat, 0));
-        material.SetShaderParameter("control1", ControlTexture(splat, 4));
+        material.SetShaderParameter("control0", ControlTexture(splat, 0, controls));
+        material.SetShaderParameter("control1", ControlTexture(splat, 4, controls));
         return material;
     }
 
     // Packs 4 splat layers (firstLayer..firstLayer+3) into an RGBA8 image. Image pixel (x, y) — addressed
     // (y * res + x) — carries the weights the splatmap stores at [x, y], so UV2 (which runs x->u, y->v)
     // samples the same texel TerrainColor blends per vertex.
-    private static ImageTexture ControlTexture(SplatmapTile splat, int firstLayer)
+    private static ImageTexture ControlTexture(SplatmapTile splat, int firstLayer,
+        ControlTextureCache? controls)
     {
         const int res = Landscape.SPLATMAP_RESOLUTION;
-        float[] weights = splat.Weights;
+        byte[] weights = splat.Weights;
         var bytes = new byte[res * res * 4];
         for (int x = 0; x < res; x++)
         {
@@ -310,12 +362,13 @@ public static class TerrainBuilder
             {
                 int src = SplatmapTile.WeightIndex(x, y, firstLayer);
                 int dst = (y * res + x) * 4;
-                bytes[dst + 0] = (byte)(weights[src + 0] * 255f);
-                bytes[dst + 1] = (byte)(weights[src + 1] * 255f);
-                bytes[dst + 2] = (byte)(weights[src + 2] * 255f);
-                bytes[dst + 3] = (byte)(weights[src + 3] * 255f);
+                bytes[dst + 0] = weights[src + 0];
+                bytes[dst + 1] = weights[src + 1];
+                bytes[dst + 2] = weights[src + 2];
+                bytes[dst + 3] = weights[src + 3];
             }
         }
-        return ImageTexture.CreateFromImage(Image.CreateFromData(res, res, false, Image.Format.Rgba8, bytes));
+        return controls?.GetOrCreate(bytes)
+            ?? ImageTexture.CreateFromImage(Image.CreateFromData(res, res, false, Image.Format.Rgba8, bytes));
     }
 }

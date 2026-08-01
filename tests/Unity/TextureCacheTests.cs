@@ -1,4 +1,5 @@
 using System.IO;
+using UnturnedGodot.Tests.Helpers;
 using UnturnedGodot.Unity;
 using Xunit;
 
@@ -61,5 +62,149 @@ public class TextureCacheTests
     {
         using var stream = new MemoryStream(new byte[] { 0, 0, 0, 0, 1, 2, 3, 4 });
         Assert.Throws<InvalidDataException>(() => TextureCache.Read(stream));
+    }
+
+    [Fact]
+    public void From_PlainTexture_KeepsItsPixelsAndFilterMode()
+    {
+        var tex = new UnityTexture { Width = 4, Height = 2, Format = 12, MipCount = 1, FilterMode = 0 };
+        CachedTexture cached = CachedTexture.From(tex, new byte[] { 7, 8, 9 });
+
+        Assert.Equal(12, cached.Format);
+        Assert.Equal(4, cached.Width);
+        Assert.Equal(2, cached.Height);
+        Assert.Equal(1, cached.MipCount);
+        Assert.Equal(0, cached.FilterMode);
+        Assert.Equal(new byte[] { 7, 8, 9 }, cached.Pixels);
+    }
+
+    [Fact]
+    public void From_CrunchedTexture_IsDecodedToPlainDxt()
+    {
+        // The 8x8 DXT1 image the Crunch tests build, arriving as Unity's DXT1Crunched (28).
+        byte[] crn = CrunchedDxt1();
+        var tex = new UnityTexture { Width = 8, Height = 8, Format = 28, MipCount = 1 };
+        CachedTexture cached = CachedTexture.From(tex, crn);
+
+        Assert.Equal(10, cached.Format); // DXT1
+        Assert.Equal(8, cached.Width);
+        Assert.Equal(8, cached.Height);
+        Assert.Equal(1, cached.MipCount);
+        Assert.Equal(32, cached.Pixels.Length);
+    }
+
+    [Fact]
+    public void Decoded_CrunchedDxt5Entry_BecomesDxt5()
+    {
+        // The other half of the mapping: a cache entry written before the decoder existed still holds the
+        // container, and reading it back has to unwrap it too.
+        var entry = new CachedTexture(29, 4, 4, 1, CrunchedDxt5());
+        CachedTexture decoded = CachedTexture.Decoded(entry);
+
+        Assert.Equal(12, decoded.Format); // DXT5
+        Assert.Equal(16, decoded.Pixels.Length);
+    }
+
+    [Fact]
+    public void From_CrunchedTextureItCannotDecode_IsLeftAlone()
+    {
+        // A container claiming to be crunched but holding nothing decodable: the renderer treats the
+        // unknown format as "no texture", which beats failing the whole load.
+        var tex = new UnityTexture { Width = 8, Height = 8, Format = 29, MipCount = 1 };
+        CachedTexture cached = CachedTexture.From(tex, new byte[] { 1, 2, 3, 4 });
+
+        Assert.Equal(29, cached.Format);
+        Assert.Equal(new byte[] { 1, 2, 3, 4 }, cached.Pixels);
+    }
+
+    // A 4x4 DXT5 image: one block, and one chunk whose other three block slots are clipped away.
+    private static byte[] CrunchedDxt5()
+    {
+        var tables = new CrnBuilder.BitWriter();
+        tables.Model(2, 0, 1); // chunk encodings
+        tables.Model(2, 0, 1); // colour endpoint delta
+        tables.Model(2, 0, 1); // colour selector delta
+        tables.Model(2, 0, 1); // alpha endpoint delta
+        tables.Model(2, 0, 1); // alpha selector delta
+
+        var colorEndpoints = new CrnBuilder.BitWriter();
+        colorEndpoints.Model(2, 0, 1);
+        colorEndpoints.Model(2, 0, 1);
+        for (int i = 0; i < 6; i++)
+            colorEndpoints.Symbol(true);
+
+        var alphaEndpoints = new CrnBuilder.BitWriter();
+        alphaEndpoints.Model(2, 0, 1);
+        alphaEndpoints.Symbol(true);
+        alphaEndpoints.Symbol(true);
+
+        var level = new CrnBuilder.BitWriter();
+        level.Symbol(false);        // chunk encoding 0
+        level.Symbol(false);        // alpha endpoint delta
+        level.Symbol(false);        // colour endpoint delta
+        for (int block = 0; block < 4; block++)
+        {
+            level.Symbol(false);    // alpha selector delta
+            level.Symbol(false);    // colour selector delta
+        }
+
+        var crn = new CrnBuilder
+        {
+            Width = 4,
+            Height = 4,
+            Format = CrnBuilder.FormatDxt5,
+            Tables = tables.ToArray(),
+            ColorEndpoints = (colorEndpoints.ToArray(), 1),
+            ColorSelectors = (Selectors(maxValue: 3), 1),
+            AlphaEndpoints = (alphaEndpoints.ToArray(), 1),
+            AlphaSelectors = (Selectors(maxValue: 7), 1),
+        };
+        crn.Levels.Add(level.ToArray());
+        return crn.Build();
+    }
+
+    // One selector palette entry, eight symbols of the delta pair that changes nothing.
+    private static byte[] Selectors(int maxValue)
+    {
+        int unique = (maxValue * 2) + 1;
+        int noChange = (maxValue * unique) + maxValue;
+
+        var w = new CrnBuilder.BitWriter();
+        w.Model(noChange + 1, 0, noChange);
+        for (int j = 0; j < 8; j++)
+            w.Symbol(true);
+        return w.ToArray();
+    }
+
+    private static byte[] CrunchedDxt1()
+    {
+        var tables = new CrnBuilder.BitWriter();
+        tables.Model(2, 0, 1); // chunk encodings
+        tables.Model(2, 0, 1); // colour endpoint delta
+        tables.Model(2, 0, 1); // colour selector delta
+
+        var endpoints = new CrnBuilder.BitWriter();
+        endpoints.Model(2, 0, 1);
+        endpoints.Model(2, 0, 1);
+        for (int i = 0; i < 6; i++)
+            endpoints.Symbol(true);
+
+        var level = new CrnBuilder.BitWriter();
+        level.Symbol(false);
+        level.Symbol(false);
+        for (int block = 0; block < 4; block++)
+            level.Symbol(false);
+
+        var crn = new CrnBuilder
+        {
+            Width = 8,
+            Height = 8,
+            Format = CrnBuilder.FormatDxt1,
+            Tables = tables.ToArray(),
+            ColorEndpoints = (endpoints.ToArray(), 1),
+            ColorSelectors = (Selectors(maxValue: 3), 1),
+        };
+        crn.Levels.Add(level.ToArray());
+        return crn.Build();
     }
 }

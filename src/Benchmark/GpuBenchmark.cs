@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using Godot;
+using UnturnedGodot.Data;
 
 namespace UnturnedGodot.Benchmark;
 
@@ -17,7 +18,8 @@ public static class GpuBenchmark
     private const int WarmupMaxFrames = 40;
     private const int WarmupStableFrames = 5;
     private const int SettleFrames = 6;   // discarded after a camera jump so transition hitches stay out of the tail
-    private const int SampleFrames = 40;
+    private const int MinSampleFrames = 40;
+    private const ulong MinSampleUsec = 1_000_000; // Performance monitors refresh on a coarse interval
 
     public static async Task RunAsync(Node context, string unturnedPath, string mapName)
     {
@@ -26,11 +28,11 @@ public static class GpuBenchmark
         {
             if (DisplayServer.GetName() == "headless")
             {
-                GD.PrintErr("[benchmark] Tier 2 needs a real rendering driver — run windowed (drop --headless).");
+                Log.PrintErr("[benchmark] Tier 2 needs a real rendering driver — run windowed (drop --headless).");
                 return;
             }
 
-            GD.Print("[benchmark] Tier 2 (GPU, windowed) starting...");
+            Log.Print("[benchmark] Tier 2 (GPU, windowed) starting...");
             WorldBuildResult world = WorldBuilder.Build(unturnedPath, mapName);
             context.AddChild(world.Terrain);
             context.AddChild(world.Objects);
@@ -44,17 +46,21 @@ public static class GpuBenchmark
             await context.ToSignal(tree, SceneTree.SignalName.ProcessFrame);
 
             Aabb bounds = SceneBounds(context);
-            camera.Far = Mathf.Max(bounds.Size.X, bounds.Size.Z) * 3f + 1000f;
-            IReadOnlyList<(string name, Transform3D xform)> poses = Poses(bounds);
+            float sceneFar = Mathf.Max(bounds.Size.X, bounds.Size.Z) * 3f + 1000f;
+            IReadOnlyList<(string name, Transform3D xform)> poses = Poses(bounds, world.Heights);
 
-            var perPoseMedianMs = new List<(string Name, double MedianMs)>();
+            var perPose = new List<PoseMetrics>();
             var frameMs = new List<double>();
+            var processMs = new List<double>();
             var drawCalls = new List<double>();
             var primitives = new List<double>();
             var renderObjects = new List<double>();
 
             foreach ((string name, Transform3D xform) in poses)
             {
+                // Ground poses represent gameplay and must use PlayerCamera's 4 km far plane. The broad
+                // overview poses still need the full scene range to keep their whole-map diagnostic value.
+                camera.Far = name.StartsWith("ground", StringComparison.Ordinal) ? 4000f : sceneFar;
                 camera.GlobalTransform = xform;
                 await WarmupAsync(context, tree);
 
@@ -64,21 +70,39 @@ public static class GpuBenchmark
                     await context.ToSignal(tree, SceneTree.SignalName.ProcessFrame);
 
                 var poseFrameMs = new List<double>();
-                ulong last = Time.GetTicksUsec();
-                for (int i = 0; i < SampleFrames; i++)
+                var poseProcessMs = new List<double>();
+                var poseDrawCalls = new List<double>();
+                var posePrimitives = new List<double>();
+                var poseRenderObjects = new List<double>();
+                ulong poseStarted = Time.GetTicksUsec();
+                ulong last = poseStarted;
+                do
                 {
                     await context.ToSignal(tree, SceneTree.SignalName.ProcessFrame);
                     ulong now = Time.GetTicksUsec();
                     poseFrameMs.Add((now - last) / 1000.0);
                     last = now;
-                    drawCalls.Add(Mon(Performance.Monitor.RenderTotalDrawCallsInFrame));
-                    primitives.Add(Mon(Performance.Monitor.RenderTotalPrimitivesInFrame));
-                    renderObjects.Add(Mon(Performance.Monitor.RenderTotalObjectsInFrame));
+                    poseProcessMs.Add(Mon(Performance.Monitor.TimeProcess) * 1000.0);
+                    poseDrawCalls.Add(Mon(Performance.Monitor.RenderTotalDrawCallsInFrame));
+                    posePrimitives.Add(Mon(Performance.Monitor.RenderTotalPrimitivesInFrame));
+                    poseRenderObjects.Add(Mon(Performance.Monitor.RenderTotalObjectsInFrame));
                 }
+                while (poseFrameMs.Count < MinSampleFrames || Time.GetTicksUsec() - poseStarted < MinSampleUsec);
                 frameMs.AddRange(poseFrameMs);
-                perPoseMedianMs.Add((name, MetricStats.Median(poseFrameMs)));
-                GD.Print($"[benchmark] pose '{name}': frameMs median {MetricStats.Median(poseFrameMs):0.00}, " +
-                    $"drawCalls {Mon(Performance.Monitor.RenderTotalDrawCallsInFrame):0}");
+                processMs.AddRange(poseProcessMs);
+                drawCalls.AddRange(poseDrawCalls);
+                primitives.AddRange(posePrimitives);
+                renderObjects.AddRange(poseRenderObjects);
+                var metrics = new PoseMetrics(name,
+                    MetricStats.Median(poseFrameMs),
+                    MetricStats.Median(poseProcessMs),
+                    MetricStats.Median(poseDrawCalls),
+                    MetricStats.Median(posePrimitives),
+                    MetricStats.Median(poseRenderObjects));
+                perPose.Add(metrics);
+                Log.Print($"[benchmark] pose '{name}': frame {metrics.FrameMs:0.00} ms, " +
+                    $"CPU monitor {metrics.ProcessMs:0.00} ms, draws {metrics.DrawCalls:0}, " +
+                    $"primitives {metrics.Primitives:0}, objects {metrics.RenderObjects:0}");
             }
 
             // Optional visual check: UG_SHOT=<path> saves a PNG from a low near-ground flyover — the only
@@ -87,27 +111,31 @@ public static class GpuBenchmark
             string shotPath = System.Environment.GetEnvironmentVariable("UG_SHOT") ?? "";
             if (shotPath.Length > 0)
             {
-                Vector3 c = bounds.Position + bounds.Size * 0.5f;
-                float sea = bounds.Position.Y;
-                camera.GlobalTransform = Look(
-                    new Vector3(c.X, sea + 45f, c.Z),
-                    new Vector3(c.X + 90f, sea + 8f, c.Z + 40f),
-                    Vector3.Up);
-                for (int i = 0; i < 4; i++)
+                // Capture the exact ground-level benchmark pose. The former bounds-centre shot could land
+                // outside the terrain on sparse maps and show no nearby shadow or foliage at all, making
+                // visually different settings produce byte-identical "validation" images.
+                foreach ((string name, Transform3D xform) in poses)
+                    if (name == "ground_diag")
+                    {
+                        camera.Far = 4000f;
+                        camera.GlobalTransform = xform;
+                        break;
+                    }
+                for (int i = 0; i < 20; i++)
                     await context.ToSignal(tree, SceneTree.SignalName.ProcessFrame);
                 context.GetViewport().GetTexture().GetImage().SavePng(shotPath);
-                GD.Print($"[benchmark] screenshot saved: {shotPath}");
+                Log.Print($"[benchmark] screenshot saved: {shotPath}");
             }
 
             SceneMetricsResult sm = SceneMetrics.Collect(new Node[] { world.Terrain, world.Objects, world.Foliage });
-            BenchmarkReport report = BuildReport(mapName, frameMs, drawCalls, primitives, renderObjects, sm,
-                poses.Count, perPoseMedianMs);
+            BenchmarkReport report = BuildReport(mapName, frameMs, processMs, drawCalls, primitives,
+                renderObjects, sm, poses.Count, perPose);
             BenchmarkRunner.Finish(report, $"{mapName}-gpu", DiffOptions(),
                 "gpu.frameMs.* are wall-clock medians — noisy, and CPU-bound when draw-call limited");
         }
         catch (Exception e)
         {
-            GD.PrintErr($"[benchmark] Tier 2 failed: {e}");
+            Log.PrintErr($"[benchmark] Tier 2 failed: {e}");
         }
         finally
         {
@@ -115,9 +143,12 @@ public static class GpuBenchmark
         }
     }
 
-    private static BenchmarkReport BuildReport(string mapName, List<double> frameMs, List<double> drawCalls,
-        List<double> primitives, List<double> renderObjects, SceneMetricsResult sm, int poseCount,
-        List<(string Name, double MedianMs)> perPoseMedianMs)
+    private readonly record struct PoseMetrics(string Name, double FrameMs, double ProcessMs,
+        double DrawCalls, double Primitives, double RenderObjects);
+
+    private static BenchmarkReport BuildReport(string mapName, List<double> frameMs, List<double> processMs,
+        List<double> drawCalls, List<double> primitives, List<double> renderObjects, SceneMetricsResult sm,
+        int poseCount, List<PoseMetrics> perPose)
     {
         var report = new BenchmarkReport
         {
@@ -129,6 +160,7 @@ public static class GpuBenchmark
                 // periodic hitches (GC, OS scheduling) that swing ±30% run-to-run, so they produced false
                 // regressions. Tail latency would need a longer, steadier harness to mean anything.
                 ["gpu.frameMs.median"] = MetricStats.Median(frameMs),
+                ["cpu.processMonitorMs.median"] = MetricStats.Median(processMs),
                 ["gpu.drawCalls.median"] = MetricStats.Median(drawCalls),
                 ["gpu.drawCalls.min"] = MetricStats.Min(drawCalls),
                 ["gpu.drawCalls.max"] = MetricStats.Max(drawCalls),
@@ -142,13 +174,20 @@ public static class GpuBenchmark
                 ["gpu.pipelineCompilations"] = PipelineTotal(),
                 ["maxMultiMeshSpread"] = sm.MaxMultiMeshSpread,
                 ["poses"] = poseCount,
-                ["samplesPerPose"] = SampleFrames,
+                ["samplesPerPose.min"] = MinSampleFrames,
+                ["sampleDurationMs.min"] = MinSampleUsec / 1000.0,
             },
         };
         // Per-pose medians too: an optimization that helps one view and hurts another vanishes in the
         // aggregate median, so the report keeps each camera's own number diffable.
-        foreach ((string name, double medianMs) in perPoseMedianMs)
-            report.Metrics[$"gpu.frameMs.median.{name}"] = medianMs;
+        foreach (PoseMetrics pose in perPose)
+        {
+            report.Metrics[$"gpu.frameMs.median.{pose.Name}"] = pose.FrameMs;
+            report.Metrics[$"cpu.processMonitorMs.median.{pose.Name}"] = pose.ProcessMs;
+            report.Metrics[$"gpu.drawCalls.median.{pose.Name}"] = pose.DrawCalls;
+            report.Metrics[$"gpu.primitives.median.{pose.Name}"] = pose.Primitives;
+            report.Metrics[$"gpu.renderObjects.median.{pose.Name}"] = pose.RenderObjects;
+        }
         return report;
     }
 
@@ -156,15 +195,15 @@ public static class GpuBenchmark
     // regression. Counts (draw calls, primitives) are deterministic per view and stay strict.
     private static BaselineDiffOptions DiffOptions() => new()
     {
+        ThresholdPrefixOverrides = new Dictionary<string, double>
+        {
+            ["gpu.frameMs.median."] = 0.10,
+            ["cpu.processMonitorMs.median."] = 0.10,
+        },
         ThresholdOverrides = new Dictionary<string, double>
         {
             ["gpu.frameMs.median"] = 0.10,
-            ["gpu.frameMs.median.overhead"] = 0.10,
-            ["gpu.frameMs.median.oblique_n"] = 0.10,
-            ["gpu.frameMs.median.oblique_e"] = 0.10,
-            ["gpu.frameMs.median.oblique_s"] = 0.10,
-            ["gpu.frameMs.median.zoom"] = 0.10,
-            ["gpu.frameMs.median.tight"] = 0.10,
+            ["cpu.processMonitorMs.median"] = 0.10,
             ["gpu.videoMemBytes"] = 0.05,
             ["gpu.bufferMemBytes"] = 0.05,
             ["gpu.textureMemBytes"] = 0.05,
@@ -209,6 +248,10 @@ public static class GpuBenchmark
             Name = "BenchSun",
             RotationDegrees = new Vector3(-50, -30, 0),
             ShadowEnabled = EnvInt("UG_SHADOW", 1) != 0,
+            // Match DayNightController so Tier 2 measures the shipping shadow workload by default.
+            DirectionalShadowMaxDistance = 128f,
+            DirectionalShadowSplit1 = 0.125f,
+            DirectionalShadowBlendSplits = true,
         };
         float dist = EnvFloat("UG_SHADOW_DIST", -1f);
         if (dist > 0f)
@@ -220,7 +263,7 @@ public static class GpuBenchmark
             4 => DirectionalLight3D.ShadowMode.Parallel4Splits,
             _ => DirectionalLight3D.ShadowMode.Parallel2Splits,
         };
-        GD.Print($"[benchmark] shadow: enabled={sun.ShadowEnabled} maxDist={sun.DirectionalShadowMaxDistance:0} " +
+        Log.Print($"[benchmark] shadow: enabled={sun.ShadowEnabled} maxDist={sun.DirectionalShadowMaxDistance:0} " +
             $"mode={sun.DirectionalShadowMode}");
         context.AddChild(sun);
         var env = new Godot.Environment
@@ -234,7 +277,7 @@ public static class GpuBenchmark
 
     // A representative set of camera poses derived from the scene's own bounds: one straight-down
     // overhead plus three obliques from different sides. Content-relative, so it stays fair on any map.
-    private static IReadOnlyList<(string, Transform3D)> Poses(Aabb bounds)
+    private static IReadOnlyList<(string, Transform3D)> Poses(Aabb bounds, HeightmapSampler heights)
     {
         Vector3 c = bounds.Position + bounds.Size * 0.5f;
         float ext = Mathf.Max(bounds.Size.X, bounds.Size.Z);
@@ -243,7 +286,7 @@ public static class GpuBenchmark
         // partitioning pays off (#2): off-screen regions get frustum-culled, so it is the pose that
         // separates "one giant MultiMesh per type" from "one per region".
         Vector3 q = new(c.X - ext * 0.25f, c.Y, c.Z - ext * 0.25f);
-        return new List<(string, Transform3D)>
+        var poses = new List<(string, Transform3D)>
         {
             // Straight down needs a horizontal up vector (Up would be colinear with the view direction).
             ("overhead", Look(c + new Vector3(0, ext * 0.9f, 0), c, Vector3.Forward)),
@@ -255,6 +298,43 @@ public static class GpuBenchmark
             // the strongest case for culling (most of the map is off-screen).
             ("tight", Look(q + new Vector3(0, ext * 0.06f, 0), q, Vector3.Forward)),
         };
+        if (TryGroundPoint(bounds, heights, out Vector3 ground))
+        {
+            // True gameplay-height views. Visibility ranges, foliage chunk culling and near shadows do not
+            // participate in the elevated poses above, so without these a foliage "optimization" can look
+            // neutral even though it changes the player's frame completely.
+            poses.Add(("ground", Look(ground + new Vector3(0, 3f, 0),
+                ground + new Vector3(0, 2f, -100f), Vector3.Up)));
+            poses.Add(("ground_diag", Look(ground + new Vector3(0, 12f, 0),
+                ground + new Vector3(80f, 2f, -80f), Vector3.Up)));
+        }
+        return poses;
+    }
+
+    private static bool TryGroundPoint(Aabb bounds, HeightmapSampler heights, out Vector3 point)
+    {
+        Vector3 centre = bounds.Position + bounds.Size * 0.5f;
+        // Search centre-first over a small deterministic grid. Object bounds can extend beyond terrain,
+        // particularly on workshop maps, so the geometric centre itself is not guaranteed to be land.
+        ReadOnlySpan<(int X, int Z)> offsets =
+        [
+            (0, 0), (-1, 0), (1, 0), (0, -1), (0, 1),
+            (-1, -1), (1, -1), (-1, 1), (1, 1),
+            (-2, 0), (2, 0), (0, -2), (0, 2),
+        ];
+        float step = Mathf.Min(bounds.Size.X, bounds.Size.Z) / 8f;
+        foreach ((int ox, int oz) in offsets)
+        {
+            float x = centre.X + ox * step;
+            float z = centre.Z + oz * step;
+            if (TerrainCoordinates.TrySampleGodotHeight(heights, x, z, out float y))
+            {
+                point = new Vector3(x, y, z);
+                return true;
+            }
+        }
+        point = default;
+        return false;
     }
 
     private static Transform3D Look(Vector3 pos, Vector3 target, Vector3 up) =>

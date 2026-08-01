@@ -13,6 +13,8 @@ public class LevelInfoTests
         using var dir = new TempDir();
         dir.Write("Landscape/Heightmaps/Tile_0_0_Source.heightmap", new byte[1]);
         dir.Write("Landscape/Heightmaps/Tile_-1_2_Source.heightmap", new byte[1]);
+        dir.Write("Landscape/Heightmaps/Tile_999999999999999999_0_Source.heightmap", new byte[1]);
+        dir.Write("Landscape/Heightmaps/Tile_0_-999999999999999999_Source.heightmap", new byte[1]);
         dir.Write("Landscape/Heightmaps/notes.txt", new byte[1]);          // wrong extension
         dir.Write("Landscape/Heightmaps/Tile_bad.heightmap", new byte[1]); // regex miss
 

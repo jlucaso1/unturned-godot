@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.IO;
 using Godot;
+using UnturnedGodot.Data;
 using UnturnedGodot.Unity;
 
 namespace UnturnedGodot;
@@ -12,13 +13,41 @@ namespace UnturnedGodot;
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed class TextureRegistry
 {
+    private static readonly bool DeduplicateGpu = System.Environment.GetEnvironmentVariable("UG_DEDUP_GPU") != "0";
     private readonly string _textureCacheDir;
     private readonly Dictionary<string, List<Material>> _pending = new();
     private readonly Dictionary<string, (ImageTexture? tex, int filterMode)> _loaded = new();
+    private readonly Dictionary<string, ImageTexture> _imagesByContent = new();
+    private readonly Dictionary<string, string> _materialIdentity = new();
+    private static readonly bool DeduplicateMaterials =
+        System.Environment.GetEnvironmentVariable("UG_DEDUP_MATERIAL_CONTENT") != "0";
 
     public TextureRegistry(string textureCacheDir) => _textureCacheDir = textureCacheDir;
 
     public int PendingKeyCount => _pending.Count;
+    public int MaterialAliasCount => _materialIdentity.Count
+        - new HashSet<string>(_materialIdentity.Values, System.StringComparer.Ordinal).Count;
+
+    // A material may use a different cache key for byte-identical texture data. The complete .tex file
+    // includes format, dimensions, mip count, filter mode and pixels, so its exact hash is a safe material
+    // discriminator and never merges two textures whose sampling or visual result differs.
+    public string MaterialIdentity(string textureKey)
+    {
+        if (!DeduplicateMaterials || textureKey.Length == 0)
+            return textureKey;
+        if (_materialIdentity.TryGetValue(textureKey, out string? identity))
+            return identity;
+        identity = textureKey;
+        string path = Path.Combine(_textureCacheDir, textureKey + ".tex");
+        try
+        {
+            if (File.Exists(path) && TextureCache.IsCurrent(path))
+                identity = ExactContentKey.File(path);
+        }
+        catch (IOException) { }
+        _materialIdentity[textureKey] = identity;
+        return identity;
+    }
 
     public void Register(string textureKey, Material material)
     {
@@ -26,7 +55,8 @@ public sealed class TextureRegistry
             return;
         if (!_pending.TryGetValue(textureKey, out List<Material>? mats))
             _pending[textureKey] = mats = new List<Material>();
-        mats.Add(material);
+        if (!mats.Contains(material))
+            mats.Add(material);
     }
 
     // Applies the texture for a key to every material registered under it. Loads the .tex (creating a GPU
@@ -72,6 +102,19 @@ public sealed class TextureRegistry
         return applied;
     }
 
+    // Once loading/streaming has finished, materials own the ImageTextures they use. These lookup tables
+    // are only acceleration/index state and otherwise retain every material list and texture for the whole
+    // play session. Returns the number of entries released for profiling diagnostics.
+    public int ReleaseLoadingIndexes()
+    {
+        int entries = _pending.Count + _loaded.Count + _imagesByContent.Count + _materialIdentity.Count;
+        _pending.Clear();
+        _loaded.Clear();
+        _imagesByContent.Clear();
+        _materialIdentity.Clear();
+        return entries;
+    }
+
     private (ImageTexture? tex, int filterMode) Load(string textureKey)
     {
         if (_loaded.TryGetValue(textureKey, out (ImageTexture? tex, int filterMode) cached))
@@ -82,10 +125,23 @@ public sealed class TextureRegistry
         if (File.Exists(path) && TextureCache.IsCurrent(path)) // stale formats re-extract on the next pass
         {
             using FileStream stream = File.OpenRead(path);
-            CachedTexture ct = TextureCache.Read(stream);
-            loaded = (ModelLibrary.BuildTexture(ct), ct.FilterMode);
+            CachedTexture ct = CachedTexture.Decoded(TextureCache.Read(stream));
+            string content = DeduplicateGpu
+                ? ExactContentKey.Image(ct.Format, ct.Width, ct.Height, ct.MipCount, ct.Pixels)
+                : textureKey;
+            if (!_imagesByContent.TryGetValue(content, out ImageTexture? image))
+            {
+                image = ModelLibrary.BuildTexture(ct);
+                if (image != null)
+                    _imagesByContent[content] = image;
+            }
+            loaded = (image, ct.FilterMode);
         }
-        _loaded[textureKey] = loaded;
+        // A miss during cold streaming is temporary: the mesh phase runs before most of the .resS tail
+        // has been written. Caching null here made the later ready notification reuse the miss forever.
+        // Successful GPU resources are stable and remain worth caching; absent/invalid files are retried.
+        if (loaded.tex != null)
+            _loaded[textureKey] = loaded;
         return loaded;
     }
 }

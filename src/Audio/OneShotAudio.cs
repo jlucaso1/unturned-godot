@@ -53,7 +53,7 @@ public partial class OneShotAudio : Node3D
         {
             Camera3D? cam = GetViewport().GetCamera3D();
             float dist = cam != null ? cam.GlobalPosition.DistanceTo(position) : -1f;
-            GD.Print($"[audio] play '{defName}' at {position} listenerDist={dist:F1} " +
+            Log.Print($"[audio] play '{defName}' at {position} listenerDist={dist:F1} " +
                 $"maxDist={maxDistance} vol={voice.VolumeDb:F1}dB playing={voice.Playing} inTree={voice.IsInsideTree()}");
         }
         return true;

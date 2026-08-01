@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading;
 using Godot;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Dat;
@@ -19,7 +20,26 @@ public static class ModelExtractor
     // decompressed blob; the .resS texture stream is the remaining ~1.18 GB. Mesh extraction only needs
     // the SerializedFile, so we cap the LZMA decode there (~3 s instead of ~10 s) and defer the texture
     // stream to ExtractTextures. See the cold-load streaming design.
-    private const long MeshDecodeCap = 200L * 1024 * 1024;
+    // Decoding stops at the end of the SerializedFile: the .resS pixel stream after it is only needed by
+    // the texture pass. The cut-off comes from the bundle's own node table rather than a fixed size —
+    // the game's SerializedFile is ~171 MB but a large workshop mod's can be several times that, and a
+    // truncated SerializedFile fails to parse at all.
+    private static long SerializedFileCap(byte[] bundle)
+    {
+        using MasterBundleStream? stream = MasterBundleStream.Open(bundle);
+        if (stream == null)
+            return long.MaxValue; // unknown shape: let the whole blob decode
+
+        long end = 0;
+        foreach (MasterBundleStream.Node node in stream.Nodes)
+            if (!node.Path.EndsWith(".resS", StringComparison.Ordinal)
+                && !node.Path.EndsWith(".resource", StringComparison.Ordinal))
+            {
+                end = Math.Max(end, node.Offset + node.Size);
+            }
+
+        return end > 0 ? end : long.MaxValue;
+    }
 
     // The masterbundle's per-class-id type trees. Since type trees are identical across files of the same
     // Unity version, these decode the game's resources.assets (which ships with its type trees stripped).
@@ -44,29 +64,39 @@ public static class ModelExtractor
             catch (IOException) { /* corrupt/locked cache -> regenerate */ }
         }
 
-        UnityBundle bundle = UnityBundle.Read(File.ReadAllBytes(bundlePath), MeshDecodeCap); // SerializedFile only
+        byte[] raw = File.ReadAllBytes(bundlePath);
+        UnityBundle bundle = UnityBundle.Read(raw, SerializedFileCap(raw)); // SerializedFile only
         byte[] sfBytes = Array.Empty<byte>();
         foreach (KeyValuePair<string, byte[]> f in bundle.Files)
             if (!f.Key.EndsWith(".resS") && !f.Key.EndsWith(".resource"))
                 sfBytes = f.Value;
         IReadOnlyDictionary<int, List<TypeTreeNode>> trees = SerializedFile.Read(sfBytes).TypeTreesByClassId;
 
+        WriteTypeTreeCache(bundlePath, trees);
+        return trees;
+    }
+
+    // Best-effort: a write failure just means the next reader decodes the bundle again.
+    private static void WriteTypeTreeCache(string bundlePath,
+        IReadOnlyDictionary<int, List<TypeTreeNode>> trees)
+    {
         try
         {
+            var info = new FileInfo(bundlePath);
+            string cachePath = ProjectSettings.GlobalizePath("user://type_trees.cache");
             Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
             using FileStream ws = File.Create(cachePath);
-            TypeTreeCache.Write(ws, trees, stamp);
+            TypeTreeCache.Write(ws, trees, info.LastWriteTimeUtc.Ticks ^ info.Length);
         }
         catch (IOException) { /* best-effort cache; a write failure isn't fatal */ }
-
-        return trees;
     }
 
     // Decodes just the masterbundle's SerializedFile (meshes + metadata; not the .resS pixel stream), for
     // reading inline assets such as the small face textures. Callers should cache the result themselves.
     public static SerializedFile ReadMasterbundleFile(string bundlePath)
     {
-        UnityBundle bundle = UnityBundle.Read(File.ReadAllBytes(bundlePath), MeshDecodeCap);
+        byte[] raw = File.ReadAllBytes(bundlePath);
+        UnityBundle bundle = UnityBundle.Read(raw, SerializedFileCap(raw));
         byte[] sfBytes = Array.Empty<byte>();
         foreach (KeyValuePair<string, byte[]> f in bundle.Files)
             if (!f.Key.EndsWith(".resS") && !f.Key.EndsWith(".resource"))
@@ -77,20 +107,66 @@ public static class ModelExtractor
     // Phase 1 (file based): decode only the SerializedFile and build the per-GUID meshes, recording each
     // submesh's texture key without touching the .resS pixel stream. Used by the synchronous/benchmark
     // build; the interactive cold load uses StreamExtract instead.
-    public static int ExtractMeshes(string bundlePath, string objectBundlesDir, string treeBundlesDir,
-        string assetsDir, HashSet<Guid> neededGuids, string cacheDir, ObjectAssetDatabase db,
-        IReadOnlyList<FoliageAsset>? foliageAssets = null)
+    public static int ExtractMeshes(string bundlePath, string bundleTag, string objectBundlesDir,
+        string treeBundlesDir, string assetsDir, HashSet<Guid> neededGuids, string cacheDir,
+        ObjectAssetDatabase db, IReadOnlyList<FoliageAsset>? foliageAssets = null,
+        CancellationToken cancellationToken = default)
     {
-        UnityBundle bundle = UnityBundle.Read(File.ReadAllBytes(bundlePath), MeshDecodeCap); // SerializedFile only
-        byte[] sfBytes = Array.Empty<byte>();
+        if (cancellationToken.IsCancellationRequested)
+            return 0;
+        byte[] raw = File.ReadAllBytes(bundlePath);
+        if (cancellationToken.IsCancellationRequested)
+            return 0;
+        UnityBundle bundle = UnityBundle.Read(raw, SerializedFileCap(raw)); // SerializedFile only
+        var produced = new HashSet<Guid>();
+        int extracted = 0;
+        int serializedFile = 0;
         foreach (KeyValuePair<string, byte[]> f in bundle.Files)
-            if (!f.Key.EndsWith(".resS") && !f.Key.EndsWith(".resource"))
-                sfBytes = f.Value;
+        {
+            if (cancellationToken.IsCancellationRequested)
+                return extracted;
+            if (f.Key.EndsWith(".resS") || f.Key.EndsWith(".resource"))
+                continue;
 
-        int extracted = ExtractMeshesFromSerializedFile(sfBytes, objectBundlesDir, treeBundlesDir,
-            assetsDir, neededGuids, cacheDir, db, neededTextures: null, foliageAssets);
-        GD.Print($"[extract] meshes={extracted}");
+            string fileTag = serializedFile++ == 0 ? bundleTag : $"{bundleTag}-{serializedFile}";
+            extracted += ExtractMeshesFromSerializedFile(f.Value, fileTag, objectBundlesDir, treeBundlesDir,
+                assetsDir, neededGuids, cacheDir, db, neededTextures: null, foliageAssets, produced);
+        }
+        if (!cancellationToken.IsCancellationRequested)
+            RecordMisses(bundlePath, cacheDir, neededGuids, foliageAssets, produced);
+        AppShutdown.PrintUnlessQuitting($"[extract] meshes={extracted}");
         return extracted;
+    }
+
+    // Marks every needed GUID this pass did NOT produce a mesh for as a known miss (no prefab in the
+    // bundle, no renderable submesh, unresolved foliage path), merged into whatever earlier maps recorded
+    // for the SAME bundle. Anything that did produce a mesh is cleared from the set, so a game update that
+    // adds a prefab heals the entry. Only call this after a pass that ran to completion — recording misses
+    // from a half-finished decode would permanently blacklist GUIDs that were simply never reached.
+    private static void RecordMisses(string bundlePath, string cacheDir, HashSet<Guid> neededGuids,
+        IReadOnlyList<FoliageAsset>? foliageAssets, HashSet<Guid> produced)
+    {
+        string indexPath = Path.Combine(cacheDir, ExtractionIndex.FileNameFor(bundlePath));
+        long stamp = ExtractionIndex.StampFor(bundlePath);
+        HashSet<Guid> misses = ExtractionIndex.Load(indexPath, stamp);
+        var failed = new HashSet<Guid>();
+
+        foreach (Guid guid in neededGuids)
+            if (guid != Guid.Empty)
+                failed.Add(guid);
+        if (foliageAssets != null)
+            foreach (FoliageAsset fa in foliageAssets)
+                failed.Add(fa.Guid);
+        failed.ExceptWith(produced);
+        misses.UnionWith(failed);
+        misses.ExceptWith(produced);
+
+        foreach (Guid guid in produced)
+            ExtractionIndex.RecordMeshOwner(cacheDir, guid, bundlePath, stamp);
+        foreach (Guid guid in failed)
+            ExtractionIndex.RemoveCachedAsset(cacheDir, guid);
+
+        ExtractionIndex.Save(indexPath, stamp, misses);
     }
 
     // Cold-load streaming: decode the single LZMA block once, reading the SerializedFile (meshes) first,
@@ -98,153 +174,317 @@ public static class ModelExtractor
     // writing each referenced texture as its bytes arrive — so textures appear progressively while the map
     // is already playable, and the 171 MB SerializedFile is never re-decompressed. Falls back to the
     // two-decode path if the bundle is not the expected single-LZMA-block shape.
-    public static void StreamExtract(string bundlePath, string objectBundlesDir, string treeBundlesDir,
-        string assetsDir, HashSet<Guid> neededGuids, string cacheDir, string textureCacheDir,
+    public static void StreamExtract(string bundlePath, string bundleTag, string objectBundlesDir,
+        string treeBundlesDir, string assetsDir, HashSet<Guid> neededGuids, string cacheDir,
+        string textureCacheDir,
         ObjectAssetDatabase db, Action onMeshesReady, Action<string> onTextureWritten,
-        IReadOnlyList<FoliageAsset>? foliageAssets = null)
+        IReadOnlyList<FoliageAsset>? foliageAssets = null, bool isCoreBundle = false,
+        IReadOnlyDictionary<string, Guid[]>? layerWantsByPath = null,
+        Action<Guid, CachedTexture>? onLayerTexture = null,
+        CancellationToken cancellationToken = default)
     {
-        byte[] bundle = File.ReadAllBytes(bundlePath);
-        using MasterBundleStream? stream = MasterBundleStream.Open(bundle);
+        IReadOnlyDictionary<string, Guid[]> layerWants =
+            layerWantsByPath ?? new Dictionary<string, Guid[]>(StringComparer.Ordinal);
+
+        using MasterBundleStream? stream = MasterBundleStream.OpenFile(bundlePath);
+        if (cancellationToken.IsCancellationRequested)
+            return;
         if (stream == null)
         {
-            GD.Print("[extract] bundle not single-block; falling back to two-pass decode.");
-            ExtractMeshes(bundlePath, objectBundlesDir, treeBundlesDir, assetsDir, neededGuids, cacheDir,
-                db, foliageAssets);
+            AppShutdown.PrintUnlessQuitting("[extract] bundle not single-block; falling back to two-pass decode.");
+            ExtractMeshes(bundlePath, bundleTag, objectBundlesDir, treeBundlesDir, assetsDir, neededGuids,
+                cacheDir, db, foliageAssets, cancellationToken);
+            if (cancellationToken.IsCancellationRequested)
+                return;
             onMeshesReady();
-            ExtractTextures(bundlePath, cacheDir, textureCacheDir, onTextureWritten);
+            ExtractTextures(bundlePath, bundleTag, cacheDir, textureCacheDir, onTextureWritten,
+                cancellationToken);
+            if (cancellationToken.IsCancellationRequested)
+                return;
+
+            // The terrain waits on this pass for its splat layers whichever route it took, so the fallback
+            // owes them too: without this the map keeps its flat-colour terrain and the wait only ends
+            // when the whole extraction does.
+            if (layerWants.Count > 0)
+                foreach ((string containerPath, CachedTexture texture) in
+                    BundleTextures.ExtractAll(bundlePath, new List<string>(layerWants.Keys)))
+                {
+                    foreach (Guid material in layerWants[containerPath])
+                        onLayerTexture?.Invoke(material, texture);
+                }
             return;
         }
 
         Directory.CreateDirectory(cacheDir);
         Directory.CreateDirectory(textureCacheDir);
 
-        // Read nodes in blob order: the SerializedFile (offset 0) first, then the .resS/.resource streams.
+        // The SerializedFile (offset 0) comes first in blob order, then the .resS/.resource streams.
         var ordered = new List<MasterBundleStream.Node>(stream.Nodes);
         ordered.Sort((a, b) => a.Offset.CompareTo(b.Offset));
-        var neededTextures = new Dictionary<long, UnityTexture>();
 
-        const int chunkSize = 16 * 1024 * 1024;
+        var neededTextures = new Dictionary<(string Tag, long Id), UnityTexture>();
+        var layerTextures = new Dictionary<string, UnityTexture>(StringComparer.Ordinal);
+        var produced = new HashSet<Guid>();
+
+        // Strictly physical order, whatever the bundle's layout: the decoder only moves forward, so a node
+        // that is skipped rather than read leaves every following one misaligned. A bundle with more than
+        // one serialized file interleaves them with their own streams, and recording those streams for
+        // later handed the next file's parse a lump of texture bytes.
+        int serializedLeft = 0;
         foreach (MasterBundleStream.Node node in ordered)
+            if (!IsStreamNode(node.Path))
+                serializedLeft++;
+
+        var written = new List<(string Tag, long TexId, string? LayerPath, UnityTexture Texture)>();
+        int readSerialized = 0;
+        var owedByFile = new Dictionary<string, List<BundlePass.Want>>(StringComparer.Ordinal);
+        // Path ids repeat between the serialized files of one bundle, so what is settled is tracked by
+        // (file tag, id) — the same pair the cache is keyed by.
+        var resolved = new HashSet<(string, long)>();
+
+        for (int i = 0; i < ordered.Count; i++)
         {
-            bool isStream = node.Path.EndsWith(".resS") || node.Path.EndsWith(".resource");
-            if (!isStream)
-            {
-                byte[] sfBytes = stream.Read((int)node.Size);
-                ExtractMeshesFromSerializedFile(sfBytes, objectBundlesDir, treeBundlesDir, assetsDir,
-                    neededGuids, cacheDir, db, neededTextures, foliageAssets);
-                GD.Print($"[extract] meshes={CachedMeshCountLoose(cacheDir)} (streamed); {neededTextures.Count} textures pending");
-                onMeshesReady();
-            }
-            else
-            {
-                string fileName = LastSegment(node.Path);
-                var pending = new List<(long texId, UnityTexture tex)>();
-                foreach (KeyValuePair<long, UnityTexture> kv in neededTextures)
-                    if (kv.Value.StreamFileName == fileName)
-                        pending.Add((kv.Key, kv.Value));
-                pending.Sort((a, b) => a.tex.StreamOffset.CompareTo(b.tex.StreamOffset));
+            if (AppShutdown.IsShuttingDown || cancellationToken.IsCancellationRequested)
+                return; // leaving: the cache keeps whatever completed and resumes next boot
 
-                // Do any two needed regions overlap (content-identical textures could share bytes)? A
-                // forward-only window can't re-read shared bytes, so in that rare case retain the whole node.
-                bool overlap = false;
-                for (int i = 1; i < pending.Count; i++)
-                    if (pending[i].tex.StreamOffset <
-                        pending[i - 1].tex.StreamOffset + pending[i - 1].tex.StreamSize)
-                    {
-                        overlap = true;
-                        break;
-                    }
+            MasterBundleStream.Node node = ordered[i];
+            if (!IsStreamNode(node.Path))
+            {
+                // A path id is unique only inside ONE serialized file, so a bundle carrying several of
+                // them can repeat ids between them. The first file keeps the bundle's plain tag — which is
+                // every bundle shipped today, and keeps their caches valid — and each further file gets
+                // its own, so colliding ids cannot claim each other's cache entry.
+                string fileTag = readSerialized == 0 ? bundleTag : $"{bundleTag}-{readSerialized + 1}";
+                readSerialized++;
 
-                if (overlap)
+                ReadSerializedNode(stream, (int)node.Size, bundlePath, fileTag, objectBundlesDir,
+                    treeBundlesDir, assetsDir, neededGuids, cacheDir, db, neededTextures, layerTextures,
+                    foliageAssets, isCoreBundle, layerWants, onLayerTexture, produced);
+
+                // Settle what needs no stream at all, once per texture: pixels stored inline are in hand
+                // already, and anything extracted on an earlier boot only needs its key handed back. Both
+                // then stay out of the plan, so the pass reads no further than it truly owes.
+                CollectOwed(neededTextures, layerTextures, resolved, textureCacheDir,
+                    onTextureWritten, owedByFile, written);
+
+                // Only once the LAST serialized file is in: the scene is built off this signal, and firing
+                // it after the first of several left the objects from the rest as fallback boxes.
+                if (--serializedLeft == 0)
                 {
-                    var buffer = new byte[node.Size];
-                    long filled = 0;
-                    int next = 0;
-                    while (filled < node.Size)
-                    {
-                        int want = (int)Math.Min(chunkSize, node.Size - filled);
-                        int got = stream.Read(buffer, (int)filled, want);
-                        if (got == 0)
-                            break;
-                        filled += got;
-                        while (next < pending.Count &&
-                            pending[next].tex.StreamOffset + pending[next].tex.StreamSize <= filled)
-                        {
-                            WriteStreamedTexture(pending[next].texId, pending[next].tex, fileName, buffer,
-                                textureCacheDir, onTextureWritten);
-                            next++;
-                        }
-                    }
+                    // All serialized files have now been scanned. A miss index written by an earlier
+                    // file would permanently hide GUIDs owned by a later file after an interrupted pass.
+                    RecordMisses(bundlePath, cacheDir, neededGuids, foliageAssets, produced);
+                    AppShutdown.PrintUnlessQuitting($"[extract] meshes={CachedMeshCountLoose(cacheDir)} "
+                        + $"(streamed); {neededTextures.Count + layerTextures.Count} textures referenced");
+                    onMeshesReady();
                 }
+
+                // The file itself is by far the largest allocation of the pass (480 MB for a big workshop
+                // bundle) and nothing past this point reads it — the texture ranges are plain offsets into
+                // the stream. Hand it back now, or it stays resident for the whole texture tail. After
+                // signalling, so the collection pause is off the path to a playable world; reading it
+                // happens inside a method so the reference is provably gone by the time this runs.
+                ReleaseDecodedFile();
+                continue;
+            }
+
+            // What this stream owes is settled: only a serialized file read BEFORE it can name its ranges,
+            // and one read after could never be served by a decoder that cannot rewind.
+            string fileName = LastSegment(node.Path);
+            List<BundlePass.Want> wants = owedByFile.TryGetValue(fileName, out List<BundlePass.Want>? owed)
+                ? owed
+                : new List<BundlePass.Want>();
+
+            List<BundlePass.Step> plan = BundlePass.Plan(new[] { new BundlePass.Node(fileName, node.Size) },
+                wants);
+            IReadOnlyList<ForwardRegions.Region> regions = plan.Count > 0
+                ? plan[0].Regions
+                : Array.Empty<ForwardRegions.Region>();
+
+            // Read no further than needed only when nothing after this node can still be owed: with a
+            // serialized file yet to come, a later stream node may turn out to be wanted and every byte in
+            // between has to be consumed to reach it.
+            bool nothingFurtherOwed = serializedLeft == 0 && !AnyLaterNodeOwed(ordered, i, owedByFile);
+            long readTo = node.Size;
+            if (nothingFurtherOwed)
+                readTo = plan.Count > 0 ? plan[0].ReadTo : 0; // owes nothing here either: stop at once
+
+            ForwardRegions.Read(stream.Read, readTo, regions, (index, pixels) =>
+            {
+                (string tag, long texId, string? layerPath, UnityTexture texture) = written[index];
+                if (layerPath == null)
+                    WriteStreamedTextureBytes(tag, texId, texture, pixels, textureCacheDir,
+                        onTextureWritten);
                 else
                 {
-                    // Sliding window: keep only the current texture's bytes resident. The .resS is ~1.18 GB;
-                    // this bounds peak to one texture (+ a reused scratch for the gaps) instead of the whole
-                    // node. A streamed texture's pixels ARE its [StreamOffset, +StreamSize) bytes (GetPixels
-                    // just copies that region), so the read buffer is the pixel data directly.
-                    long pos = 0;
-                    var scratch = new byte[chunkSize];
-                    foreach ((long texId, UnityTexture tex) in pending)
-                    {
-                        while (pos < tex.StreamOffset) // skip-read the gap up to this texture
-                        {
-                            int want = (int)Math.Min(scratch.Length, tex.StreamOffset - pos);
-                            int got = stream.Read(scratch, 0, want);
-                            if (got == 0)
-                                goto drained;
-                            pos += got;
-                        }
-                        var texBuf = new byte[tex.StreamSize];
-                        int read = 0;
-                        while (read < texBuf.Length)
-                        {
-                            int got = stream.Read(texBuf, read, texBuf.Length - read);
-                            if (got == 0)
-                                break;
-                            read += got;
-                        }
-                        pos += read;
-                        if (read == texBuf.Length)
-                            WriteStreamedTextureBytes(texId, tex, texBuf, textureCacheDir, onTextureWritten);
-                    }
-                drained:
-                    while (pos < node.Size) // drain the remainder so any following node stays aligned
-                    {
-                        int want = (int)Math.Min(scratch.Length, node.Size - pos);
-                        int got = stream.Read(scratch, 0, want);
-                        if (got == 0)
-                            break;
-                        pos += got;
-                    }
+                    CachedTexture cached = CachedTexture.From(texture, pixels);
+                    foreach (Guid material in layerWants[layerPath])
+                        onLayerTexture?.Invoke(material, cached);
                 }
-            }
+            }, cancellationToken: cancellationToken);
+
+            if (cancellationToken.IsCancellationRequested)
+                return;
+
+            owedByFile.Remove(fileName);
+            AppShutdown.PrintUnlessQuitting($"[extract] {Path.GetFileName(bundlePath)}: {regions.Count} "
+                + $"textures out of {readTo >> 20}/{node.Size >> 20} MB of {fileName}");
+
+            if (nothingFurtherOwed)
+                return; // every byte anyone asked for is in hand
         }
     }
 
-    private static void WriteStreamedTexture(long texId, UnityTexture tex, string fileName, byte[] fileBytes,
-        string textureCacheDir, Action<string> onTextureWritten)
+    // Sorts everything referenced so far into "needs no stream" (written or signalled here and now) and
+    // "owed by a stream file" (planned when that node comes round). Each texture is settled once.
+    private static void CollectOwed(Dictionary<(string Tag, long Id), UnityTexture> neededTextures,
+        Dictionary<string, UnityTexture> layerTextures, HashSet<(string, long)> resolved,
+        string textureCacheDir, Action<string> onTextureWritten,
+        Dictionary<string, List<BundlePass.Want>> owedByFile,
+        List<(string Tag, long TexId, string? LayerPath, UnityTexture Texture)> written)
     {
-        string texKey = texId.ToString("x");
-        string outPath = Path.Combine(textureCacheDir, texKey + ".tex");
-        if (File.Exists(outPath) && TextureCache.IsCurrent(outPath))
+        foreach (((string tag, long texId), UnityTexture texture) in neededTextures)
         {
-            onTextureWritten(texKey);
-            return;
+            if (!resolved.Add((tag, texId)))
+                continue;
+
+            if (texture.StreamPath.Length == 0)
+            {
+                // A Texture2D small enough to be stored inline has no stream range to wait for; the bytes
+                // are already in hand. Sending it through the pass instead dropped it silently, which is
+                // why two of this map's textures never arrived.
+                if (texture.InlineData.Length > 0)
+                    WriteStreamedTextureBytes(tag, texId, texture, texture.InlineData,
+                        textureCacheDir, onTextureWritten);
+                continue;
+            }
+
+            if (AlreadyCached(tag, texId, textureCacheDir, onTextureWritten))
+                continue;
+
+            Owe(owedByFile, texture.StreamFileName).Add(new BundlePass.Want(texture.StreamFileName,
+                texture.StreamOffset, texture.StreamSize, written.Count));
+            written.Add((tag, texId, null, texture));
         }
-        byte[]? pixels = tex.GetPixels(name => name == fileName ? fileBytes : null);
-        if (pixels == null || pixels.Length == 0)
-            return;
-        using (var stream = File.Create(outPath))
-            TextureCache.Write(stream, new CachedTexture(tex.Format, tex.Width, tex.Height, tex.MipCount, pixels, tex.FilterMode));
-        onTextureWritten(texKey);
+
+        foreach ((string containerPath, UnityTexture texture) in layerTextures)
+        {
+            bool planned = false;
+            foreach ((string _, long _, string? layerPath, UnityTexture _) in written)
+                if (layerPath == containerPath)
+                {
+                    planned = true;
+                    break;
+                }
+
+            if (planned)
+                continue;
+
+            Owe(owedByFile, texture.StreamFileName).Add(new BundlePass.Want(texture.StreamFileName,
+                texture.StreamOffset, texture.StreamSize, written.Count));
+            written.Add((string.Empty, 0, containerPath, texture));
+        }
     }
+
+    private static List<BundlePass.Want> Owe(Dictionary<string, List<BundlePass.Want>> owedByFile,
+        string fileName)
+    {
+        if (!owedByFile.TryGetValue(fileName, out List<BundlePass.Want>? wants))
+            owedByFile[fileName] = wants = new List<BundlePass.Want>();
+        return wants;
+    }
+
+    // True when a node after index `at` still owes something. Nodes already read cannot be revisited, so
+    // only what is still ahead decides whether the pass has to keep consuming.
+    private static bool AnyLaterNodeOwed(List<MasterBundleStream.Node> ordered, int at,
+        Dictionary<string, List<BundlePass.Want>> owedByFile)
+    {
+        for (int i = at + 1; i < ordered.Count; i++)
+            if (owedByFile.TryGetValue(LastSegment(ordered[i].Path), out List<BundlePass.Want>? wants)
+                && wants.Count > 0)
+            {
+                return true;
+            }
+
+        return false;
+    }
+
+    // The SerializedFile phase, kept in its own frame so the decoded file is unreachable when it returns.
+    private static void ReadSerializedNode(MasterBundleStream stream, int size, string bundlePath,
+        string bundleTag, string objectBundlesDir, string treeBundlesDir, string assetsDir,
+        HashSet<Guid> neededGuids, string cacheDir, ObjectAssetDatabase db,
+        Dictionary<(string Tag, long Id), UnityTexture> neededTextures, Dictionary<string, UnityTexture> layerTextures,
+        IReadOnlyList<FoliageAsset>? foliageAssets, bool isCoreBundle,
+        IReadOnlyDictionary<string, Guid[]> layerWants, Action<Guid, CachedTexture>? onLayerTexture,
+        HashSet<Guid> produced)
+    {
+        SerializedFile file = SerializedFile.Read(stream.Read(size));
+        ExtractMeshesFrom(file, bundleTag, objectBundlesDir, treeBundlesDir, assetsDir, neededGuids,
+            cacheDir, db, neededTextures, foliageAssets, produced, isCoreBundle ? bundlePath : null);
+
+        // Meshes land before the potentially long texture tail. If shutdown interrupted that tail, the
+        // next load sees current meshes and ExtractFoliageMeshes/Object extraction correctly skips them;
+        // recover their Texture2D metadata from the cached material keys so this pass can resume the
+        // missing pixels instead of permanently rendering opaque cards.
+        var objectsByPathId = new Dictionary<long, SerializedObject>();
+        foreach (SerializedObject obj in file.Objects)
+            objectsByPathId[obj.PathId] = obj;
+        foreach (long texId in TextureDependencyIndex.NeededTextureIds(cacheDir, bundleTag, neededGuids))
+            if (!neededTextures.ContainsKey((bundleTag, texId))
+                && objectsByPathId.TryGetValue(texId, out SerializedObject? texObj))
+                neededTextures[(bundleTag, texId)] = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree,
+                    file.ReaderFor(texObj)));
+
+        // The terrain's splat layers ride along in this same pass: they live in the same bundles, and
+        // resolving them separately meant decoding every one of them a second time.
+        foreach ((string containerPath, UnityTexture texture) in
+            BundleTextures.Locate(file, new List<string>(layerWants.Keys)))
+        {
+            if (texture.StreamPath.Length == 0)
+            {
+                CachedTexture cached = CachedTexture.From(texture, texture.InlineData);
+                foreach (Guid material in layerWants[containerPath])
+                    onLayerTexture?.Invoke(material, cached);
+            }
+            else
+                layerTextures[containerPath] = texture;
+        }
+    }
+
+    // Returns the SerializedFile's memory to the OS rather than leaving it on the large object heap for
+    // the rest of the load. Runs after the meshes are cached and the scene has been signalled, so the
+    // pause it costs is off the path to a playable world.
+    private static void ReleaseDecodedFile()
+    {
+        System.Runtime.GCSettings.LargeObjectHeapCompactionMode =
+            System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+        GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+    }
+
+    private static bool IsStreamNode(string path) =>
+        path.EndsWith(".resS", StringComparison.Ordinal)
+        || path.EndsWith(".resource", StringComparison.Ordinal);
 
     // Writes an already-extracted streamed texture — its bytes are exactly the pixel region (the sliding
     // window read them directly), so no GetPixels region-copy is needed.
-    private static void WriteStreamedTextureBytes(long texId, UnityTexture tex, byte[] pixels,
-        string textureCacheDir, Action<string> onTextureWritten)
+    // True when this texture is already on disk in the current cache format, in which case the caller is
+    // told about it and the bytes never have to be decoded again.
+    private static bool AlreadyCached(string bundleTag, long texId, string textureCacheDir,
+        Action<string> onTextureWritten)
     {
-        string texKey = texId.ToString("x");
+        string texKey = TextureKey.For(bundleTag, texId);
+        string path = Path.Combine(textureCacheDir, texKey + ".tex");
+        if (!File.Exists(path) || !TextureCache.IsCurrent(path))
+            return false;
+
+        onTextureWritten(texKey);
+        return true;
+    }
+
+    private static void WriteStreamedTextureBytes(string bundleTag, long texId, UnityTexture tex,
+        byte[] pixels, string textureCacheDir, Action<string> onTextureWritten)
+    {
+        string texKey = TextureKey.For(bundleTag, texId);
         string outPath = Path.Combine(textureCacheDir, texKey + ".tex");
         if (File.Exists(outPath) && TextureCache.IsCurrent(outPath))
         {
@@ -254,7 +494,7 @@ public static class ModelExtractor
         if (pixels.Length == 0)
             return;
         using (var stream = File.Create(outPath))
-            TextureCache.Write(stream, new CachedTexture(tex.Format, tex.Width, tex.Height, tex.MipCount, pixels, tex.FilterMode));
+            TextureCache.Write(stream, CachedTexture.From(tex, pixels));
         onTextureWritten(texKey);
     }
 
@@ -269,14 +509,33 @@ public static class ModelExtractor
 
     // Builds the per-GUID meshes from an already-decoded SerializedFile. When neededTextures is supplied,
     // it is filled with the metadata of every referenced texture so a caller can stream in the pixels.
-    private static int ExtractMeshesFromSerializedFile(byte[] sfBytes, string objectBundlesDir,
+    // producedGuids, when supplied, collects every GUID that ended up with a cached mesh — the complement
+    // of the needed set is what RecordMisses blacklists.
+    private static int ExtractMeshesFromSerializedFile(byte[] sfBytes, string bundleTag,
+        string objectBundlesDir, string treeBundlesDir, string assetsDir, HashSet<Guid> neededGuids,
+        string cacheDir, ObjectAssetDatabase db, Dictionary<(string Tag, long Id), UnityTexture>? neededTextures,
+        IReadOnlyList<FoliageAsset>? foliageAssets = null, HashSet<Guid>? producedGuids = null,
+        string? typeTreeCacheFor = null) =>
+        ExtractMeshesFrom(SerializedFile.Read(sfBytes), bundleTag, objectBundlesDir, treeBundlesDir,
+            assetsDir, neededGuids, cacheDir, db, neededTextures, foliageAssets, producedGuids,
+            typeTreeCacheFor);
+
+    // Same, for a caller that already holds the decoded file (the streaming pass reads it once and then
+    // uses it for the meshes, the type trees and the terrain layers alike).
+    private static int ExtractMeshesFrom(SerializedFile file, string bundleTag, string objectBundlesDir,
         string treeBundlesDir, string assetsDir, HashSet<Guid> neededGuids, string cacheDir,
-        ObjectAssetDatabase db, Dictionary<long, UnityTexture>? neededTextures,
-        IReadOnlyList<FoliageAsset>? foliageAssets = null)
+        ObjectAssetDatabase db, Dictionary<(string Tag, long Id), UnityTexture>? neededTextures,
+        IReadOnlyList<FoliageAsset>? foliageAssets = null, HashSet<Guid>? producedGuids = null,
+        string? typeTreeCacheFor = null)
     {
-        SerializedFile file = SerializedFile.Read(sfBytes);
+
+        // The per-class type trees are a by-product of having read this file. Handing them to the cache
+        // here is what keeps the skybox and the character importer from decoding the same 170 MB prefix
+        // again, on the main thread, in the middle of the load.
+        if (typeTreeCacheFor != null)
+            WriteTypeTreeCache(typeTreeCacheFor, file.TypeTreesByClassId);
         PrefabGraph graph = PrefabGraph.Read(file);
-        MaterialResolver materials = MaterialResolver.Read(graph, assetsDir);
+        MaterialResolver materials = MaterialResolver.Read(graph, assetsDir, bundleTag);
 
         Directory.CreateDirectory(cacheDir);
 
@@ -286,15 +545,21 @@ public static class ModelExtractor
         // instead of re-scanning both trees here. Object vs tree — which sets the prefab-key prefix — is
         // recovered from each asset's directory (they have disjoint GUID spaces, so the merged DB loses
         // nothing).
+        // The prefab key is the asset's folder path inside the bundle, so its first segment is the name of
+        // the bundle's own asset folder — "trees" for the game, "resources" for a workshop mod that keeps
+        // its harvestables there. Deriving it from the directory keeps both working.
+        string objectsRoot = RootKey(objectBundlesDir);
+        string treesRoot = RootKey(treeBundlesDir);
+
         var work = new List<(ObjectAsset asset, string key)>();
         foreach (ObjectAsset a in db.All)
         {
             bool isTree = !Path.GetRelativePath(treeBundlesDir, a.Directory).StartsWith("..");
             string key = isTree
-                ? "trees/" + FolderKey(a.Directory, treeBundlesDir)
+                ? treesRoot + "/" + FolderKey(a.Directory, treeBundlesDir)
                 : a.BundleOverridePath is { Length: > 0 } ovr
                     ? OverrideKey(ovr)
-                    : "objects/" + FolderKey(a.Directory, objectBundlesDir);
+                    : objectsRoot + "/" + FolderKey(a.Directory, objectBundlesDir);
             work.Add((a, key));
         }
 
@@ -342,9 +607,9 @@ public static class ModelExtractor
                     (Color color, string texKey, UnityMaterial.Blend blend, long texId,
                         float metallic, float smoothness, EShaderCull cull) =
                         materials.Resolve(si, palette, part.Materials);
-                    if (neededTextures != null && texId != 0 && !neededTextures.ContainsKey(texId) &&
+                    if (neededTextures != null && texId != 0 && !neededTextures.ContainsKey((bundleTag, texId)) &&
                         graph.ObjectsByPathId.TryGetValue(texId, out SerializedObject? texObj))
-                        neededTextures[texId] = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, file.ReaderFor(texObj)));
+                        neededTextures[(bundleTag, texId)] = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, file.ReaderFor(texObj)));
 
                     int[] src = mesh.Submeshes[si];
                     var indices = new int[src.Length];
@@ -363,19 +628,23 @@ public static class ModelExtractor
                 MeshCache.Write(stream, verts.ToArray(),
                     allNormals ? normals.ToArray() : Array.Empty<Vector3>(), uvs.ToArray(), submeshes);
             extracted++;
+            producedGuids?.Add(asset.Guid);
 
             // Cache the object's colliders next to its mesh (Unity units; converted when the body is built).
+            string colliderPath = Path.Combine(cacheDir, asset.Guid.ToString("N") + ".collider");
+            File.Delete(colliderPath); // never retain a previous source's collider for a colliding GUID
             if (graph.CollidersByKey.TryGetValue(key, out List<ColliderPart>? colliderParts))
             {
                 List<CachedCollider> colliders = BuildColliders(colliderParts, graph, file);
                 if (colliders.Count > 0)
-                    using (var cs = File.Create(Path.Combine(cacheDir, asset.Guid.ToString("N") + ".collider")))
+                    using (var cs = File.Create(colliderPath))
                         ColliderCache.Write(cs, colliders);
             }
         }
 
         if (foliageAssets != null)
-            extracted += ExtractFoliageMeshes(graph, foliageAssets, cacheDir, neededTextures);
+            extracted += ExtractFoliageMeshes(graph, bundleTag, foliageAssets, cacheDir, neededTextures,
+                producedGuids);
 
         return extracted;
     }
@@ -420,15 +689,14 @@ public static class ModelExtractor
     // each is a bare Mesh referenced directly in the masterbundle by the .asset's container path, using a
     // single material; cache it per foliage GUID like an object mesh so the same texture pass and
     // ModelLibrary path pick it up. Alpha-clipped, since foliage textures are cut-out.
-    private static int ExtractFoliageMeshes(PrefabGraph graph, IReadOnlyList<FoliageAsset> foliageAssets,
-        string cacheDir, Dictionary<long, UnityTexture>? neededTextures)
+    private static int ExtractFoliageMeshes(PrefabGraph graph, string bundleTag,
+        IReadOnlyList<FoliageAsset> foliageAssets,
+        string cacheDir, Dictionary<(string Tag, long Id), UnityTexture>? neededTextures, HashSet<Guid>? producedGuids = null)
     {
         int extracted = 0;
         foreach (FoliageAsset fa in foliageAssets)
         {
             string outPath = Path.Combine(cacheDir, fa.Guid.ToString("N") + ".mesh");
-            if (File.Exists(outPath) && MeshCache.IsCurrent(outPath))
-                continue;
 
             string meshKey = graph.AssetPrefix + fa.MeshPath.Replace('\\', '/').ToLowerInvariant();
             if (!graph.ContainerByPath.TryGetValue(meshKey, out long meshId) ||
@@ -443,7 +711,7 @@ public static class ModelExtractor
             // "OUT.Specular = 0.0" — the material's Standard-shader _Glossiness (0.5 Unity default) is
             // never read there, so carrying it would give grass a sky-reflection sheen the game never shows.
             (string texKey, Color color, float _, float _, EShaderCull foliageCull) =
-                ResolveMaterialByPath(graph, fa.MaterialPath, neededTextures);
+                ResolveMaterialByPath(graph, bundleTag, fa.MaterialPath, neededTextures);
 
             var uvs = new Vector2[mesh.Vertices.Length];
             for (int i = 0; i < uvs.Length; i++)
@@ -457,9 +725,11 @@ public static class ModelExtractor
                 submeshes.Add(new CachedSubmesh((int[])src.Clone(), color, texKey, UnityMaterial.Blend.Cutout,
                     cull: foliageCull)); // read from the material's own shader (Grass/Leaves author Cull Off)
 
-            using var stream = File.Create(outPath);
-            MeshCache.Write(stream, mesh.Vertices, normals, uvs, submeshes);
+            using (var stream = File.Create(outPath))
+                MeshCache.Write(stream, mesh.Vertices, normals, uvs, submeshes);
+            File.Delete(Path.Combine(cacheDir, fa.Guid.ToString("N") + ".collider"));
             extracted++;
+            producedGuids?.Add(fa.Guid);
         }
         return extracted;
     }
@@ -468,7 +738,8 @@ public static class ModelExtractor
     // the texture-streaming pass) and the _Color tint. Mirrors MaterialResolver's per-submesh lookup — some
     // foliage (the pebbles) has no texture at all and renders purely from _Color, exactly as in Unturned.
     private static (string texKey, Color color, float metallic, float smoothness, EShaderCull cull)
-        ResolveMaterialByPath(PrefabGraph graph, string materialPath, Dictionary<long, UnityTexture>? neededTextures)
+        ResolveMaterialByPath(PrefabGraph graph, string bundleTag, string materialPath,
+            Dictionary<(string Tag, long Id), UnityTexture>? neededTextures)
     {
         if (materialPath.Length == 0)
             return (string.Empty, Colors.White, 0f, 0f, EShaderCull.Back);
@@ -492,65 +763,87 @@ public static class ModelExtractor
         if (fileId != 0 || texId == 0 || !graph.ObjectsByPathId.TryGetValue(texId, out SerializedObject? texObj))
             return (string.Empty, color, metallic, smoothness, cull);
 
-        if (neededTextures != null && !neededTextures.ContainsKey(texId))
-            neededTextures[texId] = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, graph.File.ReaderFor(texObj)));
-        return (texId.ToString("x"), color, metallic, smoothness, cull);
+        if (neededTextures != null && !neededTextures.ContainsKey((bundleTag, texId)))
+        {
+            neededTextures[(bundleTag, texId)] =
+                UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, graph.File.ReaderFor(texObj)));
+        }
+        return (TextureKey.For(bundleTag, texId), color, metallic, smoothness, cull);
     }
 
     // Phase 2: decode the full bundle (now including the ~1.18 GB .resS pixel stream) and write the
     // textures referenced by the already-extracted meshes. Derives the needed set from the mesh cache, so
     // it is independent of phase 1 and resumable (skips textures already cached). Reports each written key
     // through onTextureWritten so a caller can hot-swap it into the live scene as it lands.
-    public static int ExtractTextures(string bundlePath, string cacheDir, string textureCacheDir,
-        Action<string>? onTextureWritten = null)
+    public static int ExtractTextures(string bundlePath, string bundleTag, string cacheDir,
+        string textureCacheDir, Action<string>? onTextureWritten = null,
+        CancellationToken cancellationToken = default)
     {
-        HashSet<long> needed = NeededTextureIds(cacheDir);
-        if (needed.Count == 0)
+        if (cancellationToken.IsCancellationRequested)
+            return 0;
+        if (NeededTextureIds(cacheDir, bundleTag, includeSecondary: true).Count == 0)
             return 0;
 
         UnityBundle bundle = UnityBundle.Read(File.ReadAllBytes(bundlePath)); // full decode (.resS needed)
-        byte[] sfBytes = Array.Empty<byte>();
-        foreach (KeyValuePair<string, byte[]> f in bundle.Files)
-            if (!f.Key.EndsWith(".resS") && !f.Key.EndsWith(".resource"))
-                sfBytes = f.Value;
-
-        SerializedFile file = SerializedFile.Read(sfBytes);
-        var objectsByPathId = new Dictionary<long, SerializedObject>();
-        foreach (SerializedObject o in file.Objects)
-            objectsByPathId[o.PathId] = o;
-
+        if (cancellationToken.IsCancellationRequested)
+            return 0;
         Directory.CreateDirectory(textureCacheDir);
         int written = 0;
-        foreach (long texId in needed)
+        int serializedFile = 0;
+        foreach (KeyValuePair<string, byte[]> f in bundle.Files)
         {
-            string texKey = texId.ToString("x");
-            string outPath = Path.Combine(textureCacheDir, texKey + ".tex");
-            if (File.Exists(outPath) && TextureCache.IsCurrent(outPath))
+            if (f.Key.EndsWith(".resS") || f.Key.EndsWith(".resource"))
+                continue;
+
+            string fileTag = serializedFile++ == 0 ? bundleTag : $"{bundleTag}-{serializedFile}";
+            HashSet<long> needed = NeededTextureIds(cacheDir, fileTag, includeSecondary: false);
+            if (needed.Count == 0)
+                continue;
+
+            SerializedFile file = SerializedFile.Read(f.Value);
+            var objectsByPathId = new Dictionary<long, SerializedObject>();
+            foreach (SerializedObject o in file.Objects)
+                objectsByPathId[o.PathId] = o;
+
+            foreach (long texId in needed)
             {
-                onTextureWritten?.Invoke(texKey); // already cached (resume) — still let the caller apply it
+                if (AppShutdown.IsShuttingDown || cancellationToken.IsCancellationRequested)
+                    return written; // leaving: stop between textures, never mid-file
+                string texKey = TextureKey.For(fileTag, texId);
+                string outPath = Path.Combine(textureCacheDir, texKey + ".tex");
+                if (File.Exists(outPath) && TextureCache.IsCurrent(outPath))
+                {
+                    onTextureWritten?.Invoke(texKey); // already cached (resume) — still let the caller apply it
+                    written++;
+                    continue;
+                }
+                if (!objectsByPathId.TryGetValue(texId, out SerializedObject? texObj))
+                    continue;
+
+                UnityTexture tex = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, file.ReaderFor(texObj)));
+                byte[]? pixels = tex.GetPixels(name => bundle.Files.TryGetValue(name, out byte[]? data) ? data : null);
+                if (pixels == null || pixels.Length == 0)
+                    continue;
+
+                using (var stream = File.Create(outPath))
+                    TextureCache.Write(stream, CachedTexture.From(tex, pixels));
                 written++;
-                continue;
+                onTextureWritten?.Invoke(texKey);
             }
-            if (!objectsByPathId.TryGetValue(texId, out SerializedObject? texObj))
-                continue;
-
-            UnityTexture tex = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, file.ReaderFor(texObj)));
-            byte[]? pixels = tex.GetPixels(name => bundle.Files.TryGetValue(name, out byte[]? f) ? f : null);
-            if (pixels == null || pixels.Length == 0)
-                continue;
-
-            using (var stream = File.Create(outPath))
-                TextureCache.Write(stream, new CachedTexture(tex.Format, tex.Width, tex.Height, tex.MipCount, pixels, tex.FilterMode));
-            written++;
-            onTextureWritten?.Invoke(texKey);
         }
 
-        GD.Print($"[extract] textures written/cached={written}");
+        AppShutdown.PrintUnlessQuitting($"[extract] textures written/cached={written}");
         return written;
     }
 
-    // The set of texture path ids the cached meshes reference (submesh texture keys are the id in hex).
-    private static HashSet<long> NeededTextureIds(string cacheDir)
+    // The set of texture path ids the cached meshes reference that belong to THIS bundle.
+    //
+    // The cache is shared by every map, so it routinely holds meshes in an older format: a map visited
+    // before a format bump leaves entries the current extraction has no reason to rewrite. MeshCache.Read
+    // throws on those, which would abort the whole texture pass over one stale file from an unrelated map,
+    // so they are skipped the same way ModelLibrary skips them on the warm path.
+    private static HashSet<long> NeededTextureIds(string cacheDir, string bundleTag,
+        bool includeSecondary = false)
     {
         var ids = new HashSet<long>();
         if (!Directory.Exists(cacheDir))
@@ -558,18 +851,40 @@ public static class ModelExtractor
 
         foreach (string path in Directory.GetFiles(cacheDir, "*.mesh"))
         {
-            using var stream = File.OpenRead(path);
-            (_, _, _, List<CachedSubmesh> submeshes) = MeshCache.Read(stream);
+            byte[] data;
+            try { data = File.ReadAllBytes(path); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }
+
+            if (!MeshCache.IsCurrent(data)) // stale format; a later extraction pass rewrites it
+                continue;
+
+            (_, _, _, List<CachedSubmesh> submeshes) = MeshCache.Read(data);
             foreach (CachedSubmesh sm in submeshes)
-                if (sm.TextureKey.Length > 0 &&
-                    long.TryParse(sm.TextureKey, System.Globalization.NumberStyles.HexNumber, null, out long id))
+                if (TextureKey.TryParse(sm.TextureKey, out string owner, out long id)
+                    && (string.Equals(owner, bundleTag, StringComparison.Ordinal)
+                        || (includeSecondary && IsBundleFileTag(owner, bundleTag))))
                     ids.Add(id);
         }
         return ids;
     }
 
+    private static bool IsBundleFileTag(string owner, string bundleTag)
+    {
+        if (string.Equals(owner, bundleTag, StringComparison.Ordinal))
+            return true;
+        string prefix = bundleTag + "-";
+        return owner.StartsWith(prefix, StringComparison.Ordinal)
+            && int.TryParse(owner.AsSpan(prefix.Length), out int fileNumber)
+            && fileNumber >= 2;
+    }
+
     private static string FolderKey(string directory, string bundlesDir) =>
         Path.GetRelativePath(bundlesDir, directory).Replace('\\', '/').ToLowerInvariant();
+
+    // The bundle-side name of an asset folder: Bundles/Objects -> "objects", <mod>/Resources ->
+    // "resources". This is the first segment of every prefab key built from that folder.
+    private static string RootKey(string bundlesDir) =>
+        Path.GetFileName(Path.TrimEndingDirectorySeparator(bundlesDir)).ToLowerInvariant();
 
     private static string OverrideKey(string overridePath) =>
         overridePath.Replace('\\', '/').Trim('/').ToLowerInvariant(); // already "objects/..."

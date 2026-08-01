@@ -17,34 +17,60 @@ public sealed class LandscapePhysics
     public string? PhysicsNameOf(Guid materialGuid) =>
         _nameByGuid.TryGetValue(materialGuid, out string? name) ? name : null;
 
-    public void Add(Guid guid, string physicsName) => _nameByGuid[guid] = physicsName;
+    public void Add(Guid guid, string physicsName) => _nameByGuid.TryAdd(guid, physicsName);
+
+    // Every landscape material across several asset trees: the game's own plus each installed workshop
+    // mod, since a workshop map's terrain layers are defined by its mod, not by the game.
+    public static LandscapePhysics ScanDirectories(IEnumerable<string> roots)
+        => ScanDirectories(roots, ScanDirectory);
+
+    internal static LandscapePhysics ScanDirectories(IEnumerable<string> roots,
+        Func<string, LandscapePhysics> scanDirectory)
+    {
+        var merged = new LandscapePhysics();
+        foreach (string root in roots)
+        {
+            LandscapePhysics scanned;
+            try { scanned = scanDirectory(root); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }
+
+            foreach (KeyValuePair<Guid, string> entry in scanned._nameByGuid)
+                merged._nameByGuid.TryAdd(entry.Key, entry.Value);
+        }
+
+        return merged;
+    }
 
     public static LandscapePhysics ScanDirectory(string root)
     {
         var result = new LandscapePhysics();
         if (!Directory.Exists(root))
             return result;
-        foreach (string file in Directory.EnumerateFiles(root, "*.asset", SearchOption.AllDirectories))
+        try
         {
-            DatDictionary parsed;
-            try { parsed = DatParser.Parse(File.ReadAllText(file)); }
-            catch (IOException) { continue; }
+            foreach (string file in Directory.EnumerateFiles(root, "*.asset", SearchOption.AllDirectories))
+            {
+                DatDictionary parsed;
+                try { parsed = DatParser.Parse(File.ReadAllText(file)); }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }
 
-            if (!parsed.TryGetDictionary("Metadata", out DatDictionary meta) ||
-                !parsed.TryGetDictionary("Asset", out DatDictionary data) ||
-                !meta.TryGetGuid("GUID", out Guid guid))
-                continue;
-            string type = meta.GetString("Type") ?? string.Empty;
-            if (!type.Contains("LandscapeMaterialAsset", StringComparison.Ordinal))
-                continue;
+                if (!parsed.TryGetDictionary("Metadata", out DatDictionary meta) ||
+                    !parsed.TryGetDictionary("Asset", out DatDictionary data) ||
+                    !meta.TryGetGuid("GUID", out Guid guid))
+                    continue;
+                string type = meta.GetString("Type") ?? string.Empty;
+                if (!type.Contains("LandscapeMaterialAsset", StringComparison.Ordinal))
+                    continue;
 
-            string? raw = data.GetString("Physics_Material");
-            if (raw is not { Length: > 0 })
-                continue;
-            string? name = ResolveName(raw);
-            if (name != null)
-                result.Add(guid, name);
+                string? raw = data.GetString("Physics_Material");
+                if (raw is not { Length: > 0 })
+                    continue;
+                string? name = ResolveName(raw);
+                if (name != null)
+                    result.Add(guid, name);
+            }
         }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
         return result;
     }
 

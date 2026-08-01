@@ -15,6 +15,10 @@ public sealed class PhysicsMaterialAsset
     public Guid Fallback { get; }
     public IReadOnlyDictionary<string, string> AudioDefs { get; } // event key -> masterbundle .asset path
 
+    // The directory this asset was scanned from. The audio it names lives in the bundle of whichever
+    // content source owns that directory, which is not always the game's own.
+    public string Directory { get; internal set; } = string.Empty;
+
     private PhysicsMaterialAsset(Guid guid, List<string> unityNames, Guid fallback,
         Dictionary<string, string> audioDefs)
     {
@@ -64,6 +68,20 @@ public sealed class PhysicsMaterialBank
 
     public int Count => _byGuid.Count;
 
+    // Every Unity material name the bank can resolve. The audio extraction walks these rather than a
+    // fixed list of the game's own surfaces: a workshop landscape names its own material, and a name the
+    // extraction never visited stayed out of the audio cache and played nothing.
+    public IEnumerable<string> Names => _byName.Keys;
+
+    // Adds only what nothing has claimed yet. The GUID and each Unity alias are claimed independently, so
+    // a mod asset with a fresh GUID still registers under it even when one of its aliases is taken.
+    public void AddIfAbsent(PhysicsMaterialAsset asset)
+    {
+        _byGuid.TryAdd(asset.Guid, asset);
+        foreach (string name in asset.UnityNames)
+            _byName.TryAdd(name, asset);
+    }
+
     public void Add(PhysicsMaterialAsset asset)
     {
         _byGuid[asset.Guid] = asset;
@@ -72,19 +90,52 @@ public sealed class PhysicsMaterialBank
     }
 
     // Scans a directory tree of physics-material .assets (Bundles/Assets/PhysicsMaterials).
+    // Merged across several asset trees (the game's and each workshop mod's), so a mod's own surfaces
+    // resolve to footstep sounds like the game's do.
+    public static PhysicsMaterialBank ScanDirectories(IEnumerable<string> roots)
+        => ScanDirectories(roots, ScanDirectory);
+
+    internal static PhysicsMaterialBank ScanDirectories(IEnumerable<string> roots,
+        Func<string, PhysicsMaterialBank> scanDirectory)
+    {
+        // First claimant wins, and the roots arrive with the game's own first: a workshop item is free to
+        // reuse an official GUID or a Unity alias like "Concrete", and letting it take that registration
+        // sent an official map's footsteps through the mod's asset — the wrong sound, looked for in the
+        // wrong bundle. Same rule the object database follows.
+        var merged = new PhysicsMaterialBank();
+        foreach (string root in roots)
+        {
+            PhysicsMaterialBank scanned;
+            try { scanned = scanDirectory(root); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }
+
+            foreach (PhysicsMaterialAsset asset in scanned._byGuid.Values)
+                merged.AddIfAbsent(asset);
+        }
+
+        return merged;
+    }
+
     public static PhysicsMaterialBank ScanDirectory(string root)
     {
         var bank = new PhysicsMaterialBank();
         if (!Directory.Exists(root))
             return bank;
-        foreach (string file in Directory.EnumerateFiles(root, "*.asset", SearchOption.AllDirectories))
+        try
         {
-            DatDictionary parsed;
-            try { parsed = DatParser.Parse(File.ReadAllText(file)); }
-            catch (IOException) { continue; }
-            if (TryParseFile(parsed, out PhysicsMaterialAsset asset))
-                bank.Add(asset);
+            foreach (string file in Directory.EnumerateFiles(root, "*.asset", SearchOption.AllDirectories))
+            {
+                DatDictionary parsed;
+                try { parsed = DatParser.Parse(File.ReadAllText(file)); }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }
+                if (TryParseFile(parsed, out PhysicsMaterialAsset asset))
+                {
+                    asset.Directory = Path.GetDirectoryName(file) ?? root;
+                    bank.Add(asset);
+                }
+            }
         }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
         return bank;
     }
 
@@ -93,14 +144,20 @@ public sealed class PhysicsMaterialBank
 
     // PhysicMaterialCustomData.GetAudioDef: resolve the material by name, then walk the fallback chain
     // until some asset defines the event key. Null when the name is unknown or nothing defines the key.
-    public string? FindAudioDefPath(string materialName, string key)
+    public string? FindAudioDefPath(string materialName, string key) =>
+        FindAudioDef(materialName, key)?.Path;
+
+    // Same walk, but names the asset that defined the key as well: the definition is packaged in the
+    // bundle of whatever content source shipped THAT asset, and a workshop surface falling back to a
+    // core material takes its audio from the core bundle, not the mod's.
+    public (string Path, PhysicsMaterialAsset Owner)? FindAudioDef(string materialName, string key)
     {
         if (!_byName.TryGetValue(materialName, out PhysicsMaterialAsset? asset))
             return null;
         for (int hops = 0; asset != null && hops < 8; hops++) // hop cap guards a fallback cycle
         {
             if (asset.AudioDefs.TryGetValue(key, out string? path))
-                return path;
+                return (path, asset);
             asset = asset.Fallback != Guid.Empty && _byGuid.TryGetValue(asset.Fallback, out PhysicsMaterialAsset? fb)
                 ? fb
                 : null;

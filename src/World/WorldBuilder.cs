@@ -27,21 +27,23 @@ public sealed record WorldBuildResult(
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class WorldBuilder
 {
+    // Conservative terrain occluders substantially reduce hidden object submission on hilly maps. Their
+    // triangles are proven to remain below the source heightfield, so enable them by default; zero keeps
+    // the uncullled path available for visual/performance A/B checks.
+    private static bool OccludersEnabled => OS.GetEnvironment("TERRAIN_OCCLUDERS") != "0";
+
     public static WorldBuildResult Build(string unturnedPath, string mapName)
     {
-        string mapPath = System.IO.Path.Combine(unturnedPath, "Maps", mapName);
-        var level = new LevelInfo(mapPath);
-        GD.Print($"[unturned-godot] Loading map {level.Name} at {level.Path}");
+        var level = new LevelInfo(MapCatalog.ResolvePath(unturnedPath, mapName));
+        Log.Print($"[unturned-godot] Loading map {level.Name} at {level.Path}");
 
         var terrainSw = Stopwatch.StartNew();
-        (Node3D terrain, int tileCount, HeightmapSampler heights) = BuildTerrain(level);
+        (Node3D terrain, int tileCount, HeightmapSampler heights) = BuildTerrain(unturnedPath, level);
         terrainSw.Stop();
 
         var objectsSw = Stopwatch.StartNew();
-        (Node3D objects, Node3D foliage, int placed, int withMesh, int unique) = BuildObjects(level,
-            System.IO.Path.Combine(unturnedPath, "Bundles", "Objects"),
-            System.IO.Path.Combine(unturnedPath, "Bundles", "Trees"),
-            UnturnedInstall.MasterBundlePath(unturnedPath));
+        (Node3D objects, Node3D foliage, int placed, int withMesh, int unique) =
+            BuildObjects(level, unturnedPath);
         objectsSw.Stop();
 
         return new WorldBuildResult(terrain, heights, objects, foliage, tileCount, placed, withMesh, unique,
@@ -52,82 +54,110 @@ public static class WorldBuilder
     // (the main thread keeps rendering the loading screen), and the RenderingServer-touching FinishTile
     // calls yield to the render loop every few tiles so no single frame swallows all 16.
     public static async System.Threading.Tasks.Task<(Node3D root, int tileCount, HeightmapSampler heights)>
-        BuildTerrainAsync(LevelInfo level, Node yieldOn)
+        BuildTerrainAsync(string unturnedPath, LevelInfo level, Node yieldOn,
+            System.Threading.Tasks.Task<IReadOnlyDictionary<Guid, UnturnedGodot.Unity.CachedTexture>>? sharedLayers = null)
     {
         var tiles = level.EnumerateTiles();
-        GD.Print($"[unturned-godot] Terrain tiles: {tiles.Count}");
+        Log.Print($"[unturned-godot] Terrain tiles: {tiles.Count}");
         var heightTiles = new HeightmapTile[tiles.Count];
 
-        // Texture decode + tile/LOD generation all happen off the main thread; only FinishTile below
-        // touches the RenderingServer. Semantics match the sync variant exactly (textured needs layers).
-        System.Collections.Generic.Dictionary<string, ImageTexture> textures =
-            await System.Threading.Tasks.Task.Run(() =>
-                TerrainTextures.Load(System.IO.Path.Combine(level.Path, "Terrain")));
-        ImageTexture[]? layers = TerrainBuilder.MapLayerTextures(textures);
-        GD.Print($"[unturned-godot] Terrain textures: {textures.Count} loaded, " +
-            (layers != null ? "8 layers textured" : "flat-color fallback"));
+        // Layer resolve + tile/LOD generation all happen off the main thread; only FinishTile below
+        // touches the RenderingServer. Semantics match the sync variant exactly.
+        TerrainLayers layers = await System.Threading.Tasks.Task.Run(() =>
+            LoadLayers(unturnedPath, level, sharedLayers));
 
-        bool textured = layers != null;
         var meshes = new TerrainBuilder.TileMesh[tiles.Count];
+        TerrainOccluder.Prepared[]? occluders = OccludersEnabled
+            ? new TerrainOccluder.Prepared[tiles.Count] : null;
         await System.Threading.Tasks.Task.Run(() => System.Threading.Tasks.Parallel.For(0, tiles.Count, i =>
         {
             (int x, int y) = tiles[i];
             HeightmapTile tile = HeightmapTile.Read(level.HeightmapPath(x, y), x, y);
             heightTiles[i] = tile;
             SplatmapTile? splat = SplatmapTile.TryRead(level.SplatmapPath(x, y), x, y);
-            meshes[i] = TerrainBuilder.BuildTileMesh(tile, splat, textured && splat != null);
+            meshes[i] = TerrainBuilder.BuildTileMesh(tile, splat, layers.For(x, y) != null && splat != null);
+            if (occluders != null)
+                occluders[i] = TerrainOccluder.Prepare(meshes[i]);
         }));
 
+        // Yield on a time budget, not every N tiles: waiting for a frame costs more than finishing the
+        // tile that would have shared it, and a 52-tile map was spending most of this phase waiting.
         var terrainRoot = new Node3D { Name = "Terrain" };
-        int sinceYield = 0;
-        foreach (TerrainBuilder.TileMesh tm in meshes)
+        var controlTextures = new TerrainBuilder.ControlTextureCache();
+        long budget = (long)(Stopwatch.Frequency * 0.008);
+        long until = Stopwatch.GetTimestamp() + budget;
+        for (int i = 0; i < meshes.Length; i++)
         {
-            terrainRoot.AddChild(TerrainBuilder.FinishTile(tm, layers));
-            if (++sinceYield >= 4)
+            TerrainBuilder.TileMesh tm = meshes[i];
+            terrainRoot.AddChild(TerrainBuilder.FinishTile(tm, layers.For(tm.X, tm.Y), controlTextures));
+            if (occluders != null)
+                terrainRoot.AddChild(TerrainOccluder.Finish(occluders[i]));
+            if (Stopwatch.GetTimestamp() >= until)
             {
-                sinceYield = 0;
                 await yieldOn.ToSignal(yieldOn.GetTree(), SceneTree.SignalName.ProcessFrame);
+                until = Stopwatch.GetTimestamp() + budget;
             }
         }
         return (terrainRoot, tiles.Count, new HeightmapSampler(heightTiles));
     }
 
-    public static (Node3D root, int tileCount, HeightmapSampler heights) BuildTerrain(LevelInfo level)
+    public static (Node3D root, int tileCount, HeightmapSampler heights) BuildTerrain(
+        string unturnedPath, LevelInfo level)
     {
         var tiles = level.EnumerateTiles();
-        GD.Print($"[unturned-godot] Terrain tiles: {tiles.Count}");
+        Log.Print($"[unturned-godot] Terrain tiles: {tiles.Count}");
         var heightTiles = new HeightmapTile[tiles.Count]; // kept for the height sampler (roads conform to it)
 
-        // Real per-layer terrain textures (Materials.unity3d), blended by the splatmap; null if the bundle
-        // or a layer texture is missing, in which case tiles fall back to averaged layer colors.
-        var textures = TerrainTextures.Load(System.IO.Path.Combine(level.Path, "Terrain"));
-        ImageTexture[]? layers = TerrainBuilder.MapLayerTextures(textures);
-        GD.Print($"[unturned-godot] Terrain textures: {textures.Count} loaded, " +
-            (layers != null ? "8 layers textured" : "flat-color fallback"));
+        // The map's own per-tile splat layer textures; tiles without a full set fall back to averaged
+        // layer colors.
+        TerrainLayers layers = LoadLayers(unturnedPath, level);
 
         // Build the tiles' geometry + meshoptimizer LODs on worker threads (the LOD generation dominates
         // terrain build time and is pure CPU/meshopt on data-only ImporterMeshes), then realise the meshes
         // and attach materials on this (main) thread — the only steps that touch the RenderingServer.
-        bool textured = layers != null;
         var meshes = new TerrainBuilder.TileMesh[tiles.Count];
+        TerrainOccluder.Prepared[]? occluders = OccludersEnabled
+            ? new TerrainOccluder.Prepared[tiles.Count] : null;
         System.Threading.Tasks.Parallel.For(0, tiles.Count, i =>
         {
             (int x, int y) = tiles[i];
             HeightmapTile tile = HeightmapTile.Read(level.HeightmapPath(x, y), x, y);
             heightTiles[i] = tile;
             SplatmapTile? splat = SplatmapTile.TryRead(level.SplatmapPath(x, y), x, y);
-            meshes[i] = TerrainBuilder.BuildTileMesh(tile, splat, textured && splat != null);
+            meshes[i] = TerrainBuilder.BuildTileMesh(tile, splat, layers.For(x, y) != null && splat != null);
+            if (occluders != null)
+                occluders[i] = TerrainOccluder.Prepare(meshes[i]);
         });
 
         var terrainRoot = new Node3D { Name = "Terrain" };
-        foreach (TerrainBuilder.TileMesh tm in meshes)
-            terrainRoot.AddChild(TerrainBuilder.FinishTile(tm, layers));
+        var controlTextures = new TerrainBuilder.ControlTextureCache();
+        for (int i = 0; i < meshes.Length; i++)
+        {
+            TerrainBuilder.TileMesh tm = meshes[i];
+            terrainRoot.AddChild(TerrainBuilder.FinishTile(tm, layers.For(tm.X, tm.Y), controlTextures));
+            if (occluders != null)
+                terrainRoot.AddChild(TerrainOccluder.Finish(occluders[i]));
+        }
         return (terrainRoot, tiles.Count, new HeightmapSampler(heightTiles));
     }
 
-    private static (Node3D root, Node3D foliage, int placed, int withMesh, int unique) BuildObjects(
-        LevelInfo level, string objectBundlesDir, string treeBundlesDir, string bundlePath)
+    // Resolves the map's per-tile splat layers and reports what came back, so a map that renders flat is
+    // traceable to either "no materials in the hierarchy" or "textures could not be extracted".
+    private static TerrainLayers LoadLayers(string unturnedPath, LevelInfo level,
+        System.Threading.Tasks.Task<IReadOnlyDictionary<Guid, UnturnedGodot.Unity.CachedTexture>>? sharedLayers = null)
     {
+        TerrainLayers layers = TerrainLayers.Load(unturnedPath, level, sharedLayers);
+        Log.Print($"[unturned-godot] Terrain layers: {layers.TextureCount} textures, "
+            + (layers.TileCount > 0 ? $"{layers.TileCount} tiles textured" : "flat-color fallback"));
+        return layers;
+    }
+
+    private static (Node3D root, Node3D foliage, int placed, int withMesh, int unique) BuildObjects(
+        LevelInfo level, string unturnedPath)
+    {
+        // The game's bundle plus any workshop mod that ships one: a workshop map places objects whose
+        // prefabs live in the mod's bundle, not the game's.
+        System.Collections.Generic.IReadOnlyList<ContentSource> sources = ContentSource.Discover(unturnedPath);
         // Trees are Unturned "resources" placed via a separate file; render them alongside objects so
         // the map isn't bare. They share the object transform, asset db and mesh pipeline.
         List<PlacedObject> objects = LevelObjects.Load(level.ObjectsDat);
@@ -138,46 +168,60 @@ public static class WorldBuilder
         // Scan the object/tree asset DB on a worker thread: on the warm path db is only consumed after the
         // main-thread ModelLibrary.Load below (for fallback-box coloring), so the scan overlaps that load and
         // is effectively free. The cold extraction branch resolves it explicitly before use.
-        var dbTask = System.Threading.Tasks.Task.Run(() =>
-        {
-            ObjectAssetDatabase scanned = ObjectAssetDatabase.ScanDirectory(objectBundlesDir);
-            foreach (ObjectAsset a in ObjectAssetDatabase.ScanDirectory(treeBundlesDir).All)
-                scanned.Add(a);
-            return scanned;
-        });
-        GD.Print($"[unturned-godot] Placed objects: {objects.Count} (incl. {trees.Count} trees)");
+        var dbTask = System.Threading.Tasks.Task.Run(() => ContentExtraction.ScanAssets(sources));
+        Log.Print($"[unturned-godot] Placed objects: {objects.Count} (incl. {trees.Count} trees)");
 
         string cacheDir = ProjectSettings.GlobalizePath("user://model_cache");
         string textureCacheDir = ProjectSettings.GlobalizePath("user://texture_cache");
-        string assetsDir = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(bundlePath)!, "Assets");
 
-        // Resolve the foliage types the map's Foliage.blob uses, so their meshes are extracted too.
-        LevelFoliage? foliageData = LevelFoliage.Load(System.IO.Path.Combine(level.Path, "Foliage.blob"));
+        // Resolve the foliage types the map's Foliage.blob uses, so their meshes are extracted too. Scanned
+        // across every source: a workshop map's foliage assets sit next to its own bundle, not the game's.
+        LevelFoliageChunks? foliageData = LevelFoliageChunks.Load(
+            System.IO.Path.Combine(level.Path, "Foliage.blob"), FoliageBuilder.RuntimeChunkTiles);
         var foliageAssets = foliageData != null
-            ? FoliageAsset.ScanForGuids(assetsDir, new HashSet<Guid>(foliageData.AssetGuids))
-            : new Dictionary<Guid, FoliageAsset>();
+            ? FoliageAsset.ScanSources(sources, new HashSet<Guid>(foliageData.AssetGuids))
+            : new Dictionary<Guid, FoliageAsset.Owned>();
 
         var neededGuids = new HashSet<Guid>();
         foreach (PlacedObject o in objects)
             neededGuids.Add(o.Guid);
+        foreach (Guid g in foliageAssets.Keys) // resolved foliage types only (see ObjectStreamer)
+            neededGuids.Add(g);
 
         // Parse the 1.4 GB bundle once, then reuse the compact per-GUID mesh + texture cache. This is the
         // synchronous full build (used by the benchmark and the warm path); the interactive cold load
-        // streams the two phases separately via ObjectStreamer.
-        bool foliageMissing = foliageAssets.Keys.Any(
-            g => !UnturnedGodot.Unity.MeshCache.IsCurrent(System.IO.Path.Combine(cacheDir, g.ToString("N") + ".mesh")));
-        if ((ModelLibrary.CachedMeshCount(cacheDir) == 0 || foliageMissing) && System.IO.File.Exists(bundlePath))
+        // streams the two phases separately via ObjectStreamer. Extraction is driven by what THIS map is
+        // missing from the (map-agnostic, GUID-keyed) cache, not by whether the cache has any files at all.
+        System.Collections.Generic.List<ContentExtraction.BundlePlan> plans = ContentExtraction.Plan(
+            sources, cacheDir, textureCacheDir, neededGuids, dbTask.Result, foliageAssets);
+        foreach (string report in ContentExtraction.PendingReports(plans))
+            Log.Print(report);
+        foreach (ContentExtraction.BundlePlan plan in plans)
         {
-            GD.Print("[unturned-godot] Extracting models + textures from masterbundle (one-time)...");
-            int extracted = ModelExtractor.ExtractMeshes(bundlePath, objectBundlesDir, treeBundlesDir,
-                assetsDir, neededGuids, cacheDir, dbTask.Result, foliageAssets.Values.ToList());
-            ModelExtractor.ExtractTextures(bundlePath, cacheDir, textureCacheDir);
-            GD.Print($"[unturned-godot] Extracted {extracted} meshes to cache");
+            if (!plan.NeedsExtraction)
+                continue;
+
+            // One unreadable bundle (an old or damaged mod) must not cost the whole map: its objects
+            // fall back to boxes and everything else still builds.
+            try
+            {
+                int extracted = ModelExtractor.ExtractMeshes(plan.Source.BundlePath, plan.Source.CacheTag,
+                    plan.Source.ObjectsDir, plan.Source.TreesDir, plan.Source.AssetsDir, plan.Needed,
+                    cacheDir, dbTask.Result, plan.Foliage);
+                ModelExtractor.ExtractTextures(plan.Source.BundlePath, plan.Source.CacheTag, cacheDir,
+                    textureCacheDir);
+                Log.Print($"[unturned-godot] Extracted {extracted} meshes from {plan.Source.Name}");
+            }
+            catch (Exception e)
+            {
+                Log.PrintErr($"[unturned-godot] {plan.Source.Name} could not be extracted "
+                    + $"({e.GetType().Name}: {e.Message}); its objects will render as boxes.");
+            }
         }
 
         var registry = new TextureRegistry(textureCacheDir);
-        var meshLibrary = ModelLibrary.Load(cacheDir, registry);
-        var colliderLibrary = ColliderLibrary.Load(cacheDir);
+        var meshLibrary = ModelLibrary.Load(cacheDir, registry, neededGuids);
+        var colliderLibrary = ColliderLibrary.Load(cacheDir, neededGuids);
 
         ObjectAssetDatabase db = dbTask.Result; // the scan ran concurrently with ModelLibrary.Load above
         int withMesh = 0;
@@ -187,7 +231,7 @@ public static class WorldBuilder
 
         Node3D foliageRoot = FoliageBuilder.Build(foliageData, meshLibrary);
         registry.ApplyAllAvailable();
-        GD.Print($"[unturned-godot] Rendered {withMesh}/{objects.Count} objects with real meshes " +
+        Log.Print($"[unturned-godot] Rendered {withMesh}/{objects.Count} objects with real meshes " +
             $"({meshLibrary.Count} unique)");
         return (objectsRoot, foliageRoot, objects.Count, withMesh, meshLibrary.Count);
     }

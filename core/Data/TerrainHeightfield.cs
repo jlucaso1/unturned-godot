@@ -26,6 +26,19 @@ public static class TerrainHeightfield
         return data;
     }
 
+    public static float[] MapData(ushort[] heights)
+    {
+        const int res = Landscape.HEIGHTMAP_RESOLUTION;
+        if (heights.Length != res * res)
+            throw new System.ArgumentException("Heightmap sample count does not match its resolution.", nameof(heights));
+        var data = new float[heights.Length];
+        for (int hx = 0; hx < res; hx++)
+            for (int hy = 0; hy < res; hy++)
+                data[(res - 1 - hx) * res + hy] = (-Landscape.TILE_HEIGHT / 2f)
+                    + ((heights[(hx * res) + hy] / (float)ushort.MaxValue) * Landscape.TILE_HEIGHT);
+        return data;
+    }
+
     // Places the unit-cell, origin-centred heightfield onto the tile's world region: 4 m cells in X and Z,
     // heights already in world units (Y scale 1), centred so sample (hx, hy) matches the render vertex.
     public static Transform3D CollisionTransform(int tileX, int tileY)

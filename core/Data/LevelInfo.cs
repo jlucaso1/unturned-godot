@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -25,12 +26,26 @@ public sealed class LevelInfo
         var tiles = new List<(int, int)>();
         if (!Directory.Exists(HeightmapsDir)) return tiles;
 
-        foreach (string file in Directory.GetFiles(HeightmapsDir, "*.heightmap"))
+        string[] files;
+        try
+        {
+            files = Directory.GetFiles(HeightmapsDir, "*.heightmap");
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // A map whose tiles cannot be listed has no landscape as far as everything downstream is
+            // concerned: the browser marks it unsupported instead of the exception escaping and taking
+            // the whole catalogue — and with it every other map — down with it.
+            return tiles;
+        }
+
+        foreach (string file in files)
         {
             var m = TileRegex.Match(System.IO.Path.GetFileName(file));
             if (!m.Success) continue;
-            int x = int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
-            int y = int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture);
+            if (!int.TryParse(m.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int x)
+                || !int.TryParse(m.Groups[2].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int y))
+                continue;
             tiles.Add((x, y));
         }
         return tiles;

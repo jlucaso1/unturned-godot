@@ -41,7 +41,7 @@ public partial class BotClient : Node
                     break;
             }
         };
-        GD.Print($"[bot] '{name}' connecting to {host}:{port} for {lifetime}s");
+        Log.Print($"[bot] '{name}' connecting to {host}:{port} for {lifetime}s");
         return node;
     }
 
@@ -72,12 +72,12 @@ public partial class BotClient : Node
                 line.Append($" | {remote.Name}#{id}=({pose.Position.X:F1},{pose.Position.Y:F1},{pose.Position.Z:F1})");
             }
             line.Append($" | zombies={_zombiesListed} zombieStateMsgs={_zombieStateMessages}");
-            GD.Print(line.ToString());
+            Log.Print(line.ToString());
         }
 
         if (now - _started > _lifetime)
         {
-            GD.Print("[bot] done");
+            Log.Print("[bot] done");
             GetTree().Quit();
         }
     }
