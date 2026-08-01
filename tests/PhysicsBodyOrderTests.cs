@@ -385,8 +385,10 @@ public class PhysicsBodyOrderTests
             return;
 
         string source = File.ReadAllText(path);
-        Assert.Contains("if (loaded.tex != null)", source);
-        Assert.DoesNotContain("_loaded[textureKey] = loaded;\n        return loaded;", source);
+        int guard = source.IndexOf("if (loaded.tex != null)", StringComparison.Ordinal);
+        int cache = source.IndexOf("_loaded[textureKey] = loaded;", guard, StringComparison.Ordinal);
+        int result = source.IndexOf("return loaded;", cache, StringComparison.Ordinal);
+        Assert.True(guard >= 0 && cache > guard && result > cache);
     }
 
     [Fact]
