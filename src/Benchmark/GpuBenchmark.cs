@@ -237,6 +237,12 @@ public static class GpuBenchmark
             ["gpu.frameMs.median."] = 0.10,
             ["cpu.processMonitorMs.median."] = 0.10,
         },
+        // See RuntimeBenchmark.DiffOptions: a mid-fill residency snapshot is scheduler-dependent, so two
+        // unsettled runs must not classify their difference as a regression or an improvement.
+        ThresholdSuffixOverrides = new Dictionary<string, double>
+        {
+            ["Unsettled"] = double.PositiveInfinity,
+        },
         ThresholdOverrides = new Dictionary<string, double>
         {
             ["gpu.frameMs.median"] = 0.10,

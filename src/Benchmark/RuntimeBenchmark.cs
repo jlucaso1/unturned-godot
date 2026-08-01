@@ -137,6 +137,10 @@ public static class RuntimeBenchmark
             [".totalMs"] = 0.15,
             [".meanMs"] = 0.15,
             [".maxMs"] = 0.15,
+            // A mid-fill snapshot describes how far the queue happened to get, which depends on the
+            // scheduler. Two unsettled runs would otherwise diff against each other and call that
+            // difference a regression. Keep the numbers, never classify them.
+            ["Unsettled"] = double.PositiveInfinity,
         },
         ThresholdOverrides = new Dictionary<string, double>
         {

@@ -218,6 +218,9 @@ public class PhysicsBodyOrderTests
                 Assert.Contains($"metrics[$\"{prefix}.{metric}{{state}}\"]", source);
             Assert.DoesNotContain("if (settled)", source);
             Assert.DoesNotContain("if (includeResidencySnapshot && foliage.IsSettled)", source);
+            // Two unsettled runs would otherwise diff their mid-fill snapshots against each other and
+            // call the scheduler's doing a regression, so the keys must stay out of classification.
+            Assert.Contains("[\"Unsettled\"] = double.PositiveInfinity,", source);
         }
     }
 
