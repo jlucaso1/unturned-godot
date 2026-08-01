@@ -43,8 +43,9 @@ public sealed class LevelInfo
         {
             var m = TileRegex.Match(System.IO.Path.GetFileName(file));
             if (!m.Success) continue;
-            int x = int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
-            int y = int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture);
+            if (!int.TryParse(m.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int x)
+                || !int.TryParse(m.Groups[2].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int y))
+                continue;
             tiles.Add((x, y));
         }
         return tiles;

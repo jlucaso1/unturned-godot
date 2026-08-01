@@ -131,35 +131,29 @@ public static class Program
         string fingerprint;
         int[] triangles;
         using (var input = File.OpenRead(cachePath))
-        using (var reader = new BinaryReader(input, System.Text.Encoding.UTF8, leaveOpen: true))
-        {
-            reader.ReadUInt32();
-            reader.ReadInt32();
-            fingerprint = reader.ReadString();
-            triangles = new int[reader.ReadInt32()];
-            for (int i = 0; i < triangles.Length; i++)
-            {
-                triangles[i] = reader.ReadInt32();
-                int count = reader.ReadInt32();
-                input.Position += (long)count * sizeof(int);
-            }
-        }
+            if (!NavReconcileCache.TryReadMetadata(input, out fingerprint, out triangles))
+                throw new InvalidDataException("Navigation reconciliation cache header is malformed.");
 
         GC.Collect();
         long before = GC.GetTotalMemory(forceFullCollection: true);
-        List<HashSet<int>> sets;
+        List<HashSet<int>?> sets;
         using (FileStream input = File.OpenRead(cachePath))
-            if (!NavReconcileCache.TryRead(input, fingerprint, triangles, out sets))
+            if (!NavReconcileCache.TryReadPartial(input, fingerprint, triangles, out sets))
                 throw new InvalidDataException("Real navigation reconciliation cache did not round-trip.");
         long retained = GC.GetTotalMemory(forceFullCollection: true) - before;
-        int indices = 0;
-        foreach (HashSet<int> set in sets) indices += set.Count;
+        int indices = 0, completed = 0;
+        foreach (HashSet<int>? set in sets)
+            if (set != null)
+            {
+                completed++;
+                indices += set.Count;
+            }
         GC.KeepAlive(sets);
         sets.Clear();
         long afterClear = GC.GetTotalMemory(forceFullCollection: true) - before;
 
         Console.WriteLine("== navcache: published reconciliation state ==");
-        Console.WriteLine($"  {indices:N0} rejected indices / {triangles.Length:N0} flags: "
+        Console.WriteLine($"  {indices:N0} rejected indices / {completed:N0}/{triangles.Length:N0} completed flags: "
             + $"HashSets retain ~{retained / 1024.0:0.0} KiB; after release ~{Math.Max(0, afterClear) / 1024.0:0.0} KiB");
         Console.WriteLine();
     }
@@ -598,7 +592,10 @@ public static class Program
         Bench($"A* reusable workspace ({queries.Count} routes)", () =>
         {
             foreach ((Vector3 from, Vector3 to) in queries)
+            {
+                route.Clear();
                 graph.TryPath(from, to, route);
+            }
         }, warmup: 1, iters: 7);
         Console.WriteLine($"  reusable A* workspaces retained: {graph.SearchWorkspaceCount}");
         Console.WriteLine();

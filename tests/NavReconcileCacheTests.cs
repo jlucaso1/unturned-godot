@@ -52,6 +52,36 @@ public class NavReconcileCacheTests
     }
 
     [Fact]
+    public void MetadataReaderHandlesCompletedAndIncompleteFlagsWithoutMisalignment()
+    {
+        var partial = new List<HashSet<int>?> { new() { 1, 3 }, null, new() };
+        int[] triangles = { 4, 5, 2 };
+        using var stream = new MemoryStream();
+        NavReconcileCache.WritePartial(stream, "metadata", partial, triangles);
+        stream.Position = 0;
+
+        Assert.True(NavReconcileCache.TryReadMetadata(stream, out string fingerprint, out int[] loaded));
+        Assert.Equal("metadata", fingerprint);
+        Assert.Equal(triangles, loaded);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(7)]
+    [InlineData(16)]
+    public void MetadataReaderRejectsTruncatedInput(int length)
+    {
+        using var complete = ValidCache();
+        var truncated = new byte[Math.Min(length, (int)complete.Length)];
+        _ = complete.Read(truncated);
+
+        Assert.False(NavReconcileCache.TryReadMetadata(
+            new MemoryStream(truncated), out string fingerprint, out int[] triangles));
+        Assert.Empty(fingerprint);
+        Assert.Empty(triangles);
+    }
+
+    [Fact]
     public void PartialCheckpointBecomesACompleteHitAfterLastFlag()
     {
         var flags = new List<HashSet<int>?> { new() { 0 }, new() { 1 } };

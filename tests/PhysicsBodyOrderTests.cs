@@ -378,6 +378,22 @@ public class PhysicsBodyOrderTests
     }
 
     [Fact]
+    public void EditorPreviewAlwaysRestoresBusyStateWhenTheSceneCloses()
+    {
+        if (FindRepositoryFile(Path.Combine("addons", "unturned", "MapPreviewDock.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        int load = source.IndexOf("private async void OnLoadPreview()", StringComparison.Ordinal);
+        int clear = source.IndexOf("private void OnClearPreview()", load, StringComparison.Ordinal);
+        Assert.True(load >= 0 && clear > load);
+        string method = source.Substring(load, clear - load);
+        Assert.Contains("finally", method);
+        Assert.Contains("if (Alive)", method);
+        Assert.Contains("SetBusy(false);", method);
+    }
+
+    [Fact]
     public void RuntimeBenchmarkOmitsEmptyPhysicsFrameBuckets()
     {
         if (FindRepositoryFile(Path.Combine("src", "Benchmark", "RuntimeBenchmark.cs")) is not { } path)
@@ -398,6 +414,19 @@ public class PhysicsBodyOrderTests
         string source = File.ReadAllText(path);
         foreach (string suffix in new[] { "", ".overhead", ".oblique_n", ".oblique_e", ".oblique_s", ".zoom", ".tight" })
             Assert.Contains($"[\"cpu.processMonitorMs.median{suffix}\"] = 0.10", source);
+    }
+
+    [Fact]
+    public void NavigationBenchmarkClearsItsReusableRouteForEveryQuery()
+    {
+        if (FindRepositoryFile(Path.Combine("tools", "PerfHarness", "Program.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("NavReconcileCache.TryReadMetadata(input, out fingerprint, out triangles)", source);
+        Assert.Contains("NavReconcileCache.TryReadPartial(input, fingerprint, triangles, out sets)", source);
+        Assert.Contains("foreach ((Vector3 from, Vector3 to) in queries)\n            {\n                route.Clear();",
+            source);
     }
 
     // Walks up from the test assembly to the repository root (the folder holding the solution).

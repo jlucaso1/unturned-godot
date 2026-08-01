@@ -259,12 +259,17 @@ public partial class MapPreviewDock : VBoxContainer
         {
             Log($"[color=orange]Preview failed: {e.GetType().Name}: {e.Message}[/color]");
         }
-
-        if (!Alive)
-            return;
-        _preview.Text = "Load preview";
-        SetBusy(false);
-        RefreshCacheState();
+        finally
+        {
+            // Returning because the edited scene closed still lands here while the dock itself remains
+            // alive. Restore its controls so the next scene can load a preview without restarting Godot.
+            if (Alive)
+            {
+                _preview.Text = "Load preview";
+                SetBusy(false);
+                RefreshCacheState();
+            }
+        }
     }
 
     private void OnClearPreview()

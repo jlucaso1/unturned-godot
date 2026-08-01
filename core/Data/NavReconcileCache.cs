@@ -128,6 +128,56 @@ public static class NavReconcileCache
         }
     }
 
+    // Reads the self-describing portion needed by diagnostics before they call TryRead. Partial entries
+    // omit the rejected-count field entirely, so this must walk the completion marker rather than treating
+    // every flag as a completed one. It also validates skipped indices while avoiding retained HashSets.
+    public static bool TryReadMetadata(Stream stream, out string fingerprint, out int[] triangleCounts)
+    {
+        fingerprint = "";
+        triangleCounts = Array.Empty<int>();
+        try
+        {
+            using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
+            if (reader.ReadUInt32() != Magic || reader.ReadInt32() != FormatVersion)
+                return false;
+            string readFingerprint = reader.ReadString();
+            int flags = reader.ReadInt32();
+            if (flags < 0)
+                return false;
+
+            var counts = new int[flags];
+            for (int flag = 0; flag < flags; flag++)
+            {
+                int triangles = reader.ReadInt32();
+                if (triangles < 0)
+                    return false;
+                counts[flag] = triangles;
+
+                bool completed = reader.ReadBoolean();
+                if (!completed)
+                    continue;
+
+                int rejected = reader.ReadInt32();
+                if (rejected < 0 || rejected > triangles)
+                    return false;
+                for (int i = 0; i < rejected; i++)
+                    if ((uint)reader.ReadInt32() >= (uint)triangles)
+                        return false;
+            }
+
+            fingerprint = readFingerprint;
+            triangleCounts = counts;
+            return true;
+        }
+        catch (Exception e) when (e is EndOfStreamException or IOException or InvalidDataException
+            or ArgumentException)
+        {
+            fingerprint = "";
+            triangleCounts = Array.Empty<int>();
+            return false;
+        }
+    }
+
     public static bool TryRead(Stream stream, string fingerprint, IReadOnlyList<int> triangleCounts,
         out List<HashSet<int>> unreachable)
     {
