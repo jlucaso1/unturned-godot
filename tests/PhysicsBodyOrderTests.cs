@@ -441,14 +441,17 @@ public class PhysicsBodyOrderTests
     }
 
     [Fact]
-    public void GpuBenchmarkUsesLooseThresholdsForEveryCpuTimingPose()
+    public void GpuBenchmarkUsesFamilyThresholdsForAllCurrentAndFutureTimingPoses()
     {
         if (FindRepositoryFile(Path.Combine("src", "Benchmark", "GpuBenchmark.cs")) is not { } path)
             return;
 
         string source = File.ReadAllText(path);
-        foreach (string suffix in new[] { "", ".overhead", ".oblique_n", ".oblique_e", ".oblique_s", ".zoom", ".tight" })
-            Assert.Contains($"[\"cpu.processMonitorMs.median{suffix}\"] = 0.10", source);
+        Assert.Contains("[\"gpu.frameMs.median.\"] = 0.10", source);
+        Assert.Contains("[\"cpu.processMonitorMs.median.\"] = 0.10", source);
+        Assert.Contains("[\"gpu.frameMs.median\"] = 0.10", source);
+        Assert.Contains("[\"cpu.processMonitorMs.median\"] = 0.10", source);
+        Assert.DoesNotContain("cpu.processMonitorMs.median.ground", source);
     }
 
     [Fact]
