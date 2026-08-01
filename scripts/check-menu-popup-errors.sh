@@ -66,42 +66,67 @@ cleanup() {
 }
 trap cleanup EXIT
 
+fail() {
+    echo "$1" >&2
+    keep=1
+    exit 1
+}
+
 mkdir -p "$export_dir"
 echo "[popup-check] exporting a release build (the debug binary does not show the bug)..."
+# Past the prerequisite checks a broken export is a broken shipped build, not a reason to skip.
 if ! "$godot" --headless --path "$repo_dir" --export-release "Linux" "$binary" > "$log" 2>&1; then
     tail -20 "$log" >&2
-    skip "the release export failed (see above)"
+    fail "The release export failed, so the menu could not be checked (see above)."
 fi
-[[ -x "$binary" ]] || skip "the export produced no binary"
+[[ -x "$binary" ]] || fail "The release export left no binary at $binary."
 
 Xvfb "$display" -screen 0 1920x1080x24 > /dev/null 2>&1 &
 xvfb_pid=$!
 sleep 2
 
-UNTURNED_PATH="$content" DISPLAY="$display" "$binary" > "$log" 2>&1 &
+# UG_UI_TRACE makes HoverTooltip log each hint it shows. Without that breadcrumb "no errors" would also
+# be what a crashed game, an empty map catalog or a layout that moved under Xvfb looks like.
+UG_UI_TRACE=1 UNTURNED_PATH="$content" DISPLAY="$display" "$binary" > "$log" 2>&1 &
 game_pid=$!
-sleep 12 # the boot menu scans the install and lays the map list out
+export DISPLAY="$display"
 
 # Hover the map list, then leave it. Showing and hiding one tooltip is the whole reproduction: it needs
-# no click, and the errors land the moment the tooltip goes away. Several rows are swept so a short map
-# list cannot make this pass by missing every row.
-export DISPLAY="$display"
-for y in 140 200 260; do
-    xdotool mousemove 700 "$y"
-    sleep 1.2
+# no click, and the errors land the moment the tooltip goes away. The sweep repeats until the menu
+# answers, so a slow install scan does not decide the result, and several rows are covered so a short
+# map list cannot pass by being missed.
+hovered=0
+found=0
+for _ in $(seq 1 25); do
+    if ! kill -0 "$game_pid" 2> /dev/null; then
+        tail -20 "$log" >&2
+        fail "The exported game exited before the menu could be driven (see above)."
+    fi
+
+    for y in 140 200 260; do
+        xdotool mousemove 700 "$y"
+        sleep 0.4
+    done
+    xdotool mousemove 1400 700 # off the list: hides the hint
+    sleep 0.8
+
+    grep -q "\[ui\] hover hint:" "$log" && hovered=1
+    grep -q "Attempt to disconnect a nonexistent connection" "$log" && found=1
+    [[ "$hovered" == "1" || "$found" == "1" ]] && break
 done
-xdotool mousemove 1400 700 # off the list: cancels the tooltip
-sleep 2
 
 kill "$game_pid" 2> /dev/null
 wait "$game_pid" 2> /dev/null
 game_pid=""
 
 if grep -q "Attempt to disconnect a nonexistent connection" "$log"; then
-    echo "The boot menu is showing engine Popups again -- hovering it spams stderr:" >&2
     grep -m 4 "nonexistent connection" "$log" >&2
-    keep=1
-    exit 1
+    fail "The boot menu is showing engine Popups again -- hovering it spams stderr (above)."
 fi
 
-echo "[popup-check] ok: hovering the boot menu printed no signal-disconnect errors."
+# Only meaningful once the menu draws its own hints; on a build that still uses engine tooltips the
+# error above is what fails first.
+[[ "$hovered" == "1" ]] \
+    || fail "The pointer sweep never reached a map row, so the clean stderr proves nothing. Check that the map catalog is not empty and that the menu still lays the list out where this script looks (700, 140-260 at 1920x1080)."
+
+echo "[popup-check] ok: hovering the boot menu showed hints and printed no signal-disconnect errors."

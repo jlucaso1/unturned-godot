@@ -20,6 +20,7 @@ public partial class HoverTooltip : PanelContainer
     private const float MaxWidthFraction = 0.5f;
 
     private Label _label = null!;
+    private string _text = "";
 
     public static HoverTooltip Create()
     {
@@ -54,6 +55,16 @@ public partial class HoverTooltip : PanelContainer
         margin.AddChild(_label);
 
         SetProcess(false);
+
+        // The window is resizable and Alt+Enter toggles fullscreen, so the width cap has to be redone
+        // against the new viewport rather than the one the hint was first measured against.
+        GetViewport().SizeChanged += OnViewportResized;
+    }
+
+    private void OnViewportResized()
+    {
+        if (Visible)
+            Fit();
     }
 
     // Shows `text` and starts following the cursor. Empty text dismisses, so callers can pass a hint
@@ -66,10 +77,27 @@ public partial class HoverTooltip : PanelContainer
             return;
         }
 
+        _text = text;
+        Fit();
+        Visible = true;
+        SetProcess(true);
+        Follow();
+
+        // Opt-in breadcrumb for scripts/check-menu-popup-errors.sh: a gate that only looks for the
+        // absence of an error needs proof that the hover it drove actually landed on a row. On stderr
+        // because that stream is unbuffered -- stdout is block-buffered into a pipe, and the harness
+        // kills the game rather than letting it flush.
+        if (OS.GetEnvironment("UG_UI_TRACE") == "1")
+            Log.PrintErr($"[ui] hover hint: {_text}");
+    }
+
+    // Lays the panel out around the current text, capped against the current viewport.
+    private void Fit()
+    {
         // Measured untrimmed, because a Label that is allowed to ellipsize reports a minimum width of
         // about one character and ResetSize would collapse the panel onto it.
         _label.TextOverrunBehavior = TextServer.OverrunBehavior.NoTrimming;
-        _label.Text = text;
+        _label.Text = _text;
         ResetSize();
 
         float max = GetViewportRect().Size.X * MaxWidthFraction;
@@ -78,10 +106,6 @@ public partial class HoverTooltip : PanelContainer
             _label.TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis;
             Size = new Vector2(max, Size.Y);
         }
-
-        Visible = true;
-        SetProcess(true);
-        Follow();
     }
 
     public void Dismiss()
