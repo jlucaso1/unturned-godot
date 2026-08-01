@@ -17,6 +17,7 @@
 #   ./scripts/fetch-game-data.sh --dir /opt/unturned      # somewhere else
 #   ./scripts/fetch-game-data.sh --print-dir              # just echo the destination
 #   ./scripts/fetch-game-data.sh --manifest-key           # echo a cache key for the current content
+#   ./scripts/fetch-game-data.sh --verify                 # is the requested content really on disk?
 #
 # Then point the project at it:
 #   export UNTURNED_PATH="$(./scripts/fetch-game-data.sh --print-dir)"
@@ -40,7 +41,8 @@ while [[ $# -gt 0 ]]; do
         --retries) retries="${2:?--retries needs a value}"; shift 2 ;;
         --print-dir) mode="print-dir"; shift ;;
         --manifest-key) mode="manifest-key"; shift ;;
-        -h|--help) sed -n '2,22p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        --verify) mode="verify"; shift ;;
+        -h|--help) sed -n '2,23p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -48,6 +50,65 @@ done
 if [[ "$mode" == "print-dir" ]]; then
     mkdir -p "$dest"
     (cd "$dest" && pwd)
+    exit 0
+fi
+
+# The maps the caller asked for, one per line, whitespace trimmed.
+selected_maps() {
+    local map
+    IFS=',' read -ra raw <<< "$maps"
+    for map in "${raw[@]}"; do
+        map="${map#"${map%%[![:space:]]*}"}"
+        map="${map%"${map##*[![:space:]]}"}"
+        [[ -n "$map" ]] && printf '%s\n' "$map"
+    done
+}
+
+# --- Verification ------------------------------------------------------------------------------
+# Is the requested content actually on disk, whole? A download that dies partway leaves the tree in
+# a state that reads as an install to UnturnedInstall.Find, which accepts any directory the override
+# names; the data-backed tests then run against half a map and fail instead of self-skipping. Callers
+# ask this before trusting a directory, and before deciding a re-run has nothing left to do.
+verify_content() {
+    local ok=1 map
+
+    shopt -s nullglob
+    local bundles=("$1"/Bundles/core*.masterbundle)
+    shopt -u nullglob
+    if [[ ${#bundles[@]} -eq 0 ]]; then
+        echo "Missing: a core masterbundle in $1/Bundles" >&2
+        ok=0
+    fi
+
+    if [[ ! -d "$1/Bundles/Objects" ]]; then
+        echo "Missing: $1/Bundles/Objects" >&2
+        ok=0
+    fi
+
+    if [[ "$maps" == "all" ]]; then
+        # "Every map Valve currently ships" is not knowable from disk, so this can never be confirmed
+        # offline. Report it unverified and let the caller re-run the downloader, which is incremental.
+        echo "Cannot verify --maps all without asking Steam what the full set is." >&2
+        ok=0
+    else
+        # Level.dat is the map itself; Landscape is the tile set this project needs to load one. Maps
+        # that predate Landscape tiles (Destruction, Paintball Arena) therefore never verify, which
+        # matches the fact that the project cannot load them either.
+        while read -r map; do
+            [[ -f "$1/Maps/$map/Level.dat" ]] || { echo "Missing: $1/Maps/$map/Level.dat" >&2; ok=0; }
+            [[ -d "$1/Maps/$map/Landscape" ]] || { echo "Missing: $1/Maps/$map/Landscape" >&2; ok=0; }
+        done < <(selected_maps)
+    fi
+
+    [[ $ok == 1 ]]
+}
+
+if [[ "$mode" == "verify" ]]; then
+    if ! verify_content "$dest"; then
+        echo "Incomplete game content in $dest (maps: $maps)." >&2
+        exit 1
+    fi
+    echo "Game content verified in $dest (maps: $maps)."
     exit 0
 fi
 
@@ -145,21 +206,24 @@ trap 'rm -f -- "$filelist"' EXIT
     if [[ "$maps" == "all" ]]; then
         printf 'regex:^Maps/.*\n'
     else
-        IFS=',' read -ra selected <<< "$maps"
-        for map in "${selected[@]}"; do
-            map="${map#"${map%%[![:space:]]*}"}"      # trim surrounding whitespace
-            map="${map%"${map##*[![:space:]]}"}"
-            [[ -n "$map" ]] && printf 'regex:^Maps/%s/.*\n' "$map"
-        done
+        while read -r map; do
+            printf 'regex:^Maps/%s/.*\n' "$map"
+        done < <(selected_maps)
     fi
 } > "$filelist"
 
 echo "Downloading Unturned content (app $APP_ID, maps: $maps, bundle: $os_name) into $dest"
 run_downloader -app "$APP_ID" -os "$os_name" -filelist "$filelist" -dir "$dest"
 
-# The tests locate content through UnturnedInstall, which wants <root>/Bundles and <root>/Maps.
-if [[ ! -d "$dest/Bundles" || ! -d "$dest/Maps" ]]; then
-    echo "Download finished but $dest does not look like an install (no Bundles/ or Maps/)." >&2
+# A download that reports success but left the tree short is worth catching here rather than in a
+# confusing test failure later. "all" is unverifiable offline, so it only gets the shallow check.
+if [[ "$maps" == "all" ]]; then
+    if [[ ! -d "$dest/Bundles" || ! -d "$dest/Maps" ]]; then
+        echo "Download finished but $dest does not look like an install (no Bundles/ or Maps/)." >&2
+        exit 1
+    fi
+elif ! verify_content "$dest"; then
+    echo "Download finished but $dest is incomplete." >&2
     exit 1
 fi
 

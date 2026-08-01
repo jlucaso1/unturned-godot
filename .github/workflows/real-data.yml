@@ -62,23 +62,10 @@ jobs:
         run: ./scripts/fetch-game-data.sh
 
       # Every data-backed test self-skips when the content is missing, which would leave this whole
-      # job green while proving nothing. Fail loudly instead.
+      # job green while proving nothing. Fail loudly instead. A stale cache entry that restored a
+      # partial tree is caught here too.
       - name: Verify the content is really there
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          bundles=(build/game-data/Bundles/core*.masterbundle)
-          if [[ ${#bundles[@]} -eq 0 ]]; then
-            echo "::error::No core masterbundle in build/game-data/Bundles." >&2
-            exit 1
-          fi
-          for required in Maps/PEI/Level.dat Maps/PEI/Landscape Bundles/Objects; do
-            if [[ ! -e "build/game-data/$required" ]]; then
-              echo "::error::Missing build/game-data/$required." >&2
-              exit 1
-            fi
-          done
-          echo "Content: ${bundles[0]} ($(du -sh build/game-data | cut -f1) total)"
+        run: ./scripts/fetch-game-data.sh --verify
 
       - name: Build
         run: dotnet build unturned-godot.sln -c Release -warnaserror

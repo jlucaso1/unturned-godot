@@ -17,7 +17,12 @@ content_dir="${UNTURNED_PATH:-$repo_dir/build/game-data}"
 # the environment snapshot, so this is a no-op on every session after the first.
 UNTURNED_PATH="$content_dir" bash "$repo_dir/scripts/setup-cloud-env.sh" || true
 
-if [[ -d "$content_dir/Bundles" && -n "${CLAUDE_ENV_FILE:-}" ]]; then
+# Only point the session at content that is actually whole. UnturnedInstall.Find accepts whatever
+# directory the override names, so exporting a half-finished download would make the data-backed tests
+# run against it and fail, where leaving it unset makes them self-skip as designed.
+if [[ -n "${CLAUDE_ENV_FILE:-}" ]] \
+    && bash "$repo_dir/scripts/fetch-game-data.sh" --verify \
+        --maps "${UNTURNED_SETUP_MAPS:-PEI}" --dir "$content_dir" 2>/dev/null; then
     echo "export UNTURNED_PATH=\"$content_dir\"" >> "$CLAUDE_ENV_FILE"
 fi
 

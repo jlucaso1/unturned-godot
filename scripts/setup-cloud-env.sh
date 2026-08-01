@@ -69,8 +69,10 @@ fetch_content() {
         return 0
     fi
 
-    if [[ -d "$content_dir/Bundles" && -d "$content_dir/Maps" ]]; then
-        echo "[content] Already present in $content_dir"
+    # Ask the fetcher whether *this* selection is already whole, rather than just whether some content
+    # is there: widening UNTURNED_SETUP_MAPS from PEI to PEI,Washington has to pull Washington, and a
+    # download that died partway has to be finished rather than treated as done.
+    if "$repo_dir/scripts/fetch-game-data.sh" --verify --maps "$maps" --dir "$content_dir" 2>/dev/null; then
         return 0
     fi
 
