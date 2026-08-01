@@ -85,8 +85,9 @@ public static class AppShutdown
             Log.PushWarning(message);
     }
 
-    // The single way out of a loaded world. Safe to call more than once.
-    public static void RequestQuit(SceneTree tree)
+    // The single way out of a loaded world. Safe to call more than once. exitCode is what the process
+    // reports; a headless caller that failed passes nonzero so its wrapper script can tell.
+    public static void RequestQuit(SceneTree tree, int exitCode = 0)
     {
         if (IsShuttingDown)
             return;
@@ -97,18 +98,18 @@ public static class AppShutdown
         {
             Log.Print("[shutdown] leaving");
             // Deferred: never tear the tree down inside the signal handler that asked for it.
-            tree.CallDeferred(SceneTree.MethodName.Quit);
+            tree.CallDeferred(SceneTree.MethodName.Quit, exitCode);
             return;
         }
 
         Log.Print($"[shutdown] leaving; waiting for {running} background task(s) to stop");
-        _ = WaitForBackgroundThenQuit(tree);
+        _ = WaitForBackgroundThenQuit(tree, exitCode);
     }
 
     // Polls on the main thread rather than blocking it: the workers hand their last results back through
     // CallDeferred, which only runs while frames keep being processed. Blocking here would deadlock a
     // task that is waiting for the main thread to drain.
-    private static async Task WaitForBackgroundThenQuit(SceneTree tree)
+    private static async Task WaitForBackgroundThenQuit(SceneTree tree, int exitCode)
     {
         var waited = Stopwatch.StartNew();
         while (StillRunning() > 0 && waited.Elapsed < Grace)
@@ -119,6 +120,6 @@ public static class AppShutdown
             ? $"[shutdown] background work stopped after {waited.ElapsedMilliseconds} ms"
             : $"[shutdown] {left} background task(s) still busy after {waited.ElapsedMilliseconds} ms; leaving anyway");
 
-        tree.Quit();
+        tree.Quit(exitCode);
     }
 }

@@ -24,6 +24,7 @@ public static class GpuBenchmark
     public static async Task RunAsync(Node context, string unturnedPath, string mapName)
     {
         SceneTree tree = context.GetTree();
+        bool failed = true;
         try
         {
             if (DisplayServer.GetName() == "headless")
@@ -137,6 +138,7 @@ public static class GpuBenchmark
 
             BenchmarkRunner.Finish(report, $"{mapName}-gpu", DiffOptions(),
                 "gpu.frameMs.* are wall-clock medians — noisy, and CPU-bound when draw-call limited");
+            failed = false;
         }
         catch (Exception e)
         {
@@ -144,7 +146,10 @@ public static class GpuBenchmark
         }
         finally
         {
-            tree.Quit();
+            // Every way out that does not reach Finish leaves no report behind. Quitting zero from here
+            // would tell scripts/run-benchmark.sh — and anything automating it — that a measurement was
+            // taken, so the wrapper would accept a run that measured nothing.
+            tree.Quit(failed ? 1 : 0);
         }
     }
 

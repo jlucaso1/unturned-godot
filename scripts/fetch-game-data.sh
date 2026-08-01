@@ -105,11 +105,18 @@ verify_content() {
 # Level.dat is the map itself, and the heightmap tiles are what this project needs to load one. Known
 # official grids get exact coordinate checks; --maps all discovers the loadable map set from the tree so
 # a new official map cannot be silently omitted from the receipt.
+#
+# Every directory under Maps/ counts, including one with no Level.dat yet. Requiring Level.dat here would
+# make an interrupted download self-consistent: the half-written map would drop out of the expected set,
+# the maps that did finish would verify, and the receipt would be published without ever mentioning the
+# one that is missing. A directory the depot created is a map that has to be whole, so an incomplete one
+# has to fail verification rather than disappear from it. The exclusions below are the two official
+# folders this port cannot load at all; a genuinely new one shows up as a loud failure, which is the
+# right direction to be wrong in.
 all_maps() {
     local root="$1" dir map
     shopt -s nullglob
     for dir in "$root"/Maps/*/; do
-        [[ -s "$dir/Level.dat" ]] || continue
         map="${dir%/}"
         map="${map##*/}"
         case "$map" in

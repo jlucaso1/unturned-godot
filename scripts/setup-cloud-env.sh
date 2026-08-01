@@ -22,6 +22,13 @@ set -euo pipefail
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 maps="${UNTURNED_SETUP_MAPS:-PEI}"
 content_dir="${UNTURNED_PATH:-$repo_dir/build/game-data}"
+# UNTURNED_PATH=/opt/unturned/ is the same directory as /opt/unturned, but "${content_dir}.incomplete"
+# is not: the trailing separator puts the quarantine path *inside* the tree being quarantined, and mv
+# cannot move a directory into its own child. That would turn a tolerated download failure into a setup
+# failure, so normalize once here rather than at each use.
+while [[ "$content_dir" == */ && "$content_dir" != "/" ]]; do
+    content_dir="${content_dir%/}"
+done
 log_dir="$repo_dir/build/setup-logs"
 mkdir -p "$log_dir"
 
@@ -130,18 +137,30 @@ wait "$content_pid" || content_status=$?
 cat "$toolchain_log"
 cat "$content_log"
 
+# Quarantine first, whatever else went wrong. The two halves fail independently, and when both do, an
+# early exit on the toolchain would leave the partial tree exactly where UNTURNED_PATH resolves it —
+# so the next session would discover half a map and run its data-backed tests against it.
+quarantine_status=0
+if [[ $content_status -ne 0 ]]; then
+    quarantine_incomplete_content || quarantine_status=1
+fi
+
 if [[ $toolchain_status -ne 0 ]]; then
     echo "Setup failed: the .NET toolchain could not be installed (see $toolchain_log)." >&2
+    if [[ $quarantine_status -ne 0 ]]; then
+        echo "Incomplete content was also left at $content_dir." >&2
+    fi
     exit "$toolchain_status"
+fi
+
+if [[ $quarantine_status -ne 0 ]]; then
+    echo "Setup failed: incomplete content could not be quarantined." >&2
+    exit 1
 fi
 
 # A missing download is worth reporting but not worth failing the session over: every test that reads
 # real content self-skips, so the suite is still green, just smaller.
 if [[ $content_status -ne 0 ]]; then
-    if ! quarantine_incomplete_content; then
-        echo "Setup failed: incomplete content could not be quarantined." >&2
-        exit 1
-    fi
     echo
     echo "Warning: the game content could not be fetched (see $content_log)." >&2
     echo "The suite still runs; its data-backed tests will self-skip." >&2

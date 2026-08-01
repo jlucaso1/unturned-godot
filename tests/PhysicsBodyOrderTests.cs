@@ -793,6 +793,14 @@ public class PhysicsBodyOrderTests
         Assert.Contains("minimum_unknown_tiles=\"${3:-1}\"", source);
         Assert.DoesNotContain("expected_all_maps", source);
         Assert.DoesNotContain("any_map_is_whole", source);
+
+        // A map directory with no Level.dat yet is what an interrupted --maps all leaves behind. Filtering
+        // it out of all_maps would drop it from both the expected set and the receipt, so the maps that
+        // did finish would verify and publish a receipt that never mentions the one that did not.
+        int allMaps = source.IndexOf("all_maps() {", StringComparison.Ordinal);
+        int allMapsEnd = source.IndexOf("\n}", allMaps, StringComparison.Ordinal);
+        Assert.True(allMaps >= 0 && allMapsEnd > allMaps);
+        Assert.DoesNotContain("Level.dat", source[allMaps..allMapsEnd]);
     }
 
     [Fact]
@@ -816,8 +824,19 @@ public class PhysicsBodyOrderTests
         Assert.Contains("quarantine_incomplete_content", source);
         Assert.Contains("mktemp -d \"${content_dir}.incomplete.XXXXXX\"", source);
         Assert.Contains("mv -f -- \"$content_dir\" \"$quarantine/\"", source);
-        Assert.Contains("if ! quarantine_incomplete_content", source);
+        Assert.Contains("quarantine_incomplete_content || quarantine_status=1", source);
         Assert.DoesNotContain("quarantine_incomplete_content || true", source);
+
+        // UNTURNED_PATH=/opt/unturned/ would otherwise put the quarantine directory inside the tree it
+        // replaces, and mv refuses to move a directory into its own child.
+        Assert.Contains("content_dir=\"${content_dir%/}\"", source);
+
+        // The two setup halves fail independently. Quarantining after the toolchain's exit would skip it
+        // entirely when both fail, leaving the partial tree where UNTURNED_PATH resolves it next session.
+        int quarantine = source.IndexOf("quarantine_incomplete_content || quarantine_status=1",
+            StringComparison.Ordinal);
+        int toolchainExit = source.IndexOf("exit \"$toolchain_status\"", StringComparison.Ordinal);
+        Assert.True(quarantine >= 0 && toolchainExit > quarantine);
     }
 
     [Fact]
@@ -827,7 +846,47 @@ public class PhysicsBodyOrderTests
             return;
 
         string source = File.ReadAllText(path);
-        Assert.Contains("unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}", source);
+        // Both jobs read the tree through the same verifier, so both have to leave behind cache entries
+        // that predate a change to what "whole" means -- the structural job included.
+        Assert.Equal(2, CountOccurrences(source,
+            "unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}"));
+
+        // Cache entries are immutable for a given key: trusting the hit flag would wedge every run behind
+        // one bad entry until the depot manifest moves. Verify what came back, and re-fetch when it fails.
+        Assert.DoesNotContain("steps.content-cache.outputs.cache-hit", source);
+        Assert.Equal(2, CountOccurrences(source, "if ./scripts/fetch-game-data.sh --verify 2> /dev/null; then"));
+    }
+
+    [Fact]
+    public void StructuralMetricsScriptFindsTheReportOnEveryHostPlatform()
+    {
+        if (FindRepositoryFile(Path.Combine("scripts", "check-structural-metrics.sh")) is not { } path)
+            return;
+
+        // Godot's user:// lands somewhere different on each host. Looking only under Linux's tree would
+        // report that a benchmark wrote nothing, on a macOS or Windows run that succeeded.
+        string source = File.ReadAllText(path);
+        Assert.Contains("$HOME/Library/Application Support/Godot/app_userdata/unturned-godot", source);
+        Assert.Contains("${APPDATA:-$HOME/AppData/Roaming}", source);
+        Assert.Contains("${XDG_DATA_HOME:-$HOME/.local/share}/godot/app_userdata/unturned-godot", source);
+    }
+
+    [Theory]
+    [InlineData("GpuBenchmark.cs", "tree.Quit(failed ? 1 : 0);")]
+    [InlineData("RuntimeBenchmark.cs", "AppShutdown.RequestQuit(tree, failed ? 1 : 0);")]
+    public void WindowedBenchmarkTiersQuitNonzeroWhenNoReportWasWritten(string file, string quit)
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Benchmark", file)) is not { } path)
+            return;
+
+        // These tiers catch their own exceptions so the tree still tears down. Quitting zero from that
+        // path would tell scripts/run-benchmark.sh a measurement was taken when no report exists.
+        string source = File.ReadAllText(path);
+        int flag = source.IndexOf("bool failed = true;", StringComparison.Ordinal);
+        int cleared = source.IndexOf("failed = false;", flag, StringComparison.Ordinal);
+        int finish = source.IndexOf("BenchmarkRunner.Finish(", flag, StringComparison.Ordinal);
+        Assert.True(flag >= 0 && finish > flag && cleared > finish);
+        Assert.Contains(quit, source);
     }
 
     [Fact]
@@ -853,6 +912,11 @@ public class PhysicsBodyOrderTests
         Assert.Contains("workshop_map=\"${MAP#workshop:}\"", source);
         Assert.Contains("\"$workshop_map/Level.dat\"", source);
         Assert.Contains("--verify --maps \"$MAP\"", source);
+
+        // MapCatalog.IsSupported is TileCount > 0. A legacy workshop map has Level.dat and no Landscape
+        // tiles, so accepting it on Level.dat alone would benchmark an empty world and report it.
+        Assert.Contains("workshop_tiles=(\"$workshop_map/Landscape/Heightmaps\"/*.heightmap)", source);
+        Assert.Contains("${#workshop_tiles[@]} -eq 0", source);
     }
 
     [Fact]

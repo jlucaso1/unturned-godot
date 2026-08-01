@@ -46,6 +46,16 @@ if [[ "$MAP" == workshop:* ]]; then
         echo "No workshop map $MAP or Unturned content at $content." >&2
         exit 1
     fi
+    # Level.dat alone is not enough to load one. MapCatalog.IsSupported is TileCount > 0, and a pre-2020
+    # workshop map keeps its terrain in a single legacy heightmap this port does not read: it opens as a
+    # zero-tile world, so Tier 1 would write a structurally meaningless report instead of refusing.
+    shopt -s nullglob
+    workshop_tiles=("$workshop_map/Landscape/Heightmaps"/*.heightmap)
+    shopt -u nullglob
+    if [[ ${#workshop_tiles[@]} -eq 0 ]]; then
+        echo "Workshop map $workshop_map has no Landscape heightmap tiles; this port cannot load it." >&2
+        exit 1
+    fi
 else
     if ! "$repo_dir/scripts/fetch-game-data.sh" --verify --maps "$MAP" --dir "$content" > /dev/null 2>&1; then
         echo "No $MAP content at $content. Run ./scripts/fetch-game-data.sh --maps $MAP, or set UNTURNED_PATH." >&2
