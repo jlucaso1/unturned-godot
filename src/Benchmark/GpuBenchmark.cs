@@ -174,6 +174,8 @@ public static class GpuBenchmark
                 metrics["foliage.maxDeferredPrefetch"] = foliage.MaximumDeferredPrefetch;
                 metrics["foliage.maxDecodedBytes"] = foliage.MaximumDecodedBytes;
                 metrics["foliage.emergencyVisibleLoads"] = foliage.EmergencyVisibleLoads;
+                metrics["foliage.emergencyVisible.totalMs"] = foliage.EmergencyVisibleTotalMs;
+                metrics["foliage.emergencyVisible.maxMs"] = foliage.EmergencyVisibleMaxMs;
                 metrics["foliage.visibleSetMisses"] = foliage.VisibleSetMisses;
                 metrics["foliage.retiredChunks"] = foliage.RetiredChunks;
                 metrics["foliage.staleResults"] = foliage.StaleResults;
@@ -240,10 +242,14 @@ public static class GpuBenchmark
             ["cpu.processMonitorMs.median."] = 0.10,
         },
         // See RuntimeBenchmark.DiffOptions: a mid-fill residency snapshot is scheduler-dependent, so two
-        // unsettled runs must not classify their difference as a regression or an improvement.
+        // unsettled runs must not classify their difference as a regression or an improvement. The two
+        // timing suffixes are wall-clock like everything else here, and Tier 3 already loosens them for
+        // its subsystem counters; Tier 2 needs them for the foliage emergency-decode cost.
         ThresholdSuffixOverrides = new Dictionary<string, double>
         {
             ["Unsettled"] = double.PositiveInfinity,
+            [".totalMs"] = 0.15,
+            [".maxMs"] = 0.15,
         },
         ThresholdOverrides = new Dictionary<string, double>
         {
