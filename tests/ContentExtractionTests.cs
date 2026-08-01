@@ -129,11 +129,18 @@ public class ContentExtractionTests
         Assert.Empty(ContentExtraction.PendingReports(plans));
     }
 
-    [Theory]
-    [InlineData("/game/Bundles/core_linux.masterbundle", "extraction_core_linux.index")]
-    [InlineData("california2.masterbundle", "extraction_california2.index")]
-    public void ExtractionIndexFileNameIsStablePerBundle(string bundle, string expected) =>
-        Assert.Equal(expected, ExtractionIndex.FileNameFor(bundle));
+    [Fact]
+    public void ExtractionIndexFileNameIsStableAndNamespacedBySourcePath()
+    {
+        string first = Path.Combine(Path.GetTempPath(), "workshop", "100", "shared_linux.masterbundle");
+        string second = Path.Combine(Path.GetTempPath(), "workshop", "200", "shared_linux.masterbundle");
+
+        string firstName = ExtractionIndex.FileNameFor(first);
+        Assert.Equal(firstName, ExtractionIndex.FileNameFor(first));
+        Assert.NotEqual(firstName, ExtractionIndex.FileNameFor(second));
+        Assert.StartsWith("extraction_shared-linux-", firstName, StringComparison.Ordinal);
+        Assert.EndsWith(".index", firstName, StringComparison.Ordinal);
+    }
 
     private static IReadOnlyList<ContentSource> BuildSources(TempDir dir)
     {

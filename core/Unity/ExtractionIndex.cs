@@ -20,10 +20,21 @@ public static class ExtractionIndex
     private const uint Magic = 0x31584755; // "UGX1"
     private const uint OwnerMagic = 0x314F4755; // "UGO1"
 
-    // Sits next to the per-GUID meshes. Keep one index per bundle: misses in the game's bundle say
-    // nothing about the contents of a workshop bundle, and vice versa.
-    public static string FileNameFor(string bundlePath) =>
-        "extraction_" + Path.GetFileNameWithoutExtension(bundlePath) + ".index";
+    // Sits next to the per-GUID meshes. Bundle filenames are not identities: unrelated workshop items
+    // commonly reuse names such as shared_linux.masterbundle, and copied bundles can also share the
+    // length/mtime stamp stored inside the file. Include the canonical source path so a negative result
+    // from one workshop item can never suppress extraction from another claimant.
+    public static string FileNameFor(string bundlePath)
+    {
+        string leaf = TextureKey.TagFor(Path.GetFileNameWithoutExtension(bundlePath));
+        string identity;
+        try { identity = CanonicalBundlePath(bundlePath); }
+        catch (Exception e) when (e is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            identity = bundlePath;
+        }
+        return "extraction_" + TextureKey.Discriminate(leaf, identity) + ".index";
+    }
 
     // The misses recorded for this bundle, or an empty set when the file is missing, stale (a different
     // bundle), truncated or written by another format version. Never throws: a missing/garbage index only

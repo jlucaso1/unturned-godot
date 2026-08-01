@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.IO;
 using System.Text;
 
@@ -20,6 +21,12 @@ public static class SafeCachePath
             stem = "file";
         return stem + extension;
     }
+
+    // Unity PathIDs are stable inside the SerializedFile and keep distinct clips distinct even when
+    // their untrusted display names collapse to the same portable stem during sanitization.
+    public static string UniqueFileName(string? untrusted, string fallback, long stableId, string extension) =>
+        FileName(untrusted, fallback,
+            "_" + stableId.ToString("x", CultureInfo.InvariantCulture) + extension);
 
     public static bool TryResolveChild(string directory, string fileName, out string fullPath)
     {

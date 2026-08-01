@@ -203,7 +203,7 @@ public static class AudioExtractor
                     byte[]? ogg = RebuildOgg(resource, offset, size, name);
                     if (ogg == null)
                         continue;
-                    string fileName = SafeCachePath.FileName(name, $"clip_{clipId:x}", ".ogg");
+                    string fileName = SafeCachePath.UniqueFileName(name, "clip", clipId, ".ogg");
                     if (!SafeCachePath.TryResolveChild(defDir, fileName, out string clipOutput))
                         continue;
                     File.WriteAllBytes(clipOutput, ogg);
@@ -250,7 +250,7 @@ public static class AudioExtractor
                 byte[]? ogg = RebuildOgg(resource, offset, size, name);
                 if (ogg == null)
                     continue;
-                string fileName = SafeCachePath.FileName(name, $"clip_{clipId:x}", ".ogg");
+                string fileName = SafeCachePath.UniqueFileName(name, "clip", clipId, ".ogg");
                 if (!SafeCachePath.TryResolveChild(groupDir, fileName, out string clipOutput))
                     continue;
                 File.WriteAllBytes(clipOutput, ogg);

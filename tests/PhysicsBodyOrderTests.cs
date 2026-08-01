@@ -440,7 +440,8 @@ public class PhysicsBodyOrderTests
         string source = File.ReadAllText(path);
         Assert.Contains("TextureKey.Discriminate(prefix, assetPath)", source);
         Assert.DoesNotContain("bundleTag + \"_\" + DefNameOf(assetPath)", source);
-        Assert.Equal(2, CountOccurrences(source, "SafeCachePath.FileName(name, $\"clip_{clipId:x}\", \".ogg\")"));
+        Assert.Equal(2, CountOccurrences(source,
+            "SafeCachePath.UniqueFileName(name, \"clip\", clipId, \".ogg\")"));
         Assert.Equal(2, CountOccurrences(source, "SafeCachePath.TryResolveChild"));
     }
 

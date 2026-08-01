@@ -27,6 +27,14 @@ public class SafeCachePathTests
     }
 
     [Fact]
+    public void UniqueFileNameKeepsCollidingSanitizedNamesDistinct()
+    {
+        Assert.Equal("step_metal_2a.ogg", SafeCachePath.UniqueFileName("step:metal", "clip", 0x2a, ".ogg"));
+        Assert.Equal("step_metal_2b.ogg", SafeCachePath.UniqueFileName("step?metal", "clip", 0x2b, ".ogg"));
+        Assert.Equal("clip_2c.ogg", SafeCachePath.UniqueFileName("../clip", "clip", 0x2c, ".ogg"));
+    }
+
+    [Fact]
     public void ResolveChildAcceptsOnlyADirectCacheChild()
     {
         using var dir = new TempDir();
