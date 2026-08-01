@@ -195,7 +195,27 @@ public class PhysicsBodyOrderTests
         {
             string gpu = File.ReadAllText(gpuPath);
             Assert.Contains("FoliageBenchmarkSettling.WaitAsync", gpu);
-            Assert.Contains("if (settled)", gpu);
+            Assert.Contains("metrics[\"foliage.settled\"] = settled ? 1 : 0;", gpu);
+        }
+    }
+
+    // The residency snapshot is the only direct evidence of what spatial residency keeps in memory. A
+    // machine that never settles within the wait is exactly the one whose report needs it, so neither
+    // tier may put those counts back behind the settled flag.
+    [Fact]
+    public void BenchmarkReportsResidencyCountsEvenWhenStreamingNeverSettles()
+    {
+        foreach (string file in new[] { "RuntimeBenchmark.cs", "GpuBenchmark.cs" })
+        {
+            if (FindRepositoryFile(Path.Combine("src", "Benchmark", file)) is not { } path)
+                continue;
+
+            string source = File.ReadAllText(path);
+            string prefix = file == "RuntimeBenchmark.cs" ? "runtime.foliage" : "foliage";
+            foreach (string metric in new[] { "residentChunks", "residentInstances", "residentBufferBytes" })
+                Assert.Contains($"metrics[\"{prefix}.{metric}\"]", source);
+            Assert.DoesNotContain("if (settled)", source);
+            Assert.DoesNotContain("if (includeResidencySnapshot && foliage.IsSettled)", source);
         }
     }
 
@@ -774,7 +794,10 @@ public class PhysicsBodyOrderTests
         int snapshot = source.IndexOf("AddFoliageMetrics(tree, report.Metrics, foliageSettled)", report,
             StringComparison.Ordinal);
         Assert.True(disable >= 0 && settle > disable && report > settle && snapshot > report);
-        Assert.Contains("if (includeResidencySnapshot && foliage.IsSettled)", source);
+        // The settling wait still runs before the snapshot, so a machine that drains its queue reports
+        // the same stable counts it always did; only the omission on a machine that cannot settle is gone.
+        Assert.Contains("metrics[\"runtime.foliage.settled\"] = includeResidencySnapshot && foliage.IsSettled ? 1 : 0;",
+            source);
     }
 
     [Fact]

@@ -99,7 +99,8 @@ public static class RuntimeBenchmark
             AddCounterMetrics(report.Metrics);
             AddFoliageMetrics(tree, report.Metrics, foliageSettled);
             BenchmarkRunner.Finish(report, $"{mapName}-runtime", DiffOptions(),
-                "timings are advisory; counts are deterministic for the same spawn view");
+                "timings are advisory; counts are deterministic for the same spawn view, "
+                    + "except foliage residency counts, which need runtime.foliage.settled=1 on both sides");
         }
         catch (Exception e)
         {
@@ -183,14 +184,15 @@ public static class RuntimeBenchmark
             {
                 metrics["runtime.foliage.indexedChunks"] = foliage.IndexedChunks;
                 metrics["runtime.foliage.indexedInstances"] = foliage.IndexedInstances;
+                // Report the residency snapshot unconditionally, and let `settled` say whether it is a
+                // stable state or a machine that never drained its queue. Omitting it left the reports
+                // that most need it — a slow or GPU-less box, where streaming is starved by the
+                // per-frame upload budget — with no record of what the streamer actually kept resident.
                 metrics["runtime.foliage.settled"] = includeResidencySnapshot && foliage.IsSettled ? 1 : 0;
-                if (includeResidencySnapshot && foliage.IsSettled)
-                {
-                    metrics["runtime.foliage.residentChunks"] = foliage.ResidentChunks;
-                    metrics["runtime.foliage.residentInstances"] = foliage.ResidentInstances;
-                    metrics["runtime.foliage.residentBufferBytes"] = foliage.ResidentBufferBytes;
-                    metrics["runtime.foliage.pendingChunks"] = foliage.PendingChunks;
-                }
+                metrics["runtime.foliage.residentChunks"] = foliage.ResidentChunks;
+                metrics["runtime.foliage.residentInstances"] = foliage.ResidentInstances;
+                metrics["runtime.foliage.residentBufferBytes"] = foliage.ResidentBufferBytes;
+                metrics["runtime.foliage.pendingChunks"] = foliage.PendingChunks;
                 metrics["runtime.foliage.maxQueued"] = foliage.MaximumQueued;
                 metrics["runtime.foliage.maxDecodedBytes"] = foliage.MaximumDecodedBytes;
                 metrics["runtime.foliage.emergencyVisibleLoads"] = foliage.EmergencyVisibleLoads;

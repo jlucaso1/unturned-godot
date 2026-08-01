@@ -159,14 +159,13 @@ public static class GpuBenchmark
             {
                 metrics["foliage.indexedChunks"] = foliage.IndexedChunks;
                 metrics["foliage.indexedInstances"] = foliage.IndexedInstances;
+                // Always report what is resident; `settled` says whether it is a stable state. See
+                // RuntimeBenchmark.AddFoliageMetrics for why the snapshot is no longer withheld.
                 bool settled = includeResidencySnapshot && foliage.IsSettled;
                 metrics["foliage.settled"] = settled ? 1 : 0;
-                if (settled)
-                {
-                    metrics["foliage.residentChunks"] = foliage.ResidentChunks;
-                    metrics["foliage.residentInstances"] = foliage.ResidentInstances;
-                    metrics["foliage.residentBufferBytes"] = foliage.ResidentBufferBytes;
-                }
+                metrics["foliage.residentChunks"] = foliage.ResidentChunks;
+                metrics["foliage.residentInstances"] = foliage.ResidentInstances;
+                metrics["foliage.residentBufferBytes"] = foliage.ResidentBufferBytes;
                 metrics["foliage.maxQueued"] = foliage.MaximumQueued;
                 metrics["foliage.maxDecodedBytes"] = foliage.MaximumDecodedBytes;
                 metrics["foliage.emergencyVisibleLoads"] = foliage.EmergencyVisibleLoads;

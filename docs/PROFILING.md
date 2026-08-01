@@ -178,7 +178,10 @@ the already-usable baked navigation graph is refined.
   `UG_FOLIAGE_MAX_PENDING` (256), `UG_FOLIAGE_DECODE_WORKERS` (1),
   `UG_FOLIAGE_UPLOADS_PER_FRAME` (16), and `UG_FOLIAGE_DECODED_MIB` (32 MiB). The runtime and GPU JSON
   reports include resident/indexed chunks and instances, buffer bytes, maximum queue/decoded bytes,
-  retirements, stale results, failures, and visible-set misses.
+  retirements, stale results, failures, and visible-set misses. The residency counts are always reported;
+  `settled` says whether they were sampled from a drained queue. Compare them only between runs that both
+  report `settled: 1` — on a machine slow enough that the per-frame upload budget never drains the queue
+  (a GPU-less container samples at well under 1 FPS), the snapshot is a mid-fill state, not the steady set.
 - `UG_FOLIAGE_TRAVERSAL=1` adds deterministic far-apart ground poses to Tier 2. It exercises teleport
   cancellation and retirement and is intended to be combined with the foliage counters; zero
   `visibleSetMisses` is the correctness gate.
