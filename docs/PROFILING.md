@@ -1,16 +1,32 @@
 # Benchmarking and profiling
 
-`$GODOT` below is your Godot 4.7 .NET binary. Most of this is Linux tooling, but the two benchmark tiers
+`$GODOT` below is your Godot 4.7 .NET binary. Most of this is Linux tooling, but the three benchmark tiers
 themselves work anywhere Godot runs.
 
-## The two benchmark tiers
+## The three benchmark tiers
 
-Both print a JSON report and diff it against the previous run (baselines live in `bench/baseline/`):
+All three print a JSON report and diff it against the previous run (baselines live in `bench/baseline/`):
 
 ```sh
 "$GODOT" --headless -- --benchmark   # Tier 1: build times, mesh/material counts, static memory
 "$GODOT" -- --benchmark --gpu        # Tier 2 (windowed): frame time, draw calls, primitives, VRAM
+UG_RUNTIME_BENCH_SECS=12 SOLO=1 "$GODOT" # Tier 3: real streamed load + gameplay CPU/physics/rendering
 ```
+
+Tier 2 uses deterministic map-relative camera poses, including two at actual gameplay height. Tier 3
+starts the normal interactive path (player, loopback server, zombies, navigation and streaming), records
+the time until `ObjectStreamer.Finished`, warms up, samples the spawn camera for the requested duration,
+writes `user://bench/<map>-runtime-latest.json`, then performs the normal cooperative shutdown.
+
+Tier 3 also reports p90/p95/p99/max frame times, medians/tails split by whether a 60 Hz physics tick ran,
+and the percentage of frames above the 240 Hz and 120 Hz budgets. Compare those tails with a control map
+in the same gamescope session: host scheduling and the compositor can contribute isolated spikes even when
+the game has ample median headroom.
+
+The project runs Godot's 3D physics server on its supported separate thread. Direct-space queries must
+therefore originate from a physics notification; code started by an idle-frame signal should await the next
+`physics_frame` first. Tier 3's subsystem counters expose navigation reconciliation, player physics,
+`MoveAndSlide`, step-up, networking and zombie-view costs independently.
 
 Add `--write-baseline` to record the current numbers as the new baseline.
 
@@ -47,17 +63,79 @@ suite skips cleanly when its input is missing, so it runs on any machine with so
 
 `ObjectStreamer` prints a `post-load reclaim: RSS x -> y MB` line (Linux, from `/proc/self/status`) after
 the one-time load's transient heap is compacted back to the OS: a quick steady-state RSS check.
+`UG_RECLAIM_PASSES=1|2` reproduces the measured one/two-compaction A/B; one pass is the default because
+California2 returned at least as much RSS in less time in repeated runs.
 
 ## Running without a window (Linux)
 
-- **No window** (Wayland/X): wrap a GPU run in a headless nested compositor so nothing pops up on your
-  desktop: `gamescope --backend headless -r 1000 -W 1152 -H 648 -- "$GODOT" -- --benchmark --gpu`. Real
-  Vulkan, screenshots and VRAM all work; `-r 1000` lifts the compositor's 60 Hz vblank so `gpu.frameMs` is
-  effectively uncapped too.
+- **No window** (Wayland/X): wrap every GPU or interactive benchmark in a headless nested compositor so
+  nothing pops up on your desktop: `gamescope --backend headless -r 1000 -W 1152 -H 648 -- "$GODOT"
+  --audio-driver Dummy -- --benchmark --gpu`. Real Vulkan, screenshots and VRAM all work; `-r 1000` lifts
+  the compositor's 60 Hz vblank so `gpu.frameMs` is effectively uncapped too. Tier 3 uses
+  `UG_RUNTIME_BENCH_SECS=12 SOLO=1 gamescope --backend headless -r 1000 -W 1152 -H 648 -- "$GODOT"
+  --audio-driver Dummy`.
 - **No sound**: gamescope hides the window but the audio still plays on your desktop, so pass
   `--audio-driver Dummy` to Godot in any automated/background run.
 - **Solo automation**: `SOLO=1` boots straight into the world with the loopback session (zombies and all
   server systems live) WITHOUT binding the UDP port. Only use `OPEN_LAN=1` when a second client actually
   joins the test.
+
+## Spatial-culling A/B controls
+
+The production defaults partition only object groups spread across more than one 4096 m cell, use 128 m
+foliage chunks with a 160 m per-instance visibility range, and give navmesh reconciliation 0.25 ms per
+physics frame on every map. Object collision compounds are partitioned into 2048 m cells; the partitioner
+stops expanding compounds after 8,000 object bodies so its extra bodies cannot consume Jolt's remaining
+pool. The foliage chunk's actual positional and scaled-mesh radii are added to Godot's
+aggregate-AABB range, so an instance near a chunk edge never fades early. These preserve geometry,
+materials, shadows and world transforms; they change only submission/culling granularity and how quickly
+the already-usable baked navigation graph is refined.
+
+- `TERRAIN_OCCLUDERS=0` disables the default coarse terrain occluders. Every occluder triangle is built
+  below the minimum source height of its complete cell, so it cannot hide geometry above the terrain;
+  disabling is retained for performance and screenshot A/B checks.
+- `UG_OBJECT_CHUNK_METRES=0` disables object partitioning. `UG_OBJECT_CHUNK_REQUIRE_SPREAD=0` partitions
+  every eligible repeated asset instead of leaving compact groups in one batch. `UG_CHUNK_SPARSE_OBJECTS=0`
+  restores one map-spanning MultiMesh for groups of fewer than eight instances that cross chunk cells.
+  `UG_SPARSE_OBJECT_MIN_TRIS=<count>` is an experimental cutoff for studying batch/geometry tradeoffs;
+  production uses zero so no map-spanning sparse AABB survives.
+  Placeholder boxes for unresolved assets use the same cells (and still share one mesh/material); setting
+  `UG_OBJECT_CHUNK_METRES=0` restores their former map-wide batch as well.
+- `UG_OBJECT_CHUNK_MIN_TRIS=<count>` partitions only groups whose total placed triangle count reaches the
+  threshold.
+- `UG_COLLISION_CHUNK_METRES=0` disables physics-body partitioning for A/B comparisons.
+- `UG_FOLIAGE_CHUNK_TILES=<1..32>` changes the number of 32 m foliage tiles per render chunk;
+  `UG_FOLIAGE_DISTANCE=<metres>` changes its fade range.
+- `UG_FOLIAGE_LOAD_BATCH=<128..16384>` controls how many offset-sorted foliage tiles are read per
+  bounded file batch (default 512). `UG_FOLIAGE_STREAM_LOAD=0` restores whole-file loading for memory A/B.
+- `UG_FOLIAGE_PACK_BATCH=<1..65536>` bounds how many chunk buffers coexist before upload (default 256);
+  65536 reproduces the old all-at-once peak on current maps.
+- `UG_COMPACT_HEIGHTMAP=0` keeps the resident terrain sampler in floats for memory/CPU A/B instead of
+  the default exact source `ushort` representation.
+- `UG_DEDUP_GPU=0` disables byte-exact sharing of cached meshes, textures and terrain control maps.
+- `UG_DEDUP_COLLIDERS=0`, `UG_KEEP_PHYSICS_PLACEMENTS=1`, and `UG_NODE_MULTIMESH=1` restore respectively
+  per-GUID collider parsing/shapes, retained physics placement tuples, and one Node3D wrapper per render
+  MultiMesh for memory/lifecycle A/B measurements.
+- `UG_PARALLEL_FOLIAGE_REBASE=0`, `UG_DIRECT_COLLISION_BUCKETS=0`, and `UG_ROAD_ARRAYS=0` restore
+  sequential foliage rebasing, the temporary flat collision-placement list, and SurfaceTool road uploads.
+- `UG_NODE_PHYSICS=1` restores one Node3D wrapper per static physics body; the default owns the same body
+  RIDs from one lifecycle node. `UG_DEDUP_MATERIAL_CONTENT=0` restores one material resource per texture
+  cache key instead of sharing resources whose complete cached texture contents and material properties
+  are identical.
+- `UG_DEDUP_FINAL_SHAPES=0` disables exact sharing of already-baked primitive/concave Shape3D resources.
+  `UG_KEEP_RID_UPLOAD_METADATA=1` retains the verbose body/render definitions after their RIDs are live;
+  the default keeps only the resources and local transforms required by the servers and lifecycle.
+- `UG_KEEP_NAV_RECONCILE_STATE=1` retains rejected-triangle HashSets after publication and cache writing.
+  `UG_STATIC_MAP_PREVIEW_CACHE=1` retains all decoded map artwork for the process lifetime; by default it
+  belongs to the map picker and is released when the menu closes. Run `PerfHarness -- previews` to measure
+  the installed library's full decoded RGBA footprint.
+- `UG_PARTIAL_NAV_CACHE=0` disables per-flag atomic reconciliation checkpoints. By default an interrupted
+  first California2 session resumes only the missing nav flags instead of repeating all completed raycasts.
+- `NAV_RECONCILE_BUDGET_MS=<milliseconds>` overrides the per-physics-frame collision reconciliation budget.
+  Completed results persist under `user://nav_reconcile`; remove the selected map's cache file when a
+  deliberately cold reconciliation run is required. The reconciled CSR routing graph is cached beside it;
+  valid hits deserialize the graph directly, while misses build and write it off the main thread.
+- `UG_RUNTIME_BENCH_MOVE=1` makes Tier 3 alternate forward/back once per second, exercising real movement
+  collision and the loopback multiplayer position stream instead of profiling only an idle player.
 
 Profiling output (`*.nettrace`, `heaptrack.*.zst`, `massif.out.*`, `perf.data`, `*.rgp`) is git-ignored.

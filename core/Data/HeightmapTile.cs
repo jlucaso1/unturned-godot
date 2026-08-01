@@ -9,13 +9,17 @@ public sealed class HeightmapTile
 {
     public readonly int CoordX;
     public readonly int CoordY;
-    public readonly float[,] Heights; // indexed [x, y]
+    private float[,]? _heights;
+    public float[,] Heights => _heights ??= MaterializeHeights(); // compatibility/test view, indexed [x,y]
+    public readonly ushort[]? RawSamples;
+    public bool HasMaterializedHeights => _heights != null;
 
-    private HeightmapTile(int coordX, int coordY, float[,] heights)
+    private HeightmapTile(int coordX, int coordY, float[,]? heights, ushort[]? rawSamples = null)
     {
         CoordX = coordX;
         CoordY = coordY;
-        Heights = heights;
+        _heights = heights;
+        RawSamples = rawSamples;
     }
 
     // For tests and callers that already have a height grid (e.g. building a HeightmapSampler).
@@ -25,7 +29,7 @@ public sealed class HeightmapTile
     public static HeightmapTile Read(string filePath, int coordX, int coordY)
     {
         const int res = Landscape.HEIGHTMAP_RESOLUTION;
-        var heights = new float[res, res];
+        var raw = new ushort[res * res];
 
         byte[] data = File.ReadAllBytes(filePath);
         int expected = res * res * 2;
@@ -40,11 +44,28 @@ public sealed class HeightmapTile
         {
             for (int y = 0; y < res; y++)
             {
-                heights[x, y] = BinaryPrimitives.ReadUInt16BigEndian(s.Slice(p)) / (float)ushort.MaxValue; // high byte first
+                ushort sample = BinaryPrimitives.ReadUInt16BigEndian(s.Slice(p));
+                raw[(x * res) + y] = sample;
                 p += 2;
             }
         }
 
-        return new HeightmapTile(coordX, coordY, heights);
+        return new HeightmapTile(coordX, coordY, null, raw);
+    }
+
+    public float HeightAt(int x, int y) => RawSamples != null
+        ? RawSamples[(x * Landscape.HEIGHTMAP_RESOLUTION) + y] / (float)ushort.MaxValue
+        : _heights![x, y];
+
+    private float[,] MaterializeHeights()
+    {
+        if (RawSamples == null)
+            throw new InvalidOperationException("Height tile has no samples");
+        const int res = Landscape.HEIGHTMAP_RESOLUTION;
+        var result = new float[res, res];
+        for (int x = 0; x < res; x++)
+            for (int y = 0; y < res; y++)
+                result[x, y] = RawSamples[(x * res) + y] / (float)ushort.MaxValue;
+        return result;
     }
 }

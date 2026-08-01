@@ -32,6 +32,18 @@ public sealed class ObjectAssetDatabase
             _byId[asset.Id] = asset;
     }
 
+    // Adds only what nothing has claimed yet, so a merge of several bundles keeps whichever registered
+    // first. Sources are merged with the game's own content first: a workshop item is free to reuse an
+    // official legacy id (they were never unique across mods), and letting it overwrite that entry made
+    // an old placement resolve to an unrelated mod object. The GUID and the id are claimed
+    // independently — a mod asset with a fresh GUID and a colliding id still gets its GUID indexed.
+    public void AddIfAbsent(ObjectAsset asset)
+    {
+        _byGuid.TryAdd(asset.Guid, asset);
+        if (asset.Id != 0)
+            _byId.TryAdd(asset.Id, asset);
+    }
+
     public static ObjectAssetDatabase ScanDirectory(string root)
     {
         var db = new ObjectAssetDatabase();

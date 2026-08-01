@@ -24,8 +24,20 @@ public class TerrainTests
 
         Assert.Equal(3, tile.CoordX);
         Assert.Equal(-4, tile.CoordY);
+        Assert.False(tile.HasMaterializedHeights);
+        Assert.Equal(0x8123 / 65535f, tile.HeightAt(1, 2), 6);
+        Assert.Equal(0f, tile.HeightAt(0, 0));
+        Assert.False(tile.HasMaterializedHeights); // normal runtime reads do not allocate the float grid
+        var sampler = new HeightmapSampler(new[] { tile });
+        int sampleBytes = System.Environment.GetEnvironmentVariable("UG_COMPACT_HEIGHTMAP") == "0"
+            ? sizeof(float) : sizeof(ushort);
+        Assert.Equal((long)res * res * sampleBytes, sampler.StorageBytes);
+        float cell = Landscape.TILE_SIZE / Landscape.HEIGHTMAP_RESOLUTION_MINUS_ONE;
+        Assert.True(sampler.TrySampleHeight((tile.CoordX * Landscape.TILE_SIZE) + (2 * cell),
+            (tile.CoordY * Landscape.TILE_SIZE) + (1 * cell), out float sampled));
+        Assert.Equal((-Landscape.TILE_HEIGHT / 2f) + ((0x8123 / 65535f) * Landscape.TILE_HEIGHT), sampled, 5);
         Assert.Equal(0x8123 / 65535f, tile.Heights[1, 2], 6);
-        Assert.Equal(0f, tile.Heights[0, 0]);
+        Assert.True(tile.HasMaterializedHeights); // legacy compatibility view is lazy
     }
 
     [Fact]
@@ -56,6 +68,8 @@ public class TerrainTests
         SplatmapTile splat = SplatmapTile.Parse(bytes, 0, 0);
         Assert.Equal(1f, splat.WeightAt(0, 0, 3));
         Assert.Equal(0f, splat.WeightAt(0, 0, 0));
+        Assert.Same(bytes, splat.Weights);
+        Assert.Equal(res * res * SplatmapTile.LAYERS, splat.Weights.Length);
     }
 
     [Fact]

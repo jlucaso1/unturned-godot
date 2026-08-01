@@ -1,4 +1,4 @@
-<Project Sdk="Godot.NET.Sdk/4.7.0">
+<Project Sdk="Godot.NET.Sdk/4.7.1">
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <PublishAot>true</PublishAot>
@@ -16,12 +16,29 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RootNamespace>UnturnedGodot</RootNamespace>
   </PropertyGroup>
+  <!-- NativeAOT compiles through the host toolchain, so it cannot target another OS: publishing the Windows
+       export from Linux stops in ILCompiler with "Cross-OS native compilation is not supported". Setting
+       AllowNonAotWindowsExport (an environment variable, or -p: on a direct dotnet publish) falls back to a
+       plain IL build for those runs. That build drops every AOT tuning above and leans on the runtime Godot
+       ships with the export template, so the shipping Windows binary still has to be produced on Windows. -->
+  <PropertyGroup>
+    <_CrossOsWindowsPublish Condition="!$([MSBuild]::IsOSPlatform('Windows')) And ('$(GodotTargetPlatform)' == 'windows' Or '$(RuntimeIdentifier)' == 'win-x64' Or '$(RuntimeIdentifier)' == 'win-x86' Or '$(RuntimeIdentifier)' == 'win-arm64')">true</_CrossOsWindowsPublish>
+    <_AllowNonAotWindowsExport Condition="'$(AllowNonAotWindowsExport)' == 'true' Or '$(AllowNonAotWindowsExport)' == '1'">true</_AllowNonAotWindowsExport>
+    <PublishAot Condition="'$(_CrossOsWindowsPublish)' == 'true' And '$(_AllowNonAotWindowsExport)' == 'true'">false</PublishAot>
+  </PropertyGroup>
+  <Target Name="FailOnCrossOsAotPublish" BeforeTargets="Publish" Condition="'$(_CrossOsWindowsPublish)' == 'true' And '$(PublishAot)' == 'true'">
+    <Error Text="NativeAOT cannot cross-compile to Windows from this host. Produce the shipping Windows export on Windows, or set AllowNonAotWindowsExport=1 in the environment to export a non-AOT build from here." />
+  </Target>
   <ItemGroup>
     <!-- core/ and tests/ are separate projects; keep the Godot SDK glob off them and their output. -->
     <Compile Remove="core/**/*.cs" />
     <Compile Remove="tests/**/*.cs" />
     <Compile Remove="build/**/*.cs" />
     <Compile Remove="tools/**/*.cs" />
+    <!-- The editor dock is editor-only code: EditorPlugin/EditorScript/EditorSettings live in
+         GodotSharpEditor, which the Godot SDK references (and defines TOOLS for) in the Debug
+         configuration alone. An export must not compile them at all. -->
+    <Compile Remove="addons/**/*.cs" Condition="'$(Configuration)' != 'Debug'" />
     <!-- Root the assemblies to avoid trimming. -->
     <TrimmerRootAssembly Include="GodotSharp" />
     <TrimmerRootAssembly Include="$(TargetName)" />
@@ -35,6 +52,19 @@
          via DOTNET_GCConserveMemory=5). -->
     <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="5" />
   </ItemGroup>
+  <!-- The editor add-on compiles against GodotSharpEditor, which the Godot SDK references only in the
+       Debug (editor) configuration. NuGet keeps ONE assets file per project, so restoring in Release and
+       then building Debug left that reference unresolved and the build failed on the editor types with
+       nothing having changed in the source. Drop the add-on in that case: the game — the thing this
+       project produces — always builds, and a plain `dotnet restore` brings the editor dock back. -->
+  <Target Name="DropEditorAddonWithoutEditorApi" BeforeTargets="CoreCompile" DependsOnTargets="ResolveReferences"
+          Condition="'$(Configuration)' == 'Debug'">
+    <ItemGroup Condition="'@(ReferencePath->AnyHaveMetadataValue('Filename', 'GodotSharpEditor'))' != 'true'">
+      <Compile Remove="addons/**/*.cs" />
+    </ItemGroup>
+    <Warning Text="GodotSharpEditor is not referenced in this restore; the editor add-on was left out of the build. Run 'dotnet restore' to get it back."
+             Condition="'@(ReferencePath->AnyHaveMetadataValue('Filename', 'GodotSharpEditor'))' != 'true'" />
+  </Target>
   <ItemGroup>
     <PackageReference Include="Fmod5Sharp" Version="3.1.0" />
     <!-- Fmod5Sharp -> IndexRange pins Microsoft.Bcl.Memory 9.0.0, which has a known high-severity

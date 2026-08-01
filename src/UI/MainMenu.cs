@@ -1,15 +1,22 @@
 using Godot;
+using UnturnedGodot.Data;
 
 namespace UnturnedGodot;
 
-// The boot scene: no map loaded yet, just the Unturned-style menu over a sky gradient.
-// Play starts singleplayer, Connect reveals a host:port field and joins, Quit exits.
+// The boot scene: no map loaded yet, just the Unturned-style menu over a sky gradient. The map browser
+// lists every map installed on this machine and Play loads the selected one; Connect reveals a host:port
+// field and joins (loading the selected map locally, since the protocol does not name one); Quit exits.
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class MainMenu : CanvasLayer
 {
-    // Called with null to play singleplayer, or "host[:port]" to join a server.
-    public System.Action<string?>? OnStart { get; set; }
+    // The install to list maps from, and the map to preselect (the previous session's, or MAP=).
+    public string UnturnedPath { get; init; } = "";
+    public string? InitialMap { get; init; }
 
+    // Called with the map folder to load, and null for singleplayer or "host[:port]" to join a server.
+    public System.Action<string, string?>? OnStart { get; set; }
+
+    private MapPicker _picker = null!;
     private VBoxContainer _connectRow = null!;
     private LineEdit _address = null!;
     private Label _status = null!;
@@ -46,12 +53,18 @@ public partial class MainMenu : CanvasLayer
         };
         root.AddChild(sky);
 
-        var center = new CenterContainer { AnchorRight = 1, AnchorBottom = 1 };
-        root.AddChild(center);
+        // Fills the window and lets the map browser take whatever height is left, so the menu fits any
+        // resolution instead of pushing the buttons off a short screen.
+        var margin = new MarginContainer { AnchorRight = 1, AnchorBottom = 1 };
+        margin.AddThemeConstantOverride("margin_left", 24);
+        margin.AddThemeConstantOverride("margin_right", 24);
+        margin.AddThemeConstantOverride("margin_top", 20);
+        margin.AddThemeConstantOverride("margin_bottom", 20);
+        root.AddChild(margin);
 
         var column = new VBoxContainer();
         column.AddThemeConstantOverride("separation", 8);
-        center.AddChild(column);
+        margin.AddChild(column);
 
         var title = new Label
         {
@@ -62,11 +75,31 @@ public partial class MainMenu : CanvasLayer
         title.AddThemeColorOverride("font_shadow_color", new Color(0, 0, 0, 0.5f));
         title.AddThemeConstantOverride("shadow_offset_y", 2);
         column.AddChild(title);
-        column.AddChild(new Control { CustomMinimumSize = new Vector2(0, 18) }); // spacing under the title
+        column.AddChild(new Control { CustomMinimumSize = new Vector2(0, 12) }); // spacing under the title
 
-        column.AddChild(UnturnedUi.MakeBar("▶", "Play", UnturnedUi.Olive, () => OnStart?.Invoke(null)));
-        column.AddChild(UnturnedUi.MakeBar("⇄", "Connect", UnturnedUi.Olive, ToggleConnectRow));
-        column.AddChild(UnturnedUi.MakeBar("✕", "Quit", UnturnedUi.Brown, () => GetTree().Quit()));
+        // The browser keeps its natural width, centered, and stretches vertically.
+        var pickerRow = new HBoxContainer { SizeFlagsVertical = Control.SizeFlags.ExpandFill };
+        column.AddChild(pickerRow);
+        pickerRow.AddChild(new Control { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
+
+        _picker = MapPicker.Create(MapCatalog.Scan(UnturnedPath), InitialMap);
+        _picker.OnPlay = map => OnStart?.Invoke(map.FolderName, null);
+        _picker.SizeFlagsVertical = Control.SizeFlags.ExpandFill;
+        pickerRow.AddChild(_picker);
+
+        pickerRow.AddChild(new Control { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
+
+        var actions = new HBoxContainer { Alignment = BoxContainer.AlignmentMode.Center };
+        actions.AddThemeConstantOverride("separation", 8);
+        column.AddChild(actions);
+
+        Button connect = UnturnedUi.MakeBar("⇄", "Connect", UnturnedUi.Olive, ToggleConnectRow);
+        connect.CustomMinimumSize = new Vector2(240, 40);
+        actions.AddChild(connect);
+
+        Button quit = UnturnedUi.MakeBar("✕", "Quit", UnturnedUi.Brown, () => GetTree().Quit());
+        quit.CustomMinimumSize = new Vector2(240, 40);
+        actions.AddChild(quit);
 
         // Hidden until Connect: address field + confirm, in the same visual language.
         _connectRow = new VBoxContainer { Visible = false };
@@ -108,7 +141,12 @@ public partial class MainMenu : CanvasLayer
             _status.Text = "Enter an address (host:port).";
             return;
         }
-        _status.Text = $"Connecting to {address}…";
-        OnStart?.Invoke(address);
+        if (_picker.Selected is not { IsSupported: true } map)
+        {
+            _status.Text = "Pick a playable map first: the client builds the world locally.";
+            return;
+        }
+        _status.Text = $"Connecting to {address} on {map.DisplayName}…";
+        OnStart?.Invoke(map.FolderName, address);
     }
 }

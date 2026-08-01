@@ -56,7 +56,80 @@ public sealed class MasterBundleStream : IDisposable
         }
     }
 
+    // Same, straight off disk: only the header and the block table are read into memory and the decoder
+    // pulls the compressed block through the file itself. Holding a whole masterbundle in memory for the
+    // length of the pass cost a quarter of a gigabyte per bundle, and nothing ever read it twice.
+    public static MasterBundleStream? OpenFile(string path)
+    {
+        FileStream? file = null;
+        try
+        {
+            // Buffered and hinted sequential: the decoder pulls the block in small reads, and unbuffered
+            // those became one syscall each — the pass took half again as long as reading the file whole.
+            file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+                bufferSize: 1 << 20, FileOptions.SequentialScan);
+
+            // The header and the (compressed) block table sit at the front; a header longer than this
+            // would be a bundle with thousands of nodes, which is not the shape this reader handles.
+            var head = new byte[(int)Math.Min(HeadProbeBytes, file.Length)];
+            file.ReadExactly(head);
+
+            Layout? layout = ReadLayout(head, size =>
+            {
+                var tail = new byte[size];
+                file.Position = file.Length - size;
+                file.ReadExactly(tail);
+                return tail;
+            });
+
+            if (layout == null)
+            {
+                // Every unsupported bundle takes this exit, and the fallback decoder opens the file again
+                // straight after: leaving the handle to a finaliser leaks a descriptor per attempt, and on
+                // Windows the second open would contend with the first.
+                file.Dispose();
+                return null;
+            }
+
+            file.Position = layout.BlockStart + 5;
+            var lzma = new LzmaStream(layout.Properties, file, layout.PayloadLength, layout.Uncompressed);
+            return new MasterBundleStream(lzma, file, layout.Nodes, layout.Uncompressed);
+        }
+        catch (Exception)
+        {
+            file?.Dispose();
+            return null;
+        }
+    }
+
+    // How much of the file the header parse is allowed to need. The real masterbundles use a few hundred
+    // bytes; anything past this falls back to the whole-blob path rather than guessing.
+    private const int HeadProbeBytes = 1 << 20;
+
+    // Everything the header says about the single data block, so both entry points parse it the same way.
+    private sealed record Layout(List<Node> Nodes, int BlockStart, byte[] Properties, int PayloadLength,
+        uint Uncompressed);
+
     private static MasterBundleStream? TryOpen(byte[] bundle)
+    {
+        Layout? layout = ReadLayout(bundle, size =>
+        {
+            var tail = new byte[size];
+            Array.Copy(bundle, bundle.Length - size, tail, 0, size);
+            return tail;
+        });
+
+        if (layout == null)
+            return null;
+
+        var input = new MemoryStream(bundle, layout.BlockStart + 5, layout.PayloadLength);
+        var lzma = new LzmaStream(layout.Properties, input, layout.PayloadLength, layout.Uncompressed);
+        return new MasterBundleStream(lzma, input, layout.Nodes, layout.Uncompressed);
+    }
+
+    // `readFromEnd` supplies the block table for bundles that store it at the end of the file, which is
+    // the one thing the front of the file does not contain.
+    private static Layout? ReadLayout(byte[] bundle, Func<int, byte[]> readFromEnd)
     {
         var r = new UnityBinaryReader(bundle, bigEndian: true);
         if (r.ReadCString() != "UnityFS")
@@ -75,18 +148,9 @@ public sealed class MasterBundleStream : IDisposable
         int compressionType = flags & 0x3F;
         bool blockInfoAtEnd = (flags & 0x80) != 0;
 
-        byte[] compressedBlocksInfo;
-        if (blockInfoAtEnd)
-        {
-            int saved = r.Position;
-            r.Position = bundle.Length - compressedBlocksInfoSize;
-            compressedBlocksInfo = r.ReadBytes(compressedBlocksInfoSize);
-            r.Position = saved;
-        }
-        else
-        {
-            compressedBlocksInfo = r.ReadBytes(compressedBlocksInfoSize);
-        }
+        byte[] compressedBlocksInfo = blockInfoAtEnd
+            ? readFromEnd(compressedBlocksInfoSize)
+            : r.ReadBytes(compressedBlocksInfoSize);
 
         // Reuse the (fully tested) bundle blocks-info decoder; unsupported compression throws and is
         // caught by Open, falling the caller back to the whole-blob path.
@@ -117,16 +181,11 @@ public sealed class MasterBundleStream : IDisposable
             nodes.Add(new Node(info.ReadCString(), offset, size));
         }
 
-        // The compressed block sits at the reader's current position: 5 LZMA property bytes then the
-        // stream. Wrap the decoder over that region of `bundle` in place instead of copying the whole
-        // (~compressed-file-sized) block into a fresh array; the MemoryStream keeps `bundle` alive.
+        // The compressed block sits at the reader's current position: 5 LZMA property bytes then the stream.
         int blockStart = r.Position;
         var properties = new byte[5];
         Array.Copy(bundle, blockStart, properties, 0, 5);
-        int payloadLength = (int)blockCompressed - 5;
-        var input = new MemoryStream(bundle, blockStart + 5, payloadLength);
-        var lzma = new LzmaStream(properties, input, payloadLength, blockUncompressed);
-        return new MasterBundleStream(lzma, input, nodes, blockUncompressed);
+        return new Layout(nodes, blockStart, properties, (int)blockCompressed - 5, blockUncompressed);
     }
 
     // Reads exactly count decompressed bytes (or fewer at end of stream) into a fresh array, advancing the

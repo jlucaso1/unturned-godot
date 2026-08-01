@@ -17,6 +17,13 @@ public static class AudioExtractor
     public static bool IsCached(string audioCacheDir, string defName) =>
         File.Exists(Path.Combine(audioCacheDir, defName, "def.bin"));
 
+    // The cache key for a definition: its file name, prefixed by the bundle that carries it. Two bundles
+    // can name a definition the same thing — a workshop item mirroring the game's folders is enough — and
+    // on the bare name their entries were the same directory, so one skipped extraction because the other
+    // had already written it, and the wrong footstep played.
+    public static string DefKey(string bundleTag, string assetPath) =>
+        bundleTag.Length == 0 ? DefNameOf(assetPath) : bundleTag + "_" + DefNameOf(assetPath);
+
     public static string DefNameOf(string assetPath)
     {
         string file = assetPath.Replace('\\', '/');
@@ -91,12 +98,13 @@ public static class AudioExtractor
     // Extracts every definition in defAssetPaths (masterbundle-relative, e.g.
     // "Effects/Physics/Footstep/Grass_Walk/Footstep_Grass_Walk.asset") plus every raw clip group
     // that is not cached yet.
-    public static int Extract(string bundlePath, IReadOnlyCollection<string> defAssetPaths, string audioCacheDir,
+    public static int Extract(string bundlePath, string bundleTag,
+        IReadOnlyCollection<string> defAssetPaths, string audioCacheDir,
         IReadOnlyCollection<RawClipGroup>? clipGroups = null)
     {
         var missing = new List<string>();
         foreach (string p in defAssetPaths)
-            if (!IsCached(audioCacheDir, DefNameOf(p)))
+            if (!IsCached(audioCacheDir, DefKey(bundleTag, p)))
                 missing.Add(p);
         var missingGroups = new List<RawClipGroup>();
         if (clipGroups != null)
@@ -106,7 +114,7 @@ public static class AudioExtractor
         if (missing.Count == 0 && missingGroups.Count == 0)
             return 0;
 
-        GD.Print($"[audio] extracting {missing.Count} audio definitions and {missingGroups.Count} " +
+        AppShutdown.PrintUnlessQuitting($"[audio] extracting {missing.Count} audio definitions and {missingGroups.Count} " +
             "clip groups from masterbundle (one-time)...");
         (byte[] sf, byte[] resource) = ReadAudioNodes(bundlePath);
         SerializedFile file = SerializedFile.Read(sf);
@@ -141,7 +149,7 @@ public static class AudioExtractor
             if (!containers.TryGetValue(key, out long defId) ||
                 !byId.TryGetValue(defId, out SerializedObject? defObj))
             {
-                GD.PushWarning($"[audio] def not found in bundle: {assetPath}");
+                AppShutdown.WarnUnlessQuitting($"[audio] def not found in bundle: {assetPath}");
                 continue;
             }
 
@@ -150,7 +158,7 @@ public static class AudioExtractor
             float minPitch = Convert.ToSingle(def.GetValueOrDefault("minPitch", 1f));
             float maxPitch = Convert.ToSingle(def.GetValueOrDefault("maxPitch", 1f));
 
-            string defName = DefNameOf(assetPath);
+            string defName = DefKey(bundleTag, assetPath);
             string defDir = Path.Combine(audioCacheDir, defName);
             Directory.CreateDirectory(defDir);
 
@@ -182,7 +190,7 @@ public static class AudioExtractor
 
             if (clipFiles.Count == 0)
             {
-                GD.PushWarning($"[audio] no clips rebuilt for {defName}");
+                AppShutdown.WarnUnlessQuitting($"[audio] no clips rebuilt for {defName}");
                 continue;
             }
 
@@ -193,6 +201,8 @@ public static class AudioExtractor
 
         foreach (RawClipGroup group in missingGroups)
         {
+            if (AppShutdown.IsShuttingDown)
+                return extracted; // leaving: stop between groups, never mid-file
             string groupDir = Path.Combine(audioCacheDir, group.Name);
             Directory.CreateDirectory(groupDir);
             var clipFiles = new List<string>();
@@ -202,7 +212,7 @@ public static class AudioExtractor
                 if (!containers.TryGetValue(key, out long clipId)
                     || !byId.TryGetValue(clipId, out SerializedObject? clipObj))
                 {
-                    GD.PushWarning($"[audio] clip not found in bundle: {clipPath}");
+                    AppShutdown.WarnUnlessQuitting($"[audio] clip not found in bundle: {clipPath}");
                     continue;
                 }
                 Dictionary<string, object> clip = TypeTreeReader.Read(clipObj.TypeTree, file.ReaderFor(clipObj));
@@ -222,7 +232,7 @@ public static class AudioExtractor
             }
             if (clipFiles.Count == 0)
             {
-                GD.PushWarning($"[audio] no clips rebuilt for group {group.Name}");
+                AppShutdown.WarnUnlessQuitting($"[audio] no clips rebuilt for group {group.Name}");
                 continue;
             }
             using (FileStream s = File.Create(Path.Combine(groupDir, "def.bin")))
@@ -231,7 +241,7 @@ public static class AudioExtractor
             extracted++;
         }
 
-        GD.Print($"[audio] extracted {extracted} definitions to {audioCacheDir}");
+        AppShutdown.PrintUnlessQuitting($"[audio] extracted {extracted} definitions to {audioCacheDir}");
         return extracted;
     }
 
@@ -251,7 +261,7 @@ public static class AudioExtractor
         }
         catch (Exception e)
         {
-            GD.PushWarning($"[audio] failed to rebuild '{name}': {e.Message}");
+            AppShutdown.WarnUnlessQuitting($"[audio] failed to rebuild '{name}': {e.Message}");
             return null;
         }
     }

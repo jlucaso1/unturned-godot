@@ -35,8 +35,10 @@ public sealed class UnityMesh
     {
         var result = new UnityMesh { Name = mesh.TryGetValue("m_Name", out object? n) ? (string)n : string.Empty };
 
+        // Quantized geometry lives in m_CompressedMesh instead of the vertex buffers. The game's own
+        // bundle never uses it; workshop mods do, so read it rather than dropping the mesh.
         if (ToInt(mesh["m_MeshCompression"]) != 0)
-            return result; // compressed meshes not supported
+            return ReadCompressed(mesh, result);
 
         var streamData = (Dictionary<string, object>)mesh["m_StreamData"];
         if (((string)streamData["path"]).Length != 0)
@@ -71,6 +73,55 @@ public sealed class UnityMesh
         }
         result.Indices = flat;
         result.Usable = result.Vertices.Length > 0 && totalIndices > 0;
+        return result;
+    }
+
+    // A compressed mesh carries its triangles as one packed run; the submesh table still says which slice
+    // of that run belongs to each material, so the split is taken from the file rather than assumed.
+    private static UnityMesh ReadCompressed(Dictionary<string, object> mesh, UnityMesh result)
+    {
+        CompressedMesh compressed = CompressedMesh.Read(
+            mesh.TryGetValue("m_CompressedMesh", out object? node) ? node : null);
+        if (!compressed.HasGeometry)
+            return result;
+
+        result.Vertices = compressed.Vertices;
+        result.Normals = compressed.Normals;
+        result.Uvs = compressed.Uvs;
+        result.Indices = compressed.Triangles;
+        result.BindPoses = ReadBindPoses(mesh);
+        result.Submeshes = SliceSubmeshes(mesh, compressed.Triangles);
+        result.Usable = true;
+        return result;
+    }
+
+    // firstByte/indexCount address the index buffer the mesh would have had, so the element size the
+    // header declares converts them into offsets in the unpacked triangle list.
+    private static List<int[]> SliceSubmeshes(Dictionary<string, object> mesh, int[] triangles)
+    {
+        int indexSize = ToInt(mesh["m_IndexFormat"]) == 1 ? 4 : 2;
+        var result = new List<int[]>();
+
+        foreach (object s in (List<object>)mesh["m_SubMeshes"])
+        {
+            var sm = (Dictionary<string, object>)s;
+            int first = ToInt(sm["firstByte"]) / indexSize;
+            int count = ToInt(sm["indexCount"]);
+            if (ToInt(sm["topology"]) != 0 || first < 0 || count <= 0 || first + count > triangles.Length)
+            {
+                result.Add(Array.Empty<int>()); // keep index alignment with the material list
+                continue;
+            }
+
+            var slice = new int[count];
+            Array.Copy(triangles, first, slice, 0, count);
+            result.Add(slice);
+        }
+
+        // A mesh with no usable submesh table still renders as one surface.
+        if (result.Count == 0)
+            result.Add(triangles);
+
         return result;
     }
 

@@ -36,6 +36,14 @@ public partial class DayNightController : Node
     private DirectionalLight3D _sun = null!;
     private ShaderMaterial _sky = null!;
     private Godot.Environment _env = null!;
+    private SunShafts? _shafts;
+
+    // LevelLighting: raysIntensity = singles[ELightingSingle.RAYS] * 4.
+    private const float RaysIntensityScale = 4f;
+
+    // The sun-shaft pass needs the camera it renders in front of; the caller hands it over once the
+    // player (or the free camera) exists. No-op when the effect is switched off.
+    public void AttachCamera(Camera3D camera) => _shafts?.Follow(camera);
     private StandardMaterial3D? _water; // sea plane material, tinted with the blended SEA color
     private float _azimuth = DefaultAzimuth;
     private float _time;
@@ -86,6 +94,13 @@ public partial class DayNightController : Node
         };
 
         controller.AddChild(controller._sun);
+
+        // Off by default, exactly like the game (GraphicsSettingsData.SunShaftsQuality = OFF).
+        if (OS.GetEnvironment("SUN_SHAFTS") == "1")
+        {
+            controller._shafts = SunShafts.Create(controller._sun);
+            controller.AddChild(controller._shafts);
+        }
         controller.AddChild(new WorldEnvironment { Environment = controller._env, Name = "WorldEnvironment" });
 
         controller._azimuth = lighting?.Azimuth ?? DefaultAzimuth;
@@ -168,6 +183,10 @@ public partial class DayNightController : Node
         _sun.LightColor = k.Sun;
         _sun.LightEnergy = k.Intensity;
         _sun.ShadowOpacity = k.Shadows; // ELightingSingle.SHADOWS = Unity's sunLight.shadowStrength
+
+        // LevelLighting.UpdateSunShafts: the map's RAYS colour, its RAYS single scaled by 4, and the
+        // UpdateSunShaftsIntensity(1 - fog) fade — the shafts wash out as the air thickens.
+        _shafts?.Configure(k.RaysColor, k.Rays * RaysIntensityScale, 1f - k.FogDensity);
 
         // The skybox uniforms, exactly what updateLighting pushes each frame. Unity's sun.forward is the
         // light's travel direction: -Z of our (already mirrored) sun basis. The moon sits opposite the sun,

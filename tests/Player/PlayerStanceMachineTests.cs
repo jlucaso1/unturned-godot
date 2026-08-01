@@ -47,4 +47,26 @@ public class PlayerStanceMachineTests
     [Fact]
     public void CrouchIntent_WhileSprinting_Crouches()
         => Assert.Equal(EPlayerStance.Crouch, Resolve(EPlayerStance.Sprint, crouch: true, moving: true));
+
+    [Theory]
+    [InlineData(EPlayerStance.Stand, false, false, false)]
+    [InlineData(EPlayerStance.Sprint, false, false, false)]
+    [InlineData(EPlayerStance.Crouch, true, false, false)]
+    [InlineData(EPlayerStance.Prone, true, false, false)]
+    [InlineData(EPlayerStance.Crouch, false, true, false)]
+    [InlineData(EPlayerStance.Prone, false, true, false)]
+    [InlineData(EPlayerStance.Crouch, false, false, true)]
+    [InlineData(EPlayerStance.Prone, false, false, true)]
+    public void StandClearance_IsRequestedOnlyWhenActuallyRaising(
+        EPlayerStance current, bool crouch, bool prone, bool expected)
+        => Assert.Equal(expected, PlayerStanceMachine.NeedsStandClearance(current, crouch, prone));
+
+    [Theory]
+    [InlineData(EPlayerStance.Stand, true, false)]
+    [InlineData(EPlayerStance.Crouch, true, false)]
+    [InlineData(EPlayerStance.Prone, false, false)]
+    [InlineData(EPlayerStance.Prone, true, true)]
+    public void CrouchClearance_IsRequestedOnlyWhenRaisingFromProne(
+        EPlayerStance current, bool crouch, bool expected)
+        => Assert.Equal(expected, PlayerStanceMachine.NeedsCrouchClearance(current, crouch));
 }

@@ -34,6 +34,16 @@ are not copies of SDK source files. Where a parser mirrors a specific SDK type,
 the corresponding class is named in a comment at the top of the file so the
 behaviour can be checked against the reference.
 
+## Ported algorithms
+
+`core/Unity/CrunchCodec.cs` and `core/Unity/CrunchTexture.cs` decode the Crunch
+(`.crn`) container Unity's "crunched" texture compression produces. They are a C#
+port of the reference decoder in [crunch](https://github.com/BinomialLLC/crunch)
+by Binomial LLC / Rich Geldreich (`crn_decomp.h`, which its author placed in the
+public domain; the project is distributed under the zlib licence). The bit layout,
+the canonical-code tables and the chunk encodings have to match it exactly, so the
+port follows its structure; no source file from it is included here.
+
 ## Third-party dependencies
 
 | Dependency | Used for | License |

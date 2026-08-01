@@ -33,7 +33,7 @@ public sealed class SkyboxAssets
         }
         catch (Exception e)
         {
-            GD.PrintErr($"[unturned-godot] Skybox: failed to read the game's sky assets " +
+            Log.PrintErr($"[unturned-godot] Skybox: failed to read the game's sky assets " +
                 $"({e.GetType().Name}: {e.Message}); the sky falls back to the plain gradient.");
             return null;
         }
@@ -97,7 +97,7 @@ public sealed class SkyboxAssets
             });
             if (pixels == null || pixels.Length == 0)
                 return null;
-            return ModelLibrary.BuildTexture(new CachedTexture(tex.Format, tex.Width, tex.Height, tex.MipCount, pixels));
+            return ModelLibrary.BuildTexture(CachedTexture.From(tex, pixels));
         }
         return null;
     }

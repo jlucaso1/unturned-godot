@@ -24,14 +24,31 @@ public static class ObjectsBuilder
     // Instances real meshes (grouped per GUID into one MultiMesh each) where available; placed objects
     // without an extracted mesh fall back to colored placeholder boxes.
     //
-    // We deliberately do NOT spatially partition these MultiMeshes into a grid (issue #2). Vegetation is
-    // the tempting case — the 1694 trees of a type spread ~3 km, so their single MultiMesh AABB never
-    // frustum-culls and re-draws ~679k primitives (~20% of the frame, ~0.18 ms) in every view. But
-    // splitting the wide types into a grid was swept empirically (Tier-2) and is a large net LOSS: the
-    // oblique/overhead views that dominate frame cost see most cells, so it only multiplies draw calls
-    // (507 -> 1605 at 512 m cells / 994 at 2048 m) and ~doubles frame time there, while the only view it
-    // helps (near-ground "tight") was already the cheapest (~0.5 ms). Median frame time regressed +52-82%.
-    // Real vegetation wins need per-instance LOD/impostors, which MultiMesh doesn't do natively.
+    // A map-wide MultiMesh gives every copy of an asset one enormous AABB, preventing Godot from culling
+    // or selecting LODs for distant copies independently. Split only groups whose placement bounds exceed
+    // a 4 km cell: California2 sheds millions of off-screen triangles while compact maps/groups retain the
+    // original single draw batch. Set UG_OBJECT_CHUNK_METRES=0 to disable for repeatable A/B profiling.
+    private static readonly float ObjectChunkMetres = EnvFloat("UG_OBJECT_CHUNK_METRES", 4096f, 0f, 8192f);
+    private static readonly long ObjectChunkMinTriangles = EnvLong("UG_OBJECT_CHUNK_MIN_TRIS", 0, 0, long.MaxValue);
+    private static readonly bool ObjectChunkRequireSpread = EnvBool("UG_OBJECT_CHUNK_REQUIRE_SPREAD", true);
+    private static readonly bool ChunkSparseObjects = EnvBool("UG_CHUNK_SPARSE_OBJECTS", true);
+    private static readonly long SparseChunkMinTriangles =
+        EnvLong("UG_SPARSE_OBJECT_MIN_TRIS", 0, 0, long.MaxValue);
+    private const int MinChunkedInstances = 8;
+
+    // Physics counterpart to render chunking. A body containing copies spread across an entire large map
+    // has a map-sized broadphase AABB, so every local character sweep reaches that body and then its huge
+    // compound. Spatial bodies keep the identical child shapes/transforms but give Jolt useful coarse
+    // bounds. Zero remains an A/B control. 2048 m retained nearly all of the measured query benefit of
+    // 1024 m with ~36% fewer bodies on California2.
+    private static readonly float CollisionChunkMetres =
+        EnvFloat("UG_COLLISION_CHUNK_METRES", 2048f, 0f, 4096f);
+    private const int MinChunkedCollisionShapes = 32;
+    // Jolt defaults to 10,240 bodies. Bound the extra bodies introduced by partitioning so there is room
+    // for terrain, roads, players and dynamic entities; once this threshold is reached, later GUIDs stay
+    // as their original single compound (slower locally, but with no collision dropped).
+    private const int MaxObjectCollisionBodies = 8_000;
+
     public static Node3D Build(IReadOnlyList<PlacedObject> objects, ObjectAssetDatabase db,
         IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary,
         IReadOnlyDictionary<Guid, List<CachedCollider>> colliderLibrary, out int withMesh)
@@ -57,11 +74,55 @@ public static class ObjectsBuilder
         }
 
         var collision = new Node3D { Name = "ObjectCollision" };
+        InstancedStaticBodies? collisionOwner = OS.GetEnvironment("UG_NODE_PHYSICS") == "1"
+            ? null : new InstancedStaticBodies { Name = "ObjectBodies" };
+        int collisionBodyCount = 0;
+        MultiMeshRidRenderer? render = OS.GetEnvironment("UG_NODE_MULTIMESH") == "1"
+            ? null : new MultiMeshRidRenderer { Name = "ObjectBatches" };
+        var collisionShapes = new CollisionShapePool();
         withMesh = 0;
+        int renderBatches = 0, sparseGroups = 0, sparseExtraBatches = 0;
+        if (OS.GetEnvironment("UG_OBJECT_PROFILE") == "1")
+            PrintObjectCosts(byMesh, meshLibrary, db);
         foreach ((Guid guid, List<Transform3D> transforms) in byMesh)
         {
             // No MaterialOverride: the mesh's per-submesh surface materials carry the textures.
-            root.AddChild(BuildMultiMesh(meshLibrary[guid], transforms, $"Mesh_{guid:N}"));
+            ArrayMesh renderMesh = meshLibrary[guid];
+            long placementTriangles = TriangleCount(renderMesh) * transforms.Count;
+            bool spread = ObjectChunkMetres > 0f && transforms.Count > 1
+                && ExceedsCellSpan(transforms, ObjectChunkMetres);
+            bool sparseWide = ChunkSparseObjects && transforms.Count < MinChunkedInstances && spread
+                && placementTriangles >= SparseChunkMinTriangles;
+            if (ObjectChunkMetres > 0f && (transforms.Count >= MinChunkedInstances || sparseWide)
+                && placementTriangles >= ObjectChunkMinTriangles
+                && (!ObjectChunkRequireSpread || spread))
+            {
+                var cells = new Dictionary<(int X, int Z), List<Transform3D>>();
+                foreach (Transform3D transform in transforms)
+                {
+                    var cell = (
+                        Mathf.FloorToInt(transform.Origin.X / ObjectChunkMetres),
+                        Mathf.FloorToInt(transform.Origin.Z / ObjectChunkMetres));
+                    if (!cells.TryGetValue(cell, out List<Transform3D>? inCell))
+                        cells[cell] = inCell = new List<Transform3D>();
+                    inCell.Add(transform);
+                }
+                if (sparseWide)
+                {
+                    sparseGroups++;
+                    sparseExtraBatches += cells.Count - 1;
+                }
+                foreach (((int x, int z), List<Transform3D> inCell) in cells)
+                {
+                    AddRenderBatch(root, render, BuildMultiMesh(renderMesh, inCell));
+                    renderBatches++;
+                }
+            }
+            else
+            {
+                AddRenderBatch(root, render, BuildMultiMesh(renderMesh, transforms));
+                renderBatches++;
+            }
             withMesh += transforms.Count;
 
             // Only LARGE/MEDIUM objects block the player (SMALL objects have their collider stripped in
@@ -81,15 +142,121 @@ public static class ObjectsBuilder
                     EObjectType.Medium => MediumFurnitureLayer | VisionBlockerLayer,
                     _ => 1u | VisionBlockerLayer, // LARGE: full world collision
                 };
-                BuildCollision(collision, guid, colliders, transforms, layer);
+                BuildCollision(collision, collisionOwner, ref collisionBodyCount, guid, colliders,
+                    transforms, layer, collisionShapes);
             }
         }
+        if (CollisionChunkMetres > 0f)
+            Log.Print($"[unturned-godot] Object collision bodies: {collisionBodyCount} "
+                + $"({CollisionChunkMetres:0} m cells, min {MinChunkedCollisionShapes} shapes, "
+                + $"{collisionShapes.Shapes.Count} shared shapes, "
+                + $"{collisionShapes.PrimitiveAliases} primitive + {collisionShapes.MeshAliases} mesh aliases)");
+        if (render != null)
+            root.AddChild(render);
+        if (collisionOwner != null)
+            collision.AddChild(collisionOwner);
         root.AddChild(collision);
 
         if (fallback.Count > 0)
             root.AddChild(BuildFallbackBoxes(fallback));
 
+        if (ObjectChunkMetres > 0f)
+            Log.Print($"[unturned-godot] Object render batches: {renderBatches} " +
+                $"({ObjectChunkMetres:0} m cells, min {MinChunkedInstances} instances / " +
+                $"{ObjectChunkMinTriangles:N0} placement tris, require spread={ObjectChunkRequireSpread}, " +
+                $"sparse-wide >= {SparseChunkMinTriangles:N0} tris: {sparseGroups} groups / " +
+                $"+{sparseExtraBatches} batches)");
+
         return root;
+    }
+
+    private static float EnvFloat(string name, float fallback, float min, float max) =>
+        float.TryParse(System.Environment.GetEnvironmentVariable(name),
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out float value)
+            ? Math.Clamp(value, min, max)
+            : fallback;
+
+    private static long EnvLong(string name, long fallback, long min, long max) =>
+        long.TryParse(System.Environment.GetEnvironmentVariable(name), out long value)
+            ? Math.Clamp(value, min, max)
+            : fallback;
+
+    private static bool EnvBool(string name, bool fallback) =>
+        System.Environment.GetEnvironmentVariable(name) switch
+        {
+            "1" or "true" or "yes" => true,
+            "0" or "false" or "no" => false,
+            _ => fallback,
+        };
+
+    private static long TriangleCount(ArrayMesh mesh)
+    {
+        long triangles = 0;
+        for (int surface = 0; surface < mesh.GetSurfaceCount(); surface++)
+            triangles += mesh.SurfaceGetArrayIndexLen(surface) / 3;
+        return triangles;
+    }
+
+    private static bool ExceedsCellSpan(List<Transform3D> transforms, float cellSize)
+    {
+        float minX = transforms[0].Origin.X, maxX = minX;
+        float minZ = transforms[0].Origin.Z, maxZ = minZ;
+        foreach (Transform3D transform in transforms)
+        {
+            Vector3 p = transform.Origin;
+            minX = MathF.Min(minX, p.X); maxX = MathF.Max(maxX, p.X);
+            minZ = MathF.Min(minZ, p.Z); maxZ = MathF.Max(maxZ, p.Z);
+            if (maxX - minX > cellSize || maxZ - minZ > cellSize)
+                return true;
+        }
+        return false;
+    }
+
+    private static void PrintObjectCosts(Dictionary<Guid, List<Transform3D>> byMesh,
+        IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary, ObjectAssetDatabase db)
+    {
+        var costs = new List<(Guid Guid, int Instances, int Surfaces, long Triangles, float Spread,
+            bool CellSpan)>();
+        foreach ((Guid guid, List<Transform3D> transforms) in byMesh)
+        {
+            ArrayMesh mesh = meshLibrary[guid];
+            int surfaces = mesh.GetSurfaceCount();
+            long trianglesPerInstance = TriangleCount(mesh);
+
+            Vector3 min = transforms[0].Origin;
+            Vector3 max = min;
+            foreach (Transform3D transform in transforms)
+            {
+                min = min.Min(transform.Origin);
+                max = max.Max(transform.Origin);
+            }
+            costs.Add((guid, transforms.Count, surfaces, trianglesPerInstance * transforms.Count,
+                min.DistanceTo(max), transforms.Count > 1 && ObjectChunkMetres > 0f
+                    && ExceedsCellSpan(transforms, ObjectChunkMetres)));
+        }
+        costs.Sort((a, b) => b.Triangles.CompareTo(a.Triangles));
+        Log.Print("[object-profile] top full-detail placement costs:");
+        for (int i = 0; i < Math.Min(30, costs.Count); i++)
+        {
+            var c = costs[i];
+            ObjectAsset? asset = db.Resolve(c.Guid, 0);
+            string name = asset?.Name ?? System.IO.Path.GetFileName(asset?.Directory) ?? c.Guid.ToString("N");
+            Log.Print($"[object-profile] {i + 1,2}. {name}: {c.Triangles:N0} tris, " +
+                $"{c.Instances:N0} instances, {c.Surfaces} surfaces, spread {c.Spread:0} m, {c.Guid:N}");
+        }
+        Log.Print("[object-profile] sparse groups crossing cells:");
+        int sparseRank = 0;
+        foreach (var c in costs)
+        {
+            if (c.Instances >= MinChunkedInstances || !c.CellSpan)
+                continue;
+            sparseRank++;
+            Log.Print($"[object-profile] S{sparseRank,2}. {c.Guid:N}: {c.Triangles:N0} tris, "
+                + $"{c.Instances} instances, {c.Surfaces} surfaces, spread {c.Spread:0} m");
+            if (sparseRank == 30)
+                break;
+        }
     }
 
     // One physics body per GUID holding every instance's shapes (no per-instance nodes) so thousands of
@@ -97,25 +264,114 @@ public static class ObjectsBuilder
     // colliders are shared too (geometry baked to root space once, placed per instance) except for SCALED
     // instances, where the world transform is baked into per-instance vertices — scale on a
     // ConcavePolygonShape3D is what trips Godot's physics.
-    private static void BuildCollision(Node3D root, Guid guid, List<CachedCollider> colliders,
-        List<Transform3D> instances, uint collisionLayer)
+    private sealed class CollisionShapePool
     {
-        var shapes = new List<Shape3D>();
-        var placements = new List<(int, Transform3D)>();
+        public readonly List<Shape3D> Shapes = new();
+        public readonly Dictionary<(List<CachedCollider>, int, long, long, long), int> Primitives = new();
+        public readonly Dictionary<(List<CachedCollider>, int), int> Meshes = new();
+        private readonly Dictionary<PrimitiveShapeIdentity, int> _finalPrimitives = new();
+        private readonly Dictionary<string, int> _finalMeshes = new(StringComparer.Ordinal);
+        private static readonly bool DeduplicateFinal =
+            System.Environment.GetEnvironmentVariable("UG_DEDUP_FINAL_SHAPES") != "0";
+        public int PrimitiveAliases { get; private set; }
+        public int MeshAliases { get; private set; }
+        public int Add(Shape3D shape) { Shapes.Add(shape); return Shapes.Count - 1; }
 
-        var primitives = new List<(int index, Transform3D local)>();
-        var meshes = new List<CachedCollider>();
-        foreach (CachedCollider c in colliders)
+        public int AddPrimitive(Shape3D shape)
         {
+            PrimitiveShapeIdentity identity = shape switch
+            {
+                BoxShape3D box => CollisionShapeIdentity.Primitive((byte)EColliderKind.Box,
+                    box.Size.X, box.Size.Y, box.Size.Z),
+                SphereShape3D sphere => CollisionShapeIdentity.Primitive((byte)EColliderKind.Sphere,
+                    sphere.Radius),
+                CapsuleShape3D capsule => CollisionShapeIdentity.Primitive((byte)EColliderKind.Capsule,
+                    capsule.Radius, capsule.Height),
+                _ => throw new ArgumentException("Unsupported primitive shape.", nameof(shape)),
+            };
+            if (DeduplicateFinal && _finalPrimitives.TryGetValue(identity, out int existing))
+            {
+                PrimitiveAliases++;
+                shape.Dispose();
+                return existing;
+            }
+            int added = Add(shape);
+            if (DeduplicateFinal)
+                _finalPrimitives[identity] = added;
+            return added;
+        }
+
+        public int AddMesh(CachedCollider collider, Transform3D toTarget)
+        {
+            Vector3[]? faces = MeshFaces(collider, toTarget);
+            if (faces == null)
+                return -1;
+            string identity = CollisionShapeIdentity.Mesh(faces);
+            if (DeduplicateFinal && _finalMeshes.TryGetValue(identity, out int existing))
+            {
+                MeshAliases++;
+                return existing;
+            }
+            int added = Add(new ConcavePolygonShape3D { Data = faces });
+            if (DeduplicateFinal)
+                _finalMeshes[identity] = added;
+            return added;
+        }
+    }
+
+    private static void BuildCollision(Node3D root, InstancedStaticBodies? owner, ref int bodyCount,
+        Guid guid, List<CachedCollider> colliders,
+        List<Transform3D> instances, uint collisionLayer, CollisionShapePool pool)
+    {
+        var primitives = new List<(CachedCollider Collider, int Index)>();
+        var meshes = new List<(CachedCollider Collider, int Index)>();
+        for (int colliderIndex = 0; colliderIndex < colliders.Count; colliderIndex++)
+        {
+            CachedCollider c = colliders[colliderIndex];
             if (c.Kind == EColliderKind.Mesh)
-            {
-                meshes.Add(c);
-            }
-            else if (BuildPrimitive(c) is { } s)
-            {
-                shapes.Add(s.shape);
-                primitives.Add((shapes.Count - 1, s.local));
-            }
+                meshes.Add((c, colliderIndex));
+            else if (c.Kind is EColliderKind.Box or EColliderKind.Sphere or EColliderKind.Capsule)
+                primitives.Add((c, colliderIndex));
+        }
+
+        bool directBuckets = OS.GetEnvironment("UG_DIRECT_COLLISION_BUCKETS") != "0";
+        bool mayChunk = CollisionChunkMetres > 0f
+            && (long)instances.Count * (primitives.Count + meshes.Count) >= MinChunkedCollisionShapes;
+        SpatialBuckets<(int Shape, Transform3D Transform)>? buckets = directBuckets && mayChunk
+            ? new SpatialBuckets<(int, Transform3D)>(CollisionChunkMetres) : null;
+        List<(int Shape, Transform3D Transform)>? directFlat = directBuckets && !mayChunk
+            ? new List<(int, Transform3D)>() : null;
+        List<(int Shape, Transform3D Transform, Vector3 WorldOrigin)>? legacy = directBuckets
+            ? null : new List<(int, Transform3D, Vector3)>();
+
+        void AddPlacement(int shape, Transform3D transform, Vector3 origin)
+        {
+            if (buckets != null)
+                buckets.Add(origin.X, origin.Z, (shape, transform));
+            else if (directFlat != null)
+                directFlat.Add((shape, transform));
+            else
+                legacy!.Add((shape, transform, origin));
+        }
+
+        // One shape per (collider, scale) rather than per instance: the scale is baked into the shape, and
+        // the overwhelming majority of instances share a scale (usually 1), so this stays a handful of
+        // shapes even on a map with a hundred thousand objects. Quantised so floating-point noise in the
+        // placement data cannot spawn a near-duplicate shape per instance.
+        int ShapeFor(int primitive, Vector3 scale)
+        {
+            var key = (colliders, primitives[primitive].Index,
+                (long)MathF.Round(scale.X * 1000f),
+                (long)MathF.Round(scale.Y * 1000f),
+                (long)MathF.Round(scale.Z * 1000f));
+            if (pool.Primitives.TryGetValue(key, out int existing))
+                return existing;
+            Shape3D? built = BuildPrimitiveShape(primitives[primitive].Collider, scale);
+            if (built == null)
+                return -1;
+            int added = pool.AddPrimitive(built);
+            pool.Primitives[key] = added;
+            return added;
         }
 
         // Mesh colliders: ~98% of placed instances carry no scale, so bake each collider's geometry to ROOT
@@ -127,18 +383,43 @@ public static class ObjectsBuilder
         var sharedMesh = new int[meshes.Count];
         for (int m = 0; m < meshes.Count; m++)
         {
-            sharedMesh[m] = -1;
-            if (MeshShape(meshes[m], UnityMath.ReflectZ(meshes[m].LocalToRoot)) is { } shared)
+            var key = (colliders, meshes[m].Index);
+            if (pool.Meshes.TryGetValue(key, out int existing))
             {
-                shapes.Add(shared);
-                sharedMesh[m] = shapes.Count - 1;
+                sharedMesh[m] = existing;
+                continue;
+            }
+            sharedMesh[m] = -1;
+            CachedCollider collider = meshes[m].Collider;
+            int shared = pool.AddMesh(collider, UnityMath.ReflectZ(collider.LocalToRoot));
+            if (shared >= 0)
+            {
+                sharedMesh[m] = shared;
+                pool.Meshes[key] = sharedMesh[m];
             }
         }
 
         foreach (Transform3D instance in instances)
         {
-            foreach ((int index, Transform3D local) in primitives)
-                placements.Add((index, instance * local));
+            for (int i = 0; i < primitives.Count; i++)
+            {
+                // Compose first, then split: the scale that matters is the instance's and the collider's
+                // own combined. Orthonormalized strips it from the basis while leaving the origin — which
+                // already has the scale applied to it — exactly where it belongs.
+                Transform3D world = instance * PrimitiveLocal(primitives[i].Collider);
+                // A collapsed axis leaves the basis singular: Orthonormalized cannot recover a frame from
+                // it, and the shape would enclose no volume anyway. Placed objects do carry these (an
+                // author zeroing an axis to hide a piece), so skip rather than hand physics a degenerate
+                // transform it has to guess at.
+                if (IsDegenerate(world.Basis))
+                    continue;
+                int index = ShapeFor(i, world.Basis.Scale);
+                if (index >= 0)
+                    AddPlacement(index, world.Orthonormalized(), world.Origin);
+            }
+
+            if (IsDegenerate(instance.Basis))
+                continue; // see above: nothing meaningful to collide with
 
             Vector3 sc = instance.Basis.Scale;
             bool unscaled = Mathf.IsEqualApprox(sc.X, 1f, 0.001f)
@@ -146,43 +427,154 @@ public static class ObjectsBuilder
             for (int m = 0; m < meshes.Count; m++)
             {
                 if (unscaled && sharedMesh[m] >= 0)
-                    placements.Add((sharedMesh[m], instance));
-                else if (MeshShape(meshes[m], instance * UnityMath.ReflectZ(meshes[m].LocalToRoot)) is { } baked)
+                    AddPlacement(sharedMesh[m], instance, instance.Origin);
+                else
                 {
-                    shapes.Add(baked);
-                    placements.Add((shapes.Count - 1, Transform3D.Identity));
+                    int baked = pool.AddMesh(meshes[m].Collider,
+                        instance * UnityMath.ReflectZ(meshes[m].Collider.LocalToRoot));
+                    if (baked >= 0)
+                        AddPlacement(baked, Transform3D.Identity, instance.Origin);
                 }
             }
         }
-        if (placements.Count == 0)
-            return;
 
-        root.AddChild(new InstancedStaticBody
+        if (directBuckets)
         {
-            Name = $"Col_{guid:N}",
-            Shapes = shapes,
-            Placements = placements,
-            CollisionLayer = collisionLayer,
-        });
+            int count = buckets?.Count ?? directFlat!.Count;
+            if (count == 0) return;
+            if (buckets != null && count >= MinChunkedCollisionShapes
+                && bodyCount + buckets.Groups.Count <= MaxObjectCollisionBodies)
+            {
+                foreach (((int x, int z), List<(int Shape, Transform3D Transform)> inCell)
+                    in buckets.Groups)
+                {
+                    AddCollisionBody(root, owner, ref bodyCount, $"Col_{guid:N}_{x}_{z}",
+                        pool.Shapes, inCell, collisionLayer);
+                }
+                return;
+            }
+            AddCollisionBody(root, owner, ref bodyCount, $"Col_{guid:N}", pool.Shapes,
+                directFlat ?? buckets!.Flatten(), collisionLayer);
+            return;
+        }
+
+        List<(int Shape, Transform3D Transform, Vector3 WorldOrigin)> placements = legacy!;
+        if (placements.Count == 0) return;
+
+        if (CollisionChunkMetres > 0f && placements.Count >= MinChunkedCollisionShapes)
+        {
+            var cells = new Dictionary<(int X, int Z), List<(int Shape, Transform3D Transform)>>();
+            foreach ((int shape, Transform3D transform, Vector3 origin) in placements)
+            {
+                var cell = (Mathf.FloorToInt(origin.X / CollisionChunkMetres),
+                    Mathf.FloorToInt(origin.Z / CollisionChunkMetres));
+                if (!cells.TryGetValue(cell, out List<(int Shape, Transform3D Transform)>? inCell))
+                    cells[cell] = inCell = new List<(int, Transform3D)>();
+                inCell.Add((shape, transform));
+            }
+            if (bodyCount + cells.Count <= MaxObjectCollisionBodies)
+            {
+                foreach (((int x, int z), List<(int Shape, Transform3D Transform)> inCell) in cells)
+                    AddCollisionBody(root, owner, ref bodyCount, $"Col_{guid:N}_{x}_{z}",
+                        pool.Shapes, inCell, collisionLayer);
+                return;
+            }
+        }
+
+        var bodyPlacements = new List<(int Shape, Transform3D Transform)>(placements.Count);
+        foreach ((int shape, Transform3D transform, Vector3 _) in placements)
+            bodyPlacements.Add((shape, transform));
+        AddCollisionBody(root, owner, ref bodyCount, $"Col_{guid:N}", pool.Shapes,
+            bodyPlacements, collisionLayer);
     }
 
-    // A primitive Unity collider as a Godot shape + its pose relative to the object root (Unity->Godot).
-    private static (Shape3D shape, Transform3D local)? BuildPrimitive(CachedCollider c)
-        => c.Kind switch
+    private static void AddCollisionBody(Node3D root, InstancedStaticBodies? owner, ref int bodyCount,
+        string name, IReadOnlyList<Shape3D> shapes,
+        IReadOnlyList<(int Shape, Transform3D Transform)> placements, uint collisionLayer)
+    {
+        bodyCount++;
+        if (owner != null)
+            owner.Add(name, shapes, placements, collisionLayer);
+        else
+            root.AddChild(new InstancedStaticBody
+            {
+                Name = name,
+                Shapes = shapes,
+                Placements = placements,
+                CollisionLayer = collisionLayer,
+            });
+    }
+
+    // True when any axis has collapsed, so the basis has no inverse and no orientation to extract.
+    private static bool IsDegenerate(Basis basis)
+    {
+        Vector3 scale = basis.Scale;
+        const float Epsilon = 1e-4f;
+        return MathF.Abs(scale.X) < Epsilon || MathF.Abs(scale.Y) < Epsilon
+            || MathF.Abs(scale.Z) < Epsilon;
+    }
+
+    // The pose of a primitive collider relative to the object root (Unity->Godot), scale included.
+    private static Transform3D PrimitiveLocal(CachedCollider c) => c.Kind == EColliderKind.Capsule
+        ? UnityMath.ReflectZ(c.LocalToRoot.TranslatedLocal(c.Center) * DirectionRotation(c.Direction))
+        : UnityMath.ReflectZ(c.LocalToRoot.TranslatedLocal(c.Center));
+
+    // A primitive Unity collider as a Godot shape, with `scale` BAKED INTO ITS DIMENSIONS rather than left
+    // on the body's transform.
+    //
+    // Jolt refuses non-uniform scale on spheres and capsules: it silently substitutes the average of the
+    // three axes, so a prop scaled (0.75, 0.75, 1) collides as if it were (0.83, 0.83, 0.83) — wrong shape,
+    // and a console error per instance. Baking sidesteps that entirely, because the body then carries a
+    // plain rotation and translation.
+    //
+    // The bake follows Unity's own rules for scaled colliders, which exist for the same reason (a sphere
+    // cannot be squashed and stay a sphere): a box scales per axis, a sphere takes the largest axis, and a
+    // capsule takes the largest of the two axes across its length plus its own axis for the height. So this
+    // is not an approximation of Unity — it is what Unity does.
+    private static Shape3D? BuildPrimitiveShape(CachedCollider c, Vector3 scale)
+    {
+        // Abs: an extent is a magnitude, and Godot rejects a negative one outright. Unity carries
+        // mirroring in the size instead — a collider baked from a prefab scaled by -1 on an axis arrives
+        // with that axis negated — so the sign belongs to the transform and never to the extent.
+        Vector3 s = scale.Abs();
+        switch (c.Kind)
         {
-            EColliderKind.Box => (new BoxShape3D { Size = c.Size },
-                UnityMath.ReflectZ(c.LocalToRoot.TranslatedLocal(c.Center))),
-            EColliderKind.Sphere => (new SphereShape3D { Radius = c.Radius },
-                UnityMath.ReflectZ(c.LocalToRoot.TranslatedLocal(c.Center))),
-            EColliderKind.Capsule => (new CapsuleShape3D { Radius = c.Radius, Height = c.Height },
-                UnityMath.ReflectZ(c.LocalToRoot.TranslatedLocal(c.Center) * DirectionRotation(c.Direction))),
-            _ => null,
-        };
+            case EColliderKind.Box:
+                return new BoxShape3D { Size = c.Size.Abs() * s };
+
+            case EColliderKind.Sphere:
+                return new SphereShape3D
+                {
+                    Radius = MathF.Abs(c.Radius) * MathF.Max(s.X, MathF.Max(s.Y, s.Z)),
+                };
+
+            case EColliderKind.Capsule:
+                {
+                    // The scale arrives measured in the basis DirectionRotation already produced, so the
+                    // capsule's length is on Y whatever its Unity direction was: each column of that basis
+                    // is how far the transform stretches the corresponding post-rotation axis. Switching
+                    // on Direction here as well permuted the axes a second time, and an X-directed capsule
+                    // took its transverse scale as its height.
+                    float radius = MathF.Abs(c.Radius) * MathF.Max(s.X, s.Z);
+                    float alongLength = s.Y;
+                    return new CapsuleShape3D
+                    {
+                        Radius = radius,
+                        // Godot's capsule height spans the whole shape and may not be shorter than its own
+                        // diameter; a mirrored or degenerate prefab can produce both.
+                        Height = MathF.Max(MathF.Abs(c.Height) * alongLength, radius * 2f),
+                    };
+                }
+
+            default:
+                return null;
+        }
+    }
 
     // A MeshCollider as a ConcavePolygonShape3D with each triangle vertex baked through the given transform
     // (F-reflected first: negate Z). Callers pass ReflectZ(LocalToRoot) for the shared root-space shape, or
     // instance * ReflectZ(LocalToRoot) for a per-instance world-space bake.
-    private static ConcavePolygonShape3D? MeshShape(CachedCollider c, Transform3D toTarget)
+    private static Vector3[]? MeshFaces(CachedCollider c, Transform3D toTarget)
     {
         if (c.Indices.Length < 3 || c.Indices.Length % 3 != 0)
             return null;
@@ -197,7 +589,7 @@ public static class ObjectsBuilder
                 return null;
             faces[i] = toTarget * new Vector3(v.X, v.Y, -v.Z); // F: negate Z, then to target space
         }
-        return new ConcavePolygonShape3D { Data = faces };
+        return faces;
     }
 
     // Godot's CapsuleShape3D is Y-aligned; orient it to Unity's m_Direction (0=X, 1=Y, 2=Z).
@@ -208,7 +600,7 @@ public static class ObjectsBuilder
         _ => Transform3D.Identity,
     };
 
-    private static MultiMeshInstance3D BuildMultiMesh(Mesh mesh, List<Transform3D> transforms, string name)
+    private static MultiMesh BuildMultiMesh(Mesh mesh, List<Transform3D> transforms)
     {
         var multimesh = new MultiMesh
         {
@@ -229,29 +621,80 @@ public static class ObjectsBuilder
         }
         multimesh.Buffer = buffer;
 
-        return new MultiMeshInstance3D { Multimesh = multimesh, Name = name };
+        return multimesh;
     }
 
-    private static MultiMeshInstance3D BuildFallbackBoxes(List<(Transform3D transform, Color color)> items)
+    private static void AddRenderBatch(Node3D root, MultiMeshRidRenderer? renderer, MultiMesh multimesh)
+    {
+        if (renderer != null)
+            renderer.Add(multimesh, Transform3D.Identity);
+        else
+            root.AddChild(new MultiMeshInstance3D { Multimesh = multimesh });
+    }
+
+    private static Node3D BuildFallbackBoxes(List<(Transform3D transform, Color color)> items)
+    {
+        var root = new Node3D { Name = "ObjectPlaceholders" };
+        var mesh = new BoxMesh { Size = new Vector3(2, 2, 2) };
+        var material = new StandardMaterial3D { VertexColorUseAsAlbedo = true };
+
+        // Missing assets used to share one map-wide MultiMesh. Besides making its AABB span the whole
+        // level, that kept every placeholder visible whenever any one of them was visible. Use the same
+        // spatial cells as real objects while sharing the BoxMesh and material between all batches.
+        if (ObjectChunkMetres > 0f && items.Count > 1)
+        {
+            var cells = new Dictionary<(int X, int Z), List<(Transform3D transform, Color color)>>();
+            foreach ((Transform3D transform, Color color) in items)
+            {
+                var cell = (Mathf.FloorToInt(transform.Origin.X / ObjectChunkMetres),
+                    Mathf.FloorToInt(transform.Origin.Z / ObjectChunkMetres));
+                if (!cells.TryGetValue(cell,
+                    out List<(Transform3D transform, Color color)>? inCell))
+                    cells[cell] = inCell = new List<(Transform3D, Color)>();
+                inCell.Add((transform, color));
+            }
+            foreach (((int x, int z), List<(Transform3D transform, Color color)> inCell) in cells)
+                root.AddChild(BuildFallbackBatch(inCell, mesh, material, $"Cell_{x}_{z}"));
+        }
+        else
+        {
+            root.AddChild(BuildFallbackBatch(items, mesh, material, "All"));
+        }
+        return root;
+    }
+
+    private static MultiMeshInstance3D BuildFallbackBatch(
+        List<(Transform3D transform, Color color)> items, BoxMesh mesh,
+        StandardMaterial3D material, string name)
     {
         var multimesh = new MultiMesh
         {
-            Mesh = new BoxMesh { Size = new Vector3(2, 2, 2) },
+            Mesh = mesh,
             TransformFormat = MultiMesh.TransformFormatEnum.Transform3D,
             UseColors = true,
             InstanceCount = items.Count,
         };
+        // One native buffer upload, same as BuildMultiMesh: with UseColors the stride is the 12 transform
+        // floats followed by the instance's RGBA. The per-instance setters cost two marshaled calls each,
+        // which is nothing on PEI (one fallback box) but tens of thousands on a cold-cache map.
+        var buffer = new float[items.Count * 16];
         for (int i = 0; i < items.Count; i++)
         {
-            multimesh.SetInstanceTransform(i, items[i].transform);
-            multimesh.SetInstanceColor(i, items[i].color);
+            Transform3D t = items[i].transform;
+            Color c = items[i].color;
+            int o = i * 16;
+            buffer[o + 0] = t.Basis.X.X; buffer[o + 1] = t.Basis.Y.X; buffer[o + 2] = t.Basis.Z.X; buffer[o + 3] = t.Origin.X;
+            buffer[o + 4] = t.Basis.X.Y; buffer[o + 5] = t.Basis.Y.Y; buffer[o + 6] = t.Basis.Z.Y; buffer[o + 7] = t.Origin.Y;
+            buffer[o + 8] = t.Basis.X.Z; buffer[o + 9] = t.Basis.Y.Z; buffer[o + 10] = t.Basis.Z.Z; buffer[o + 11] = t.Origin.Z;
+            buffer[o + 12] = c.R; buffer[o + 13] = c.G; buffer[o + 14] = c.B; buffer[o + 15] = c.A;
         }
+        multimesh.Buffer = buffer;
 
         return new MultiMeshInstance3D
         {
             Multimesh = multimesh,
-            Name = "ObjectPlaceholders",
-            MaterialOverride = new StandardMaterial3D { VertexColorUseAsAlbedo = true },
+            Name = name,
+            MaterialOverride = material,
         };
     }
 }

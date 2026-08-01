@@ -11,6 +11,23 @@ public static class UnturnedUi
     public static readonly Color Brown = new(0.37f, 0.29f, 0.20f);
     public static readonly Color BorderColor = new(0.16f, 0.14f, 0.10f);
 
+    // A muted one-line label, for counts and captions under a heading.
+    public static Label Caption(string text, int size = 12)
+    {
+        var label = new Label { Text = text, Modulate = new Color(1, 1, 1, 0.72f) };
+        label.AddThemeFontSizeOverride("font_size", size);
+        return label;
+    }
+
+    // Retitles a bar built by MakeBar (the text lives in a child label, not Button.Text).
+    public static void SetBarText(Button bar, string text)
+    {
+        if (bar.GetMeta(BarLabelMeta, default(Variant)).As<Label>() is { } label)
+            label.Text = text;
+    }
+
+    private const string BarLabelMeta = "unturned_ui_bar_label";
+
     public static Button MakeBar(string glyph, string text, Color tint, System.Action onPressed)
     {
         var button = new Button { CustomMinimumSize = new Vector2(320, 40) };
@@ -48,11 +65,23 @@ public static class UnturnedUi
         };
         label.AddThemeFontSizeOverride("font_size", 14);
         content.AddChild(label);
+        button.SetMeta(BarLabelMeta, label);
 
         // Re-center the text over the full bar (the glyph plate offsets the HBox): pad the right side.
         content.AddChild(new Control { CustomMinimumSize = new Vector2(48, 0) });
 
         return button;
+    }
+
+    // The backdrop behind a menu panel: darker, softer corners, same border.
+    public static StyleBoxFlat Panel(Color fill)
+    {
+        StyleBoxFlat box = Bar(fill);
+        box.CornerRadiusBottomLeft = 6;
+        box.CornerRadiusBottomRight = 6;
+        box.CornerRadiusTopLeft = 6;
+        box.CornerRadiusTopRight = 6;
+        return box;
     }
 
     public static StyleBoxFlat Bar(Color tint) => new()

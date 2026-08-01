@@ -55,7 +55,7 @@ public partial class NetworkManager : Node
         _server = new NetServer(_serverTransport, new ServerSimulation(new HeightfieldMoveSolver(_ground)), _spawn);
         _clientTransport = loopback.CreateClient();
         _client = new NetClient(_clientTransport, hostName);
-        GD.Print($"[net] local session up; '{hostName}' joined via loopback");
+        Log.Print($"[net] local session up; '{hostName}' joined via loopback");
     }
 
     // Minecraft-style "open to LAN": attach a UDP listener to the ALREADY-RUNNING local server.
@@ -69,11 +69,11 @@ public partial class NetworkManager : Node
         }
         catch (System.Net.Sockets.SocketException e)
         {
-            GD.PushWarning($"[net] failed to bind UDP port {port}: {e.Message}");
+            Log.PushWarning($"[net] failed to bind UDP port {port}: {e.Message}");
             return false;
         }
         IsLanOpen = true;
-        GD.Print($"[net] open to LAN on UDP {port}");
+        Log.Print($"[net] open to LAN on UDP {port}");
         return true;
     }
 
@@ -87,7 +87,7 @@ public partial class NetworkManager : Node
             UnturnedGodot.Zombies.ZombieWorld.Load(levelDir, _ground, new System.Random());
         if (zombies == null)
         {
-            GD.PushWarning("[zombies] level ships no zombie data; skipping");
+            Log.PushWarning("[zombies] level ships no zombie data; skipping");
             return;
         }
         // AlertTool's BLOCK_VISION raycast: stealth detection fails when geometry hides the player.
@@ -99,9 +99,16 @@ public partial class NetworkManager : Node
         // Query-parameter objects are engine objects, so both closures reuse one instead of
         // allocating (and later finalizing) a fresh one per zombie step.
         var ray = new PhysicsRayQueryParameters3D { CollisionMask = ObjectsBuilder.VisionBlockerLayer };
+        // The viewport's World3D never changes while this node is in the tree, so resolve it once and keep
+        // it: these three closures run PER ZOMBIE PER TICK, and GetViewport() walks the node tree and
+        // marshals across to the engine every single time. The space state itself is still fetched per
+        // call, which is what has to stay fresh.
+        World3D? world = null;
+        World3D? World() => world ??= GetViewport()?.World3D;
+
         zombies.VisionBlocked = (from, to) =>
         {
-            PhysicsDirectSpaceState3D? space = GetViewport()?.World3D?.DirectSpaceState;
+            PhysicsDirectSpaceState3D? space = World()?.DirectSpaceState;
             if (space == null)
                 return false;
             ray.From = from;
@@ -121,7 +128,7 @@ public partial class NetworkManager : Node
         float lastRadius = -1f;
         zombies.MoveResolver = (from, to, radius) =>
         {
-            PhysicsDirectSpaceState3D? space = GetViewport()?.World3D?.DirectSpaceState;
+            PhysicsDirectSpaceState3D? space = World()?.DirectSpaceState;
             if (space == null)
                 return to;
             if (radius != lastRadius) // one capsule size per speciality; skip the redundant engine write
@@ -130,45 +137,69 @@ public partial class NetworkManager : Node
                 lastRadius = radius;
             }
             var chest = new Vector3(0f, 1.2f, 0f); // capsule centre: covers 0.4..2.0 above the feet
+            Vector3 at = from;
             Vector3 motion = to - from;
-            query.Transform = new Transform3D(Basis.Identity, from + chest);
-            query.Motion = motion;
-            float[] cast = space.CastMotion(query);
-            if (cast[0] >= 1f)
-                return to; // clear path
 
-            // Step-up with the zombie CharacterController's REAL stepOffset (0.5, read from the
-            // prefab; slope limit is 75°): retry the sweep raised by it — steps pass, walls do
-            // not. The ground snap settles the final height onto the actual step afterwards.
-            query.Transform = new Transform3D(Basis.Identity, from + chest + new Vector3(0f, 0.5f, 0f));
-            float[] stepCast = space.CastMotion(query);
-            if (stepCast[0] >= 1f)
+            // Unity's CharacterController.Move is ITERATIVE: it advances to the first contact,
+            // projects what is left of the motion onto that surface, and goes again. That loop is
+            // the whole reason a zombie wedged nose-first into a corner in Unturned works itself
+            // free over a frame or two — one pass leaves it stuck against the first surface, and a
+            // sidestep heuristic bolted on top of a single pass re-decides every tick and visibly
+            // shuffles left and right. Four passes is enough for a corner (two walls) plus slack;
+            // Unity does not publish its own count.
+            const int MaxSlides = 4;
+            for (int pass = 0; pass < MaxSlides; pass++)
             {
-                // Only a real step: the raised destination must have ground within the climb
-                // height, or this would hop through window openings and float over gaps.
-                stepDown.From = new Vector3(to.X, from.Y + 1.5f, to.Z);
-                stepDown.To = new Vector3(to.X, from.Y + 0.05f, to.Z);
-                Godot.Collections.Dictionary ground = space.IntersectRay(stepDown);
-                if (ground.Count > 0)
-                    return new Vector3(to.X, ((Vector3)ground["position"]).Y, to.Z);
+                if (motion.LengthSquared() < 1e-8f)
+                    break;
+
+                query.Transform = new Transform3D(Basis.Identity, at + chest);
+                query.Motion = motion;
+                float[] cast = space.CastMotion(query);
+                if (cast[0] >= 1f)
+                {
+                    at += motion; // rest of the motion is clear
+                    break;
+                }
+
+                // Step-up with the zombie CharacterController's REAL stepOffset (0.5, read from the
+                // prefab; slope limit is 75°): retry the sweep raised by it — steps pass, walls do
+                // not. Only attempted on the first contact, like the CC's own step pass.
+                if (pass == 0)
+                {
+                    query.Transform =
+                        new Transform3D(Basis.Identity, at + chest + new Vector3(0f, 0.5f, 0f));
+                    float[] stepCast = space.CastMotion(query);
+                    if (stepCast[0] >= 1f)
+                    {
+                        // Only a real step: the raised destination must have ground within the climb
+                        // height, or this would float over gaps.
+                        stepDown.From = new Vector3(to.X, at.Y + 1.5f, to.Z);
+                        stepDown.To = new Vector3(to.X, at.Y + 0.05f, to.Z);
+                        Godot.Collections.Dictionary ground = space.IntersectRay(stepDown);
+                        if (ground.Count > 0)
+                            return new Vector3(to.X, ((Vector3)ground["position"]).Y, to.Z);
+                    }
+                }
+
+                Vector3 safe = at + (motion * cast[0]);
+
+                // Contact normal at the blocked spot -> slide what remains along that surface, then
+                // let the next pass resolve whatever the slide runs into.
+                query.Transform = new Transform3D(Basis.Identity, safe + chest);
+                query.Motion = Vector3.Zero;
+                Vector3 normal = space.GetRestInfo(query) is { Count: > 0 } rest
+                    ? (Vector3)rest["normal"]
+                    : Vector3.Zero;
+                if (normal == Vector3.Zero)
+                    return safe;
+
+                Vector3 remaining = motion * (1f - cast[0]);
+                motion = remaining - (normal * remaining.Dot(normal));
+                at = safe;
             }
 
-            Vector3 safe = from + (motion * cast[0]);
-
-            // Contact normal at the blocked spot -> slide the remaining motion along the surface.
-            query.Transform = new Transform3D(Basis.Identity, safe + chest);
-            query.Motion = Vector3.Zero;
-            Vector3 normal = space.GetRestInfo(query) is { Count: > 0 } rest
-                ? (Vector3)rest["normal"]
-                : Vector3.Zero;
-            if (normal == Vector3.Zero)
-                return safe;
-            Vector3 remaining = motion * (1f - cast[0]);
-            Vector3 slide = remaining - (normal * remaining.Dot(normal));
-            query.Transform = new Transform3D(Basis.Identity, safe + chest);
-            query.Motion = slide;
-            float[] slideCast = space.CastMotion(query);
-            return safe + (slide * slideCast[0]);
+            return at;
         };
         // Real ground: a short downward ray finds the surface actually underfoot — sidewalks,
         // house floors, stairs — with the zombie's current height as the reference so stacked
@@ -177,7 +208,7 @@ public partial class NetworkManager : Node
         var snapRay = new PhysicsRayQueryParameters3D { CollisionMask = 1 | ObjectsBuilder.MediumFurnitureLayer }; // reused: one per zombie step otherwise
         zombies.GroundSnap = (Vector3 position, out float y) =>
         {
-            PhysicsDirectSpaceState3D? space = GetViewport()?.World3D?.DirectSpaceState;
+            PhysicsDirectSpaceState3D? space = World()?.DirectSpaceState;
             if (space == null)
                 return _ground(position.X, position.Z, out y);
             // Start just above the CC's stepOffset (0.5): steps resolve, railings above don't.
@@ -192,11 +223,14 @@ public partial class NetworkManager : Node
             return _ground(position.X, position.Z, out y);
         };
         // The pre-baked navmesh drives the Seeker port: zombies path around buildings and props
-        // exactly over the triangles the original game baked. Prefer the map preloaded at the
-        // start of the world load (its async sync is already done by now).
+        // exactly over the triangles the original game baked. Prefer the data parsed at the start of the
+        // world load; until collision reconciliation publishes it, PathReady selects direct movement.
         _zombieNavigation = ZombieNavigation.TakePreloaded() ?? ZombieNavigation.Build(zombies.Navmesh);
         if (_zombieNavigation != null)
+        {
             zombies.PathQuery = _zombieNavigation.Query;
+            zombies.PathReady = () => _zombieNavigation?.IsReady == true;
+        }
 
         // PATH_PROBE="x,y,z>x,y,z": log the navmesh route between two points — the exact tool for
         // "which opening does the zombie leave the house through" investigations.
@@ -212,10 +246,10 @@ public partial class NetworkManager : Node
             {
                 var waypoints = new System.Collections.Generic.List<Vector3>();
                 bool ok = zombies.PathQuery!(from, to, waypoints);
-                GD.Print($"[nav] path probe t={Now - startedAt:F1}s {from} -> {to}: " +
+                Log.Print($"[nav] path probe t={Now - startedAt:F1}s {from} -> {to}: " +
                     $"found={ok} waypoints={waypoints.Count}");
                 foreach (Vector3 w in waypoints)
-                    GD.Print($"[nav]   wp {w}");
+                    Log.Print($"[nav]   wp {w}");
                 if (!ok && Now - startedAt < 15)
                     GetTree().CreateTimer(1.0).Timeout += Probe;
             }
@@ -227,7 +261,10 @@ public partial class NetworkManager : Node
         // log its trajectory — the definitive end-to-end check for "does the zombie reach me here".
         if (OS.GetEnvironment("HUNT_PROBE") is { Length: > 0 } huntProbe)
         {
-            GetTree().CreateTimer(8.0).Timeout += () => // after the nav map sync
+            // 25 s: the navmesh is reconciled against collision once the world finishes streaming, and
+            // that rebuild re-syncs the map for a few seconds. Probing earlier catches the gap and reads
+            // as "the zombie never moved" when it simply had no graph yet.
+            GetTree().CreateTimer(25.0).Timeout += () => // after the nav map sync AND the reconcile
             {
                 string[] ends = huntProbe.Split('>');
                 string[] a = ends[0].Split(',');
@@ -252,6 +289,7 @@ public partial class NetworkManager : Node
                     zombies.Navmesh)
                 {
                     PathQuery = zombies.PathQuery,
+                    PathReady = zombies.PathReady,
                     MoveResolver = zombies.MoveResolver,
                     GroundSnap = zombies.GroundSnap,
                     VisionBlocked = zombies.VisionBlocked,
@@ -259,7 +297,7 @@ public partial class NetworkManager : Node
                 probe.Spawn(new[] { zombieAt }, new System.Random(1));
                 if (probe.Zombies.Count == 0)
                 {
-                    GD.Print("[nav] hunt probe: spawnpoint rejected (outside bounds/navmesh)");
+                    Log.Print("[nav] hunt probe: spawnpoint rejected (outside bounds/navmesh)");
                     return;
                 }
                 UnturnedGodot.Zombies.ZombieInstance z = probe.Zombies[0];
@@ -275,16 +313,16 @@ public partial class NetworkManager : Node
                     };
                     probe.Tick(views, UnturnedGodot.Net.ServerSimulation.TickRate);
                     if (tick % 25 == 0)
-                        GD.Print($"[nav] hunt t={tick * 0.08f:F1}s pos={z.Position} state={z.State}");
+                        Log.Print($"[nav] hunt t={tick * 0.08f:F1}s pos={z.Position} state={z.State}");
                     bool phaseTwo = playerLater == null || tick > 37;
                     if (z.State == UnturnedGodot.Zombies.EZombieState.Attack && phaseTwo)
                     {
-                        GD.Print($"[nav] hunt probe: ATTACK reached at t={tick * 0.08f:F1}s pos={z.Position}");
+                        Log.Print($"[nav] hunt probe: ATTACK reached at t={tick * 0.08f:F1}s pos={z.Position}");
                         return;
                     }
                     last = z.Position;
                 }
-                GD.Print($"[nav] hunt probe: never reached attack; final pos={last} state={z.State}");
+                Log.Print($"[nav] hunt probe: never reached attack; final pos={last} state={z.State}");
             };
         }
 
@@ -293,13 +331,37 @@ public partial class NetworkManager : Node
         // zombie physically climb this stair/step" questions.
         if (OS.GetEnvironment("WALK_PROBE") is { Length: > 0 } walkProbe)
         {
-            GetTree().CreateTimer(2.0).Timeout += () =>
+            // The navigation map answers only after its async sync settles (~5 s on PEI); probing at
+            // 2 s reported "no route" for crossings that resolve fine once it is up.
+            GetTree().CreateTimer(10.0).Timeout += () =>
             {
                 string[] ends = walkProbe.Split('>');
                 string[] a = ends[0].Split(',');
                 string[] b = ends[1].Split(',');
                 var at = new Vector3(a[0].ToFloat(), a[1].ToFloat(), a[2].ToFloat());
                 var goal = new Vector3(b[0].ToFloat(), b[1].ToFloat(), b[2].ToFloat());
+
+                // What the GAME's own pre-baked navmesh thinks of this crossing. If it routes
+                // straight through (a ratio near 1), the original expects a zombie to walk it and
+                // our collision refusing is the divergence. If it routes the long way round, the
+                // original sends its zombies round too and the collision is right.
+                var route = new List<Vector3>();
+                if (zombies.PathQuery != null && zombies.PathQuery(at, goal, route))
+                {
+                    float walked = 0f;
+                    for (int i = 1; i < route.Count; i++)
+                        walked += route[i - 1].DistanceTo(route[i]);
+                    float direct = at.DistanceTo(goal);
+                    Log.Print($"[nav] walk probe: navmesh route {route.Count} waypoints, " +
+                        $"{walked:0.#} m vs {direct:0.#} m direct (ratio {walked / direct:0.##})");
+                    foreach (Vector3 w in route)
+                        Log.Print($"[nav]   waypoint {w.X:0.##},{w.Y:0.##},{w.Z:0.##}");
+                }
+                else
+                {
+                    Log.Print("[nav] walk probe: navmesh has NO route between these points");
+                }
+
                 for (int i = 0; i < 120; i++)
                 {
                     Vector3 flat = new(goal.X - at.X, 0, goal.Z - at.Z);
@@ -311,12 +373,12 @@ public partial class NetworkManager : Node
                         next.Y = gy;
                     if ((next - at).Length() < 0.02f)
                     {
-                        GD.Print($"[nav] walk probe STUCK at {at} (step {i})");
+                        Log.Print($"[nav] walk probe STUCK at {at} (step {i})");
                         return;
                     }
                     at = next;
                 }
-                GD.Print($"[nav] walk probe reached {at} (goal {goal})");
+                Log.Print($"[nav] walk probe reached {at} (goal {goal})");
             };
         }
 
@@ -332,14 +394,158 @@ public partial class NetworkManager : Node
                     string[] parts = point.Split(',');
                     var at = new Vector3(parts[0].ToFloat(), parts[1].ToFloat(), parts[2].ToFloat());
                     bool ok = zombies.GroundSnap!(at, out float gy);
-                    GD.Print($"[nav] ground probe at {at}: hit={ok} y={gy:F2} (reference {at.Y:F2}, " +
-                        $"delta {gy - at.Y:+0.00;-0.00})");
+                    // Also report WHO the surface belongs to, and what a mask-1-only ray (the one the
+                    // move resolver uses) finds: a floor missing from mask 1 drops the walker onto the
+                    // terrain underneath, which silently turns a low sill into a tall step.
+                    PhysicsDirectSpaceState3D? sp = GetViewport()?.World3D?.DirectSpaceState;
+                    string who = "?", who1 = "?";
+                    float y1 = float.NaN;
+                    if (sp != null)
+                    {
+                        var probeRay = new PhysicsRayQueryParameters3D
+                        {
+                            From = new Vector3(at.X, at.Y + 3f, at.Z),
+                            To = new Vector3(at.X, at.Y - 3f, at.Z),
+                            CollisionMask = 1 | ObjectsBuilder.MediumFurnitureLayer,
+                        };
+                        if (sp.IntersectRay(probeRay) is { Count: > 0 } anyHit)
+                            who = InstancedStaticBodies.ColliderName(anyHit);
+                        probeRay.CollisionMask = 1;
+                        if (sp.IntersectRay(probeRay) is { Count: > 0 } worldHit)
+                        {
+                            who1 = InstancedStaticBodies.ColliderName(worldHit);
+                            y1 = ((Vector3)worldHit["position"]).Y;
+                        }
+                    }
+                    Log.Print($"[nav] ground probe at {at}: hit={ok} y={gy:F2} (reference {at.Y:F2}, " +
+                        $"delta {gy - at.Y:+0.00;-0.00}) owner={who} | mask1: y={y1:F2} owner={who1}");
                 }
             };
         }
 
+        // NAV_AUDIT=<stride>: compare the pre-baked navmesh against the collision world we built.
+        // The navmesh is the ORIGINAL geometry's walkable surface, so raycasting our world down onto
+        // each navmesh vertex measures placement drift directly: a systematic offset means the whole
+        // world sits wrong, isolated spikes mean specific colliders are too tall (which is what stops
+        // a zombie stepping over a sill the game walks across).
+        if (OS.GetEnvironment("NAV_AUDIT") is { Length: > 0 } auditStride)
+        {
+            GetTree().CreateTimer(10.0).Timeout += () => AuditNavHeights(zombies, auditStride.ToInt());
+        }
+
         _ = new UnturnedGodot.Zombies.ZombieHost(zombies, _server);
-        GD.Print($"[zombies] {zombies.Zombies.Count} zombies spawned from the level's spawnpoints");
+        Log.Print($"[zombies] {zombies.Zombies.Count} zombies spawned from the level's spawnpoints");
+    }
+
+    // Raycasts our collision world down onto every Nth navmesh vertex and reports the height error.
+    private void AuditNavHeights(UnturnedGodot.Zombies.ZombieSystem zombies, int stride)
+    {
+        if (zombies.Navmesh is not { Count: > 0 } flags)
+        {
+            Log.Print("[nav] audit: this map ships no navmesh");
+            return;
+        }
+        PhysicsDirectSpaceState3D? space = GetViewport()?.World3D?.DirectSpaceState;
+        if (space == null)
+            return;
+
+        stride = System.Math.Max(1, stride);
+        var ray = new PhysicsRayQueryParameters3D { CollisionMask = 1 };
+        var errors = new List<float>();
+        var tall = new List<(float Error, Vector3 At, string Owner)>();
+        int missed = 0;
+
+        foreach (NavFlag flag in flags)
+            for (int i = 0; i < flag.Vertices.Length; i += stride)
+            {
+                Vector3 v = flag.Vertices[i];
+                // Start above and end below the navmesh point: whatever surface our world puts there
+                // is what a zombie would actually stand on.
+                ray.From = new Vector3(v.X, v.Y + 2f, v.Z);
+                ray.To = new Vector3(v.X, v.Y - 2f, v.Z);
+                Godot.Collections.Dictionary hit = space.IntersectRay(ray);
+                if (hit.Count == 0)
+                {
+                    missed++;
+                    continue;
+                }
+                float error = ((Vector3)hit["position"]).Y - v.Y;
+                errors.Add(error);
+
+                // Only a POSITIVE error blocks anything: our surface standing above the walkable one
+                // is what a zombie has to climb. (Negative is the recast offset — the navmesh floats
+                // a little over the ground it was baked from, and nothing trips on that.) Record who
+                // owns the collider so the culprit is a named object, not a coordinate.
+                if (error > 0.25f && tall.Count < 4000)
+                    tall.Add((error, v, InstancedStaticBodies.ColliderName(hit)));
+            }
+
+        if (errors.Count == 0)
+        {
+            Log.Print($"[nav] audit: no hits ({missed} misses)");
+            return;
+        }
+
+        errors.Sort();
+        float mean = 0f;
+        foreach (float e in errors)
+            mean += e;
+        mean /= errors.Count;
+        int over25 = 0;
+        foreach (float e in errors)
+            if (System.MathF.Abs(e) > 0.25f)
+                over25++;
+
+        Log.Print($"[nav] audit over {errors.Count} navmesh vertices ({missed} with no collider under them):");
+        Log.Print($"[nav]   mean {mean:+0.000;-0.000}  median {errors[errors.Count / 2]:+0.000;-0.000}  " +
+            $"p5 {errors[errors.Count / 20]:+0.000;-0.000}  p95 {errors[errors.Count * 19 / 20]:+0.000;-0.000}");
+        Log.Print($"[nav]   min {errors[0]:+0.000;-0.000}  max {errors[^1]:+0.000;-0.000}  " +
+            $"|error|>0.25 m: {over25} ({100.0 * over25 / errors.Count:0.#}%)");
+
+        // The blocking tail, grouped by whoever owns the collider.
+        Log.Print($"[nav]   OUR SURFACE ABOVE THE WALKABLE ONE by >0.25 m: {tall.Count} " +
+            $"({100.0 * tall.Count / errors.Count:0.#}% of vertices)");
+        var byOwner = new Dictionary<string, (int Count, float Worst)>();
+        foreach ((float error, Vector3 _, string owner) in tall)
+        {
+            byOwner.TryGetValue(owner, out (int Count, float Worst) acc);
+            byOwner[owner] = (acc.Count + 1, System.MathF.Max(acc.Worst, error));
+        }
+        var ranked = new List<KeyValuePair<string, (int Count, float Worst)>>(byOwner);
+        ranked.Sort((a, b) => b.Value.Count.CompareTo(a.Value.Count));
+        for (int i = 0; i < ranked.Count && i < 12; i++)
+            Log.Print($"[nav]     {ranked[i].Key}: {ranked[i].Value.Count} vertices, worst " +
+                $"{ranked[i].Value.Worst:+0.00}");
+    }
+
+    // Reconciles the navmesh with the collision world. Called once the object colliders are actually in
+    // the physics space (ObjectStreamer.Finished) — earlier it measures bare terrain and prunes the wrong
+    // triangles. The step allowance is the CharacterController's m_StepOffset from the game data.
+    public void ReconcileNavigation(IReadOnlySet<System.Guid> colliderGuids)
+    {
+        if (_zombieNavigation == null || _navigationReconcile != null)
+            return;
+        // With the PhysicsServer on its own thread, DirectSpaceState is intentionally unavailable from
+        // ObjectStreamer.Finished (an idle-frame signal). Enter the next physics notification first;
+        // the same path also works in the default single-threaded mode.
+        var selected = new HashSet<System.Guid>(colliderGuids);
+        _navigationReconcile = AppShutdown.Track(ReconcileNavigationWhenSafeAsync(selected));
+    }
+
+    private async System.Threading.Tasks.Task ReconcileNavigationWhenSafeAsync(
+        IReadOnlySet<System.Guid> colliderGuids)
+    {
+        await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame);
+        if (AppShutdown.IsShuttingDown || _zombieNavigation == null)
+            return;
+        PhysicsDirectSpaceState3D? space = GetViewport()?.World3D?.DirectSpaceState;
+        if (space == null)
+        {
+            Log.PushWarning("[nav] physics space unavailable; collision reconciliation skipped");
+            return;
+        }
+        await _zombieNavigation.PruneAgainstCollisionAsync(
+            this, space, Player.PlayerConfig.StepOffset, colliderGuids);
     }
 
     public void JoinServer(string host, ushort port, string name)
@@ -348,17 +554,22 @@ public partial class NetworkManager : Node
             return;
         _clientTransport = new UdpClientTransport(host, port);
         _client = new NetClient(_clientTransport, name);
-        GD.Print($"[net] joining {host}:{port} as '{name}'");
+        Log.Print($"[net] joining {host}:{port} as '{name}'");
     }
 
     public override void _PhysicsProcess(double delta)
     {
         double now = Now;
+        long serverStarted = Benchmark.RuntimeCounters.Start();
         _server?.Update(now);
+        Benchmark.RuntimeCounters.Record(Benchmark.RuntimeCounters.Counter.NetworkServer, serverStarted);
+        long clientStarted = Benchmark.RuntimeCounters.Start();
         _client?.Update(now);
+        Benchmark.RuntimeCounters.Record(Benchmark.RuntimeCounters.Counter.NetworkClient, clientStarted);
     }
 
     private ZombieNavigation? _zombieNavigation;
+    private System.Threading.Tasks.Task? _navigationReconcile;
 
     public override void _ExitTree()
     {

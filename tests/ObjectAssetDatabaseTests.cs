@@ -114,6 +114,68 @@ public class ObjectAssetDatabaseTests
     }
 
     [Fact]
+    public void AddIfAbsent_KeepsWhatWasRegisteredFirst()
+    {
+        // Sources are merged with the game's own content first, so a workshop item reusing an official
+        // legacy id (they were never unique across mods) must not take that id over: a plain placement
+        // resolving by id would land on an unrelated mod object.
+        var db = new ObjectAssetDatabase();
+        ObjectAsset core = Make("2e698a7b85e94c019b3f91ec8796a961", 57, "Small");
+        ObjectAsset mod = Make("0517b7a03b844929856fc4f72701fca9", 57, "Medium");
+
+        db.AddIfAbsent(core);
+        db.AddIfAbsent(mod);
+
+        Assert.Same(core, db.ResolveById(57));
+        Assert.Same(core, db.ResolveByGuid(core.Guid));
+
+        // The mod's own GUID is still indexed: only the contested id went to the first claimant.
+        Assert.Same(mod, db.ResolveByGuid(mod.Guid));
+        Assert.Equal(2, db.Count);
+    }
+
+    [Fact]
+    public void AddIfAbsent_SameGuidTwice_KeepsTheFirst()
+    {
+        var db = new ObjectAssetDatabase();
+        ObjectAsset first = Make("2e698a7b85e94c019b3f91ec8796a961", 57, "Small");
+        ObjectAsset duplicate = Make("2e698a7b85e94c019b3f91ec8796a961", 88, "Large");
+
+        db.AddIfAbsent(first);
+        db.AddIfAbsent(duplicate);
+
+        Assert.Same(first, db.ResolveByGuid(first.Guid));
+        Assert.Same(first, db.ResolveById(57));
+        Assert.Same(duplicate, db.ResolveById(88)); // its own id was free
+    }
+
+    [Fact]
+    public void AddIfAbsent_AssetWithoutId_IsIndexedByGuidOnly()
+    {
+        var db = new ObjectAssetDatabase();
+        ObjectAsset asset = Make("2e698a7b85e94c019b3f91ec8796a961", 0, "Small");
+        db.AddIfAbsent(asset);
+
+        Assert.Same(asset, db.ResolveByGuid(asset.Guid));
+        Assert.Null(db.ResolveById(0));
+    }
+
+    [Fact]
+    public void Add_StillOverwrites_WithinASingleScan()
+    {
+        // Inside one bundle the last file read wins, which is what ScanDirectory documents; only the
+        // cross-source merge uses AddIfAbsent.
+        var db = new ObjectAssetDatabase();
+        ObjectAsset first = Make("2e698a7b85e94c019b3f91ec8796a961", 57, "Small");
+        ObjectAsset second = Make("0517b7a03b844929856fc4f72701fca9", 57, "Medium");
+
+        db.Add(first);
+        db.Add(second);
+
+        Assert.Same(second, db.ResolveById(57));
+    }
+
+    [Fact]
     public void ResolveByGuid_Miss_IsNull()
     {
         Assert.Null(new ObjectAssetDatabase().ResolveByGuid(Guid.NewGuid()));

@@ -13,49 +13,144 @@ namespace UnturnedGodot;
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class ModelLibrary
 {
-    // Counts only current-format caches: after a format bump the stale files don't count, so the cold-load
-    // check re-extracts instead of loading nothing.
-    public static int CachedMeshCount(string cacheDir) =>
-        Directory.Exists(cacheDir)
-            ? Array.FindAll(Directory.GetFiles(cacheDir, "*.mesh"), MeshCache.IsCurrent).Length
-            : 0;
+    private static readonly bool DeduplicateGpu = System.Environment.GetEnvironmentVariable("UG_DEDUP_GPU") != "0";
+    // How long the realise phase works before handing the frame back. Fixed rather than derived from the
+    // frame rate: a slower machine has longer frames, so this is a smaller share of one, not a larger.
+    private const double RealiseSecondsPerFrame = 0.008;
 
-    // Staged variant for interactive loads: identical to Load, but yields to the render loop every
-    // `batch` meshes so the loading screen keeps animating while the ~400 ArrayMeshes are realised.
+    // Meshes prepared before they are realised and let go. Preparing all of them first meant every
+    // ImporterMesh and every ArrayMesh built from it were alive at the same time — half a gigabyte of
+    // native memory on a large map, for no gain: the prepared form is dead the moment it is realised.
+    private const int PrepareChunk = 256;
+
+    // Staged variant for interactive loads: the same two phases as Load, but the realise phase yields to
+    // the render loop on a time budget so the loading screen keeps animating.
     public static async System.Threading.Tasks.Task<Dictionary<Guid, ArrayMesh>> LoadStagedAsync(
-        string cacheDir, TextureRegistry registry, Node yieldOn, int batch = 48)
+        string cacheDir, TextureRegistry registry, Node yieldOn, IReadOnlySet<Guid>? only = null)
     {
         var library = new Dictionary<Guid, ArrayMesh>();
         if (!Directory.Exists(cacheDir))
             return library;
 
+        var sources = new List<(Guid Item, string Path)>(CachedMeshPaths(cacheDir, only));
+        IReadOnlyList<ExactFileGroups.Group<Guid>> groups = ExactFileGroups.Build(sources, DeduplicateGpu);
+
+        // Yield on a time budget rather than every N meshes: a fixed count either stalls the frame on
+        // heavy meshes or, far worse here, spends most of the phase waiting for frames it did not need —
+        // a thousand-mesh map was paying fifty frame waits to realise work worth a handful.
         var materials = new Dictionary<(string, Color, UnityMaterial.Blend, float, float, EShaderCull), Material>();
-        int sinceYield = 0;
-        foreach (string path in Directory.GetFiles(cacheDir, "*.mesh"))
+        long budget = (long)(System.Diagnostics.Stopwatch.Frequency * RealiseSecondsPerFrame);
+        long until = System.Diagnostics.Stopwatch.GetTimestamp() + budget;
+
+        for (int start = 0; start < groups.Count; start += PrepareChunk)
         {
-            if (!Guid.TryParseExact(Path.GetFileNameWithoutExtension(path), "N", out Guid guid))
-                continue;
-            if (!MeshCache.IsCurrent(path))
-                continue;
+            int count = Math.Min(PrepareChunk, groups.Count - start);
+            PreparedMesh[] prepared = await System.Threading.Tasks.Task.Run(
+                () => PrepareRange(groups, start, count));
 
-            var (verts, normals, uvs, submeshes) = MeshCache.Read(File.ReadAllBytes(path));
-            ArrayMesh? mesh = Build(verts, normals, uvs, submeshes, registry, materials);
-            if (mesh != null)
-                library[guid] = mesh;
-
-            if (++sinceYield >= batch)
+            for (int i = 0; i < prepared.Length; i++)
             {
-                sinceYield = 0;
-                await yieldOn.ToSignal(yieldOn.GetTree(), SceneTree.SignalName.ProcessFrame);
+                PreparedMesh mesh = prepared[i];
+                if (mesh.Importer != null)
+                {
+                    ArrayMesh realised = Realise(mesh, registry, materials);
+                    foreach (Guid guid in groups[start + i].Items)
+                        library[guid] = realised;
+                }
+
+                if (System.Diagnostics.Stopwatch.GetTimestamp() >= until)
+                {
+                    await yieldOn.ToSignal(yieldOn.GetTree(), SceneTree.SignalName.ProcessFrame);
+                    until = System.Diagnostics.Stopwatch.GetTimestamp() + budget;
+                }
             }
         }
+        Log.Print($"[stream] materials realised: {materials.Count} resources, "
+            + $"{registry.MaterialAliasCount} exact texture-key aliases");
         return library;
+    }
+
+    // Phase 1 — worker threads: read each cached mesh, convert it and generate its LOD chain. All of that
+    // is pure CPU on an ImporterMesh, a data-only Resource, which is what lets the whole library be built
+    // in parallel; the terrain tiles are split the same way. A map places thousands of distinct models, so
+    // this was the longest single-threaded stretch of a load.
+    private static PreparedMesh[] PrepareRange(IReadOnlyList<ExactFileGroups.Group<Guid>> groups,
+        int start, int count)
+    {
+        var prepared = new PreparedMesh[count];
+        System.Threading.Tasks.Parallel.For(0, count, i =>
+        {
+            ExactFileGroups.Group<Guid> group = groups[start + i];
+            prepared[i] = Prepare(group.Items[0], group.Path, group.ContentKey);
+        });
+        return prepared;
+    }
+
+    // A mesh converted and LOD-ed but not yet realised: Importer is null when the cache entry held nothing
+    // renderable (no vertices, or every submesh degenerate).
+    private readonly record struct PreparedMesh(Guid Guid, string ContentKey, ImporterMesh? Importer,
+        List<CachedSubmesh> Surfaces);
+
+    private static PreparedMesh Prepare(Guid guid, string path, string contentKey)
+    {
+        byte[] data;
+        try
+        {
+            data = File.ReadAllBytes(path);
+        }
+        catch (IOException)
+        {
+            return new PreparedMesh(guid, "", null, new List<CachedSubmesh>());
+        }
+
+        if (!MeshCache.IsCurrent(data)) // stale format; the extraction pass rewrites it
+            return new PreparedMesh(guid, "", null, new List<CachedSubmesh>());
+
+        var (verts, normals, uvs, submeshes) = MeshCache.Read(data);
+        return Build(guid, contentKey, verts, normals, uvs, submeshes);
+    }
+
+    // Phase 2 — main thread: GetMesh creates the RenderingServer resource, and each surface takes the
+    // deduplicated material for its texture key (materials are GPU resources too).
+    private static ArrayMesh Realise(in PreparedMesh prepared, TextureRegistry registry,
+        Dictionary<(string, Color, UnityMaterial.Blend, float, float, EShaderCull), Material> materials)
+    {
+        ArrayMesh mesh = prepared.Importer!.GetMesh();
+        int surfaces = mesh.GetSurfaceCount();
+        for (int i = 0; i < surfaces && i < prepared.Surfaces.Count; i++)
+            mesh.SurfaceSetMaterial(i, MaterialFor(prepared.Surfaces[i], registry, materials));
+        return mesh;
+    }
+
+    // The cached meshes to realise, as (guid, file bytes). With `only` given — the GUIDs the map actually
+    // places — the cache is addressed by name instead of scanned: a shared cache holding every map ever
+    // opened then costs nothing extra, where scanning it built (and kept) hundreds of ArrayMeshes, their
+    // materials and their texture registrations for objects this map never places.
+    private static IEnumerable<(Guid Guid, string Path)> CachedMeshPaths(string cacheDir, IReadOnlySet<Guid>? only)
+    {
+        if (only != null)
+        {
+            foreach (Guid guid in only)
+            {
+                if (guid == Guid.Empty)
+                    continue;
+                string path = Path.Combine(cacheDir, guid.ToString("N") + ".mesh");
+                if (File.Exists(path))
+                    yield return (guid, path);
+            }
+            yield break;
+        }
+
+        foreach (string path in Directory.GetFiles(cacheDir, "*.mesh"))
+            if (Guid.TryParseExact(Path.GetFileNameWithoutExtension(path), "N", out Guid guid))
+                yield return (guid, path);
     }
 
     // Builds the meshes and their materials, registering each textured submesh's material under its
     // texture key so the caller can apply textures later (registry.ApplyAllAvailable for a warm cache, or
     // progressively as ExtractTextures streams them in on a cold load).
-    public static Dictionary<Guid, ArrayMesh> Load(string cacheDir, TextureRegistry registry)
+    public static Dictionary<Guid, ArrayMesh> Load(string cacheDir, TextureRegistry registry,
+        IReadOnlySet<Guid>? only = null)
     {
         var library = new Dictionary<Guid, ArrayMesh>();
         if (!Directory.Exists(cacheDir))
@@ -65,27 +160,33 @@ public static class ModelLibrary
         // one StandardMaterial3D (fewer material objects + GPU parameter buffers, fewer render-state
         // changes). Scoped to this load so nothing leaks between calls.
         var materials = new Dictionary<(string, Color, UnityMaterial.Blend, float, float, EShaderCull), Material>();
-        foreach (string path in Directory.GetFiles(cacheDir, "*.mesh"))
+        var sources = new List<(Guid Item, string Path)>(CachedMeshPaths(cacheDir, only));
+        IReadOnlyList<ExactFileGroups.Group<Guid>> groups = ExactFileGroups.Build(sources, DeduplicateGpu);
+        for (int start = 0; start < groups.Count; start += PrepareChunk)
         {
-            if (!Guid.TryParseExact(Path.GetFileNameWithoutExtension(path), "N", out Guid guid))
-                continue;
-            if (!MeshCache.IsCurrent(path))
-                continue; // stale format; the extraction pass rewrites it
-
-            var (verts, normals, uvs, submeshes) = MeshCache.Read(File.ReadAllBytes(path));
-            ArrayMesh? mesh = Build(verts, normals, uvs, submeshes, registry, materials);
-            if (mesh != null)
-                library[guid] = mesh;
+            int count = Math.Min(PrepareChunk, groups.Count - start);
+            PreparedMesh[] prepared = PrepareRange(groups, start, count);
+            for (int i = 0; i < prepared.Length; i++)
+            {
+                PreparedMesh mesh = prepared[i];
+                if (mesh.Importer != null)
+                {
+                    ArrayMesh realised = Realise(mesh, registry, materials);
+                    foreach (Guid guid in groups[start + i].Items)
+                        library[guid] = realised;
+                }
+            }
         }
+
         return library;
     }
 
-    private static ArrayMesh? Build(Vector3[] verts, Vector3[] normals, Vector2[] uvs,
-        List<CachedSubmesh> submeshes, TextureRegistry registry,
-        Dictionary<(string, Color, UnityMaterial.Blend, float, float, EShaderCull), Material> materials)
+    private static PreparedMesh Build(Guid guid, string contentKey, Vector3[] verts, Vector3[] normals, Vector2[] uvs,
+        List<CachedSubmesh> submeshes)
     {
+        var empty = new List<CachedSubmesh>();
         if (verts.Length == 0 || submeshes.Count == 0)
-            return null;
+            return new PreparedMesh(guid, contentKey, null, empty);
 
         var gverts = new Vector3[verts.Length];
         for (int i = 0; i < verts.Length; i++)
@@ -122,20 +223,21 @@ public static class ModelLibrary
             gnormals = SmoothNormals(gverts, reversed);
         }
 
-        // Merge submeshes that resolve to the same deduplicated material (TextureKey/Color/Blend) into one
+        // Merge submeshes that resolve to the same complete material (TextureKey/Color/Blend/Metallic/
+        // Smoothness/Cull) into one
         // surface with concatenated indices: a mesh's several same-material submeshes then cost one
         // instanced draw call per MultiMesh instead of several. Output is pixel-identical — the vertex/
         // normal/uv pool and the material are the same, only the surface count changes.
         bool hasUv = guvs.Length == gverts.Length;
         var groups = new List<(CachedSubmesh rep, List<int> indices)>();
-        var groupByKey = new Dictionary<(string, Color, UnityMaterial.Blend), int>();
+        var groupByKey = new Dictionary<(string, Color, UnityMaterial.Blend, float, float, EShaderCull), int>();
         for (int s = 0; s < submeshes.Count; s++)
         {
             int[] idx = reversed[s];
             if (idx.Length < 3)
                 continue;
             CachedSubmesh sm = submeshes[s];
-            var key = (sm.TextureKey, sm.Color, sm.Blend);
+            var key = (sm.TextureKey, sm.Color, sm.Blend, sm.Metallic, sm.Smoothness, sm.Cull);
             if (!groupByKey.TryGetValue(key, out int gi))
             {
                 gi = groups.Count;
@@ -145,8 +247,11 @@ public static class ModelLibrary
             groups[gi].indices.AddRange(idx);
         }
 
-        var mesh = new ArrayMesh();
-        int surfaces = 0;
+        // Built through an ImporterMesh so meshoptimizer can generate the LOD chain, exactly as the
+        // terrain tiles do. Objects are the bulk of the frame's geometry — 17.2M primitives per frame on
+        // California2 — and without LODs every distant tree and house is submitted at full density.
+        var importer = new ImporterMesh();
+        var surfaces = new List<CachedSubmesh>(groups.Count);
         foreach ((CachedSubmesh rep, List<int> indices) in groups)
         {
             using var arrays = new Godot.Collections.Array(); // freed each iteration (data copied into the mesh)
@@ -157,11 +262,17 @@ public static class ModelLibrary
                 arrays[(int)Mesh.ArrayType.TexUV] = guvs;
             arrays[(int)Mesh.ArrayType.Index] = indices.ToArray();
 
-            mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
-            mesh.SurfaceSetMaterial(surfaces, MaterialFor(rep, registry, materials));
-            surfaces++;
+            // No material yet: they are GPU resources, so Realise attaches them on the main thread.
+            importer.AddSurface(Mesh.PrimitiveType.Triangles, arrays);
+            surfaces.Add(rep);
         }
-        return surfaces > 0 ? mesh : null;
+        if (surfaces.Count == 0)
+            return new PreparedMesh(guid, contentKey, null, empty);
+
+        // Same angle thresholds the terrain uses: meshoptimizer collapses what it can without folding
+        // hard edges, and Godot picks the level from screen coverage at draw time.
+        importer.GenerateLods(25f, 60f, new Godot.Collections.Array());
+        return new PreparedMesh(guid, contentKey, importer, surfaces);
     }
 
     // Area-weighted smooth normals over all submeshes (CCW front faces, so the cross product points out).
@@ -249,9 +360,13 @@ public static class ModelLibrary
     private static Material MaterialFor(CachedSubmesh sm, TextureRegistry registry,
         Dictionary<(string, Color, UnityMaterial.Blend, float, float, EShaderCull), Material> cache)
     {
-        var key = (sm.TextureKey, sm.Color, sm.Blend, sm.Metallic, sm.Smoothness, sm.Cull);
+        string textureIdentity = registry.MaterialIdentity(sm.TextureKey);
+        var key = (textureIdentity, sm.Color, sm.Blend, sm.Metallic, sm.Smoothness, sm.Cull);
         if (cache.TryGetValue(key, out Material? shared))
+        {
+            registry.Register(sm.TextureKey, shared);
             return shared; // already built and registered under this texture key
+        }
 
         if (sm.Blend == UnityMaterial.Blend.Cutout)
         {
@@ -294,8 +409,11 @@ public static class ModelLibrary
         return material;
     }
 
-    internal static ImageTexture? BuildTexture(CachedTexture cached)
+    internal static ImageTexture? BuildTexture(CachedTexture entry)
     {
+        // Cache entries written before the Crunch decoder existed still hold the container; unwrapping
+        // here means they show up on the next load instead of waiting for the cache to be rebuilt.
+        CachedTexture cached = CachedTexture.Decoded(entry);
         byte[] pixels = cached.Pixels;
         Image.Format format;
         switch (cached.Format)

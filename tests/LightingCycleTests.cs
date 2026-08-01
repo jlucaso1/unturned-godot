@@ -60,7 +60,8 @@ public class LightingCycleTests
         sun: new Color(v, v, v), sea: new Color(v, v, v), fog: new Color(v, v, v),
         skyTop: new Color(v, v, v), skyHorizon: new Color(v, v, v), skyGround: new Color(v, v, v),
         ambientSky: new Color(v, v, v), ambientEquator: new Color(v, v, v), ambientGround: new Color(v, v, v),
-        intensity: v, fogDensity: v, clouds: v, shadows: v, rays: v, cloudColor: new Color(v, v, v));
+        intensity: v, fogDensity: v, clouds: v, shadows: v, rays: v, cloudColor: new Color(v, v, v),
+        raysColor: new Color(v, v, v));
 
     private static readonly IReadOnlyList<LightingKeyframe> Times = new[]
     {
@@ -87,6 +88,7 @@ public class LightingCycleTests
         Assert.Equal(0.5f, k.FogDensity, 4);
         Assert.Equal(0.5f, k.Shadows, 4);
         Assert.Equal(0.5f, k.CloudColor.R, 4); // ELightingColor.CLOUDS blends like every other channel
+        Assert.Equal(0.5f, k.RaysColor.R, 4);  // and so does ELightingColor.RAYS
     }
 
     // updateLighting's stars ramp (LevelLighting.cs 895/917/933/951): held at 1.0 all day, lerped to 0.05

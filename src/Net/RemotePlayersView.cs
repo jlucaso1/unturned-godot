@@ -27,15 +27,25 @@ public partial class RemotePlayersView : Node3D
     private string _unturnedPath = "";
     private System.Func<MovementAudio>? _audioFactory;
     private readonly Dictionary<byte, Avatar> _avatars = new();
+    private bool _ownsTemplate;
 
     public static RemotePlayersView Create(NetClient client, string unturnedPath,
-        System.Func<MovementAudio>? audioFactory) => new()
+        System.Func<MovementAudio>? audioFactory, Node3D? localTemplate = null) => new()
         {
             Name = "RemotePlayers",
             _client = client,
             _unturnedPath = unturnedPath,
             _audioFactory = audioFactory,
+            _template = localTemplate,
+            _ownsTemplate = localTemplate == null,
         };
+
+    public override void _ExitTree()
+    {
+        if (_ownsTemplate)
+            _template?.Free();
+        _template = null;
+    }
 
     public override void _Process(double delta)
     {
@@ -73,7 +83,9 @@ public partial class RemotePlayersView : Node3D
             }
     }
 
-    private Node3D? _template; // one full CharacterModel.Build; every remote is a cheap Clone of it
+    // Main passes the already-imported local Player_Client. Joining multiplayer therefore never repeats
+    // resources.assets parsing on the first remote avatar; the lazy build remains for standalone callers.
+    private Node3D? _template;
 
     private Avatar Spawn(byte id, string name)
     {
@@ -98,7 +110,7 @@ public partial class RemotePlayersView : Node3D
         root.AddChild(label);
 
         AddChild(root);
-        GD.Print($"[net] remote player '{name}' (id {id}) spawned");
+        Log.Print($"[net] remote player '{name}' (id {id}) spawned");
         return new Avatar { Root = root, Rig = rig, Audio = audio };
     }
 

@@ -60,5 +60,23 @@ public class TerrainHeightfieldTests
     }
 
     [Fact]
+    public void CompactMapData_MatchesFloatConversionWithoutIntermediateGrids()
+    {
+        var raw = new ushort[Res * Res];
+        raw[0] = 0;
+        raw[(1 * Res) + 2] = ushort.MaxValue;
+        raw[(8 * Res) + 9] = 0x8123;
+
+        float[] compact = TerrainHeightfield.MapData(raw);
+
+        Assert.Equal(-Landscape.TILE_HEIGHT / 2f, compact[(Res - 1) * Res], 0.001f);
+        Assert.Equal(Landscape.TILE_HEIGHT / 2f, compact[((Res - 2) * Res) + 2], 0.001f);
+        Assert.Equal((-Landscape.TILE_HEIGHT / 2f)
+            + ((0x8123 / (float)ushort.MaxValue) * Landscape.TILE_HEIGHT),
+            compact[((Res - 1 - 8) * Res) + 9], 0.001f);
+        Assert.Throws<System.ArgumentException>(() => TerrainHeightfield.MapData(new ushort[3]));
+    }
+
+    [Fact]
     public void CellSize_IsFourMetres() => Assert.Equal(4f, TerrainHeightfield.CellSize, 0.0001f);
 }

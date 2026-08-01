@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Text;
 
@@ -15,17 +16,13 @@ public static class TypeTreeReader
     }
 
     // Types are shared across thousands of objects, so cache the built hierarchy by node-list identity.
-    private static readonly Dictionary<List<TypeTreeNode>, Tree> TreeCache = new();
+    // Concurrent because a load decodes several bundles at once, one thread each: a plain Dictionary
+    // written from two of them corrupts its buckets. Two threads racing to build the same tree just build
+    // it twice and keep one; the tree is derived purely from `nodes`, so either is the same.
+    private static readonly ConcurrentDictionary<List<TypeTreeNode>, Tree> TreeCache = new();
 
-    public static Dictionary<string, object> Read(List<TypeTreeNode> nodes, UnityBinaryReader reader)
-    {
-        if (!TreeCache.TryGetValue(nodes, out Tree? root))
-        {
-            root = BuildTree(nodes);
-            TreeCache[nodes] = root;
-        }
-        return (Dictionary<string, object>)ReadValue(root, reader);
-    }
+    public static Dictionary<string, object> Read(List<TypeTreeNode> nodes, UnityBinaryReader reader) =>
+        (Dictionary<string, object>)ReadValue(TreeCache.GetOrAdd(nodes, BuildTree), reader);
 
     private static Tree BuildTree(List<TypeTreeNode> nodes)
     {

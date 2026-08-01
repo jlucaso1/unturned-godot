@@ -3,6 +3,7 @@ using Godot;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Data;
 using UnturnedGodot.Player;
+using UnturnedGodot.Unity;
 
 namespace UnturnedGodot;
 
@@ -20,14 +21,19 @@ public sealed class MovementAudio
     private readonly OneShotAudio _audio;
     private readonly MovementSoundClock _clock;
 
+    // Turns the directory a physics material was scanned from into the tag of the bundle that carries its
+    // audio. Definitions are cached per bundle, because two bundles can name one the same thing.
+    private readonly Func<string, string> _bundleTagOf;
+
     public MovementAudio(PhysicsMaterialBank bank, LandscapePhysics landscape, SplatSampler splat,
-        OneShotAudio audio, bool startGrounded)
+        OneShotAudio audio, bool startGrounded, Func<string, string> bundleTagOf)
     {
         _bank = bank;
         _landscape = landscape;
         _splat = splat;
         _audio = audio;
         _clock = new MovementSoundClock(startGrounded);
+        _bundleTagOf = bundleTagOf;
     }
 
     public void Tick(EPlayerStance stance, bool moving, bool grounded, Vector3 position, float dt)
@@ -50,11 +56,12 @@ public sealed class MovementAudio
         string? materialName = _landscape.PhysicsNameOf(materialGuid);
         if (materialName == null)
             return;
-        string? defPath = _bank.FindAudioDefPath(materialName, key);
-        if (defPath == null)
+        // The asset that DEFINED the key decides which bundle the audio came from, which is not always
+        // the material the surface names: a workshop surface commonly falls back to a core one.
+        if (_bank.FindAudioDef(materialName, key) is not { } def)
             return;
 
-        _audio.Play(AudioExtractor.DefNameOf(defPath), position,
+        _audio.Play(AudioExtractor.DefKey(_bundleTagOf(def.Owner.Directory), def.Path), position,
             FootstepConfig.VolumeFor(stance, landing),
             landing ? FootstepConfig.LandMaxDistance : FootstepConfig.FootstepMaxDistance);
     }

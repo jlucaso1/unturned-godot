@@ -19,11 +19,18 @@ public sealed class FoliageInstances
     public Guid Asset { get; }
     public float[] Packed { get; }
     public int Count => Packed.Length / Stride;
+    public FoliageBounds Bounds { get; }
 
     public FoliageInstances(Guid asset, float[] packed)
+        : this(asset, packed, FoliageBounds.Measure(packed))
+    {
+    }
+
+    internal FoliageInstances(Guid asset, float[] packed, FoliageBounds bounds)
     {
         Asset = asset;
         Packed = packed;
+        Bounds = bounds;
     }
 
     // Reconstructs the i-th instance's Godot transform from the packed floats (for callers/tests that need a
@@ -37,6 +44,47 @@ public sealed class FoliageInstances
                 new Vector3(Packed[o + 1], Packed[o + 5], Packed[o + 9]),
                 new Vector3(Packed[o + 2], Packed[o + 6], Packed[o + 10])),
             new Vector3(Packed[o + 3], Packed[o + 7], Packed[o + 11]));
+    }
+}
+
+// Bounds already observed while decoding a packed foliage run. Carrying this tiny summary forward avoids
+// reading all twelve floats of every transform again when render chunks are assembled (about 189 MiB of
+// redundant traffic on California2). Combining summaries is exact: min/max and max are associative.
+public readonly record struct FoliageBounds(Vector3 Min, Vector3 Max, float MaxScaleSquared, int Count)
+{
+    public static FoliageBounds Empty => new(
+        new Vector3(float.MaxValue, float.MaxValue, float.MaxValue),
+        new Vector3(float.MinValue, float.MinValue, float.MinValue), 0f, 0);
+
+    public static FoliageBounds Measure(float[] packed)
+    {
+        FoliageBounds bounds = Empty;
+        for (int offset = 0; offset + 11 < packed.Length; offset += 12)
+            bounds = bounds.Include(packed, offset);
+        return bounds;
+    }
+
+    public FoliageBounds Include(FoliageBounds other)
+    {
+        if (other.Count == 0)
+            return this;
+        if (Count == 0)
+            return other;
+        return new FoliageBounds(Min.Min(other.Min), Max.Max(other.Max),
+            MathF.Max(MaxScaleSquared, other.MaxScaleSquared), Count + other.Count);
+    }
+
+    internal FoliageBounds Include(float[] packed, int offset)
+    {
+        var position = new Vector3(packed[offset + 3], packed[offset + 7], packed[offset + 11]);
+        float scaleSquared =
+            (packed[offset] * packed[offset]) + (packed[offset + 1] * packed[offset + 1]) +
+            (packed[offset + 2] * packed[offset + 2]) + (packed[offset + 4] * packed[offset + 4]) +
+            (packed[offset + 5] * packed[offset + 5]) + (packed[offset + 6] * packed[offset + 6]) +
+            (packed[offset + 8] * packed[offset + 8]) + (packed[offset + 9] * packed[offset + 9]) +
+            (packed[offset + 10] * packed[offset + 10]);
+        return new FoliageBounds(Count == 0 ? position : Min.Min(position),
+            Count == 0 ? position : Max.Max(position), MathF.Max(MaxScaleSquared, scaleSquared), Count + 1);
     }
 }
 
@@ -77,7 +125,65 @@ public sealed class LevelFoliage
     }
 
     public static LevelFoliage? Load(string blobPath) =>
-        File.Exists(blobPath) ? Parse(File.ReadAllBytes(blobPath)) : null;
+        !File.Exists(blobPath) ? null
+        : System.Environment.GetEnvironmentVariable("UG_FOLIAGE_STREAM_LOAD") == "0"
+            ? Parse(File.ReadAllBytes(blobPath)) : ParseBatchedFile(blobPath);
+
+    // The workshop California2 blob is 273 MiB, while an individual tile region is at most ~62 KiB.
+    // Reading the whole file retained that input beside the ~198 MiB packed output until parsing ended.
+    // Process offset-sorted batches instead: each batch is one sequential read and its tiles still parse
+    // in parallel, but input memory is bounded to a few MiB rather than the complete blob.
+    private static LevelFoliage ParseBatchedFile(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, System.IO.FileAccess.Read, FileShare.Read,
+            bufferSize: 1024 * 1024, FileOptions.SequentialScan);
+        using var reader = new BinaryReader(stream, System.Text.Encoding.UTF8, leaveOpen: true);
+        int version = reader.ReadInt32();
+        if (version is not (1 or VersionAssetListHeader))
+            throw new NotSupportedException($"Unsupported Foliage.blob version {version}");
+
+        int tileCount = reader.ReadInt32();
+        var coords = new (int x, int y, long offset)[tileCount];
+        for (int i = 0; i < coords.Length; i++)
+            coords[i] = (reader.ReadInt32(), reader.ReadInt32(), reader.ReadInt64());
+
+        var assetGuids = new List<Guid>();
+        if (version >= VersionAssetListHeader)
+        {
+            int assetCount = reader.ReadInt32();
+            for (int i = 0; i < assetCount; i++)
+                assetGuids.Add(new Guid(reader.ReadBytes(16)));
+        }
+
+        long bodyStart = stream.Position;
+        var order = new int[tileCount];
+        for (int i = 0; i < tileCount; i++) order[i] = i;
+        Array.Sort(order, (a, b) => coords[a].offset.CompareTo(coords[b].offset));
+        var tileInstances = new List<FoliageInstances>?[tileCount];
+        int tilesPerBatch = int.TryParse(System.Environment.GetEnvironmentVariable("UG_FOLIAGE_LOAD_BATCH"),
+            out int configured) ? Math.Clamp(configured, 128, 16384) : 8192;
+        for (int first = 0; first < tileCount; first += tilesPerBatch)
+        {
+            int last = Math.Min(first + tilesPerBatch, tileCount);
+            long relativeStart = coords[order[first]].offset;
+            long relativeEnd = last < tileCount ? coords[order[last]].offset : stream.Length - bodyStart;
+            int length = checked((int)(relativeEnd - relativeStart));
+            var batch = new byte[length];
+            stream.Position = bodyStart + relativeStart;
+            stream.ReadExactly(batch);
+
+            System.Threading.Tasks.Parallel.For(first, last, at =>
+            {
+                int index = order[at];
+                int p = checked((int)(coords[index].offset - relativeStart));
+                List<FoliageInstances> instances = ReadTile(batch, ref p, version, assetGuids);
+                if (instances.Count > 0)
+                    tileInstances[index] = instances;
+            });
+        }
+
+        return Assemble(version, assetGuids, coords, tileInstances);
+    }
 
     // Parses directly over the byte[] with a cursor and explicit little-endian reads (BinaryPrimitives),
     // instead of wrapping a MemoryStream+BinaryReader — the blob is ~667k instances, so this avoids ~11M
@@ -116,8 +222,14 @@ public sealed class LevelFoliage
                 tileInstances[i] = instances;
         });
 
+        return Assemble(version, assetGuids, coords, tileInstances);
+    }
+
+    private static LevelFoliage Assemble(int version, IReadOnlyList<Guid> assetGuids,
+        (int x, int y, long offset)[] coords, List<FoliageInstances>?[] tileInstances)
+    {
         var tiles = new List<FoliageTile>();
-        for (int i = 0; i < tileCount; i++)
+        for (int i = 0; i < coords.Length; i++)
             if (tileInstances[i] is { } instances)
                 tiles.Add(new FoliageTile(coords[i].x, coords[i].y, instances));
 
@@ -136,13 +248,16 @@ public sealed class LevelFoliage
 
             int matrixCount = ReadInt32(data, ref pos);
             var packed = new float[matrixCount * 12];
+            FoliageBounds bounds = FoliageBounds.Empty;
             for (int m = 0; m < matrixCount; m++)
             {
-                PackTransform(data, ref pos, packed, m * 12);
+                int offset = m * 12;
+                PackTransform(data, ref pos, packed, offset);
+                bounds = bounds.Include(packed, offset);
                 pos++; // clearWhenBaked flag (editor-only bake bookkeeping)
             }
             if (matrixCount > 0)
-                result.Add(new FoliageInstances(asset, packed));
+                result.Add(new FoliageInstances(asset, packed, bounds));
         }
         return result;
     }

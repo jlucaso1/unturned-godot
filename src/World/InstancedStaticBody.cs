@@ -28,11 +28,26 @@ public partial class InstancedStaticBody : Node3D
     {
         _body = PhysicsServer3D.BodyCreate();
         PhysicsServer3D.BodySetMode(_body, PhysicsServer3D.BodyMode.Static);
-        PhysicsServer3D.BodySetSpace(_body, GetWorld3D().Space);
         PhysicsServer3D.BodySetCollisionLayer(_body, CollisionLayer);
         PhysicsServer3D.BodySetCollisionMask(_body, 1);
+        // Point the body back at this node, so a ray/shape hit resolves to a real object instead of a
+        // bare RID. A StaticBody3D does this for you; a server-owned body does not, and without it every
+        // query result on the object world is anonymous — which made the collision diagnostics report
+        // "?" as the owner and left no way to get from a bad surface back to the GUID that produced it.
+        PhysicsServer3D.BodyAttachObjectInstanceId(_body, GetInstanceId());
+
+        // Shapes go on BEFORE the body joins a space. Each body_add_shape on a body that is already in a
+        // space makes the physics server re-register it with the broadphase, so adding thousands of shapes
+        // that way costs far more than adding them first and joining once
+        // (godotengine/godot#24026).
         foreach ((int shape, Transform3D transform) in Placements)
             PhysicsServer3D.BodyAddShape(_body, Shapes[shape].GetRid(), transform);
+
+        PhysicsServer3D.BodySetSpace(_body, GetWorld3D().Space);
+        // PhysicsServer copied every shape RID/transform above. Keeping thousands of managed tuples on
+        // every body serves no later query and inflated steady-state RAM for the whole session.
+        if (OS.GetEnvironment("UG_KEEP_PHYSICS_PLACEMENTS") != "1")
+            Placements = System.Array.Empty<(int Shape, Transform3D Transform)>();
     }
 
     public override void _ExitTree()

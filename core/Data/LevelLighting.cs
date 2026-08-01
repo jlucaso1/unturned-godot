@@ -29,6 +29,9 @@ public readonly struct LightingKeyframe
     public readonly Color AmbientEquator;
     public readonly Color AmbientGround;
     public readonly Color CloudColor; // ELightingColor.CLOUDS: the skybox's cloud rim/body tint
+    // ELightingColor.RAYS: the tint of the sun shafts. LevelLighting pairs it with the RAYS single
+    // (Rays below) as UpdateSunShafts(sunFlare, raysColor) / raysIntensity = singles[RAYS] * 4.
+    public readonly Color RaysColor;
     public readonly float Intensity; // sun brightness
     public readonly float FogDensity;
     public readonly float Clouds;
@@ -37,7 +40,7 @@ public readonly struct LightingKeyframe
 
     public LightingKeyframe(Color sun, Color sea, Color fog, Color skyTop, Color skyHorizon, Color skyGround,
         Color ambientSky, Color ambientEquator, Color ambientGround, float intensity, float fogDensity,
-        float clouds, float shadows, float rays, Color cloudColor = default)
+        float clouds, float shadows, float rays, Color cloudColor = default, Color raysColor = default)
     {
         Sun = sun;
         Sea = sea;
@@ -49,6 +52,7 @@ public readonly struct LightingKeyframe
         AmbientEquator = ambientEquator;
         AmbientGround = ambientGround;
         CloudColor = cloudColor;
+        RaysColor = raysColor;
         Intensity = intensity;
         FogDensity = fogDensity;
         Clouds = clouds;
@@ -158,7 +162,8 @@ public sealed class LevelLighting
             skyTop: colors[3], skyHorizon: colors[4], skyGround: colors[5],
             ambientSky: colors[6], ambientEquator: colors[7], ambientGround: colors[8],
             intensity, fogDensity, clouds, shadows, rays,
-            cloudColor: colors[9]); // colors[10]/[11] (RAYS, PARTICLE_LIGHTING) feed legacy sun shafts
+            cloudColor: colors[9],
+            raysColor: colors[10]); // colors[11] (PARTICLE_LIGHTING) is unused by the renderer
     }
 
     private static Color ReadColor(BinaryReader r)

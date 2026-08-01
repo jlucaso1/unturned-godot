@@ -60,13 +60,14 @@ public sealed class ZombieInstance
     public float PendingHit = -1f;    // counts down from attackTime/2 to the damage landing
     public float LeaveDelay;          // Zombie.leave: stand still this long, then walk to LeaveTo
     public Vector3 LeaveTo;
-    public sbyte DetourSide;          // sticky side while skirting a head-on block (see ApplyStep)
     public bool RepathGranted;        // this tick's path-query token (granted round-robin)
     public readonly List<Vector3> PathPoints = new(); // the Seeker's current route over the navmesh
     public int CurrentWaypointIndex;  // LegacyAIPathNoRedist.currentWaypointIndex
     public bool TargetReached;        // LegacyAIPathNoRedist.targetReached
+    public bool PathIsPartial;        // route ends at the closest reachable point, not the target island
     public Vector3 SteerDirection;    // LegacyAIPathNoRedist.targetDirection
     public float RepathTimer;         // counts down to the next path recalculation
+    public float BlockedRouteTime;    // sustained physical failure while following the current route
 
     // ZombieManager.getZombieSpeed with Slow_Movement=false (NORMAL difficulty).
     public float Speed => Speciality switch
@@ -122,8 +123,8 @@ public delegate bool VisionBlocked(Vector3 from, Vector3 to);
 public delegate Vector3 ZombieMoveResolver(Vector3 from, Vector3 to, float radius);
 
 // Finds a walkable route over the level's pre-baked navmesh (the Seeker's A* + funnel). Fills
-// waypoints from start to destination and returns whether any path exists; the caller falls back
-// to the straight-line seek when there is none. Null means no navmesh (maps without nav data).
+// waypoints from start to destination and returns whether any path exists. Null means no navmesh
+// (maps without nav data); a ready graph returning false is authoritative and never grants wall travel.
 public delegate bool ZombiePathQuery(Vector3 from, Vector3 to, List<Vector3> path);
 
 // Samples the REAL walking surface near a position — object floors, sidewalks, stairs — the way a
@@ -161,6 +162,11 @@ public sealed class ZombieSystem
     // PEI's map after warm-up, so a saturated budget is ~10 ms of an 80 ms tick — deliberate
     // headroom spent on route freshness.
     public const int MaxRepathsPerTick = 8;
+    // A valid slide can deliver less than the requested forward component while still moving around an
+    // obstacle. Only sustained near-zero delivery invalidates a route, so a stale path through a window
+    // cannot outrank the pathfinder's later partial-but-executable route through the door forever.
+    public const float BlockedRouteTimeout = 0.75f;
+    public const float MinRouteProgressFraction = 0.2f;
     public const float MaxChaseDistanceSquared = 4096f; // Zombie.cs: target beyond 64 m -> leave
     public const float SwingInterval = 1f;              // Time.time - lastAttack > 1 starts a swing
     public const float AttackTime = 0.5f;               // dedicated-server Attack_0 fallback length
@@ -176,6 +182,7 @@ public sealed class ZombieSystem
     private readonly Dictionary<byte, int> _agro = new(); // Player.agro: how many zombies hunt each player
     private Random _random = new();
     private float _detectTimer;
+    private bool _pathReadyThisTick;
 
     public IReadOnlyList<ZombieInstance> Zombies => _zombies;
 
@@ -193,6 +200,11 @@ public sealed class ZombieSystem
 
     // The Seeker's navmesh pathfinding, wired to the NavigationServer by the host (optional).
     public ZombiePathQuery? PathQuery;
+
+    // False while an attached pathfinder is still publishing/reconciling its graph. This is distinct
+    // from PathQuery returning false for a READY graph, which means the destination is unreachable.
+    // While unavailable the original movement fallback keeps pursuing directly instead of freezing.
+    public Func<bool>? PathReady;
 
     // Real ground (object floors, sidewalks) via physics on the host; heightfield otherwise.
     public ZombieGroundSnap? GroundSnap;
@@ -302,6 +314,10 @@ public sealed class ZombieSystem
 
     public void Tick(IReadOnlyList<ZombiePlayerView> players, float dt)
     {
+        // Poll an engine-backed pathfinder once per authoritative tick, not once per hunter. During a
+        // small map's async publication this probe can cross into NavigationServer; a horde must not turn
+        // one readiness check into hundreds of identical engine calls.
+        _pathReadyThisTick = PathQuery != null && (PathReady?.Invoke() ?? true);
         _detectTimer += dt;
         if (_detectTimer >= ZombieDetection.DetectInterval)
         {
@@ -316,7 +332,7 @@ public sealed class ZombieSystem
         int count = _zombies.Count;
         for (int i = 0; i < count; i++)
             _zombies[i].RepathGranted = false;
-        if (count > 0 && PathQuery != null)
+        if (count > 0 && _pathReadyThisTick)
         {
             _repathCursor %= count;
             int granted = 0;
@@ -396,8 +412,10 @@ public sealed class ZombieSystem
         zombie.Path = RollPath(zombie, player.Id);
         zombie.RepathTimer = 0f; // fresh target: path on the next move
         zombie.PathPoints.Clear();
+        zombie.BlockedRouteTime = 0f;
         zombie.CurrentWaypointIndex = 0;
         zombie.TargetReached = false;
+        zombie.PathIsPartial = false;
         AdjustAgro(player.Id, +1);
         if (zombie.State is EZombieState.Idle or EZombieState.Return)
             zombie.State = EZombieState.Chase;
@@ -518,17 +536,18 @@ public sealed class ZombieSystem
         Move(zombie, destination, canTurn, directDirection, dt);
     }
 
-    // LegacyAIPathNoRedist.move(), ported: repath on the cadence (a FAILED query keeps the current
-    // route, exactly like OnPathComplete ignoring an errored ABPath), then follow the route with
+    // LegacyAIPathNoRedist.move(), ported: repath on the cadence (a FAILED query keeps a route that
+    // physics is still delivering, like OnPathComplete ignoring an errored ABPath), then follow it with
     // CalculateVelocity + RotateTowards and step through the physics. With no route at all the
     // zombie stands (path == null in the original); the straight-line seek only exists for maps
     // without a navmesh, where the original also falls back to its NonPathfinding component.
     private void Move(ZombieInstance zombie, Vector3 destination, bool canTurn,
         Vector3 directDirection, float dt)
     {
-        if (PathQuery == null)
+        ZombiePathQuery? pathQuery = PathQuery;
+        if (!_pathReadyThisTick || pathQuery == null)
         {
-            MoveTowards(zombie, destination, dt); // NonPathfindingZombieMovementComponent fallback
+            MoveTowards(zombie, destination, dt); // graph absent/still building: collision-aware fallback
             return;
         }
 
@@ -537,33 +556,71 @@ public sealed class ZombieSystem
         {
             zombie.RepathGranted = false;
             zombie.RepathTimer = RepathRate;
-            // Stabilize the query's destination: project it onto the navmesh XZ-first (its own
-            // floor), so an off-mesh target can never snap the route into a basement below it.
+            // Stabilize BOTH ends of the query: project them onto the navmesh XZ-first (their own
+            // floor), so an off-mesh point can never snap the route onto a different storey. The
+            // destination needed this or a target standing over a basement pulled the route down
+            // there; the start needs it for the same reason — a zombie pushed a little off the mesh
+            // by collision, or standing on a floor the mesh does not cover, otherwise begins its
+            // route at whatever polygon is nearest in 3D, which can be below or behind it. The route
+            // then walks it back to that polygon first, which reads as a pointless detour.
+            Vector3 queryFrom = zombie.Position;
             Vector3 queryTo = destination;
-            if (_navmesh != null && LevelNavmesh.SnapXZ(_navmesh, destination, out Vector3 snapped))
-                queryTo = snapped;
-            _scratchPath.Clear();
-            if (PathQuery(zombie.Position, queryTo, _scratchPath)
-                && HorizontalDistanceSquared(_scratchPath[^1], queryTo) <= 4f)
+            if (_navmesh != null)
             {
-                // Success: replace the route (OnPathComplete). A route that stops short of the
-                // destination is Godot's closest-reachable result — the official ABPath ERRORS on
-                // unreachable targets instead, so it is treated as a failure and discarded.
-                zombie.PathPoints.Clear();
-                zombie.PathPoints.AddRange(_scratchPath);
-                zombie.CurrentWaypointIndex = 0;
-                zombie.TargetReached = false;
+                if (LevelNavmesh.SnapXZ(_navmesh, destination, out Vector3 snappedTo))
+                    queryTo = snappedTo;
+                if (LevelNavmesh.SnapXZ(_navmesh, zombie.Position, out Vector3 snappedFrom))
+                    queryFrom = snappedFrom;
+            }
+            _scratchPath.Clear();
+            if (pathQuery(queryFrom, queryTo, _scratchPath) && _scratchPath.Count > 0)
+            {
+                float newError = HorizontalDistanceSquared(_scratchPath[^1], queryTo);
+                float fromError = HorizontalDistanceSquared(queryFrom, queryTo);
+                float oldError = zombie.PathPoints.Count > 0
+                    ? HorizontalDistanceSquared(zombie.PathPoints[^1], queryTo)
+                    : float.PositiveInfinity;
+
+                // Godot returns a useful PARTIAL route to the closest point in the start polygon's
+                // connected island when the destination is on another island. PEI contains many such
+                // authored islands around buildings. Discarding that route left a newly aggroed zombie
+                // in Chase with no steering: clients played its running animation at its random spawn
+                // yaw, which looked exactly like it was running in the wrong direction. Follow a partial
+                // route when it makes real progress, but never replace an existing route with a worse
+                // endpoint. A false/empty/non-progressing query still stands rather than crossing walls.
+                bool complete = newError <= 4f;
+                bool improvesFrom = newError + 0.01f < fromError;
+                bool improvesRoute = newError + 0.01f < oldError;
+                if (complete || (improvesFrom && improvesRoute))
+                {
+                    zombie.PathPoints.Clear();
+                    zombie.PathPoints.AddRange(_scratchPath);
+                    zombie.CurrentWaypointIndex = 0;
+                    zombie.TargetReached = false;
+                    zombie.PathIsPartial = !complete;
+                    zombie.BlockedRouteTime = 0f;
+                }
             }
         }
 
         if (zombie.PathPoints.Count == 0)
             return; // no route has ever succeeded: stand, like the original with path == null
 
+        // Once a partial route has safely carried the body to the edge of its connected nav island,
+        // continue with the collision-aware movement component. This repairs small graph seams without
+        // granting wall traversal: MoveResolver still sweeps/slides the real capsule, so a genuine wall
+        // holds while an artificial navmesh split no longer strands a running-in-place zombie.
+        if (zombie.PathIsPartial && zombie.TargetReached)
+        {
+            MoveTowards(zombie, destination, dt, routeGuided: true);
+            return;
+        }
+
         Vector3 velocity = CalculateVelocity(zombie, destination, canTurn, dt);
         if (!canTurn)
             zombie.SteerDirection = directDirection;
         RotateTowards(zombie, zombie.SteerDirection, dt);
-        ApplyStep(zombie, velocity * dt);
+        ApplyStep(zombie, velocity * dt, dt, routeGuided: true);
     }
 
     private readonly List<Vector3> _scratchPath = new();
@@ -691,6 +748,8 @@ public sealed class ZombieSystem
 
         zombie.RepathTimer = 0f; // the retreat is a new destination
         zombie.PathPoints.Clear();
+        zombie.BlockedRouteTime = 0f;
+        zombie.PathIsPartial = false;
         zombie.CurrentWaypointIndex = 0;
         zombie.TargetReached = false;
         zombie.LeaveTo = retreat;
@@ -727,7 +786,8 @@ public sealed class ZombieSystem
 
     // NonPathfindingZombieMovementComponent.Move: straight-line seek with its own 720°/s turning —
     // the original's fallback when no pathfinding exists, kept for maps without navmesh data.
-    private void MoveTowards(ZombieInstance zombie, Vector3 targetPosition, float dt)
+    private void MoveTowards(ZombieInstance zombie, Vector3 targetPosition, float dt,
+        bool routeGuided = false)
     {
         Face(zombie, targetPosition, dt);
         Vector3 flat = new(targetPosition.X - zombie.Position.X, 0f, targetPosition.Z - zombie.Position.Z);
@@ -735,63 +795,30 @@ public sealed class ZombieSystem
         if (distance < 1e-4f)
             return;
         float step = MathF.Min(zombie.Speed * dt, distance);
-        ApplyStep(zombie, flat / distance * step);
+        ApplyStep(zombie, flat / distance * step, dt, routeGuided);
     }
 
     // The physics leg of a movement step: world collision (the host's capsule collide-and-slide),
     // then the other zombies' capsules (CharacterController semantics: the mover is pushed out,
     // the blocker never budges), re-resolved against the world so separation can't shove anyone
-    // through a wall, and finally the ground snap.
-    private void ApplyStep(ZombieInstance zombie, Vector3 step)
+    // through a wall, and finally the ground snap. Sustained physical non-delivery invalidates only the
+    // stale route so a newly reconciled door route is allowed to replace it on the next bounded repath.
+    private void ApplyStep(ZombieInstance zombie, Vector3 step, float dt, bool routeGuided)
     {
         if ((step.X * step.X) + (step.Z * step.Z) < 1e-10f)
             return;
-        Vector3 next = zombie.Position + step;
+        Vector3 before = zombie.Position;
+        Vector3 next = before + step;
 
         if (MoveResolver != null)
         {
             next = MoveResolver(zombie.Position, next, zombie.Radius);
 
-            // A Unity CharacterController resolves collisions ITERATIVELY per move, so a dead-on
-            // block destabilizes sideways within a frame or two; our single-sweep resolve is
-            // deterministic and can deadlock nose-first forever (a plateau corner the funnel cut
-            // over, a prop edge). Recreate that escape: when the step made under a quarter of its
-            // length, sweep both tangents and take the side that physically opens — preferring,
-            // when both do, the one ending closer ALONG the blocked direction, with the previous
-            // side as the near-tie hysteresis so curved obstacles are rounded, never orbited.
-            float stepLen = MathF.Sqrt((step.X * step.X) + (step.Z * step.Z));
-            float progress = HorizontalDistanceSquared(next, zombie.Position);
-            if (progress < stepLen * stepLen * 0.0625f)
-            {
-                var tangent = new Vector3(-step.Z / stepLen, 0f, step.X / stepLen) * stepLen;
-                Vector3 ahead = zombie.Position + (step / stepLen * 4f); // where it wants to go
-                Vector3 plus = MoveResolver(zombie.Position, zombie.Position + tangent, zombie.Radius);
-                Vector3 minus = MoveResolver(zombie.Position, zombie.Position - tangent, zombie.Radius);
-                float blocked = stepLen * stepLen * 0.0625f;
-                bool plusMoves = HorizontalDistanceSquared(plus, zombie.Position) > blocked;
-                bool minusMoves = HorizontalDistanceSquared(minus, zombie.Position) > blocked;
-                sbyte side;
-                if (plusMoves && minusMoves)
-                {
-                    float gain = HorizontalDistanceSquared(minus, ahead)
-                        - HorizontalDistanceSquared(plus, ahead);
-                    side = MathF.Abs(gain) < 0.01f
-                        ? (zombie.DetourSide != 0 ? zombie.DetourSide : (sbyte)1)
-                        : (gain > 0f ? (sbyte)1 : (sbyte)-1);
-                }
-                else if (plusMoves || minusMoves)
-                {
-                    side = plusMoves ? (sbyte)1 : (sbyte)-1;
-                }
-                else
-                {
-                    side = zombie.DetourSide != 0 ? zombie.DetourSide : (sbyte)1;
-                }
-                zombie.DetourSide = side;
-                Vector3 detour = side > 0 ? plus : minus;
-                if (HorizontalDistanceSquared(detour, zombie.Position) > progress)
-                    next = detour;
-            }
+            // No sidestep heuristic here on purpose: the original has none. A blocked zombie in
+            // Unturned simply keeps pushing, and its CharacterController.Move slides it free over a
+            // frame or two because that resolve is ITERATIVE. That iteration lives in MoveResolver
+            // (the host's collide-and-slide), which is where the escape belongs — picking a side
+            // here re-decided every tick and produced a visible left-right shuffle at window sills.
         }
 
         bool separated = false;
@@ -825,6 +852,37 @@ public sealed class ZombieSystem
             next.Y = y;
         }
         zombie.Position = next;
+
+        if (!routeGuided)
+        {
+            zombie.BlockedRouteTime = 0f;
+            return;
+        }
+
+        float requestedSquared = (step.X * step.X) + (step.Z * step.Z);
+        float deliveredX = next.X - before.X, deliveredZ = next.Z - before.Z;
+        float deliveredSquared = (deliveredX * deliveredX) + (deliveredZ * deliveredZ);
+        float minimumSquared = requestedSquared
+            * MinRouteProgressFraction * MinRouteProgressFraction;
+        if (deliveredSquared >= minimumSquared)
+        {
+            zombie.BlockedRouteTime = 0f;
+            return;
+        }
+
+        zombie.BlockedRouteTime += MathF.Max(0f, dt);
+        if (zombie.BlockedRouteTime + 1e-6f < BlockedRouteTimeout)
+            return;
+
+        // The physics world is authoritative: after sustained failure this route is demonstrably stale.
+        // Clear it before the next repath so a partial route with a worse endpoint can be considered on
+        // executability instead of losing forever to the blocked route's perfect endpoint score.
+        zombie.BlockedRouteTime = 0f;
+        zombie.PathPoints.Clear();
+        zombie.PathIsPartial = false;
+        zombie.CurrentWaypointIndex = 0;
+        zombie.TargetReached = false;
+        zombie.RepathTimer = 0f;
     }
 
     private static void Face(ZombieInstance zombie, Vector3 targetPosition, float dt)

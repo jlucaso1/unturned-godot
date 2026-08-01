@@ -56,7 +56,7 @@ public partial class DebugOverlay : CanvasLayer
         string shotCam = string.Format(c, "{0:0.##},{1:0.##},{2:0.##},{3:0.##},{4:0.##}",
             p.X, p.Y, p.Z, r.X, r.Y);
         DisplayServer.ClipboardSet(shotCam);
-        GD.Print($"[camera] SHOT_CAM={shotCam}");
+        Log.Print($"[camera] SHOT_CAM={shotCam}");
     }
 
     public override void _Process(double delta)
@@ -84,7 +84,7 @@ public partial class DebugOverlay : CanvasLayer
         // for GPU workload, or an external tool (MangoHud/radeontop) for true GPU frame time.
         double frameMs = fps > 0.0 ? 1000.0 / fps : 0.0;
         double gpuWaitMs = Mathf.Max(0.0, frameMs - cpuMs);
-        double memMb = Mon(Performance.Monitor.MemoryStatic) / (1024.0 * 1024.0);
+        double memMb = Benchmark.ProcessMemory.RssBytes() / (1024.0 * 1024.0);
         double drawCalls = Mon(Performance.Monitor.RenderTotalDrawCallsInFrame);
         double primitives = Mon(Performance.Monitor.RenderTotalPrimitivesInFrame);
         double renderObjects = Mon(Performance.Monitor.RenderTotalObjectsInFrame);
@@ -93,7 +93,7 @@ public partial class DebugOverlay : CanvasLayer
         _label.Text =
             $"FPS {fps:0}   Frame {frameMs:0.00} ms\n" +
             $"CPU {cpuMs:0.00} ms   GPU-wait ~{gpuWaitMs:0.00} ms   Phys {physMs:0.0} ms\n" +
-            $"Static memory {memMb:0.0} MB\n" +
+            $"Process RSS {memMb:0.0} MB\n" +
             $"Draw calls {drawCalls:0}   Primitives {primitives:0}\n" +
             $"Render objects {renderObjects:0}   Nodes {nodes:0}\n" +
             "F3 toggle HUD   F4 copy camera (SHOT_CAM)";

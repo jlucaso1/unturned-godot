@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Dat;
+using UnturnedGodot.Tests.Helpers;
 using Xunit;
 
 namespace UnturnedGodot.Tests;
@@ -244,4 +245,91 @@ public class FoliageAssetTests
     public void ScanForGuids_MissingDirectory_ReturnsEmpty() =>
         Assert.Empty(FoliageAsset.ScanForGuids(Path.Combine(Path.GetTempPath(), "no-such-dir-xyz"),
             new HashSet<Guid> { Guid.NewGuid() }));
+
+    private const string ModGrassAsset = """
+        Metadata
+        {
+            GUID 703378589e9f404db3bf2d539b740593
+            Type SDG.Framework.Foliage.FoliageInstancedMeshInfoAsset, Assembly-CSharp
+        }
+        Asset
+        {
+            Mesh
+            {
+                Name california2.masterbundle
+                Path Terrain/Foliage/Grass/CA_Grass_Mesh.fbx
+            }
+        }
+        """;
+
+    // A Steam library with the game and one workshop mod, each shipping its own foliage asset.
+    private static string LibraryWithMod(TempDir dir)
+    {
+        const string core = "Asset_Bundle_Name core.masterbundle\nAsset_Prefix Assets/Core\n";
+        const string mod = "Asset_Bundle_Name california2.masterbundle\nAsset_Prefix Assets/CA\n";
+        string game = Path.Combine("steamapps", "common", "Unturned", "Bundles");
+        dir.Write(Path.Combine(game, "MasterBundle.dat"), core);
+        dir.Write(Path.Combine(game, "core_linux.masterbundle"), new byte[] { 1 });
+        dir.Write(Path.Combine(game, "Assets", "Foliage", "grass.asset"), GrassAsset);
+        Directory.CreateDirectory(Path.Combine(dir.Path, game, "Objects"));
+
+        string item = Path.Combine("steamapps", "workshop", "content", "304930", "3711646503");
+        dir.Write(Path.Combine(item, "MasterBundle.dat"), mod);
+        dir.Write(Path.Combine(item, "california2_linux.masterbundle"), new byte[] { 1 });
+        dir.Write(Path.Combine(item, "Objects", "CA_Sign", "CA_Sign.dat"),
+            "GUID 0517b7a03b844929856fc4f72701fca9\nType Medium\n");
+        dir.Write(Path.Combine(item, "Assets", "Foliage", "ca_grass.asset"), ModGrassAsset);
+
+        return Path.Combine(dir.Path, "steamapps", "common", "Unturned");
+    }
+
+    // The workshop-foliage regression: a mod's own grass resolves, and to the mod's bundle. Scanning only
+    // the game's Assets folder left that GUID unresolved, so its mesh was never extracted and the map
+    // rendered with no foliage.
+    [Fact]
+    public void ScanSources_ResolvesModFoliageToItsOwnBundle()
+    {
+        using var dir = new TempDir();
+        IReadOnlyList<ContentSource> sources =
+            ContentSource.Discover(LibraryWithMod(dir), UnturnedInstall.Platform.Linux);
+
+        var core = new Guid("c928fb99bae9434795563319a64f6461");
+        var mod = new Guid("703378589e9f404db3bf2d539b740593");
+        Dictionary<Guid, FoliageAsset.Owned> owned =
+            FoliageAsset.ScanSources(sources, new HashSet<Guid> { core, mod });
+
+        Assert.Equal(2, owned.Count);
+        Assert.Equal(0, owned[core].SourceIndex);   // the game's
+        Assert.Equal(1, owned[mod].SourceIndex);    // the mod's
+        Assert.Equal("Terrain/Foliage/Grass/CA_Grass_Mesh.fbx", owned[mod].Asset.MeshPath);
+    }
+
+    [Fact]
+    public void ScanSources_KeepsOnlyNeededGuids()
+    {
+        using var dir = new TempDir();
+        IReadOnlyList<ContentSource> sources =
+            ContentSource.Discover(LibraryWithMod(dir), UnturnedInstall.Platform.Linux);
+
+        Assert.Empty(FoliageAsset.ScanSources(sources, new HashSet<Guid> { Guid.NewGuid() }));
+    }
+
+    // Unturned rejects an asset whose GUID is already registered, so the game's copy wins over a mod's.
+    [Fact]
+    public void ScanSources_FirstSourceWinsOnADuplicateGuid()
+    {
+        using var dir = new TempDir();
+        string install = LibraryWithMod(dir);
+        dir.Write(Path.Combine("steamapps", "workshop", "content", "304930", "3711646503", "Assets",
+            "Foliage", "clash.asset"), GrassAsset); // same GUID as the game's grass
+        IReadOnlyList<ContentSource> sources =
+            ContentSource.Discover(install, UnturnedInstall.Platform.Linux);
+
+        var core = new Guid("c928fb99bae9434795563319a64f6461");
+        Dictionary<Guid, FoliageAsset.Owned> owned =
+            FoliageAsset.ScanSources(sources, new HashSet<Guid> { core });
+
+        Assert.Equal(0, owned[core].SourceIndex);
+        Assert.Equal("Terrain/Foliage/Grass/Grass_00_Mesh.fbx", owned[core].Asset.MeshPath);
+    }
 }

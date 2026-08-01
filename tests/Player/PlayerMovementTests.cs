@@ -49,6 +49,74 @@ public class PlayerMovementTests
     }
 
     [Fact]
+    public void AirVelocity_NoInput_DeceleratesAtExactlyTwoMetresPerSecondSquared()
+    {
+        Vector3 v = PlayerMovement.AirVelocity(new Vector3(6f, 1f, 8f), Vector3.Zero, 0f, 0.25f);
+
+        Assert.Equal(9.5f, new Vector2(v.X, v.Z).Length(), 4);
+        Assert.Equal(1f + (PlayerConfig.Gravity * 0.25f), v.Y, 4);
+    }
+
+    [Fact]
+    public void AirVelocity_ZeroDelta_DoesNotChangeVelocity()
+    {
+        var initial = new Vector3(3f, -4f, -2f);
+        Assert.Equal(initial, PlayerMovement.AirVelocity(initial, Vector3.Right, 7f, 0f));
+    }
+
+    [Fact]
+    public void AirVelocity_NeverAcceleratesPastWishSpeedFromRest()
+    {
+        Vector3 velocity = Vector3.Zero;
+        Vector3 wish = new Vector3(0.6f, 0f, -0.8f);
+        for (int i = 0; i < 600; i++)
+        {
+            velocity = PlayerMovement.AirVelocity(velocity, wish, PlayerConfig.SpeedSprint, 1f / 60f);
+            Assert.True(new Vector2(velocity.X, velocity.Z).Length() <= PlayerConfig.SpeedSprint + 1e-4f);
+            Assert.True(float.IsFinite(velocity.X) && float.IsFinite(velocity.Y) && float.IsFinite(velocity.Z));
+        }
+    }
+
+    [Theory]
+    [InlineData(30)]
+    [InlineData(60)]
+    [InlineData(120)]
+    [InlineData(240)]
+    public void JumpIntegration_ReachesApexThenFalls_AtCommonPhysicsRates(int hz)
+    {
+        float dt = 1f / hz;
+        Vector3 velocity = Vector3.Up * PlayerConfig.JumpSpeed;
+        float height = 0f;
+        float apex = 0f;
+        bool descended = false;
+        for (int i = 0; i < hz * 2; i++)
+        {
+            velocity = PlayerMovement.AirVelocity(velocity, Vector3.Zero, 0f, dt);
+            height += velocity.Y * dt;
+            apex = System.MathF.Max(apex, height);
+            descended |= velocity.Y < 0f;
+            if (descended && height <= 0f)
+                break;
+        }
+
+        Assert.True(descended);
+        Assert.InRange(apex, 0.70f, 0.84f); // semi-implicit Euler converges upward toward analytic 0.832 m
+        Assert.True(height <= 0f, $"jump did not land at {hz} Hz; height={height}");
+    }
+
+    [Fact]
+    public void AirVelocity_StopsAtTerminalVelocityAcrossManyTicks()
+    {
+        Vector3 velocity = Vector3.Zero;
+        for (int i = 0; i < 1000; i++)
+        {
+            velocity = PlayerMovement.AirVelocity(velocity, Vector3.Zero, 0f, 1f / 60f);
+            Assert.True(velocity.Y >= PlayerConfig.TerminalVelocity);
+        }
+        Assert.Equal(PlayerConfig.TerminalVelocity, velocity.Y);
+    }
+
+    [Fact]
     public void JumpSpeedAndGravity_GiveTheGamesJumpHeight()
     {
         // Apex height h = v² / (2|g|) = 49 / (2*29.43) ≈ 0.83 m.

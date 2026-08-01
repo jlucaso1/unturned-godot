@@ -37,7 +37,10 @@ public readonly struct CachedSubmesh
 // texture keys), so the 1.4 GB bundle is parsed once and runtime loads only the small meshes it needs.
 public static class MeshCache
 {
-    private const uint Magic = 0x374D4755; // "UGM7": foliage culling now read from its material's shader (pebbles cull Back)
+    // "UGM8": submesh texture keys are namespaced by the bundle they came from (see Unity.TextureKey).
+    // The bump matters — a mesh written under UGM7 carries a bare path id, which no longer identifies a
+    // texture uniquely now that workshop bundles are extracted alongside the game's.
+    private const uint Magic = 0x384D4755;
 
     // True when the file starts with the current format magic; false for stale formats, short files or a
     // missing path. Cold-load detection uses this so a format bump re-extracts instead of crashing on Read.
@@ -51,6 +54,11 @@ public static class MeshCache
         }
         catch (IOException) { return false; }
     }
+
+    // The same check against bytes already in hand, so a caller that reads the file anyway does one open
+    // instead of two (IsCurrent(path) + ReadAllBytes) per cached mesh.
+    public static bool IsCurrent(ReadOnlySpan<byte> data) =>
+        data.Length >= 4 && BinaryPrimitives.ReadUInt32LittleEndian(data) == Magic;
 
     public static void Write(Stream stream, Vector3[] vertices, Vector3[] normals, Vector2[] uvs,
         IReadOnlyList<CachedSubmesh> submeshes)

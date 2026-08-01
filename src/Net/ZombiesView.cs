@@ -43,11 +43,13 @@ public partial class ZombiesView : Node3D
     }
 
     private string _unturnedPath = "";
+    private NetClient? _client;
     private OneShotAudio? _audio;
     private readonly Dictionary<ushort, ZombieAvatar> _avatars = new();
     private readonly List<ushort> _leaving = new();
     private Node3D? _normalTemplate;
     private Node3D? _megaTemplate;
+    private bool _templatesWarmed;
     private readonly RandomNumberGenerator _rng = new();
     private IReadOnlyList<NavBound> _navBounds = System.Array.Empty<NavBound>();
     private System.Func<Vector3>? _localPosition;
@@ -59,6 +61,7 @@ public partial class ZombiesView : Node3D
         var view = new ZombiesView
         {
             Name = "Zombies",
+            _client = client,
             _unturnedPath = unturnedPath,
             _audio = audio,
             _navBounds = navBounds,
@@ -66,6 +69,34 @@ public partial class ZombiesView : Node3D
         };
         client.OnUnhandledMessage += view.Handle;
         return view;
+    }
+
+    public override void _ExitTree()
+    {
+        if (_client != null)
+            _client.OnUnhandledMessage -= Handle;
+
+        // Templates are deliberately not children (they must never render); unlike their shared Resources,
+        // unparented Nodes are not reclaimed by tree teardown, so release them explicitly with the view.
+        _normalTemplate?.Free();
+        _megaTemplate?.Free();
+        _normalTemplate = null;
+        _megaTemplate = null;
+    }
+
+    // Character import is synchronous because its final phase creates Godot rendering resources. Do it
+    // explicitly while Main's loading screen is still up, rather than on the first ZombieList received
+    // when the player crosses into a populated city. Normal and mega share the one expensive import.
+    public void WarmupTemplates()
+    {
+        if (_templatesWarmed)
+            return;
+        _templatesWarmed = true; // a failed import must not be retried for every zombie in the packet
+        long started = System.Diagnostics.Stopwatch.GetTimestamp();
+        (_normalTemplate, _megaTemplate) = CharacterModel.BuildZombieTemplates(_unturnedPath);
+        double elapsedMs = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        Log.Print($"[performance] zombie visual templates warmed during loading in {elapsedMs:0.0} ms " +
+            $"(normal={_normalTemplate != null}, mega={_megaTemplate != null}).");
     }
 
     // Zombie.PlayOneShot: volume 0.5, linear rolloff to 32 m, pitch by speciality (megas growl low).
@@ -138,9 +169,13 @@ public partial class ZombiesView : Node3D
 
     private Node3D? Template(bool isMega)
     {
+        // Defensive lazy fallback for callers that construct the view outside Main (or missing/corrupt
+        // game data). The normal runtime has already warmed both looks before network polling resumes.
+        if (!_templatesWarmed)
+            WarmupTemplates();
         if (isMega)
-            return _megaTemplate ??= CharacterModel.BuildZombie(_unturnedPath, isMega: true);
-        return _normalTemplate ??= CharacterModel.BuildZombie(_unturnedPath, isMega: false);
+            return _megaTemplate;
+        return _normalTemplate;
     }
 
     private void Push(in ZombieSnapshotState state, double now)
@@ -183,6 +218,7 @@ public partial class ZombiesView : Node3D
 
     public override void _Process(double delta)
     {
+        long benchmarkStarted = Benchmark.RuntimeCounters.Start();
         double now = NetworkManager.Now;
         Vector3? eye = GetViewport()?.GetCamera3D()?.GlobalPosition;
 
@@ -275,6 +311,7 @@ public partial class ZombiesView : Node3D
                 rig.ProcessMode = nearby ? ProcessModeEnum.Inherit : ProcessModeEnum.Disabled;
             }
         }
+        Benchmark.RuntimeCounters.Record(Benchmark.RuntimeCounters.Counter.ZombiesView, benchmarkStarted);
     }
 
     // Zombie.cs's animation selection: the move/idle split follows what the RENDERED body is

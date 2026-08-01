@@ -17,7 +17,19 @@ public sealed class LandscapePhysics
     public string? PhysicsNameOf(Guid materialGuid) =>
         _nameByGuid.TryGetValue(materialGuid, out string? name) ? name : null;
 
-    public void Add(Guid guid, string physicsName) => _nameByGuid[guid] = physicsName;
+    public void Add(Guid guid, string physicsName) => _nameByGuid.TryAdd(guid, physicsName);
+
+    // Every landscape material across several asset trees: the game's own plus each installed workshop
+    // mod, since a workshop map's terrain layers are defined by its mod, not by the game.
+    public static LandscapePhysics ScanDirectories(IEnumerable<string> roots)
+    {
+        var merged = new LandscapePhysics();
+        foreach (string root in roots)
+            foreach (KeyValuePair<Guid, string> entry in ScanDirectory(root)._nameByGuid)
+                merged._nameByGuid.TryAdd(entry.Key, entry.Value);
+
+        return merged;
+    }
 
     public static LandscapePhysics ScanDirectory(string root)
     {

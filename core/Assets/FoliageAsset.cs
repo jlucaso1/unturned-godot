@@ -56,6 +56,27 @@ public sealed class FoliageAsset
         return true;
     }
 
+    // A foliage type, paired with the index of the ContentSource whose bundle carries its mesh.
+    public readonly record struct Owned(FoliageAsset Asset, int SourceIndex);
+
+    // Resolves the foliage types a map scatters across EVERY installed source, not just the game's own.
+    // A workshop map ships its grass, flower and pebble assets next to its own bundle; scanning only the
+    // core Assets folder leaves those GUIDs unresolved, so they never enter the needed set, their meshes
+    // are never extracted, and the map renders with no foliage at all.
+    //
+    // Sources are searched in order (the game first) and the first to declare a GUID keeps it, which is
+    // what the original does — an asset whose GUID is already registered is rejected.
+    public static Dictionary<Guid, Owned> ScanSources(IReadOnlyList<ContentSource> sources, ISet<Guid> needed)
+    {
+        var owned = new Dictionary<Guid, Owned>();
+        for (int i = 0; i < sources.Count; i++)
+            foreach (KeyValuePair<Guid, FoliageAsset> entry in ScanForGuids(sources[i].AssetsDir, needed))
+                if (!owned.ContainsKey(entry.Key))
+                    owned[entry.Key] = new Owned(entry.Value, i);
+
+        return owned;
+    }
+
     // Scans a bundle tree for foliage .asset files, keeping those whose GUID the map actually uses.
     public static Dictionary<Guid, FoliageAsset> ScanForGuids(string root, ISet<Guid> needed)
     {

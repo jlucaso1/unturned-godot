@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using UnturnedGodot.Assets;
+using UnturnedGodot.Tests.Helpers;
 using Xunit;
 
 namespace UnturnedGodot.Tests;
@@ -119,4 +120,39 @@ public class LandscapePhysicsTests
             Directory.Delete(dir, recursive: true);
         }
     }
+
+    [Fact]
+    public void ScanDirectories_MergesEveryAssetTree()
+    {
+        // A workshop map's terrain layers are defined by its mod, so both trees have to be read.
+        using var game = new TempDir();
+        using var mod = new TempDir();
+        game.Write("PEI_Grass.asset", Asset("11111111111111111111111111111111", "FOLIAGE_STATIC"));
+        mod.Write(Path.Combine("Materials", "CA_Sand.asset"),
+            Asset("22222222222222222222222222222222", "SAND"));
+        mod.Write(Path.Combine("Materials", "Conflicting_Grass.asset"),
+            Asset("11111111111111111111111111111111", "SAND"));
+
+        LandscapePhysics merged = LandscapePhysics.ScanDirectories(new[]
+        {
+            game.Path, mod.Path, Path.Combine(mod.Path, "missing"),
+        });
+
+        Assert.Equal(2, merged.Count);
+        // Names resolve exactly as in a single scan: legacy enum values are converted, modern ones kept.
+        Assert.Equal("Foliage", merged.PhysicsNameOf(Guid.Parse("11111111111111111111111111111111")));
+        Assert.Equal("SAND", merged.PhysicsNameOf(Guid.Parse("22222222222222222222222222222222")));
+    }
+
+    private static string Asset(string guid, string physicsMaterial) => $$"""
+        Metadata
+        {
+            GUID {{guid}}
+            Type SDG.Unturned.LandscapeMaterialAsset
+        }
+        Asset
+        {
+            Physics_Material {{physicsMaterial}}
+        }
+        """;
 }

@@ -42,6 +42,18 @@ public static class SceneMetrics
         r.Nodes++;
         switch (node)
         {
+            case MultiMeshRidRenderer ridOwner:
+                foreach (MultiMesh mm in ridOwner.MultiMeshes)
+                {
+                    r.MultiMeshInstances++;
+                    r.MultiMeshTotalInstances += mm.InstanceCount;
+                    AccountMesh(mm.Mesh, r, meshes);
+                    AccountMultiMeshMaterials(mm, materials);
+                    double ridSpread = InstanceOriginSpread(mm);
+                    if (ridSpread > r.MaxMultiMeshSpread)
+                        r.MaxMultiMeshSpread = ridSpread;
+                }
+                break;
             case MultiMeshInstance3D { Multimesh: { } mm } mmi:
                 r.MultiMeshInstances++;
                 r.MultiMeshTotalInstances += mm.InstanceCount;
@@ -99,6 +111,13 @@ public static class SceneMetrics
             AccountMaterial(mmi.MaterialOverride, materials);
             return;
         }
+        if (mm.Mesh is { } mesh)
+            for (int s = 0; s < mesh.GetSurfaceCount(); s++)
+                AccountMaterial(mesh.SurfaceGetMaterial(s), materials);
+    }
+
+    private static void AccountMultiMeshMaterials(MultiMesh mm, HashSet<ulong> materials)
+    {
         if (mm.Mesh is { } mesh)
             for (int s = 0; s < mesh.GetSurfaceCount(); s++)
                 AccountMaterial(mesh.SurfaceGetMaterial(s), materials);

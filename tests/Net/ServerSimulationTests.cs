@@ -228,6 +228,82 @@ public class ServerSimulationTests
     }
 
     [Fact]
+    public void TrustedPosition_HorizontalBudgetDoesNotBorrowTerminalFallSpeed()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, new Vector3(0, 10f, 0));
+        sim.QueueInput(1, new InputCommand(10, 0, 0, false, false, 0, 90,
+            EPlayerStance.Stand, new Vector3(0, 10f, 0)));
+        sim.Step();
+
+        // One sprint tick is 0.56 m (0.84 m including the 1.5x jitter allowance). The former combined
+        // budget incorrectly accepted this 2 m horizontal claim because terminal fall speed is 100 m/s.
+        sim.QueueInput(1, new InputCommand(11, 0, -1, false, true, 0, 90,
+            EPlayerStance.Sprint, new Vector3(2f, 10f, 0)));
+        sim.Step();
+
+        Assert.True(sim.TryGetState(1, out PlayerMoveState state));
+        Assert.Equal(Vector3.Zero, state.Position - new Vector3(0, 10f, 0));
+    }
+
+    [Fact]
+    public void TrustedPosition_FastVerticalFallRemainsValid()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, new Vector3(0, 30f, 0));
+        sim.QueueInput(1, new InputCommand(20, 0, 0, false, false, 0, 90,
+            EPlayerStance.Stand, new Vector3(0, 30f, 0), grounded: false));
+        sim.Step();
+
+        var falling = new Vector3(0.2f, 22f, -0.1f); // 100 m/s vertical, ordinary horizontal drift
+        sim.QueueInput(1, new InputCommand(21, 0, -1, false, false, 0, 90,
+            EPlayerStance.Stand, falling, grounded: false));
+        sim.Step();
+
+        Assert.True(sim.TryGetState(1, out PlayerMoveState state));
+        Assert.Equal(falling, state.Position);
+        Assert.False(state.Grounded);
+    }
+
+    [Fact]
+    public void TrustedPosition_DuplicateAndReorderedFramesCannotRewindPlayer()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, new Vector3(0, 10f, 0));
+        sim.QueueInput(1, new InputCommand(100, 0, -1, false, false, 0, 90,
+            EPlayerStance.Stand, new Vector3(0, 10f, -0.3f)));
+        sim.Step();
+        sim.QueueInput(1, new InputCommand(101, 0, -1, false, false, 0, 90,
+            EPlayerStance.Stand, new Vector3(0, 10f, -0.6f)));
+        sim.Step();
+
+        sim.QueueInput(1, new InputCommand(101, 0, -1, false, false, 0, 90,
+            EPlayerStance.Stand, new Vector3(0, 10f, -0.4f))); // duplicate
+        sim.QueueInput(1, new InputCommand(99, 0, -1, false, false, 0, 90,
+            EPlayerStance.Stand, new Vector3(0, 10f, -0.2f))); // reordered
+        sim.Step();
+
+        Assert.True(sim.TryGetState(1, out PlayerMoveState state));
+        Assert.Equal(new Vector3(0, 10f, -0.6f), state.Position);
+    }
+
+    [Fact]
+    public void TrustedPosition_FrameSequenceHandlesUintWraparound()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, new Vector3(0, 10f, 0));
+        sim.QueueInput(1, new InputCommand(uint.MaxValue, 0, -1, false, false, 0, 90,
+            EPlayerStance.Stand, new Vector3(0, 10f, -0.2f)));
+        sim.Step();
+        sim.QueueInput(1, new InputCommand(0, 0, -1, false, false, 0, 90,
+            EPlayerStance.Stand, new Vector3(0, 10f, -0.4f)));
+        sim.Step();
+
+        Assert.True(sim.TryGetState(1, out PlayerMoveState state));
+        Assert.Equal(new Vector3(0, 10f, -0.4f), state.Position);
+    }
+
+    [Fact]
     public void TrustedPosition_BudgetScalesWithStarvation_NoPermanentDivergence()
     {
         ServerSimulation sim = FlatSim();

@@ -402,6 +402,39 @@ public class ZombieSystemTests
     }
 
     [Fact]
+    public void OpenGroundSideApproach_StaysABoundedOffsetInsteadOfOrbiting()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        system.PathQuery = (from, to, path) =>
+        {
+            path.Add(from);
+            path.Add(to);
+            return true;
+        };
+        var initialPlayer = Player(1, new Vector3(10, 5, 0),
+            UnturnedGodot.Player.EPlayerStance.Sprint);
+        system.Tick(new[] { initialPlayer }, 0.1f);
+        zombie.Path = EZombiePath.Left;
+
+        var player = Player(1, new Vector3(20, 5, 0),
+            UnturnedGodot.Player.EPlayerStance.Sprint);
+        Vector3 previous = zombie.Position;
+        float walked = 0f, maxSide = 0f;
+        for (int tick = 0; tick < 60; tick++)
+        {
+            system.Tick(new[] { player }, 0.1f);
+            walked += previous.DistanceTo(zombie.Position);
+            maxSide = MathF.Max(maxSide, MathF.Abs(zombie.Position.Z));
+            previous = zombie.Position;
+        }
+
+        Assert.Equal(EZombieState.Attack, zombie.State);
+        Assert.InRange(maxSide, 0.1f, 2f);
+        Assert.InRange(walked, 18f, 23f); // lateral spread, never a circular lap
+    }
+
+    [Fact]
     public void WorldColliders_BlockAndSlideTheStep()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
@@ -447,6 +480,54 @@ public class ZombieSystemTests
     }
 
     // ---- Navmesh pathfinding (the Seeker port) ----------------------------------------------------
+
+    [Fact]
+    public void PathfinderStillBuilding_UsesDirectFallbackThenSwitchesToRoutes()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f; // face the player so the direct fallback advances immediately
+        bool ready = false;
+        int queries = 0;
+        system.PathReady = () => ready;
+        system.PathQuery = (from, to, path) =>
+        {
+            queries++;
+            path.Add(from);
+            path.Add(to);
+            return true;
+        };
+
+        var player = Player(1, new Vector3(10, 5, 0));
+        Vector3 spawn = zombie.Position;
+        for (int i = 0; i < 5; i++)
+            system.Tick(new[] { player }, 0.1f);
+
+        Assert.Equal(EZombieState.Chase, zombie.State); // it did acquire aggro
+        Assert.True(zombie.Position.X > spawn.X + 1f, $"froze while graph built: {zombie.Position}");
+        Assert.Equal(0, queries); // an unavailable engine map must not be queried or log errors
+
+        ready = true;
+        for (int i = 0; i < 6; i++)
+            system.Tick(new[] { player }, 0.1f);
+        Assert.True(queries > 0); // automatically adopted the graph when publication completed
+        Assert.True(zombie.Position.X > spawn.X + 2f);
+    }
+
+    [Fact]
+    public void ReadyPathfinderWithNoRoute_StillStopsInsteadOfWalkingThroughWalls()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        system.PathReady = () => true;
+        system.PathQuery = (from, to, path) => false;
+
+        Vector3 spawn = zombie.Position;
+        var player = Player(1, new Vector3(10, 5, 0));
+        for (int i = 0; i < 10; i++)
+            system.Tick(new[] { player }, 0.1f);
+
+        Assert.Equal(EZombieState.Chase, zombie.State);
+        Assert.Equal(spawn, zombie.Position);
+    }
 
     [Fact]
     public void PathQuery_FollowsWaypointsAroundACorner()
@@ -630,26 +711,78 @@ public class ZombieSystemTests
     }
 
     [Fact]
-    public void PartialRoutes_AreDiscardedLikeErroredPaths()
+    public void PartialRouteThenCollisionAwareFallback_ReachesAcrossAGraphSeam()
     {
-        // The official ABPath ERRORS on unreachable targets; Godot instead returns the route to
-        // the closest reachable point. A route ending far from the requested destination must be
-        // treated as that error: with no route ever succeeding, the zombie stands (path == null).
+        // Godot returns the route to the closest reachable point when the target occupies another
+        // navmesh island. Throwing that useful prefix away made Chase animate at the random spawn yaw
+        // without any movement. It should advance as far as the graph safely allows.
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
         system.PathQuery = (from, to, path) =>
         {
             path.Add(from);
-            path.Add(from + new Vector3(1, 0, 0)); // stops ~9 m short of the target
+            path.Add(new Vector3(4, 5, 0)); // connected island ends 6 m short of the target
             return true;
         };
 
         var player = Player(1, new Vector3(10, 5, 0));
         Vector3 spawn = zombie.Position;
-        for (int i = 0; i < 10; i++)
+        for (int i = 0; i < 35; i++)
+            system.Tick(new[] { player }, 0.1f);
+
+        Assert.Equal(EZombieState.Attack, zombie.State);
+        Assert.True(zombie.Position.X > spawn.X + 8f, $"stranded at graph seam: {zombie.Position}");
+        Assert.True(zombie.PathIsPartial);
+        Assert.InRange(MathF.Abs(Mathf.Wrap(zombie.Yaw - -90f, -180f, 180f)), 0f, 5f);
+    }
+
+    [Fact]
+    public void PartialRouteFallback_StillCannotCrossARealWall()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        int queries = 0;
+        system.PathQuery = (from, to, path) =>
+        {
+            queries++;
+            path.Add(from);
+            path.Add(new Vector3(4, 5, 0));
+            return true;
+        };
+        // The nav island ends at the same place as a real collider. The post-route direct leg may push
+        // against it, but every authoritative step is still resolved by physics and must remain outside.
+        system.MoveResolver = (from, to, radius) => new Vector3(MathF.Min(to.X, 4f), to.Y, to.Z);
+
+        var player = Player(1, new Vector3(10, 5, 0));
+        for (int i = 0; i < 80; i++)
             system.Tick(new[] { player }, 0.1f);
 
         Assert.Equal(EZombieState.Chase, zombie.State);
-        Assert.True(zombie.Position.DistanceTo(spawn) < 0.2f, $"moved on a discarded route: {zombie.Position}");
+        Assert.InRange(zombie.Position.X, 3.8f, 4.001f);
+        Assert.True(zombie.Position.DistanceTo(player.Position) > 5f);
+        Assert.InRange(queries, 2, 30); // retries, but never one query per simulation tick
+    }
+
+    [Fact]
+    public void PartialRepathDoesNotReplaceABetterExistingRoute()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        int query = 0;
+        system.PathQuery = (from, to, path) =>
+        {
+            path.Add(from);
+            path.Add(new Vector3(query++ == 0 ? 7f : 3f, 5, 0));
+            return true;
+        };
+
+        var player = Player(1, new Vector3(10, 5, 0));
+        for (int i = 0; i < 12; i++)
+            system.Tick(new[] { player }, 0.1f);
+
+        Assert.True(query >= 2);
+        Assert.Equal(7f, zombie.PathPoints[^1].X); // the later, worse partial endpoint was ignored
+        Assert.True(zombie.Position.X > 4f);
     }
 
     [Fact]
@@ -724,11 +857,12 @@ public class ZombieSystemTests
         Assert.True(zombie.Position.X > 2f); // still following after the clamp
     }
 
+    // Unturned has no sidestep logic anywhere: a blocked zombie keeps pushing, and its
+    // CharacterController.Move slides it free because THAT resolve is iterative. So the escape
+    // belongs to the move resolver, and this system must not invent one of its own.
     [Fact]
-    public void DeadOnBlocks_SkirtTheObstacleInsteadOfDeadlocking()
+    public void DeadOnBlocks_AreSkirtedByTheResolversSlide_NotByTheBrain()
     {
-        // The follower moves along the body's forward; a dead-on block would otherwise deadlock
-        // forever (the CC's iterative resolve destabilizes sideways — ApplyStep recreates that).
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         zombie.Yaw = -90f;
         system.PathQuery = (from, to, path) =>
@@ -737,12 +871,21 @@ public class ZombieSystemTests
             path.Add(to);
             return true;
         };
-        // A trunk of radius 1 at (5,0), dead on the straight route; no slide at all.
+
+        // A trunk of radius 1 at (5,0) dead on the route, with a resolver that slides along it the
+        // way a CharacterController does — tangentially, never straight through.
         Vector3 trunk = new(5, 5, 0);
         system.MoveResolver = (from, to, radius) =>
         {
             float dx = to.X - trunk.X, dz = to.Z - trunk.Z;
-            return MathF.Sqrt((dx * dx) + (dz * dz)) < 1f + radius ? from : to;
+            float dist = MathF.Sqrt((dx * dx) + (dz * dz));
+            float minimum = 1f + radius;
+            if (dist >= minimum)
+                return to;
+            if (dist < 1e-4f)
+                return from;
+            // Push the destination back out to the surface: the slide component of the motion.
+            return new Vector3(trunk.X + (dx / dist * minimum), to.Y, trunk.Z + (dz / dist * minimum));
         };
 
         var player = Player(1, new Vector3(10, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
@@ -757,21 +900,6 @@ public class ZombieSystemTests
     public void FullyWalledIn_HoldsStillWithoutTeleporting()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
-        // First pass with no previous side (defaults to +1), then pinned to -1: both walled-in
-        // tie-breaks hold still.
-        var probe = new ZombieSystem(new[] { Table() }, TwoBounds(), FlatGround);
-        probe.Spawn(new[] { At(0, 0) }, new Random(4));
-        ZombieInstance fresh = probe.Zombies[0];
-        fresh.Speciality = EZombieSpeciality.Normal;
-        fresh.Yaw = -90f;
-        probe.PathQuery = (from, to, path) => { path.Add(from); path.Add(to); return true; };
-        probe.MoveResolver = (from, to, radius) => from;
-        Vector3 freshSpawn = fresh.Position;
-        probe.Tick(new[] { Player(1, new Vector3(10, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint) }, 0.1f);
-        Assert.Equal(freshSpawn, fresh.Position);
-        Assert.Equal(1, fresh.DetourSide); // the no-previous-side default
-
-        zombie.DetourSide = -1; // walled-in hysteresis keeps a previous side
         system.PathQuery = (from, to, path) =>
         {
             path.Add(from);
@@ -786,13 +914,104 @@ public class ZombieSystemTests
             system.Tick(new[] { player }, 0.1f);
 
         Assert.Equal(spawn, zombie.Position);
-        Assert.Equal(-1, zombie.DetourSide);
     }
 
-    [Theory]
-    [InlineData(+1)]
-    [InlineData(-1)]
-    public void OneOpenTangent_IsTaken(int openSign)
+    [Fact]
+    public void PersistentlyBlockedCompleteRoute_IsDiscardedSoDoorDetourCanReplaceIt()
+    {
+        (List<Vector3> trace, int queries, EZombieState state) = RunWindowRecovery();
+
+        Assert.True(queries >= 3);
+        Assert.Contains(trace, p => p.Z >= 2f);
+        Assert.True(trace[^1].X > 8f, $"never escaped the window route: {trace[^1]}");
+        Assert.Equal(EZombieState.Attack, state);
+    }
+
+    [Fact]
+    public void WindowRecovery_IsDeterministicAcrossIndependentSimulations()
+    {
+        var first = RunWindowRecovery();
+        var second = RunWindowRecovery();
+
+        Assert.Equal(first.Queries, second.Queries);
+        Assert.Equal(first.State, second.State);
+        Assert.Equal(first.Trace, second.Trace);
+    }
+
+    private static (List<Vector3> Trace, int Queries, EZombieState State) RunWindowRecovery()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        int queries = 0;
+        system.PathQuery = (from, to, path) =>
+        {
+            queries++;
+            path.Add(from);
+            if (queries == 1)
+            {
+                // The stale route ends exactly at the target but crosses the window sill.
+                path.Add(to);
+            }
+            else
+            {
+                // The reconciled graph can reach the far side through the door, but reports a partial
+                // endpoint. Endpoint-only replacement rejects this forever while the stale route remains.
+                path.Add(new Vector3(3.5f, 5f, 3f));
+                path.Add(new Vector3(7f, 5f, 4f));
+            }
+            return true;
+        };
+        system.MoveResolver = (from, to, radius) =>
+        {
+            // Wall at x=4 with a door for z>=2. The direct route hits its window at z=0.
+            if (from.X <= 4f && to.X > 4f && MathF.Max(from.Z, to.Z) < 2f)
+                return new Vector3(4f, to.Y, to.Z);
+            return to;
+        };
+
+        var player = Player(1, new Vector3(10, 5, 0),
+            UnturnedGodot.Player.EPlayerStance.Sprint);
+        var trace = new List<Vector3>();
+        for (int tick = 0; tick < 100; tick++)
+        {
+            system.Tick(new[] { player }, 0.1f);
+            trace.Add(zombie.Position);
+        }
+        return (trace, queries, zombie.State);
+    }
+
+    [Fact]
+    public void BriefPhysicalBlock_DoesNotDiscardAHealthyRoute()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        int queries = 0, blockedSteps = 0;
+        system.PathQuery = (from, to, path) =>
+        {
+            queries++;
+            if (queries > 1)
+                return false; // recovery must continue on the original route
+            path.Add(from);
+            path.Add(to);
+            return true;
+        };
+        system.MoveResolver = (from, to, radius) => blockedSteps++ < 5 ? from : to;
+
+        var player = Player(1, new Vector3(10, 5, 0),
+            UnturnedGodot.Player.EPlayerStance.Sprint);
+        for (int tick = 0; tick < 50; tick++)
+            system.Tick(new[] { player }, 0.1f);
+
+        Assert.True(5 * 0.1f < ZombieSystem.BlockedRouteTimeout);
+        Assert.True(zombie.Position.X > 8f, $"brief contact discarded the route: {zombie.Position}");
+        Assert.Equal(EZombieState.Attack, zombie.State);
+    }
+
+    // The regression behind the window-sill shuffle: with the way forward blocked, the brain must
+    // hand the same forward step to the resolver every tick and accept the answer. It must never
+    // try one side and then the other, which is what made a stuck zombie visibly pace left-right.
+    [Fact]
+    public void BlockedZombie_NeverProbesSideways()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         zombie.Yaw = -90f;
@@ -802,14 +1021,23 @@ public class ZombieSystemTests
             path.Add(to);
             return true;
         };
+
+        var asked = new List<Vector3>();
         system.MoveResolver = (from, to, radius) =>
-            MathF.Sign(to.Z - from.Z) == openSign && MathF.Abs(to.Z - from.Z) > 0.01f ? to : from;
+        {
+            asked.Add(to - from);
+            return from; // a wall dead ahead
+        };
 
         var player = Player(1, new Vector3(10, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
-        for (int i = 0; i < 3; i++)
+        for (int i = 0; i < 10; i++)
             system.Tick(new[] { player }, 0.1f);
-        Assert.Equal(openSign, zombie.DetourSide);
-        Assert.True(zombie.Position.Z * openSign > 0f);
+
+        Assert.NotEmpty(asked);
+        // Every request is the same forward step: no tangent probes, so no side to alternate.
+        foreach (Vector3 motion in asked)
+            Assert.True(MathF.Abs(motion.Z) <= MathF.Abs(motion.X) * 0.05f,
+                $"brain probed sideways with {motion}");
     }
 
     [Fact]
@@ -913,6 +1141,46 @@ public class ZombieSystemTests
         system.Tick(new[] { Player(1, new Vector3(10, 5, 0)), Player(2, new Vector3(4, 5, 0)) }, 0.1f);
         Assert.Equal(2, destinations.Count);
         Assert.Equal(4f, destinations[1].X, 1f);
+    }
+
+    private static List<NavFlag> OneTriangle(float halfExtent, float y) => new()
+    {
+        new()
+        {
+            Center = new Vector3(0, 140, 0), Size = new Vector3(halfExtent * 2f, 236, halfExtent * 2f),
+            Vertices = new[]
+            {
+                new Vector3(-20, y, -20), new Vector3(20, y, -20), new Vector3(0, y, 20),
+            },
+            Triangles = new[] { 0, 1, 2 },
+        },
+    };
+
+    [Fact]
+    public void SeekOrigin_IsSnappedToTheNavmeshToo()
+    {
+        // Both ends of the query are snapped, not just the destination. A zombie nudged off the mesh by
+        // collision — or standing on a floor the mesh does not cover — would otherwise have its route
+        // START at whatever polygon is nearest in 3D, which can be behind or below it. The route then
+        // walks it back there first, and that reads in game as a pointless detour.
+        var system = new ZombieSystem(new[] { Table() }, TwoBounds(), FlatGround, OneTriangle(68f, 5.4f));
+        system.Spawn(new[] { At(0, 0) }, new Random(1));
+        ZombieInstance zombie = Assert.Single(system.Zombies);
+        zombie.Speciality = EZombieSpeciality.Normal;
+        zombie.Yaw = 0f;
+
+        var origins = new List<Vector3>();
+        system.PathQuery = (from, to, path) =>
+        {
+            origins.Add(from);
+            path.Add(from);
+            path.Add(to);
+            return true;
+        };
+
+        system.Tick(new[] { Player(1, new Vector3(10, 5, 0)) }, 0.1f);
+        Vector3 from = Assert.Single(origins);
+        Assert.Equal(5.4f, from.Y, 2); // lifted onto the triangle's level, not the zombie's raw ground Y
     }
 
     [Fact]

@@ -21,6 +21,37 @@ public readonly struct CachedTexture
         FilterMode = filterMode;
         Pixels = pixels;
     }
+
+    // Unity TextureFormat values that wrap DXT blocks in a Crunch container, and what they hold.
+    private const int Dxt1Crunched = 28;
+    private const int Dxt5Crunched = 29;
+    private const int Dxt1 = 10;
+    private const int Dxt5 = 12;
+
+    // The cache entry for a texture read out of a bundle, with any Crunch container unwrapped so the rest
+    // of the pipeline only ever sees plain DXT blocks.
+    public static CachedTexture From(UnityTexture texture, byte[] pixels) =>
+        Decoded(new CachedTexture(texture.Format, texture.Width, texture.Height, texture.MipCount,
+            pixels, texture.FilterMode));
+
+    // Unwraps a crunched entry into the DXT blocks it holds. Anything else, including a container this
+    // decoder cannot read, is returned untouched: the renderer already treats an unknown format as "no
+    // texture" rather than failing the load. Cache entries written before the decoder existed still hold
+    // the container, so this also runs when one is read back.
+    public static CachedTexture Decoded(CachedTexture cached)
+    {
+        if (cached.Format is not (Dxt1Crunched or Dxt5Crunched)
+            || !CrunchTexture.TryDecode(cached.Pixels, out byte[] blocks,
+                out CrunchTexture.BlockFormat format, out int width, out int height, out int levels))
+        {
+            return cached;
+        }
+
+        // The CRN header is the authority on the decoded size: the Texture2D's own mip count can name
+        // levels the crunched stream does not carry.
+        return new CachedTexture(format == CrunchTexture.BlockFormat.Dxt1 ? Dxt1 : Dxt5,
+            width, height, levels, blocks, cached.FilterMode);
+    }
 }
 
 // Compact on-disk format for an extracted texture (Unity format + dimensions + raw block bytes),

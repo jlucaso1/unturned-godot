@@ -305,6 +305,94 @@ public class ZombieHostTests
     }
 
     [Fact]
+    public void UnpublishedNavmesh_StillChasesAndReplicatesMovement()
+    {
+        // Regression: the host had a PathQuery attached, but its preloaded graph was deliberately not
+        // published until collision reconciliation finished. Aggro replicated while every query failed,
+        // so clients played the wake-up animation on a zombie whose position never changed.
+        var h = new Harness();
+        h.Populate(4);
+        ZombieInstance zombie = Assert.Single((IEnumerable<ZombieInstance>)h.System.Zombies);
+        zombie.Speciality = EZombieSpeciality.Normal;
+        zombie.Position = zombie.Home = new Vector3(8, 10, 0);
+        zombie.Yaw = 90f; // face -X, directly toward the player at the origin
+        int prematureQueries = 0;
+        h.System.PathReady = () => false;
+        h.System.PathQuery = (from, to, path) =>
+        {
+            prematureQueries++;
+            return false;
+        };
+
+        (_, _, List<List<ZombieSnapshotState>> batches) = Join(h, "A");
+        Pump(h, 8);
+
+        Assert.Equal(EZombieState.Chase, zombie.State);
+        Assert.True(zombie.Position.X < 6f, $"authoritative zombie froze at {zombie.Position}");
+        Assert.Equal(0, prematureQueries); // do not hammer an engine map that is still publishing
+        Assert.Contains(batches.SelectMany(b => b),
+            state => state.Id == zombie.Id && state.State == EZombieState.Chase && state.Position.X < 8f);
+    }
+
+    [Fact]
+    public void PartialNavmeshRoute_CrossesAGraphSeamAndReplicatesTheAttack()
+    {
+        var h = new Harness();
+        h.Populate(4);
+        ZombieInstance zombie = Assert.Single((IEnumerable<ZombieInstance>)h.System.Zombies);
+        zombie.Speciality = EZombieSpeciality.Normal;
+        zombie.Position = zombie.Home = new Vector3(8, 10, 0);
+        zombie.Yaw = 90f; // face -X, toward the player at the origin
+        h.System.PathReady = () => true;
+        h.System.PathQuery = (from, to, path) =>
+        {
+            path.Add(from);
+            path.Add(new Vector3(4, 10, 0)); // the player's navmesh island begins beyond this edge
+            return true;
+        };
+
+        (_, _, List<List<ZombieSnapshotState>> batches) = Join(h, "A");
+        Pump(h, 80);
+
+        Assert.True(zombie.State == EZombieState.Attack,
+            $"expected attack after graph seam, got {zombie.State} at {zombie.Position}");
+        Assert.True(zombie.Position.X < 2f, $"authoritative zombie stopped at graph seam: {zombie.Position}");
+        Assert.Contains(batches.SelectMany(b => b), state =>
+            state.Id == zombie.Id && state.State == EZombieState.Chase && state.Position.X < 8f);
+        Assert.Contains(batches.SelectMany(b => b), state =>
+            state.Id == zombie.Id && state.State == EZombieState.Attack);
+    }
+
+    [Fact]
+    public void PartialNavmeshRoute_WithARealWallNeverReplicatesMovementThroughIt()
+    {
+        var h = new Harness();
+        h.Populate(4);
+        ZombieInstance zombie = Assert.Single((IEnumerable<ZombieInstance>)h.System.Zombies);
+        zombie.Speciality = EZombieSpeciality.Normal;
+        zombie.Position = zombie.Home = new Vector3(8, 10, 0);
+        zombie.Yaw = 90f;
+        h.System.PathReady = () => true;
+        h.System.PathQuery = (from, to, path) =>
+        {
+            path.Add(from);
+            path.Add(new Vector3(4, 10, 0));
+            return true;
+        };
+        h.System.MoveResolver = (from, to, radius) =>
+            new Vector3(MathF.Max(to.X, 4f), to.Y, to.Z);
+
+        (_, _, List<List<ZombieSnapshotState>> batches) = Join(h, "A");
+        Pump(h, 60);
+
+        Assert.Equal(EZombieState.Chase, zombie.State);
+        Assert.InRange(zombie.Position.X, 3.99f, 4.01f);
+        List<ZombieSnapshotState> snapshots = batches.SelectMany(batch => batch).ToList();
+        Assert.DoesNotContain(snapshots, state => state.Id == zombie.Id && state.Position.X < 3.99f);
+        Assert.DoesNotContain(snapshots, state => state.Id == zombie.Id && state.State == EZombieState.Attack);
+    }
+
+    [Fact]
     public void LosingItsTarget_TheZombieWalksHomeAndFallsSilent()
     {
         var h = new Harness();

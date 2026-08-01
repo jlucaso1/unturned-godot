@@ -64,6 +64,11 @@ public readonly struct ColliderPart
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed class PrefabGraph
 {
+    // Unity class ids, as they appear in the SerializedFile's object table.
+    private const int MeshFilterClassId = 33;
+    private const int MeshRendererClassId = 23;
+    private const int SkinnedMeshRendererClassId = 137;
+
     public SerializedFile File { get; }
     public IReadOnlyDictionary<long, SerializedObject> ObjectsByPathId { get; }
     public IReadOnlyDictionary<string, long> ContainerByPath { get; }
@@ -184,7 +189,10 @@ public sealed class PrefabGraph
 
         foreach (SerializedObject o in file.Objects)
         {
-            if (o.ClassId != 33) // MeshFilter
+            // A static prop hangs its geometry off a MeshFilter; an animated one (the sliding and blast
+            // doors, for instance) has a SkinnedMeshRenderer instead, which names its mesh the same way.
+            // Only the MeshFilter path was read before, so those objects rendered as nothing at all.
+            if (o.ClassId != MeshFilterClassId && o.ClassId != SkinnedMeshRendererClassId)
                 continue;
             Dictionary<string, object> mf = TypeTreeReader.Read(o.TypeTree, file.ReaderFor(o));
             var meshPptr = (Dictionary<string, object>)mf["m_Mesh"];
@@ -309,8 +317,13 @@ public sealed class PrefabGraph
         foreach (object component in (List<object>)gameObject["m_Component"])
         {
             long compId = PathId((Dictionary<string, object>)((Dictionary<string, object>)component)["component"]);
-            if (!objects.TryGetValue(compId, out SerializedObject? comp) || comp.ClassId != 23) // MeshRenderer
+            // MeshRenderer or SkinnedMeshRenderer: both carry the material list the same way.
+            if (!objects.TryGetValue(compId, out SerializedObject? comp)
+                || (comp.ClassId != MeshRendererClassId && comp.ClassId != SkinnedMeshRendererClassId))
+            {
                 continue;
+            }
+
             Dictionary<string, object> renderer = TypeTreeReader.Read(comp.TypeTree, file.ReaderFor(comp));
             foreach (object m in (List<object>)renderer["m_Materials"])
                 materials.Add(PathId((Dictionary<string, object>)m));
@@ -334,13 +347,24 @@ public sealed class PrefabGraph
     // ".../objects/small/business/cardboard_0/object.prefab" -> "objects/small/business/cardboard_0";
     // ".../trees/birch_1/resource.prefab" -> "trees/birch_1". The category prefix keeps object and tree
     // keys from colliding and matches the keys built from each asset's bundle folder.
+    // The container key without the bundle's own prefix or the file name: "assets/coremasterbundle/
+    // objects/medium/props/x/object.prefab" -> "objects/medium/props/x". Every master bundle is built
+    // under "Assets/<Name>MasterBundle", including workshop mods, so the first two segments are the
+    // prefix. Matching on known folder names instead would miss a mod's own layout: the game keeps its
+    // harvestables under Trees/ while a mod keeps them under Resources/.
     private static string PrefabKey(string path)
     {
-        int idx = path.IndexOf("/objects/", StringComparison.Ordinal);
-        if (idx < 0)
-            idx = path.IndexOf("/trees/", StringComparison.Ordinal);
-        string rest = path[(idx + 1)..];              // drop leading slash -> "objects/..." or "trees/..."
-        return rest[..rest.LastIndexOf('/')];         // drop the "/*.prefab" filename
+        int start = 0;
+        if (path.StartsWith("assets/", StringComparison.Ordinal))
+        {
+            int second = path.IndexOf('/', "assets/".Length);
+            if (second > 0)
+                start = second + 1;
+        }
+
+        string rest = path[start..];
+        int file = rest.LastIndexOf('/');
+        return file > 0 ? rest[..file] : rest; // drop the "/*.prefab" filename
     }
 
     private static float F(object value) => Convert.ToSingle(value);

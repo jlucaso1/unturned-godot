@@ -33,14 +33,14 @@ public static class TerrainPalette
     // and read weights[base + layer]; the float accumulation order is unchanged, so the result is identical.
     public static Color Blend(SplatmapTile splat, int x, int y)
     {
-        float[] weights = splat.Weights;
+        byte[] weights = splat.Weights;
         Color[] palette = LayerColors;
         int baseIndex = SplatmapTile.WeightIndex(x, y, 0);
 
         float r = 0, g = 0, b = 0, total = 0;
         for (int layer = 0; layer < SplatmapTile.LAYERS; layer++)
         {
-            float w = weights[baseIndex + layer];
+            float w = weights[baseIndex + layer] / 255f;
             Color c = palette[layer];
             r += c.R * w;
             g += c.G * w;

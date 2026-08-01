@@ -32,6 +32,9 @@ public partial class PlayerController : CharacterBody3D
     private double _netInputTimer;
     private uint _netFrame;
 
+    // The camera this controller drives, for screen-space passes that must render in front of it.
+    public Camera3D Camera => _camera;
+
     private Node3D _head = null!;
     private Camera3D _camera = null!;
     private CollisionShape3D _collider = null!;
@@ -45,6 +48,13 @@ public partial class PlayerController : CharacterBody3D
     private float _pitch;       // Godot pitch degrees: 0 = horizon, + up, - down
     private float _eyeHeight = PlayerConfig.EyeHeightStand;
     private bool _thirdPerson;
+    private bool _benchmarkMovement;
+    private ulong _benchmarkMovementStarted;
+    private bool _worldReady;
+
+    // ObjectStreamer calls this only after every terrain/object collider has joined the physics world.
+    // Before then even an idle grounded player must keep integrating so newly attached geometry is seen.
+    public void MarkWorldReady() => _worldReady = true;
 
     // Reused physics-query objects so the per-tick stance clearance test and the per-frame third-person
     // camera sweep don't allocate fresh RefCounted query/shape/exclude objects each call.
@@ -58,6 +68,8 @@ public partial class PlayerController : CharacterBody3D
     public override void _Ready()
     {
         _thirdPerson = StartThirdPerson;
+        _benchmarkMovement = OS.GetEnvironment("UG_RUNTIME_BENCH_MOVE") == "1";
+        _benchmarkMovementStarted = Engine.GetPhysicsFrames();
 
         // The body lives on layer 2 so the zombie brain's world queries (ground rays, vision rays,
         // movement sweeps — all mask 1) never treat the player as static geometry; the body itself
@@ -110,11 +122,16 @@ public partial class PlayerController : CharacterBody3D
 
     public override void _PhysicsProcess(double delta)
     {
+        long benchmarkStarted = Benchmark.RuntimeCounters.Start();
         float dt = (float)delta;
 
         // Mouse released = a menu owns the input (PauseMenu): freeze movement keys; physics still runs.
         bool inputCaptured = Input.MouseMode == Input.MouseModeEnum.Captured;
-        var input = inputCaptured
+        var input = _benchmarkMovement
+            // Alternate forward/back every second. This keeps the player near the deterministic spawn
+            // while exercising real MoveAndSlide, step-up and the 12.5 Hz loopback position stream.
+            ? new Vector2(0f, ((Engine.GetPhysicsFrames() - _benchmarkMovementStarted) / 60) % 2 == 0 ? -1f : 1f)
+            : inputCaptured
             ? new Vector2(
                 (Input.IsKeyPressed(_settings.Right) ? 1f : 0f) - (Input.IsKeyPressed(_settings.Left) ? 1f : 0f),
                 (Input.IsKeyPressed(_settings.Back) ? 1f : 0f) - (Input.IsKeyPressed(_settings.Forward) ? 1f : 0f))
@@ -123,20 +140,22 @@ public partial class PlayerController : CharacterBody3D
         Vector3 wishDir = moving ? (Transform.Basis * new Vector3(input.X, 0f, input.Y)).Normalized() : Vector3.Zero;
 
         bool wantSprint = inputCaptured && Input.IsKeyPressed(_settings.Sprint);
-        UpdateStance(moving, wantSprint);
+        bool stanceChanged = UpdateStance(moving, wantSprint);
         _rig?.SetState(_stance, moving); // crossfades to Idle_/Move_<stance>
         _rig?.SetPitch(_pitch);          // bends the upper body toward the look
 
         float speed = PlayerConfig.SpeedFor(_stance);
+        bool wasOnFloor = IsOnFloor();
+        bool canJump = wasOnFloor && inputCaptured && Input.IsKeyPressed(_settings.Jump)
+            && _stance is EPlayerStance.Stand or EPlayerStance.Sprint;
+        bool integrate = PlayerPhysicsActivity.NeedsIntegration(
+            _worldReady, wasOnFloor, moving, canJump, stanceChanged);
         Vector3 velocity = Velocity;
-
-        if (IsOnFloor())
+        if (wasOnFloor)
         {
             Vector3 ground = PlayerMovement.GroundVelocity(wishDir, speed);
             velocity.X = ground.X;
             velocity.Z = ground.Z;
-            bool canJump = inputCaptured && Input.IsKeyPressed(_settings.Jump)
-                && _stance is EPlayerStance.Stand or EPlayerStance.Sprint;
             velocity.Y = canJump ? PlayerConfig.JumpSpeed : -2f; // small downward keeps us snapped to the floor
         }
         else
@@ -144,13 +163,24 @@ public partial class PlayerController : CharacterBody3D
             velocity = PlayerMovement.AirVelocity(velocity, wishDir, speed, dt);
         }
 
-        Velocity = velocity;
-        MoveAndSlide();
+        bool isOnFloor = wasOnFloor;
+        if (integrate)
+        {
+            Velocity = velocity;
+            Vector3 beforeMove = GlobalPosition;
+            long moveStarted = Benchmark.RuntimeCounters.Start();
+            MoveAndSlide();
+            Benchmark.RuntimeCounters.Record(Benchmark.RuntimeCounters.Counter.PlayerMoveAndSlide, moveStarted);
+            long stepStarted = Benchmark.RuntimeCounters.Start();
+            PlayerStep.TryStepUp(this, beforeMove, new Vector3(velocity.X, 0f, velocity.Z) * dt);
+            Benchmark.RuntimeCounters.Record(Benchmark.RuntimeCounters.Counter.PlayerStep, stepStarted);
+            isOnFloor = IsOnFloor();
+        }
 
         // PlayerMovement's footstep block: the MovementSoundClock derives the landing thud on the
         // airborne->grounded edge and the 2.1/speed footstep cadence from this state, like every client
         // does for every player (local and remote) — movement audio never travels over the network.
-        Footsteps?.Tick(_stance, moving, IsOnFloor(), GlobalPosition, dt);
+        Footsteps?.Tick(_stance, moving, isOnFloor, GlobalPosition, dt);
 
         // Multiplayer: forward one input frame per 0.08 s (PlayerInput.RATE). Idle frames still flow so
         // the server keeps simulating (gravity) and other players see us stop.
@@ -167,27 +197,35 @@ public partial class PlayerController : CharacterBody3D
                     (sbyte)input.X, (sbyte)input.Y, jumpHeld, wantSprint,
                     UnturnedGodot.Net.NetAngles.QuantizeYaw(RotationDegrees.Y),
                     UnturnedGodot.Net.NetAngles.QuantizePitch(_pitch + 90f),
-                    _stance, GlobalPosition, IsOnFloor()));
+                    _stance, GlobalPosition, isOnFloor));
             }
         }
 
         UpdateCamera(dt);
+        Benchmark.RuntimeCounters.Record(Benchmark.RuntimeCounters.Counter.PlayerPhysics, benchmarkStarted);
     }
 
-    private void UpdateStance(bool moving, bool wantSprint)
+    private bool UpdateStance(bool moving, bool wantSprint)
     {
+        // Shape intersection is a real physics query. Most ticks do not attempt to raise the capsule, so
+        // do not eagerly test both standing and crouching headroom merely to pass booleans to the pure
+        // state machine.
+        bool canStand = !PlayerStanceMachine.NeedsStandClearance(_stance, _wantCrouch, _wantProne)
+            || HasClearance(PlayerConfig.HeightStand);
+        bool canCrouch = !PlayerStanceMachine.NeedsCrouchClearance(_stance, _wantCrouch)
+            || HasClearance(PlayerConfig.HeightCrouch);
         EPlayerStance next = PlayerStanceMachine.Resolve(
             _stance, _wantCrouch, _wantProne, wantSprint, moving,
             hasStamina: true, // stamina/skills are a follow-up; base player is never exhausted
-            canStand: HasClearance(PlayerConfig.HeightStand),
-            canCrouch: HasClearance(PlayerConfig.HeightCrouch));
+            canStand, canCrouch);
         if (next == _stance)
-            return;
+            return false;
 
         _stance = next;
         float height = PlayerConfig.HeightFor(next);
         _capsule.Height = height;
         _collider.Position = Vector3.Up * (height * 0.5f);
+        return true;
     }
 
     // True when a standing/crouching capsule of the given height fits at the current position (headroom).

@@ -127,7 +127,29 @@ public static class DatParser
     private static string ReadStringValue(string text, ref int p)
     {
         if (text[p] == '"') return ReadQuoted(text, ref p);
-        var sb = new StringBuilder();
+
+        // Escapes are rare in asset data, so scan for the end first and slice when there are none. The
+        // character-at-a-time StringBuilder is only worth its allocation and its regrowth when there is
+        // actually something to unescape — and this runs for every value of every .dat in the install.
+        int start = p;
+        int scan = p;
+        bool escaped = false;
+        while (scan < text.Length && text[scan] != '\r' && text[scan] != '\n')
+        {
+            if (text[scan] == '\\' && scan + 1 < text.Length)
+            {
+                escaped = true;
+                break;
+            }
+            scan++;
+        }
+        if (!escaped)
+        {
+            p = scan;
+            return text.Substring(start, scan - start);
+        }
+
+        var sb = new StringBuilder(text.Length - start);
         while (p < text.Length && text[p] != '\r' && text[p] != '\n')
         {
             char c = text[p];
@@ -148,7 +170,29 @@ public static class DatParser
     private static string ReadQuoted(string text, ref int p)
     {
         p++; // opening quote
-        var sb = new StringBuilder();
+
+        // Same shape as ReadStringValue: slice when the quoted run has no escapes, which is the norm.
+        int start = p;
+        int scan = p;
+        bool escaped = false;
+        while (scan < text.Length && text[scan] != '"')
+        {
+            if (text[scan] == '\\' && scan + 1 < text.Length)
+            {
+                escaped = true;
+                break;
+            }
+            scan++;
+        }
+        if (!escaped)
+        {
+            p = scan;
+            if (p < text.Length) p++; // closing quote
+            if (p < text.Length && text[p] == ',') p++;
+            return text.Substring(start, scan - start);
+        }
+
+        var sb = new StringBuilder(text.Length - start);
         while (p < text.Length && text[p] != '"')
         {
             char c = text[p];

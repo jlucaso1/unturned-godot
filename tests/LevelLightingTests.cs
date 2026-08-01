@@ -76,6 +76,8 @@ public class LevelLightingTests
         Assert.Equal(new Color(1f / 255f, 7f / 255f, 14f / 255f), day.AmbientEquator); // color 7
         Assert.Equal(new Color(1f / 255f, 8f / 255f, 16f / 255f), day.AmbientGround);  // color 8
         Assert.Equal(new Color(1f / 255f, 9f / 255f, 18f / 255f), day.CloudColor);     // color 9 (CLOUDS)
+        // color 10 (RAYS): the sun-shaft tint. LevelLighting pairs it with the RAYS single below.
+        Assert.Equal(new Color(1f / 255f, 10f / 255f, 20f / 255f), day.RaysColor);
         Assert.Equal(1.5f, day.Intensity);
         Assert.Equal(0.1f, day.FogDensity);
         Assert.Equal(0.2f, day.Clouds);

@@ -43,6 +43,10 @@ jobs:
       - name: Test
         run: dotnet test tests/UnturnedGodot.Tests.csproj -c Release --no-build
 
+      - name: Enforce core coverage above 95%
+        if: runner.os == 'Linux'
+        run: ./scripts/check-coverage.sh --no-build --no-restore
+
   format:
     name: format
     runs-on: ubuntu-latest

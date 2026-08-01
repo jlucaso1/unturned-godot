@@ -88,7 +88,8 @@ public static class LightingCycle
             clouds: Mathf.Lerp(a.Clouds, b.Clouds, alpha),
             shadows: Mathf.Lerp(a.Shadows, b.Shadows, alpha),
             rays: Mathf.Lerp(a.Rays, b.Rays, alpha),
-            cloudColor: a.CloudColor.Lerp(b.CloudColor, alpha));
+            cloudColor: a.CloudColor.Lerp(b.CloudColor, alpha),
+            raysColor: a.RaysColor.Lerp(b.RaysColor, alpha));
     }
 
     // How much of the stars texture's alpha is cut away (the skybox's _StarsCutoff). updateLighting holds
