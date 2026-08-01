@@ -136,6 +136,10 @@ the rasterizer. On PEI in a GPU-less container:
 | lavapipe under Xvfb | 1762 MB | 236 MB |
 | `UG_HEADLESS_INTERACTIVE=1`, no driver | 355 MB | 0 |
 
+```sh
+UG_HEADLESS_INTERACTIVE=1 ./scripts/run-benchmark.sh runtime   # the runtime tier skips Xvfb for this
+```
+
 Roughly 1.4 GB — about 80% of the process — is the software rasterizer holding in host memory what a
 real GPU keeps in VRAM. Two consequences. Any RSS figure measured in an agent sandbox or a CI runner is
 mostly lavapipe, so memory work must be judged against the headless number or on real hardware. And the

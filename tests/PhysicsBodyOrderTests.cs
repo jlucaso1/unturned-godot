@@ -55,6 +55,22 @@ public class PhysicsBodyOrderTests
         int build = source.IndexOf("if ((headless && !headlessInteractive)", StringComparison.Ordinal);
         int autoStart = source.IndexOf("bool autoStart = headlessInteractive", StringComparison.Ordinal);
         Assert.True(flag >= 0 && build > flag && autoStart > build);
+
+        // The documented workflow is the script, and its runtime tier otherwise always takes a swapchain.
+        // Handing the no-renderer control an Xvfb display would measure lavapipe and report it as the
+        // game's memory, which is the confusion the flag exists to remove — so the script must branch too.
+        if (FindRepositoryFile(Path.Combine("scripts", "run-benchmark.sh")) is not { } scriptPath)
+            return;
+
+        string script = File.ReadAllText(scriptPath);
+        int runtimeTier = script.IndexOf("    runtime)", StringComparison.Ordinal);
+        int guard = script.IndexOf("\"${UG_HEADLESS_INTERACTIVE:-}\" == \"1\"", runtimeTier,
+            StringComparison.Ordinal);
+        int headlessLaunch = script.IndexOf("\"$godot\" --headless", guard, StringComparison.Ordinal);
+        int windowed = script.IndexOf("run_windowed", guard, StringComparison.Ordinal);
+        Assert.True(runtimeTier >= 0 && guard > runtimeTier, "the runtime tier must branch on the flag");
+        Assert.True(headlessLaunch > guard && windowed > headlessLaunch,
+            "the flag must launch --headless, and the windowed launch must stay on the other branch");
     }
 
     [Fact]
