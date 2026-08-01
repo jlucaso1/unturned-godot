@@ -126,6 +126,27 @@ WARNING: environment differs from baseline (baseline vulkan/AMD Radeon RX 6600 (
 Keep a separate baseline per environment, and read the timed half of any GPU-less run as scaffolding
 rather than as a measurement.
 
+**And read RSS there as mostly the renderer.** `UG_HEADLESS_INTERACTIVE=1` runs the normal interactive
+session — streaming, navigation, physics, netcode, zombies, foliage residency — with no rendering driver
+at all, so differencing it against the same session under lavapipe attributes RSS between the game and
+the rasterizer. On PEI in a GPU-less container:
+
+| Tier 3 session | Peak RSS | `videoMemoryBytes` |
+|---|---:|---:|
+| lavapipe under Xvfb | 1762 MB | 236 MB |
+| `UG_HEADLESS_INTERACTIVE=1`, no driver | 355 MB | 0 |
+
+Roughly 1.4 GB — about 80% of the process — is the software rasterizer holding in host memory what a
+real GPU keeps in VRAM. Two consequences. Any RSS figure measured in an agent sandbox or a CI runner is
+mostly lavapipe, so memory work must be judged against the headless number or on real hardware. And the
+game's own resident state for a fully loaded, fully simulated PEI is around 355 MB, which is the figure
+an optimization is actually competing with.
+
+The headless session reports `drawCalls`, `primitives` and `videoMemoryBytes` as zero and runs frames far
+faster than a real one (1733 samples in 12 s against 8 under lavapipe), so its timings describe an
+unthrottled loop, not a frame budget. `SCREENSHOT_PATH` still takes precedence: a screenshot needs
+something drawn.
+
 ## Running without a window (Linux)
 
 - **No window** (Wayland/X): wrap every GPU or interactive benchmark in a headless nested compositor so
@@ -224,7 +245,12 @@ the already-usable baked navigation graph is refined.
   deliberately cold reconciliation run is required. The reconciled CSR routing graph is cached beside it;
   valid hits deserialize the graph directly, while misses build and write it off the main thread.
 - `UG_RUNTIME_BENCH_MOVE=1` makes Tier 3 alternate forward/back once per second, exercising real movement
-  collision and the loopback multiplayer position stream instead of profiling only an idle player.
+  collision and the loopback multiplayer position stream instead of profiling only an idle player. Note
+  that it oscillates rather than traverses: net displacement stays near zero, so it does not carry the
+  camera out of the prefetched foliage ring. Use Tier 2's `UG_FOLIAGE_TRAVERSAL=1` poses for that.
+- `UG_HEADLESS_INTERACTIVE=1` runs the interactive session under `--headless` instead of quitting after
+  the data loads, so the renderer's share of RSS can be differenced. See
+  [Running without a GPU](#running-without-a-gpu) for the measured split.
 
 ### Foliage residency reference A/B
 

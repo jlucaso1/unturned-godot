@@ -35,6 +35,28 @@ public class PhysicsBodyOrderTests
             "placement tuples must be released only after PhysicsServer has copied every transform");
     }
 
+    // Attributing RSS between the game and the rendering driver needs one session that runs streaming,
+    // navigation, physics and netcode with no driver at all. The flag must therefore skip the
+    // synchronous-build-and-quit branch, force the auto-start (there is no menu to click without a
+    // display), and still yield to a screenshot, which cannot be taken with nothing drawn.
+    [Fact]
+    public void HeadlessInteractiveRunsTheRealSessionAndStillYieldsToAScreenshot()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Main.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("OS.GetEnvironment(\"UG_HEADLESS_INTERACTIVE\") == \"1\"", source);
+        Assert.Contains("&& string.IsNullOrEmpty(shot)", source);
+        Assert.Contains("if ((headless && !headlessInteractive) || !string.IsNullOrEmpty(shot))", source);
+        Assert.Contains("bool autoStart = headlessInteractive", source);
+
+        int flag = source.IndexOf("bool headlessInteractive", StringComparison.Ordinal);
+        int build = source.IndexOf("if ((headless && !headlessInteractive)", StringComparison.Ordinal);
+        int autoStart = source.IndexOf("bool autoStart = headlessInteractive", StringComparison.Ordinal);
+        Assert.True(flag >= 0 && build > flag && autoStart > build);
+    }
+
     [Fact]
     public void IdlePhysicsFastPath_DoesNotSuppressMultiplayerFrames()
     {
