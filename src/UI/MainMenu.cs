@@ -110,6 +110,9 @@ public partial class MainMenu : CanvasLayer
             PlaceholderText = "host:port",
             CustomMinimumSize = new Vector2(320, 36),
             Alignment = HorizontalAlignment.Center,
+            // Right-click would build a PopupMenu, and hiding an embedded Popup in a release export spams
+            // "Attempt to disconnect a nonexistent connection" (see HoverTooltip). Ctrl+V still pastes.
+            ContextMenuEnabled = false,
         };
         _address.TextSubmitted += _ => Connect();
         _connectRow.AddChild(_address);
