@@ -4,8 +4,10 @@
 # cloud environments and Codex's cloud environment, but it is an ordinary idempotent script, so it is
 # also the fastest way to set up a fresh Linux box or a Docker image.
 #
-# It provisions everything except Godot itself: the editor is only needed to *run* the game, and the
-# whole test suite, the coverage gate and `dotnet format` work without it.
+# Godot is left out by default: the editor is only needed to *run* the game, the test suite and the
+# coverage gate and `dotnet format` all work without it, and it would add ~350 MB and a minute to a
+# setup that most work here never uses. Set UNTURNED_SETUP_GODOT=1 to get it (plus software rendering,
+# so the benchmark tiers run on a GPU-less container).
 #
 # Usage:
 #   ./scripts/setup-cloud-env.sh
@@ -13,6 +15,7 @@
 # Environment:
 #   UNTURNED_SETUP_MAPS   maps to fetch: a comma-separated list, "all", or "none" to skip the
 #                         download entirely (default: PEI, ~165 MB with the bundles)
+#   UNTURNED_SETUP_GODOT  1 to also install Godot 4.7 .NET and Mesa's software Vulkan driver
 #   UNTURNED_PATH         where the content goes (default: <repo>/build/game-data)
 set -euo pipefail
 
@@ -79,12 +82,24 @@ fetch_content() {
     "$repo_dir/scripts/fetch-game-data.sh" --maps "$maps" --dir "$content_dir"
 }
 
+# --- Godot (opt-in) ----------------------------------------------------------------------------
+install_godot() {
+    if [[ "${UNTURNED_SETUP_GODOT:-0}" != "1" ]]; then
+        echo "[godot] UNTURNED_SETUP_GODOT is not 1, skipping"
+        return 0
+    fi
+
+    "$repo_dir/scripts/install-godot.sh"
+}
+
 # The download and the toolchain install do not depend on each other, and the container images that
 # run this cap setup at a few minutes, so overlap them; the restore has to wait for the SDK.
 toolchain_log="$log_dir/toolchain.log"
 content_log="$log_dir/content.log"
 
-( install_dotnet && warm_nuget ) > "$toolchain_log" 2>&1 &
+# Godot rides in this branch rather than its own: it wants apt (which takes a lock the SDK install is
+# already holding) and it finishes by building the Debug assembly, which needs the SDK anyway.
+( install_dotnet && warm_nuget && install_godot ) > "$toolchain_log" 2>&1 &
 toolchain_pid=$!
 fetch_content > "$content_log" 2>&1 &
 content_pid=$!
