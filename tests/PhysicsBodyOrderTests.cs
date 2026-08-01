@@ -902,14 +902,24 @@ public class PhysicsBodyOrderTests
 
         string source = File.ReadAllText(path);
         // Both jobs read the tree through the same verifier, so both have to leave behind cache entries
-        // that predate a change to what "whole" means -- the structural job included.
-        Assert.Equal(2, CountOccurrences(source,
+        // that predate a change to what "whole" means -- the structural job included. Three references
+        // per job: the restore key, its restore-keys prefix, and the run-scoped save key.
+        Assert.Equal(6, CountOccurrences(source,
             "unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}"));
 
         // Cache entries are immutable for a given key: trusting the hit flag would wedge every run behind
         // one bad entry until the depot manifest moves. Verify what came back, and re-fetch when it fails.
         Assert.DoesNotContain("steps.content-cache.outputs.cache-hit", source);
         Assert.Equal(2, CountOccurrences(source, "if ./scripts/fetch-game-data.sh --verify 2> /dev/null; then"));
+
+        // A repair has to outlive the run that made it. actions/cache skips its teardown save after an
+        // exact-key hit, so a combined restore+save would fix the working directory and discard the fix,
+        // leaving every later run to restore the same bad entry and download again.
+        Assert.DoesNotContain("uses: actions/cache@v4\n        with:\n          path: build/game-data", source);
+        Assert.Equal(2, CountOccurrences(source, "uses: actions/cache/restore@v4"));
+        Assert.Equal(2, CountOccurrences(source, "uses: actions/cache/save@v4"));
+        Assert.Equal(2, CountOccurrences(source,
+            "key: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-${{ github.run_id }}-${{ github.job }}"));
     }
 
     [Fact]
