@@ -137,7 +137,11 @@ public sealed class TextureRegistry
             }
             loaded = (image, ct.FilterMode);
         }
-        _loaded[textureKey] = loaded;
+        // A miss during cold streaming is temporary: the mesh phase runs before most of the .resS tail
+        // has been written. Caching null here made the later ready notification reuse the miss forever.
+        // Successful GPU resources are stable and remain worth caching; absent/invalid files are retried.
+        if (loaded.tex != null)
+            _loaded[textureKey] = loaded;
         return loaded;
     }
 }

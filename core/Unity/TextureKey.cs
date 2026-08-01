@@ -68,6 +68,16 @@ public static class TextureKey
         return needsDiscriminator ? tag + "-" + Discriminator(name) : tag;
     }
 
+    // Adds a compact, filename-safe identity to an already-safe tag. Bundle names are not globally
+    // unique: two workshop items may both declare "shared.masterbundle", and asset filenames are not
+    // unique inside a bundle either. Keeping the readable prefix while hashing the stable source/path
+    // identity gives both cache layers one collision-resistant naming rule without creating long paths.
+    public static string Discriminate(string tag, string identity)
+    {
+        string normalized = identity.Replace('\\', '/').TrimEnd('/').ToLowerInvariant();
+        return tag + "-" + Discriminator(normalized);
+    }
+
     // Punctuation is normalized above for filenames, so retain a stable discriminator for names such as
     // "some mod" and "some-mod" that would otherwise share one namespace. FNV-1a is tiny, deterministic,
     // and runs only while content sources are discovered, never while texture keys are streamed.

@@ -35,7 +35,12 @@ public sealed class ContentSource
         string assetsDir, bool isCore)
     {
         Name = name;
-        CacheTag = Unity.TextureKey.TagFor(name);
+        string nameTag = Unity.TextureKey.TagFor(name);
+        // Steam workshop directory names are item ids and therefore stable across platforms and library
+        // moves. Bundle names alone are not unique: unrelated items often reuse names such as
+        // "shared.masterbundle", while their Unity PathIDs overlap freely.
+        CacheTag = isCore ? nameTag : Unity.TextureKey.Discriminate(nameTag,
+            Path.GetFileName(Path.TrimEndingDirectorySeparator(root)));
         Root = root;
         BundlePath = bundlePath;
         ObjectsDir = objectsDir;

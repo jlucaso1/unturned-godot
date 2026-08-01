@@ -37,10 +37,10 @@ public readonly struct CachedSubmesh
 // texture keys), so the 1.4 GB bundle is parsed once and runtime loads only the small meshes it needs.
 public static class MeshCache
 {
-    // "UGM8": submesh texture keys are namespaced by the bundle they came from (see Unity.TextureKey).
-    // The bump matters — a mesh written under UGM7 carries a bare path id, which no longer identifies a
-    // texture uniquely now that workshop bundles are extracted alongside the game's.
-    private const uint Magic = 0x384D4755;
+    // "UGM9": workshop texture tags include the source item identity as well as its declared bundle name.
+    // The bump forces meshes written with UGM8's name-only keys to be extracted once more; accepting them
+    // would keep pointing at the old shared texture namespace even though ContentSource now has a safe tag.
+    private const uint Magic = 0x394D4755;
 
     // True when the file starts with the current format magic; false for stale formats, short files or a
     // missing path. Cold-load detection uses this so a format bump re-extracts instead of crashing on Read.

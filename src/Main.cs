@@ -232,8 +232,10 @@ public partial class Main : Node3D
     // speed and step offset are all the ported constants.
     private async System.Threading.Tasks.Task RunStepProbe(string spec)
     {
-        for (int i = 0; i < 120; i++) // let the world finish streaming in
-            await NextPhysicsFrame();
+        // The caller starts this from ObjectStreamer.MeshesReady, after BuildObjects attached every
+        // collider. Cross one physics boundary so PhysicsServer has incorporated those new bodies before
+        // the first MoveAndSlide; a fixed frame delay raced cold/large bundles and measured bare terrain.
+        await NextPhysicsFrame();
 
         string[] ends = spec.Split('>');
         string[] a = ends[0].Split(',');
@@ -299,7 +301,7 @@ public partial class Main : Node3D
         // Horizontal only: the walker can be mid-fall when it arrives, and a height difference is not
         // a failure to get there.
         body.QueueFree();
-        GetTree().Quit();
+        AppShutdown.RequestQuit(GetTree());
     }
 
     private static float Horizontal(Vector3 a, Vector3 b) =>
@@ -458,13 +460,12 @@ public partial class Main : Node3D
         await NextFrame();
         // Feature flag: FREECAM=1 keeps the fly-through camera; otherwise the player character spawns and
         // walks the map (terrain collision is added on demand so free-cam runs don't pay for it).
-        if (OS.GetEnvironment("STEP_PROBE") is { Length: > 0 } stepProbe)
-        {
-            _ = RunStepProbe(stepProbe); // diagnostic run: no player, no input
-        }
-        else if (OS.GetEnvironment("FREECAM") == "1")
+        string? stepProbe = OS.GetEnvironment("STEP_PROBE") is { Length: > 0 } probe ? probe : null;
+        // STEP_PROBE is a diagnostic run with no player/input. It starts from MeshesReady below rather
+        // than from a guessed delay, so it always sees the object collision world it measures.
+        if (stepProbe == null && OS.GetEnvironment("FREECAM") == "1")
             AddFreeCamera();
-        else
+        else if (stepProbe == null)
             _player = SpawnPlayer(terrain, thirdPerson: false, unturnedPath, heights);
 
         loading.SetStatus("World objects…");
@@ -476,6 +477,8 @@ public partial class Main : Node3D
         streamer.Finished += loading.Finish; // fade out once the scene (and warm textures) are in
         streamer.Finished += () => _player?.MarkWorldReady();
         streamer.Finished += RunPendingAudioExtraction;
+        if (stepProbe != null)
+            streamer.MeshesReady += elapsedMs => _ = RunStepProbe(stepProbe);
         // Only now do the object colliders exist, so only now can the navmesh be checked against them.
         streamer.Finished += () => _network?.ReconcileNavigation(streamer.NeededGuids);
         if (OS.GetEnvironment("UG_RUNTIME_BENCH_SECS") is { Length: > 0 } duration
@@ -701,8 +704,8 @@ public partial class Main : Node3D
         // Each bundle's definitions are cached under that bundle's tag, so two bundles naming one the same
         // thing stay apart — and the parallel passes never write each other's directory. The zombie clip
         // groups only exist in the game's own bundle, so they ride along with its pass.
-        string TagOf(string bundle) => UnturnedGodot.Unity.TextureKey.TagFor(
-            BundleNameOf(sources, bundle) ?? System.IO.Path.GetFileNameWithoutExtension(bundle));
+        string TagOf(string bundle) => BundleTagOf(sources, bundle)
+            ?? UnturnedGodot.Unity.TextureKey.TagFor(System.IO.Path.GetFileNameWithoutExtension(bundle));
 
         _pendingAudioExtraction = () =>
         {
@@ -723,8 +726,8 @@ public partial class Main : Node3D
         AddChild(oneShot);
         _oneShotAudio = oneShot;
         string BundleTagOfDirectory(string directory) =>
-            UnturnedGodot.Unity.TextureKey.TagFor(SourceForAssetDirectory(sources, directory)?.Name
-                ?? System.IO.Path.GetFileNameWithoutExtension(bundlePath));
+            SourceForAssetDirectory(sources, directory)?.CacheTag
+            ?? UnturnedGodot.Unity.TextureKey.TagFor(System.IO.Path.GetFileNameWithoutExtension(bundlePath));
 
         MovementAudio Factory(bool startGrounded) =>
             new(bank, landscape, splat, oneShot, startGrounded, BundleTagOfDirectory);
@@ -734,14 +737,15 @@ public partial class Main : Node3D
     // The masterbundle of the content source whose assets folder holds `directory`, falling back to the
     // game's own bundle for anything unattributed. A source that ships no bundle has nothing to extract
     // from, and returning "" drops those definitions rather than looking for them in the wrong file.
-    // The name a bundle's own MasterBundle.dat gives it, which is what the cache tag is derived from: the
-    // FILE name carries a platform suffix and would key the same content differently per platform.
-    private static string? BundleNameOf(
+    // The discovered source's complete cache tag includes both the name from MasterBundle.dat and, for a
+    // workshop source, its item identity. The FILE name still only serves as a fallback because it carries
+    // a platform suffix and would key the same content differently per platform.
+    private static string? BundleTagOf(
         System.Collections.Generic.IReadOnlyList<ContentSource> sources, string bundlePath)
     {
         foreach (ContentSource source in sources)
             if (string.Equals(source.BundlePath, bundlePath, System.StringComparison.Ordinal))
-                return source.Name;
+                return source.CacheTag;
 
         return null;
     }

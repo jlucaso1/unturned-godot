@@ -379,6 +379,51 @@ public class PhysicsBodyOrderTests
     }
 
     [Fact]
+    public void StreamingTextureMissesAreRetriedAfterTheirFilesArrive()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Rendering", "TextureRegistry.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("if (loaded.tex != null)", source);
+        Assert.DoesNotContain("_loaded[textureKey] = loaded;\n        return loaded;", source);
+    }
+
+    [Fact]
+    public void SourceAwareTextureTagsInvalidateNameOnlyMeshCaches()
+    {
+        if (FindRepositoryFile(Path.Combine("core", "Unity", "MeshCache.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("\"UGM9\"", source);
+        Assert.Contains("private const uint Magic = 0x394D4755;", source);
+    }
+
+    [Fact]
+    public void StepProbeStartsFromColliderReadinessAndUsesCooperativeShutdown()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Main.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("streamer.MeshesReady += elapsedMs => _ = RunStepProbe(stepProbe);", source);
+        Assert.Contains("AppShutdown.RequestQuit(GetTree());", source);
+        Assert.DoesNotContain("for (int i = 0; i < 120; i++)", source);
+    }
+
+    [Fact]
+    public void AudioDefinitionCacheKeysIncludeTheirFullAssetPath()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Rendering", "AudioExtractor.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("TextureKey.Discriminate(prefix, assetPath)", source);
+        Assert.DoesNotContain("bundleTag + \"_\" + DefNameOf(assetPath)", source);
+    }
+
+    [Fact]
     public void RuntimeBenchmarkAppliesFamilyThresholdsToAllWallClockMetrics()
     {
         if (FindRepositoryFile(Path.Combine("src", "Benchmark", "RuntimeBenchmark.cs")) is not { } path)

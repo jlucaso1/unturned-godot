@@ -96,4 +96,16 @@ public class TextureKeyTests
     [Fact]
     public void TagNeverContainsTheSeparator() =>
         Assert.DoesNotContain('_', TextureKey.TagFor("mod_with_underscores.masterbundle"));
+
+    [Fact]
+    public void DiscriminatorIsStableAcrossPathSeparatorsButDistinctAcrossSources()
+    {
+        string first = TextureKey.Discriminate("shared", @"304930\12345");
+        string same = TextureKey.Discriminate("shared", "304930/12345");
+        string other = TextureKey.Discriminate("shared", "304930/67890");
+
+        Assert.Equal(first, same);
+        Assert.NotEqual(first, other);
+        Assert.DoesNotContain('_', first);
+    }
 }

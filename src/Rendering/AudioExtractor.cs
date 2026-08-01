@@ -13,16 +13,19 @@ namespace UnturnedGodot;
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class AudioExtractor
 {
-    // Cache layout: <audioCacheDir>/<DefName>/def.bin + <clip>.ogg. A def.bin marks the def as complete.
+    // Cache layout: <audioCacheDir>/<DefKey>/def.bin + <clip>.ogg. A def.bin marks the def as complete.
     public static bool IsCached(string audioCacheDir, string defName) =>
         File.Exists(Path.Combine(audioCacheDir, defName, "def.bin"));
 
-    // The cache key for a definition: its file name, prefixed by the bundle that carries it. Two bundles
-    // can name a definition the same thing — a workshop item mirroring the game's folders is enough — and
-    // on the bare name their entries were the same directory, so one skipped extraction because the other
-    // had already written it, and the wrong footstep played.
-    public static string DefKey(string bundleTag, string assetPath) =>
-        bundleTag.Length == 0 ? DefNameOf(assetPath) : bundleTag + "_" + DefNameOf(assetPath);
+    // The cache key carries both source identity and the normalized full asset path. Definitions with the
+    // same leaf name routinely live in different surface folders; using only that leaf let the later one
+    // overwrite def.bin and made both surfaces play the same clips.
+    public static string DefKey(string bundleTag, string assetPath)
+    {
+        string leaf = TextureKey.TagFor(DefNameOf(assetPath));
+        string prefix = bundleTag.Length == 0 ? leaf : bundleTag + "-" + leaf;
+        return TextureKey.Discriminate(prefix, assetPath);
+    }
 
     public static string DefNameOf(string assetPath)
     {

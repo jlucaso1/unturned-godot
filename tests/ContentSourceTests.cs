@@ -68,6 +68,23 @@ public class ContentSourceTests
     }
 
     [Fact]
+    public void WorkshopItemsWithTheSameBundleNameHaveDistinctCacheTags()
+    {
+        using var dir = new TempDir();
+        string install = BuildLibrary(dir);
+        AddMod(dir, "100", ModConfig, "california2_linux.masterbundle");
+        AddMod(dir, "200", ModConfig, "california2_linux.masterbundle");
+
+        IReadOnlyList<ContentSource> mods = ContentSource.Discover(install,
+            UnturnedInstall.Platform.Linux);
+
+        Assert.Equal(3, mods.Count);
+        Assert.NotEqual(mods[1].CacheTag, mods[2].CacheTag);
+        Assert.StartsWith("california2-", mods[1].CacheTag);
+        Assert.Equal("core", mods[0].CacheTag);
+    }
+
+    [Fact]
     public void Discover_PicksTheBundleForThePlatform()
     {
         using var dir = new TempDir();
