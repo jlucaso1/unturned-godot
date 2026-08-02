@@ -54,9 +54,16 @@ public sealed class ReliableChannel
 
         if (_pending.Count >= MaxPending)
         {
-            // Dropping a reliable send breaks its delivery guarantee, which is the point: a peer that has
-            // this many frames outstanding is either gone or not reading, and either way the answer is to
-            // stop generating more rather than to keep retransmitting a set nobody is acknowledging.
+            // Give up on the peer rather than drop the frame. Callers send reliably precisely because they
+            // then mutate state as though it arrived — ZombieHost marks a region loaded once it has pushed
+            // its chunks — so silently discarding one leaves the two sides disagreeing with nothing to
+            // notice it, and nothing to retry it. A peer holding this many frames unacked is not reading,
+            // which is the same conclusion the GiveUpAfter deadline reaches by a slower route, so this
+            // takes the same exit: the owner drops the connection on its next Update.
+            //
+            // The frame is still not sent — it cannot be, the set is full — but the connection dies with
+            // it, so "reliable" keeps meaning delivered-or-disconnected rather than silently-maybe.
+            HasGivenUp = true;
             RefusedSends++;
             return;
         }

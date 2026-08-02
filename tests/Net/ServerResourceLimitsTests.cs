@@ -246,6 +246,33 @@ public class ServerResourceLimitsTests
 
         Assert.Equal(ReliableChannel.MaxPending, sent.Count);
         Assert.True(channel.RefusedSends > 0);
+
+        // And the connection is given up rather than the frames silently vanishing. Callers send
+        // reliably because they then treat the message as delivered — ZombieHost marks a region loaded
+        // once it has pushed its chunks — so a dropped frame with a live connection leaves the two sides
+        // disagreeing with nothing to notice or retry it.
+        Assert.True(channel.HasGivenUp, "a full pending set must end the connection, not the message");
+    }
+
+    [Fact]
+    public void APeerThatAcksKeepsItsConnection()
+    {
+        var sent = new List<byte[]>();
+        ReliableChannel? channel = null;
+        // The receiver acks straight back, as a reachable peer does.
+        var receiver = new ReliableChannel(ack => channel!.HandleDatagram(ack, out _));
+        channel = new ReliableChannel(frame =>
+        {
+            sent.Add(frame);
+            receiver.HandleDatagram(frame, out _);
+        });
+
+        for (int i = 0; i < ReliableChannel.MaxPending * 4; i++)
+            channel.Send(new byte[] { (byte)ENetMessage.PlayerLeft, 1 }, ESendType.Reliable, now: 0);
+
+        Assert.Equal(ReliableChannel.MaxPending * 4, sent.Count);
+        Assert.Equal(0, channel.RefusedSends);
+        Assert.False(channel.HasGivenUp);
     }
 
     [Fact]
