@@ -37,6 +37,8 @@ public class PlayerIdPoolTests
         Assert.DoesNotContain(byte.MaxValue, seen);
     }
 
+    // The point of the pool: 254 is a limit on concurrent players, not on admissions for the lifetime of
+    // the server. A bare counter made it the latter.
     [Fact]
     public void ReturnedIdIsReusedRatherThanExhaustingThePool()
     {
@@ -50,7 +52,7 @@ public class PlayerIdPoolTests
         pool.Return(42, 0.0);
 
         Assert.Equal(1, pool.Available);
-        Assert.True(pool.TryRent(0.0, out byte reused));
+        Assert.True(pool.TryRent(PlayerIdPool.QuarantineSeconds, out byte reused));
         Assert.Equal(42, reused);
     }
 
@@ -109,10 +111,11 @@ public class PlayerIdPoolTests
     public void NothingHasCooled_OnAPoolThatHasNeverRecycled() =>
         Assert.False(new PlayerIdPool().NextRecycledIdHasCooled(1000.0));
 
-    // Under enough churn to exhaust the fresh ids, a still-cooling id is reused rather than the join
-    // being refused: locking every joiner out for the quarantine window would be the worse failure.
+    // The rule is absolute: no id leaves the pool inside the window where a stale PlayerLeft for its
+    // previous holder can still arrive. A fallback that handed out a hot id under pressure would leave
+    // the race reachable, just harder to hit.
     [Fact]
-    public void WhenNoFreshIdRemains_AStillCoolingIdIsReusedRatherThanRefused()
+    public void AStillCoolingIdIsNeverHandedOut_EvenWithNoFreshIdLeft()
     {
         var pool = new PlayerIdPool();
         for (int i = 0; i < PlayerIdPool.Capacity; i++)
@@ -121,8 +124,31 @@ public class PlayerIdPoolTests
         pool.Return(7, 100.0);
 
         Assert.False(pool.NextRecycledIdHasCooled(100.0));
-        Assert.True(pool.TryRent(100.0, out byte reused));
+        Assert.False(pool.TryRent(100.0, out _));
+
+        // ...and it becomes available the moment the window closes.
+        double cooled = 100.0 + PlayerIdPool.QuarantineSeconds;
+        Assert.True(pool.TryRent(cooled, out byte reused));
         Assert.Equal(7, reused);
+    }
+
+    [Fact]
+    public void ARecycledIdIsHandedOutOnceCooled()
+    {
+        var pool = new PlayerIdPool();
+        for (int i = 0; i < PlayerIdPool.Capacity; i++)
+            Assert.True(pool.TryRent(0.0, out _));
+        pool.Return(3, 0.0);
+        pool.Return(9, 1.0);
+
+        double afterFirst = PlayerIdPool.QuarantineSeconds;
+        Assert.True(pool.TryRent(afterFirst, out byte first));
+        Assert.Equal(3, first);
+
+        // 9 was released a second later, so it is still hot at this instant.
+        Assert.False(pool.TryRent(afterFirst, out _));
+        Assert.True(pool.TryRent(afterFirst + 1.0, out byte second));
+        Assert.Equal(9, second);
     }
 }
 
@@ -197,9 +223,11 @@ public class PlayerIdExhaustionTests
         FakeConnection victim = Join(server, transport, now);
         Assert.Equal(1, server.PlayerCount);
 
+        // Well past the id space, and slowly enough that returned ids keep cooling back into service —
+        // a real server's join/leave churn, not a flood.
         for (int i = 0; i < PlayerIdPool.Capacity * 3; i++)
         {
-            now += 0.01;
+            now += PlayerIdPool.QuarantineSeconds / 4;
             FakeConnection churn = Join(server, transport, now);
             transport.Disconnect(churn);
             server.Update(now);
@@ -209,9 +237,10 @@ public class PlayerIdExhaustionTests
         Assert.Equal(1, server.PlayerCount);
         Assert.False(victim.Closed);
 
-        now += 0.01;
-        Join(server, transport, now);
+        now += PlayerIdPool.QuarantineSeconds;
+        FakeConnection newcomer = Join(server, transport, now);
         Assert.Equal(2, server.PlayerCount);
+        Assert.NotEqual(victim.AssignedPlayerId, newcomer.AssignedPlayerId);
     }
 
     [Fact]

@@ -55,23 +55,25 @@ public sealed class PlayerIdPool
             return true;
         }
 
-        if (_released.Count == 0)
+        // Past this point every id has been used before, so one can only be handed out once it has
+        // cooled. Refusing until then keeps the rule absolute — an id is never reused inside the window
+        // where a stale PlayerLeft can still land — which is the whole point of the quarantine; a
+        // fallback that reuses a hot id under pressure would leave the original race reachable, just
+        // harder to hit. The failure this trades into is a join refused for at most QuarantineSeconds,
+        // and only after 254 disconnects inside that window. Guarding against a peer that can produce
+        // that much churn is connection rate limiting, which this class is the wrong place for.
+        if (!NextRecycledIdHasCooled(now))
         {
             id = 0;
             return false;
         }
 
-        // Past this point every id has been used before. Prefer one that has cooled; if none has,
-        // hand out the one free longest anyway. Refusing instead would let 254 quick disconnects lock
-        // every joiner out for QuarantineSeconds, which is a worse failure than reopening a narrow
-        // ordering race on a single id under exactly that much churn.
         id = _released.Dequeue().Id;
         _rented.Add(id);
         return true;
     }
 
-    // Whether the next id TryRent would recycle has been free long enough to be safe to reuse. False
-    // while ids are still cooling — TryRent will hand one out regardless, see the note there.
+    // Whether the next id TryRent would recycle has been free long enough to be safe to reuse.
     public bool NextRecycledIdHasCooled(double now) =>
         _released.Count > 0 && now - _released.Peek().At >= QuarantineSeconds;
 
