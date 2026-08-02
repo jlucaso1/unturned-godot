@@ -197,7 +197,9 @@ the already-usable baked navigation graph is refined.
 - `UG_OBJECT_CELL_MIN_TRIS=<count>` is the geometry an average cell must carry for its draw call to pay
   for itself. Groups whose cells fall short are partitioned on a coarser grid instead (doubling until
   they clear it, or until the group is a single batch). Zero gives every group the same fixed cell size,
-  which is the A/B control for the whole mechanism.
+  which is the A/B control for the whole mechanism. It responds to how dense a group is rather than how
+  far it is spread, which is why one setting suits maps of different sizes: a wider map multiplies spread
+  but not density.
 - `UG_COLLISION_CHUNK_METRES=0` disables physics-body partitioning for A/B comparisons.
 - `UG_FOLIAGE_CHUNK_TILES=<1..32>` changes the number of 32 m foliage tiles per render chunk;
   `UG_FOLIAGE_DISTANCE=<metres>` changes its fade range.

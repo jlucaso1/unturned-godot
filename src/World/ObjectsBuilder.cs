@@ -31,14 +31,19 @@ public static class ObjectsBuilder
     //
     // The cell size is a trade, not a free win: finer cells shed geometry at eye level, where most of a
     // group is behind the camera or beyond it, and cost draw calls in views that take in the whole map at
-    // once, where nothing can be rejected. This default sits at the knee — cutting it further keeps
-    // improving the ground view but the aerial cost climbs faster than the gain.
+    // once, where nothing can be rejected. Widening it is the crudest way to settle that trade, because
+    // it gives up rejection everywhere to save draw calls on the groups too thin to be worth splitting;
+    // MinCellTriangles is what separates those two cases, so this stays at the size that suits the dense
+    // groups and the coarsening handles the rest.
     private static readonly float ObjectChunkMetres = EnvFloat("UG_OBJECT_CHUNK_METRES", 1024f, 0f, 8192f);
     private static readonly long ObjectChunkMinTriangles = EnvLong("UG_OBJECT_CHUNK_MIN_TRIS", 0, 0, long.MaxValue);
     private static readonly bool ObjectChunkRequireSpread = EnvBool("UG_OBJECT_CHUNK_REQUIRE_SPREAD", true);
     // Geometry an average cell must carry for its own draw call to be worth taking. See CellSizeFor.
+    // The default sits where the measured cost of the next step up stops being worth it: coarsening this
+    // far buys most of the aerial saving that a larger cell size would, for a fraction of its cost at eye
+    // level, and going further costs ground geometry about as fast as simply widening the cells would.
     // Zero restores a single fixed cell size for every group, which is the A/B control.
-    private static readonly long MinCellTriangles = EnvLong("UG_OBJECT_CELL_MIN_TRIS", 0, 0, long.MaxValue);
+    private static readonly long MinCellTriangles = EnvLong("UG_OBJECT_CELL_MIN_TRIS", 500, 0, long.MaxValue);
     // Ceiling for that coarsening walk. Past the widest map a cell holds every copy of a group, so going
     // further cannot change the partition — this only bounds the loop against degenerate coordinates.
     private const float MaxCellMetres = 65_536f;
