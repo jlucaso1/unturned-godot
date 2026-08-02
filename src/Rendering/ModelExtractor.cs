@@ -719,8 +719,18 @@ public static class ModelExtractor
                     requireEveryPart: true)
                 && TriangleTotal(lodSubmeshes) <= TriangleTotal(submeshes) * Lod1MaxTriangleRatio)
             {
-                WriteMeshAtomically(lod1Path, stem + ".lod1.tmp", lodVerts.ToArray(),
-                    lodNormalsOk ? lodNormals.ToArray() : Array.Empty<Vector3>(), lodUvs.ToArray(), lodSubmeshes);
+                // Best-effort, like the type-tree cache: the lower level is an optimisation, and losing it
+                // must not cost this asset its base mesh — let alone unwind through ExtractMeshes and drop
+                // every asset still queued in this bundle to a placeholder box.
+                try
+                {
+                    WriteMeshAtomically(lod1Path, stem + ".lod1.tmp", lodVerts.ToArray(),
+                        lodNormalsOk ? lodNormals.ToArray() : Array.Empty<Vector3>(), lodUvs.ToArray(), lodSubmeshes);
+                }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+                {
+                    AppShutdown.PrintUnlessQuitting($"[extract] lower level not cached for {asset.Guid:N}: {e.Message}");
+                }
             }
 
             // Cache the authored per-vertex normals (Unturned's own hard/soft edges); ModelLibrary falls
@@ -965,12 +975,21 @@ public static class ModelExtractor
             if (!MeshCache.IsCurrent(data)) // stale format; a later extraction pass rewrites it
                 continue;
 
-            (_, _, _, List<CachedSubmesh> submeshes) = MeshCache.Read(data);
-            foreach (CachedSubmesh sm in submeshes)
-                if (TextureKey.TryParse(sm.TextureKey, out string owner, out long id)
-                    && (string.Equals(owner, bundleTag, StringComparison.Ordinal)
-                        || (includeSecondary && IsBundleFileTag(owner, bundleTag))))
-                    ids.Add(id);
+            try
+            {
+                (_, _, _, List<CachedSubmesh> submeshes) = MeshCache.Read(data);
+                foreach (CachedSubmesh sm in submeshes)
+                    if (TextureKey.TryParse(sm.TextureKey, out string owner, out long id)
+                        && (string.Equals(owner, bundleTag, StringComparison.Ordinal)
+                            || (includeSecondary && IsBundleFileTag(owner, bundleTag))))
+                        ids.Add(id);
+            }
+            catch (Exception e) when (e is InvalidDataException or ArgumentOutOfRangeException
+                or IndexOutOfRangeException or OverflowException)
+            {
+                // The magic check reads four bytes, so a file truncated after them still gets here. Such an
+                // entry is already unusable as a mesh; skip it rather than abort the bundle's texture pass.
+            }
         }
         return ids;
     }

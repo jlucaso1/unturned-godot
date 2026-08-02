@@ -112,6 +112,15 @@ public class TextureDependencyIndexTests
         WriteMesh(meshes, plain, TextureKey.For("mod", 12));
         Assert.Equal(new HashSet<long> { 12 },
             TextureDependencyIndex.NeededTextureIds(meshes, "mod", new[] { plain }));
+
+        // A lower level truncated after its 4-byte header still passes the magic check, so the read has to
+        // survive it. The base mesh beside it must still be planned.
+        Guid halfWritten = Guid.NewGuid();
+        WriteMesh(meshes, halfWritten, TextureKey.For("mod", 13));
+        byte[] whole = File.ReadAllBytes(Path.Combine(meshes, halfWritten.ToString("N") + ".mesh"));
+        File.WriteAllBytes(Path.Combine(meshes, halfWritten.ToString("N") + MeshCache.Lod1Suffix), whole[..5]);
+        Assert.Equal(new HashSet<long> { 13 },
+            TextureDependencyIndex.NeededTextureIds(meshes, "mod", new[] { halfWritten }));
     }
 
     private static void WriteMesh(string directory, Guid guid, params string[] keys) =>
