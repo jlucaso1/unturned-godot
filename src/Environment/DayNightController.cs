@@ -61,15 +61,16 @@ public partial class DayNightController : Node
         {
             Name = "Sun",
             ShadowEnabled = true,
-            // 2 cascades over a tight 64 m range (Unturned's own shadow draw distance ballpark): the near
-            // split stays dense enough for a crisp player shadow in third person, and beyond ~64 m Unturned
-            // shows no shadows either. 4 cascades was ~10% frame time for no visible gain here (#6).
+            // 2 cascades over a tight range, which is where Unturned itself stops drawing shadows. The
+            // shadow pass re-rasterizes every caster inside this distance, so it is the single largest
+            // block of geometry the frame submits — larger than the objects it shadows.
             DirectionalShadowMode = DirectionalLight3D.ShadowMode.Parallel2Splits,
-            DirectionalShadowMaxDistance = 128f,
-            // Near split out to 16 m (0.25 * 64): thin casters (fence wires, goal nets) hold their shadow
+            DirectionalShadowMaxDistance = 64f,
+            // Split kept at 16 m of that range: thin casters (fence wires, goal nets) hold their shadow
             // well past walking distance instead of popping in at ~6 m, while the near texel density stays
-            // ample for the player's own shadow.
-            DirectionalShadowSplit1 = 0.125f,
+            // ample for the player's own shadow. Halving the range at the same split means the far cascade
+            // now covers half the ground with the same texels, so 16-64 m gets sharper rather than worse.
+            DirectionalShadowSplit1 = 0.25f,
             DirectionalShadowBlendSplits = true,
         };
 

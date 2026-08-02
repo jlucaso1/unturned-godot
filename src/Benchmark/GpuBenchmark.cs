@@ -305,8 +305,8 @@ public static class GpuBenchmark
             RotationDegrees = new Vector3(-50, -30, 0),
             ShadowEnabled = EnvInt("UG_SHADOW", 1) != 0,
             // Match DayNightController so Tier 2 measures the shipping shadow workload by default.
-            DirectionalShadowMaxDistance = 128f,
-            DirectionalShadowSplit1 = 0.125f,
+            DirectionalShadowMaxDistance = 64f,
+            DirectionalShadowSplit1 = 0.25f,
             DirectionalShadowBlendSplits = true,
         };
         float dist = EnvFloat("UG_SHADOW_DIST", -1f);
