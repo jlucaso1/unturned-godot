@@ -68,10 +68,10 @@ public sealed class NetServer
                     _sessions[evt.Connection] = new Session();
                     break;
                 case ETransportEvent.Message:
-                    HandleMessage(evt.Connection, evt.Payload);
+                    HandleMessage(evt.Connection, evt.Payload, now);
                     break;
                 case ETransportEvent.Disconnected:
-                    HandleDisconnect(evt.Connection);
+                    HandleDisconnect(evt.Connection, now);
                     break;
             }
         }
@@ -88,7 +88,7 @@ public sealed class NetServer
         }
     }
 
-    private void HandleMessage(ITransportConnection connection, byte[] payload)
+    private void HandleMessage(ITransportConnection connection, byte[] payload, double now)
     {
         if (!_sessions.TryGetValue(connection, out Session? session))
             return;
@@ -104,7 +104,7 @@ public sealed class NetServer
                     }
                     else if (!session.Joined)
                     {
-                        if (!AdmitPlayer(connection, session, name))
+                        if (!AdmitPlayer(connection, session, name, now))
                             connection.Close(); // server full: refuse cleanly, do not invent an id
                     }
                     else
@@ -131,9 +131,9 @@ public sealed class NetServer
     // back on disconnect: a bare incrementing byte wrapped after 255 admissions and handed a live
     // player's id to the next joiner, which overwrote their simulation state and then deleted it when
     // the newcomer left, so the admission after that threw out of GetState.
-    private bool AdmitPlayer(ITransportConnection connection, Session session, string name)
+    private bool AdmitPlayer(ITransportConnection connection, Session session, string name, double now)
     {
-        if (!_playerIds.TryRent(out byte playerId))
+        if (!_playerIds.TryRent(now, out byte playerId))
             return false;
 
         session.PlayerId = playerId;
@@ -158,13 +158,13 @@ public sealed class NetServer
         return true;
     }
 
-    private void HandleDisconnect(ITransportConnection connection)
+    private void HandleDisconnect(ITransportConnection connection, double now)
     {
         if (!_sessions.Remove(connection, out Session? session) || !session.Joined)
             return;
         PlayerCount--;
         _simulation.RemovePlayer(session.PlayerId);
-        _playerIds.Return(session.PlayerId);
+        _playerIds.Return(session.PlayerId, now);
         Broadcast(NetMessages.WritePlayerLeft(session.PlayerId), ESendType.Reliable);
     }
 

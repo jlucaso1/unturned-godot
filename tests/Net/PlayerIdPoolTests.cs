@@ -13,9 +13,9 @@ public class PlayerIdPoolTests
     {
         var pool = new PlayerIdPool();
 
-        Assert.True(pool.TryRent(out byte a));
-        Assert.True(pool.TryRent(out byte b));
-        Assert.True(pool.TryRent(out byte c));
+        Assert.True(pool.TryRent(0.0, out byte a));
+        Assert.True(pool.TryRent(0.0, out byte b));
+        Assert.True(pool.TryRent(0.0, out byte c));
 
         Assert.Equal(1, a);
         Assert.Equal(2, b);
@@ -28,7 +28,7 @@ public class PlayerIdPoolTests
         var pool = new PlayerIdPool();
         var seen = new HashSet<byte>();
 
-        while (pool.TryRent(out byte id))
+        while (pool.TryRent(0.0, out byte id))
             Assert.True(seen.Add(id), $"id {id} was handed out twice");
 
         Assert.Equal(PlayerIdPool.Capacity, seen.Count);
@@ -42,15 +42,15 @@ public class PlayerIdPoolTests
     {
         var pool = new PlayerIdPool();
         for (int i = 0; i < PlayerIdPool.Capacity; i++)
-            Assert.True(pool.TryRent(out _));
+            Assert.True(pool.TryRent(0.0, out _));
 
-        Assert.False(pool.TryRent(out _));
+        Assert.False(pool.TryRent(0.0, out _));
         Assert.Equal(0, pool.Available);
 
-        pool.Return(42);
+        pool.Return(42, 0.0);
 
         Assert.Equal(1, pool.Available);
-        Assert.True(pool.TryRent(out byte reused));
+        Assert.True(pool.TryRent(0.0, out byte reused));
         Assert.Equal(42, reused);
     }
 
@@ -58,10 +58,10 @@ public class PlayerIdPoolTests
     public void ReturningTwice_DoesNotDuplicateAnId()
     {
         var pool = new PlayerIdPool();
-        Assert.True(pool.TryRent(out byte id));
+        Assert.True(pool.TryRent(0.0, out byte id));
 
-        pool.Return(id);
-        pool.Return(id);
+        pool.Return(id, 0.0);
+        pool.Return(id, 0.0);
 
         Assert.Equal(PlayerIdPool.Capacity, pool.Available);
     }
@@ -73,9 +73,56 @@ public class PlayerIdPoolTests
     {
         var pool = new PlayerIdPool();
 
-        pool.Return(reserved);
+        pool.Return(reserved, 0.0);
 
         Assert.Equal(PlayerIdPool.Capacity, pool.Available);
+    }
+
+    // PlayerLeft and PlayerJoined are both reliable, and ReliableChannel delivers an unseen sequence as
+    // soon as it arrives rather than in order. Handing a just-freed id to the next joiner therefore lets
+    // a retransmitted PlayerLeft for the previous holder delete the newcomer on every client.
+    [Fact]
+    public void AJustFreedId_IsNotHandedStraightBackOut()
+    {
+        var pool = new PlayerIdPool();
+        Assert.True(pool.TryRent(0.0, out byte first));
+
+        pool.Return(first, 1.0);
+
+        Assert.True(pool.TryRent(1.0, out byte next));
+        Assert.NotEqual(first, next);
+    }
+
+    [Fact]
+    public void ARecycledIdIsReportedCooled_OnlyAfterTheQuarantineWindow()
+    {
+        var pool = new PlayerIdPool();
+        Assert.True(pool.TryRent(0.0, out byte id));
+        pool.Return(id, 5.0);
+
+        Assert.False(pool.NextRecycledIdHasCooled(5.0));
+        Assert.False(pool.NextRecycledIdHasCooled(5.0 + PlayerIdPool.QuarantineSeconds - 0.001));
+        Assert.True(pool.NextRecycledIdHasCooled(5.0 + PlayerIdPool.QuarantineSeconds));
+    }
+
+    [Fact]
+    public void NothingHasCooled_OnAPoolThatHasNeverRecycled() =>
+        Assert.False(new PlayerIdPool().NextRecycledIdHasCooled(1000.0));
+
+    // Under enough churn to exhaust the fresh ids, a still-cooling id is reused rather than the join
+    // being refused: locking every joiner out for the quarantine window would be the worse failure.
+    [Fact]
+    public void WhenNoFreshIdRemains_AStillCoolingIdIsReusedRatherThanRefused()
+    {
+        var pool = new PlayerIdPool();
+        for (int i = 0; i < PlayerIdPool.Capacity; i++)
+            Assert.True(pool.TryRent(0.0, out _));
+
+        pool.Return(7, 100.0);
+
+        Assert.False(pool.NextRecycledIdHasCooled(100.0));
+        Assert.True(pool.TryRent(100.0, out byte reused));
+        Assert.Equal(7, reused);
     }
 }
 
@@ -88,8 +135,13 @@ public class PlayerIdExhaustionTests
         private readonly int _id = ++NextId;
         public bool Closed;
         public int Id => _id;
-        public void Send(byte[] payload, ESendType sendType) { }
+        public readonly List<byte[]> Sent = new();
+        public void Send(byte[] payload, ESendType sendType) => Sent.Add(payload);
         public void Close() => Closed = true;
+
+        // The id the server assigned this connection, read back off its own Welcome.
+        public byte AssignedPlayerId =>
+            NetMessages.ReadWelcome(Sent.Find(p => NetMessages.TypeOf(p) == ENetMessage.Welcome)!).PlayerId;
     }
 
     private sealed class FakeServerTransport : IServerTransport
@@ -182,6 +234,26 @@ public class PlayerIdExhaustionTests
 
         Assert.True(turnedAway.Closed);
         Assert.Equal(PlayerIdPool.Capacity, server.PlayerCount);
+    }
+
+    // The server-level shape of the ordering hazard: a client that had the leaver's id must not see the
+    // newcomer take it, because a retransmitted PlayerLeft would then delete the newcomer's remote.
+    [Fact]
+    public void ADepartedPlayersId_IsNotGivenToTheNextJoiner()
+    {
+        (NetServer server, FakeServerTransport transport) = Build();
+        FakeConnection first = Join(server, transport, 0.0);
+        byte departed = first.AssignedPlayerId;
+
+        transport.Disconnect(first);
+        server.Update(0.1);
+
+        FakeConnection second = Join(server, transport, 0.2);
+        FakeConnection third = Join(server, transport, 0.3);
+
+        Assert.NotEqual(departed, second.AssignedPlayerId);
+        Assert.NotEqual(departed, third.AssignedPlayerId);
+        Assert.NotEqual(second.AssignedPlayerId, third.AssignedPlayerId);
     }
 
     [Fact]
