@@ -9,13 +9,20 @@ on:
 permissions:
   contents: read
 
+# A PR with five pushes used to run five copies of the matrix; superseded runs could also report after
+# the current one. real-data.yml already does this — ci.yml simply never got it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-test:
     # The game content is never present on a runner, so this is the hermetic half of the suite: the
-    # real-data tests self-skip and everything else must still pass, on all three desktop platforms,
-    # since the loader now resolves Steam installs for each of them.
+    # real-data tests skip (visibly — see RealDataFactAttribute) and everything else must still pass, on
+    # all three desktop platforms, since the loader now resolves Steam installs for each of them.
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -28,6 +35,14 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      # setup-dotnet's built-in cache wants a lock file, which this repo does not have; key on the
+      # project files instead, which is what actually decides the resolved graph.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'Directory.Build.props', 'nuget.config') }}
+          restore-keys: nuget-${{ runner.os }}-
+
       - name: Restore
         run: |
           dotnet restore unturned-godot.sln
@@ -35,10 +50,24 @@ jobs:
 
       # Analyzers + .editorconfig style are build-enforced (Directory.Build.props), so a warning here
       # is a failure worth seeing.
+      #
+      # The Debug build is not redundant. unturned-godot.csproj drops addons/**/*.cs from every non-Debug
+      # configuration, so a Release-only CI never compiled the editor add-on at all — 25 files, including
+      # a #pragma warning disable CS0618 sitting on a deprecated API, none of it reaching this gate.
+      # Measured before this change: `-getItem:Compile` listed 0 addon files in Release and 25 in Debug.
       - name: Build
         run: |
           dotnet build unturned-godot.sln -c Release --no-restore -warnaserror
           dotnet build tools/PerfHarness/PerfHarness.csproj -c Release --no-restore -warnaserror
+
+      # Deliberately without --no-restore. The Godot SDK references GodotSharpEditor only in Debug, and
+      # NuGet keeps one assets file per project rather than per configuration, so the Release restore above
+      # erases it; building Debug on those assets trips the csproj's DropEditorAddonWithoutEditorApi
+      # warning, which -warnaserror turns into a failure. Letting this step restore first is what makes it
+      # compile the add-on rather than skip it. That fragility is worth removing at the source — see the
+      # audit note on making the restore configuration-invariant — but that is a csproj change, not a CI one.
+      - name: Build the editor add-on
+        run: dotnet build unturned-godot.csproj -c Debug -warnaserror
 
       - name: Test
         run: dotnet test tests/UnturnedGodot.Tests.csproj -c Release --no-build
@@ -50,6 +79,7 @@ jobs:
   format:
     name: format
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -61,3 +91,28 @@ jobs:
         run: |
           dotnet format unturned-godot.sln --verify-no-changes
           dotnet format tools/PerfHarness/PerfHarness.csproj --verify-no-changes
+
+  audit:
+    # The project already carries a hand-applied CVE mitigation (the Microsoft.Bcl.Memory pin in
+    # unturned-godot.csproj, lifting GHSA-73j8-2gch-69rq out of Fmod5Sharp -> IndexRange). Nothing was
+    # watching for the next one; this and the Dependabot config are that.
+    name: dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Fail on any known advisory
+        run: |
+          set -euo pipefail
+          dotnet restore unturned-godot.sln
+          dotnet list unturned-godot.sln package --vulnerable --include-transitive 2>&1 | tee audit.txt
+          # `dotnet list` exits 0 whether or not it found anything, so the severity column is the signal.
+          if grep -qE '\b(Critical|High|Moderate|Low)\b' audit.txt; then
+            echo "::error::vulnerable packages reported above"
+            exit 1
+          fi

@@ -1,0 +1,22 @@
+version: 2
+
+# The repo pins every downloaded binary by SHA-256 (install-godot.sh, fetch-game-data.sh) but had nothing
+# watching its NuGet graph or its actions. The Microsoft.Bcl.Memory pin in unturned-godot.csproj exists
+# specifically to lift a published advisory out of a transitive dependency — a mitigation nothing kept
+# fresh is the kind that quietly goes stale.
+updates:
+  # tools/PerfHarness is not in unturned-godot.sln and has its own PackageReference set, so a single "/"
+  # entry would never have seen it. CI builds it separately for the same reason.
+  - package-ecosystem: nuget
+    directories:
+      - "/"
+      - "/tools/PerfHarness"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
