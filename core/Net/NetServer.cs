@@ -251,7 +251,7 @@ public sealed class NetServer
             return false;
 
         session.PlayerId = playerId;
-        session.Name = name;
+        session.Name = NetMessages.ClampName(name);
         session.Joined = true;
         PlayerCount++;
         _simulation.AddPlayer(session.PlayerId, _spawnPosition);

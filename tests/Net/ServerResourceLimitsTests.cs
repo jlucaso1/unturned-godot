@@ -262,6 +262,52 @@ public class ServerResourceLimitsTests
         Assert.Equal(0, channel.RefusedSends);
     }
 
+    // A name is the only unbounded string a peer puts into server state, and Welcome names every joined
+    // player. Left unbounded, one oversized name makes the Welcome sent to everyone who joins afterwards
+    // exceed the transport's payload cap — those clients are admitted and then time out without joining.
+    [Fact]
+    public void AFullRosterOfMaximumNamesStillFitsInOneDatagram()
+    {
+        var roster = new List<PlayerListing>();
+        string longest = new string('W', NetMessages.MaxNameBytes * 4); // clamped down on admission
+        for (int i = 0; i < PlayerIdPool.Capacity; i++)
+        {
+            roster.Add(new PlayerListing
+            {
+                PlayerId = (byte)(PlayerIdPool.First + i),
+                Name = NetMessages.ClampName(longest),
+                Position = new Vector3(1f, 2f, 3f),
+            });
+        }
+
+        byte[] welcome = NetMessages.WriteWelcome(1, 0, roster);
+
+        Assert.True(welcome.Length < UdpServerTransport.MaxPayloadBytes,
+            $"a full roster is {welcome.Length} bytes, past the " +
+            $"{UdpServerTransport.MaxPayloadBytes}-byte transport cap");
+    }
+
+    [Fact]
+    public void ClampNameCutsOnACharacterBoundary()
+    {
+        // Four bytes each in UTF-8, so the cap does not land on a whole number of them.
+        string emoji = string.Concat(System.Linq.Enumerable.Repeat("\U0001F600", 20));
+        string clamped = NetMessages.ClampName(emoji);
+
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(clamped) <= NetMessages.MaxNameBytes);
+        // Round-tripping proves nothing was cut through a multi-byte sequence.
+        Assert.Equal(clamped, System.Text.Encoding.UTF8.GetString(
+            System.Text.Encoding.UTF8.GetBytes(clamped)));
+        Assert.DoesNotContain('\uFFFD', clamped);
+    }
+
+    [Fact]
+    public void ClampNameLeavesAnOrdinaryNameAlone()
+    {
+        Assert.Equal("player", NetMessages.ClampName("player"));
+        Assert.Equal(string.Empty, NetMessages.ClampName(""));
+    }
+
     // A composite transport is how a listen server works: the host's loopback plus a LAN UDP transport.
     // Restarting at the first child on every TryReceive meant a backlogged host could consume the whole
     // per-Update budget forever and the LAN side would never be polled.
