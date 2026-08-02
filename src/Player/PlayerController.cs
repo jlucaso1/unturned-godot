@@ -68,7 +68,7 @@ public partial class PlayerController : CharacterBody3D
     public override void _Ready()
     {
         _thirdPerson = StartThirdPerson;
-        _benchmarkMovement = OS.GetEnvironment("UG_RUNTIME_BENCH_MOVE") == "1";
+        _benchmarkMovement = EnvFlag.IsOn(OS.GetEnvironment("UG_RUNTIME_BENCH_MOVE"), whenUnset: false);
         _benchmarkMovementStarted = Engine.GetPhysicsFrames();
 
         // The body has its own bit so no world query treats the player as geometry. It used to sit on

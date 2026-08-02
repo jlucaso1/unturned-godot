@@ -49,7 +49,7 @@ public class PhysicsBodyOrderTests
             return;
 
         string source = File.ReadAllText(path);
-        Assert.Contains("OS.GetEnvironment(\"UG_HEADLESS_INTERACTIVE\") == \"1\"", source);
+        Assert.Contains("EnvFlag.IsOn(OS.GetEnvironment(\"UG_HEADLESS_INTERACTIVE\"), whenUnset: false)", source);
         Assert.Contains("&& string.IsNullOrEmpty(shot)", source);
         Assert.Contains("if ((headless && !headlessInteractive) || !string.IsNullOrEmpty(shot))", source);
         Assert.Contains("bool autoStart = headlessInteractive", source);
@@ -523,7 +523,9 @@ public class PhysicsBodyOrderTests
             return;
         string world = File.ReadAllText(worldPath);
         string occluder = File.ReadAllText(occluderPath);
-        Assert.Contains("OS.GetEnvironment(\"TERRAIN_OCCLUDERS\") != \"0\"", world);
+        // Asserts the flag defaults ON. The spelling moved to EnvFlag so that "false" turns it off
+        // instead of on — `!= "0"` compared the string without reading it.
+        Assert.Contains("EnvFlag.IsOn(OS.GetEnvironment(\"TERRAIN_OCCLUDERS\"), whenUnset: true)", world);
         Assert.Contains("occluders[i] = TerrainOccluder.Prepare(meshes[i])", world);
         Assert.Contains("TerrainOccluder.Finish(occluders[i])", world);
         Assert.Contains("public static Prepared Prepare", occluder);

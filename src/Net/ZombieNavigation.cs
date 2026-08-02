@@ -119,7 +119,7 @@ public sealed class ZombieNavigation
             NavigationServer3D.Singleton.MapChanged += OnMapChanged;
 
         Rid map = _map;
-        bool debug = OS.GetEnvironment("NAV_DEBUG") == "1";
+        bool debug = EnvFlag.IsOn(OS.GetEnvironment("NAV_DEBUG"), whenUnset: false);
         Query = (Vector3 from, Vector3 to, List<Vector3> path) =>
         {
             if (_useBakedGraph)
@@ -343,7 +343,7 @@ public sealed class ZombieNavigation
         IReadOnlySet<Guid> colliderGuids)
     {
         // Diagnostic/benchmark aid: isolates NavigationServer publication cost from collision probing.
-        if (OS.GetEnvironment("NAV_SKIP_RECONCILE") == "1")
+        if (EnvFlag.IsOn(OS.GetEnvironment("NAV_SKIP_RECONCILE"), whenUnset: false))
         {
             Publish();
             return;
@@ -351,7 +351,7 @@ public sealed class ZombieNavigation
 
         string? cachePath = null;
         string? fingerprint = null;
-        bool partialCheckpoints = OS.GetEnvironment("UG_PARTIAL_NAV_CACHE") != "0";
+        bool partialCheckpoints = EnvFlag.IsOn(OS.GetEnvironment("UG_PARTIAL_NAV_CACHE"), whenUnset: true);
         int[] triangleCounts = new int[_flags.Count];
         for (int i = 0; i < _flags.Count; i++)
             triangleCounts[i] = _flags[i].Triangles.Length / 3;
@@ -549,7 +549,7 @@ public sealed class ZombieNavigation
     // runtime consumer. California2 can hold hundreds of thousands of HashSet entries here otherwise.
     private void ReleaseReconciliationState()
     {
-        if (OS.GetEnvironment("UG_KEEP_NAV_RECONCILE_STATE") == "1")
+        if (EnvFlag.IsOn(OS.GetEnvironment("UG_KEEP_NAV_RECONCILE_STATE"), whenUnset: false))
             return;
 
         int rejected = 0;

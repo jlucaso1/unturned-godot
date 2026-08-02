@@ -95,7 +95,7 @@ public partial class SunShafts : Node3D
 
     public override void _Process(double delta)
     {
-        bool debug = OS.GetEnvironment("SUN_SHAFTS_DEBUG") == "1";
+        bool debug = EnvFlag.IsOn(OS.GetEnvironment("SUN_SHAFTS_DEBUG"), whenUnset: false);
         if (_camera == null || !IsInstanceValid(_camera))
         {
             if (debug)

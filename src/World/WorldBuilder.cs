@@ -30,7 +30,7 @@ public static class WorldBuilder
     // Conservative terrain occluders substantially reduce hidden object submission on hilly maps. Their
     // triangles are proven to remain below the source heightfield, so enable them by default; zero keeps
     // the uncullled path available for visual/performance A/B checks.
-    private static bool OccludersEnabled => OS.GetEnvironment("TERRAIN_OCCLUDERS") != "0";
+    private static bool OccludersEnabled => EnvFlag.IsOn(OS.GetEnvironment("TERRAIN_OCCLUDERS"), whenUnset: true);
 
     public static WorldBuildResult Build(string unturnedPath, string mapName)
     {

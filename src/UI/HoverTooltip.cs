@@ -87,7 +87,7 @@ public partial class HoverTooltip : PanelContainer
         // absence of an error needs proof that the hover it drove actually landed on a row. On stderr
         // because that stream is unbuffered -- stdout is block-buffered into a pipe, and the harness
         // kills the game rather than letting it flush.
-        if (OS.GetEnvironment("UG_UI_TRACE") == "1")
+        if (EnvFlag.IsOn(OS.GetEnvironment("UG_UI_TRACE"), whenUnset: false))
             Log.PrintErr($"[ui] hover hint: {_text}");
     }
 

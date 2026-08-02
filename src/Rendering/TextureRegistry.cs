@@ -13,14 +13,14 @@ namespace UnturnedGodot;
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed class TextureRegistry
 {
-    private static readonly bool DeduplicateGpu = System.Environment.GetEnvironmentVariable("UG_DEDUP_GPU") != "0";
+    private static readonly bool DeduplicateGpu = EnvFlag.IsOn(System.Environment.GetEnvironmentVariable("UG_DEDUP_GPU"), whenUnset: true);
     private readonly string _textureCacheDir;
     private readonly Dictionary<string, List<Material>> _pending = new();
     private readonly Dictionary<string, (ImageTexture? tex, int filterMode)> _loaded = new();
     private readonly Dictionary<string, ImageTexture> _imagesByContent = new();
     private readonly Dictionary<string, string> _materialIdentity = new();
     private static readonly bool DeduplicateMaterials =
-        System.Environment.GetEnvironmentVariable("UG_DEDUP_MATERIAL_CONTENT") != "0";
+        EnvFlag.IsOn(System.Environment.GetEnvironmentVariable("UG_DEDUP_MATERIAL_CONTENT"), whenUnset: true);
 
     public TextureRegistry(string textureCacheDir) => _textureCacheDir = textureCacheDir;
 

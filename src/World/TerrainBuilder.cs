@@ -243,7 +243,7 @@ public static partial class TerrainBuilder
 
         public ImageTexture GetOrCreate(byte[] bytes)
         {
-            if (System.Environment.GetEnvironmentVariable("UG_DEDUP_GPU") == "0")
+            if (!EnvFlag.IsOn(System.Environment.GetEnvironmentVariable("UG_DEDUP_GPU"), whenUnset: true))
             {
                 const int rawRes = Landscape.SPLATMAP_RESOLUTION;
                 return ImageTexture.CreateFromImage(

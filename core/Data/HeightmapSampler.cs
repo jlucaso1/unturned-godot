@@ -10,7 +10,7 @@ namespace UnturnedGodot.Data;
 // z-offset, the way Unturned's roads sit on Unity's (bilinear) terrain.
 public sealed class HeightmapSampler
 {
-    private static readonly bool CompactHeightmaps = System.Environment.GetEnvironmentVariable("UG_COMPACT_HEIGHTMAP") != "0";
+    private static readonly bool CompactHeightmaps = EnvFlag.IsOn(System.Environment.GetEnvironmentVariable("UG_COMPACT_HEIGHTMAP"), whenUnset: true);
     private const int Res = Landscape.HEIGHTMAP_RESOLUTION_MINUS_ONE; // 256 cells across a tile
     private readonly Dictionary<(int X, int Y), TileData> _tiles = new();
 

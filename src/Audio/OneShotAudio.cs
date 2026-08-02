@@ -49,7 +49,7 @@ public partial class OneShotAudio : Node3D
         voice.PitchScale = Mathf.Lerp(minPitch ?? entry.Def.MinPitch, maxPitch ?? entry.Def.MaxPitch,
             (float)_random.NextDouble());
         voice.Play();
-        if (OS.GetEnvironment("AUDIO_DEBUG") == "1")
+        if (EnvFlag.IsOn(OS.GetEnvironment("AUDIO_DEBUG"), whenUnset: false))
         {
             Camera3D? cam = GetViewport().GetCamera3D();
             float dist = cam != null ? cam.GlobalPosition.DistanceTo(position) : -1f;

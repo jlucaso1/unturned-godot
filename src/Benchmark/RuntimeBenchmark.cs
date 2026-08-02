@@ -95,7 +95,7 @@ public static class RuntimeBenchmark
                     ["runtime.videoMemoryBytes"] = Mon(Performance.Monitor.RenderVideoMemUsed),
                     ["runtime.samples"] = frameMs.Count,
                     ["runtime.sampleSeconds"] = seconds,
-                    ["runtime.scriptedMovement"] = OS.GetEnvironment("UG_RUNTIME_BENCH_MOVE") == "1" ? 1 : 0,
+                    ["runtime.scriptedMovement"] = EnvFlag.IsOn(OS.GetEnvironment("UG_RUNTIME_BENCH_MOVE"), whenUnset: false) ? 1 : 0,
                 },
             };
             AddFrameBucket(report.Metrics, "withPhysics", withPhysicsFrameMs);
