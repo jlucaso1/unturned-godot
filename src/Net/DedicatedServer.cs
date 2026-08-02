@@ -14,7 +14,10 @@ public partial class DedicatedServer : Node
     private NetServer _server = null!;
     private IServerTransport _transport = null!;
 
-    public static DedicatedServer Create(string unturnedPath, string mapName, Vector3 spawn, ushort port)
+    // levelName is what the handshake compares (the map's folder name), which is not always mapName:
+    // a workshop selection key carries an absolute path that means nothing on the joining machine.
+    public static DedicatedServer Create(string unturnedPath, string mapName, string levelName, Vector3 spawn,
+        ushort port)
     {
         // Through the catalog, not Maps/<name>: a workshop map lives in the workshop content folder, and
         // hard-coding the shipped location left the server advertising that map while loading no terrain
@@ -31,7 +34,8 @@ public partial class DedicatedServer : Node
         {
             Name = "DedicatedServer",
             _transport = transport,
-            _server = new NetServer(transport, new ServerSimulation(new HeightfieldMoveSolver(ground)), spawn),
+            _server = new NetServer(transport, new ServerSimulation(new HeightfieldMoveSolver(ground)), spawn,
+                levelName),
         };
 
         UnturnedGodot.Zombies.ZombieSystem? zombies = UnturnedGodot.Zombies.ZombieWorld.Load(
@@ -48,7 +52,7 @@ public partial class DedicatedServer : Node
             Log.Print($"[server] {zombies.Zombies.Count} zombies spawned");
         }
 
-        Log.Print($"[server] dedicated server for {mapName} listening on UDP {port} ({tiles.Count} height tiles)");
+        Log.Print($"[server] dedicated server for {levelName} listening on UDP {port} ({tiles.Count} height tiles)");
         return node;
     }
 

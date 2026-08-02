@@ -11,15 +11,16 @@ namespace UnturnedGodot;
 public static class ObjectsBuilder
 {
     // Collision layer bit for the bodies Unturned's RayMasks.BLOCK_VISION would hit (the LARGE and
-    // MEDIUM object layers). Zombie alert raycasts query exactly this bit.
-    public const uint VisionBlockerLayer = 1u << 1;
+    // MEDIUM object layers). Zombie alert raycasts query exactly this bit. See CollisionLayers for the
+    // whole layout — these two names are kept because the call sites read well with them.
+    public const uint VisionBlockerLayer = CollisionLayers.VisionBlocker;
 
     // MEDIUM furniture (gravestones, benches, beds) collides with the PLAYER but not with zombie
     // movement: the original's navmesh ignores it (BLOCK_NAVMESH rasterizes only the dedicated Nav
     // colliders) and its zombies shove straight through such props — colliding here made ours jam
     // dead-still on a gravestone the route legitimately crosses. Zombie ground/step rays still see
     // it (a zombie standing on a deck must find the deck).
-    public const uint MediumFurnitureLayer = 1u << 2;
+    public const uint MediumFurnitureLayer = CollisionLayers.MediumFurniture;
 
     // Instances real meshes (grouped per GUID into one MultiMesh each) where available; placed objects
     // without an extracted mesh fall back to colored placeholder boxes.
