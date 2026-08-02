@@ -6,11 +6,13 @@ using Xunit;
 
 namespace UnturnedGodot.Tests;
 
-// E2E validation of the Unity parser against the real core bundle. Self-skips when absent.
-// Ground-truth counts come from UnityPy reading the same file.
+// E2E validation of the Unity parser against the real core bundle. Reports a SKIP when it is absent, and
+// the real-data job turns that skip into a failure. Ground-truth counts come from UnityPy reading the same
+// file.
+[Trait("Category", "RealData")]
 public class UnityBundleRealTests
 {
-    private static string? BundlePath() => GameData.MasterBundle;
+    private static string BundlePath() => GameData.MasterBundle!;
 
     private static byte[]? SerializedFileBytes(UnityBundle bundle)
     {
@@ -20,11 +22,10 @@ public class UnityBundleRealTests
         return null;
     }
 
-    [Fact]
+    [RealDataFact(RequiresMasterBundle = true)]
     public void ParsesRealBundle_ObjectCountsMatchUnityPy()
     {
-        string? path = BundlePath();
-        if (path == null) return;
+        string path = BundlePath();
 
         // Decode only the SerializedFile prefix (~179 MB) instead of the whole 1.4 GB block.
         UnityBundle bundle = UnityBundle.Read(File.ReadAllBytes(path), maxDecompressedBytes: 200_000_000);
@@ -43,11 +44,10 @@ public class UnityBundleRealTests
         Assert.Equal(9381, counts[33]);   // MeshFilter
     }
 
-    [Fact]
+    [RealDataFact(RequiresMasterBundle = true)]
     public void ReadsRealMesh_EndToEnd_ThroughGenericReader()
     {
-        string? path = BundlePath();
-        if (path == null) return;
+        string path = BundlePath();
 
         UnityBundle bundle = UnityBundle.Read(File.ReadAllBytes(path), maxDecompressedBytes: 200_000_000);
         SerializedFile file = SerializedFile.Read(SerializedFileBytes(bundle)!);

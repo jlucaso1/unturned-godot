@@ -186,11 +186,10 @@ public class ZombieNavmeshTests : IDisposable
         Assert.False(LevelNavmesh.SnapXZ(flags, new Vector3(500, 34, 500), out _));
     }
 
-    [Fact]
+    [RealDataFact(Map = "PEI")]
     public void RealPei_TheReportedOffMeshSpot_SnapsToTheStreetNotTheBasement()
     {
-        if (GameData.Map("PEI") is not { } pei)
-            return;
+        string pei = GameData.Map("PEI")!;
         List<NavFlag> flags = LevelNavmesh.Load(Path.Combine(pei, "Environment"));
         // The reported zigzag spot: a player standing off-mesh at street level (y~34) with a
         // basement mesh ~3 m below. The stable snap must pick the street.
@@ -202,11 +201,10 @@ public class ZombieNavmeshTests : IDisposable
 
     // Real PEI data (self-skips without the game): 19 pre-baked navmeshes; every flag's box must
     // match its Bounds.dat entry minus the BOUNDS_SIZE (64 m) expansion.
-    [Fact]
+    [RealDataFact(Map = "PEI")]
     public void RealPei_NavmeshesParseAndMatchTheBounds()
     {
-        if (GameData.Map("PEI") is not { } pei)
-            return;
+        string pei = GameData.Map("PEI")!;
         string env = Path.Combine(pei, "Environment");
 
         List<NavFlag> flags = LevelNavmesh.Load(env);

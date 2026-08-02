@@ -276,11 +276,10 @@ public class ContentSourceTests
     }
 
     // The real install: the game is always a source, and any subscribed mod with a bundle joins it.
-    [Fact]
+    [RealDataFact]
     public void Discover_RealInstall_AlwaysHasTheGame()
     {
-        if (GameData.Install is not { } install)
-            return;
+        string install = GameData.Install!;
 
         IReadOnlyList<ContentSource> sources = ContentSource.Discover(install);
 

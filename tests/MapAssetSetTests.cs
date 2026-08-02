@@ -138,11 +138,11 @@ public class MapAssetSetTests
     }
 
     // Against the real game: PEI's needs must match what the map actually places.
-    [Fact]
+    [RealDataFact(Map = "PEI")]
     public void Collect_RealPei_MatchesThePlacedObjects()
     {
-        if (GameData.Install is not { } install || GameData.Map("PEI") is not { } pei)
-            return;
+        string install = GameData.Install!;
+        string pei = GameData.Map("PEI")!;
 
         HashSet<Guid> needed = MapAssetSet.Collect(pei, Path.Combine(install, "Bundles", "Assets"));
 

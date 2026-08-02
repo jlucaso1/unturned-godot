@@ -329,11 +329,10 @@ public class ZombieDataTests : IDisposable
     }
 
     // Real PEI data (self-skips without the game): 19 zombie tables, 1456 spawnpoints, 19 nav bounds.
-    [Fact]
+    [RealDataFact(Map = "PEI")]
     public void RealPei_ZombieDataParses()
     {
-        if (GameData.Map("PEI") is not { } pei)
-            return;
+        string pei = GameData.Map("PEI")!;
 
         List<ZombieTable> tables = LevelZombiesData.LoadTables(Path.Combine(pei, "Spawns", "Zombies.dat"));
         Assert.Equal(19, tables.Count);

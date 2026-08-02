@@ -9,24 +9,26 @@ using Xunit;
 
 namespace UnturnedGodot.Tests;
 
-// End-to-end compatibility checks against a real Unturned install. These self-skip (return early)
-// when the game is not present, so they never fail on machines without the content.
+// End-to-end compatibility checks against a real Unturned install. [RealDataFact] reports a SKIP when the
+// content is absent, so a machine without it can tell these apart from tests that ran; the real-data job
+// sets UG_REQUIRE_REAL_DATA=1, which turns every skip here into a failure.
+[Trait("Category", "RealData")]
 public class RealDataTests
 {
-    private static string? UnturnedPath() => GameData.Install;
+    private static string UnturnedPath() => GameData.Install!;
 
-    private static LevelInfo? Pei()
+    private static LevelInfo Pei()
     {
-        if (GameData.Map("PEI") is not { } pei) return null;
-        var level = new LevelInfo(pei);
-        return Directory.Exists(level.HeightmapsDir) ? level : null;
+        var level = new LevelInfo(GameData.Map("PEI")!);
+        Assert.True(Directory.Exists(level.HeightmapsDir),
+            $"PEI is installed but has no heightmaps at {level.HeightmapsDir}");
+        return level;
     }
 
-    [Fact]
+    [RealDataFact(Map = "PEI")]
     public void RealHeightmaps_ParseToExpectedRange()
     {
-        LevelInfo? level = Pei();
-        if (level == null) return;
+        LevelInfo level = Pei();
 
         var tiles = level.EnumerateTiles();
         Assert.NotEmpty(tiles);
@@ -38,15 +40,12 @@ public class RealDataTests
         Assert.InRange(tile.Heights[128, 128], 0f, 1f);
     }
 
-    [Fact]
+    [RealDataFact(Map = "PEI")]
     public void RealLighting_ParsesPeiMiddayValues()
     {
-        string? root = UnturnedPath();
-        if (root == null) return;
-
-        string path = Path.Combine(root, "Maps", "PEI", "Environment", "Lighting.dat");
+        string path = Path.Combine(UnturnedPath(), "Maps", "PEI", "Environment", "Lighting.dat");
         LevelLighting? lighting = LevelLighting.Load(path);
-        if (lighting == null) return;
+        Assert.NotNull(lighting);
 
         Assert.Equal(12, lighting.Version);
         Assert.Equal(4, lighting.Times.Count);
@@ -70,13 +69,13 @@ public class RealDataTests
         Assert.True(day.SkyHorizon.R > day.SkyTop.R);                 // horizon is hazier/greyer than zenith
     }
 
-    [Fact]
+    [RealDataFact(Map = "PEI")]
     public void RealRoadTextures_ParseFromUnityRawBundle()
     {
-        string? root = UnturnedPath();
-        if (root == null) return;
-        string path = Path.Combine(root, "Maps", "PEI", "Environment", "Roads.unity3d");
-        if (!File.Exists(path)) return;
+        // Asserted, not guarded: fetch-game-data.sh --verify checks heightmaps and Level.dat but not this,
+        // so a depot change that dropped it used to leave the test green while proving nothing.
+        string path = Path.Combine(UnturnedPath(), "Maps", "PEI", "Environment", "Roads.unity3d");
+        Assert.True(File.Exists(path), $"PEI is installed but has no {path}");
 
         byte[] data = File.ReadAllBytes(path);
         Assert.True(UnityRawBundle.IsRaw(data));
@@ -99,13 +98,11 @@ public class RealDataTests
         Assert.Equal((64, 64), byName["Trail"]);
     }
 
-    [Fact]
+    [RealDataFact(Map = "PEI")]
     public void RealFoliage_ParsesBlobInstances()
     {
-        string? root = UnturnedPath();
-        if (root == null) return;
-        string path = Path.Combine(root, "Maps", "PEI", "Foliage.blob");
-        if (!File.Exists(path)) return;
+        string path = Path.Combine(UnturnedPath(), "Maps", "PEI", "Foliage.blob");
+        Assert.True(File.Exists(path), $"PEI is installed but has no {path}");
 
         LevelFoliage foliage = LevelFoliage.Parse(File.ReadAllBytes(path));
 
@@ -121,16 +118,15 @@ public class RealDataTests
         Assert.Equal(667254, total); // matches a direct scan of PEI's Foliage.blob
     }
 
-    [Fact]
+    [RealDataFact(Map = "PEI")]
     public void RealObjects_ParseAndResolveAgainstBundles()
     {
-        LevelInfo? level = Pei();
-        if (level == null) return;
+        LevelInfo level = Pei();
 
         List<PlacedObject> objects = LevelObjects.Load(level.ObjectsDat);
         Assert.NotEmpty(objects);
 
-        string bundles = Path.Combine(UnturnedPath()!, "Bundles", "Objects");
+        string bundles = Path.Combine(UnturnedPath(), "Bundles", "Objects");
         ObjectAssetDatabase db = ObjectAssetDatabase.ScanDirectory(bundles);
         Assert.True(db.Count > 0);
 

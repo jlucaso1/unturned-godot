@@ -203,11 +203,11 @@ public class LandscapeMaterialAssetTests
 
     // Against the real game: every layer GUID PEI's tiles reference must resolve to a material whose
     // texture lives in the core master bundle.
-    [Fact]
+    [RealDataFact(Map = "PEI")]
     public void RealPei_EveryTileLayerResolvesToACoreBundleTexture()
     {
-        if (GameData.Install is not { } install || GameData.Map("PEI") is not { } pei)
-            return;
+        string install = GameData.Install!;
+        string pei = GameData.Map("PEI")!;
 
         Dictionary<Guid, LandscapeMaterialAsset> materials = LandscapeMaterialAsset.ScanDirectory(
             Path.Combine(install, "Bundles", "Assets", "Landscapes"));

@@ -351,12 +351,12 @@ public class BakedNavGraphTests
         return !((d1 < 0f || d2 < 0f || d3 < 0f) && (d1 > 0f || d2 > 0f || d3 > 0f));
     }
 
-    [Fact]
+    // California2 is a Steam Workshop subscription, so it is never present in CI and the guards below stay
+    // opportunistic by design. The attribute still turns "no install at all" into a visible skip.
+    [RealDataFact]
     public void RealCalifornia2_LargeGraphBuildsAndRoutesAdjacentFaces()
     {
-        if (GameData.Install == null)
-            return;
-        string map = MapCatalog.ResolvePath(GameData.Install, "California2");
+        string map = MapCatalog.ResolvePath(GameData.Install!, "California2");
         if (!Directory.Exists(map))
             return;
         List<NavFlag> flags = LevelNavmesh.Load(Path.Combine(map, "Environment"));
