@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.IO;
 using UnturnedGodot.Dat;
@@ -26,13 +27,13 @@ public sealed class FoliageAsset
         DrawDistance = drawDistance;
     }
 
-    public static bool TryParse(DatDictionary root, out FoliageAsset asset)
+    public static bool TryParse(DatDictionary root, [MaybeNullWhen(false)] out FoliageAsset asset)
     {
-        asset = null!;
+        asset = null;
 
         // Foliage assets are always the v2 layout: identity under Metadata, fields under Asset.
-        if (!root.TryGetDictionary("Metadata", out DatDictionary meta) ||
-            !root.TryGetDictionary("Asset", out DatDictionary data))
+        if (!root.TryGetDictionary("Metadata", out var meta) ||
+            !root.TryGetDictionary("Asset", out var data))
             return false;
         if (!meta.TryGetGuid("GUID", out Guid guid))
             return false;
@@ -41,11 +42,11 @@ public sealed class FoliageAsset
         if (!type.Contains("FoliageInstancedMeshInfoAsset", StringComparison.Ordinal))
             return false;
 
-        if (!data.TryGetDictionary("Mesh", out DatDictionary mesh) ||
+        if (!data.TryGetDictionary("Mesh", out var mesh) ||
             mesh.GetString("Path") is not { Length: > 0 } meshPath)
             return false;
 
-        string materialPath = data.TryGetDictionary("Material", out DatDictionary mat)
+        string materialPath = data.TryGetDictionary("Material", out var mat)
             ? mat.GetString("Path") ?? string.Empty
             : string.Empty;
         bool castShadows = string.Equals(data.GetString("Cast_Shadows"), "true", StringComparison.OrdinalIgnoreCase);
@@ -108,7 +109,7 @@ public sealed class FoliageAsset
                 try { parsed = DatParser.Parse(File.ReadAllText(file)); }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }
 
-                if (TryParse(parsed, out FoliageAsset asset) && needed.Contains(asset.Guid))
+                if (TryParse(parsed, out var asset) && needed.Contains(asset.Guid))
                     result[asset.Guid] = asset;
             }
         }

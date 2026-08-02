@@ -77,7 +77,7 @@ public sealed class ObjectAssetDatabase
             // The localized name isn't read here — no production code uses ObjectAsset.Name, so its
             // English.dat is read lazily only if Name is ever accessed, saving a File.Exists +
             // ReadAllText + parse per asset across every scan.
-            if (ObjectAsset.TryParse(parsed, null, out ObjectAsset asset))
+            if (ObjectAsset.TryParse(parsed, null, out var asset))
             {
                 asset.Directory = Path.GetDirectoryName(files[i])!; // never null for an enumerated file path
                 parsedAssets[i] = asset;

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using UnturnedGodot.Dat;
 
@@ -28,11 +29,11 @@ public sealed class PhysicsMaterialAsset
         AudioDefs = audioDefs;
     }
 
-    public static bool TryParse(DatDictionary root, out PhysicsMaterialAsset asset)
+    public static bool TryParse(DatDictionary root, [MaybeNullWhen(false)] out PhysicsMaterialAsset asset)
     {
-        asset = null!;
-        if (!root.TryGetDictionary("Metadata", out DatDictionary meta) ||
-            !root.TryGetDictionary("Asset", out DatDictionary data))
+        asset = null;
+        if (!root.TryGetDictionary("Metadata", out var meta) ||
+            !root.TryGetDictionary("Asset", out var data))
             return false;
         if (!meta.TryGetGuid("GUID", out Guid guid))
             return false;
@@ -41,7 +42,7 @@ public sealed class PhysicsMaterialAsset
             return false;
 
         var names = new List<string>();
-        if (data.TryGetList("UnityNames", out DatList list))
+        if (data.TryGetList("UnityNames", out var list))
             foreach (DatNode node in list.Items)
                 if (node is DatValue v && v.Value.Length > 0)
                     names.Add(v.Value);
@@ -49,7 +50,7 @@ public sealed class PhysicsMaterialAsset
         data.TryGetGuid("Fallback", out Guid fallback);
 
         var audioDefs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (data.TryGetDictionary("AudioDefs", out DatDictionary defs))
+        if (data.TryGetDictionary("AudioDefs", out var defs))
             foreach (string key in defs.Keys)
                 if (defs.GetString(key) is { Length: > 0 } path)
                     audioDefs[key] = path;
@@ -128,7 +129,7 @@ public sealed class PhysicsMaterialBank
                 DatDictionary parsed;
                 try { parsed = DatParser.Parse(File.ReadAllText(file)); }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }
-                if (TryParseFile(parsed, out PhysicsMaterialAsset asset))
+                if (TryParseFile(parsed, out var asset))
                 {
                     asset.Directory = Path.GetDirectoryName(file) ?? root;
                     bank.Add(asset);
@@ -139,7 +140,8 @@ public sealed class PhysicsMaterialBank
         return bank;
     }
 
-    private static bool TryParseFile(DatDictionary parsed, out PhysicsMaterialAsset asset) =>
+    private static bool TryParseFile(DatDictionary parsed,
+        [MaybeNullWhen(false)] out PhysicsMaterialAsset asset) =>
         PhysicsMaterialAsset.TryParse(parsed, out asset);
 
     // PhysicMaterialCustomData.GetAudioDef: resolve the material by name, then walk the fallback chain

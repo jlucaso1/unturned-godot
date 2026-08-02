@@ -58,7 +58,7 @@ public class DatParserTests
     public void NestedDictionary()
     {
         DatDictionary d = DatParser.Parse("Metadata\n{\nGUID abc\nType SDG.Unturned.ObjectAsset\n}\nID 5\n");
-        Assert.True(d.TryGetDictionary("Metadata", out DatDictionary md));
+        Assert.True(d.TryGetDictionary("Metadata", out var md));
         Assert.Equal("abc", md.GetString("GUID"));
         Assert.Equal("5", d.GetString("ID"));
     }
@@ -68,7 +68,7 @@ public class DatParserTests
     {
         // Key has an inline value, but a '{' on the next line wins (Unturned semantics).
         DatDictionary d = DatParser.Parse("Asset ignored\n{\nType Large\n}\n");
-        Assert.True(d.TryGetDictionary("Asset", out DatDictionary a));
+        Assert.True(d.TryGetDictionary("Asset", out var a));
         Assert.Equal("Large", a.GetString("Type"));
     }
 
@@ -76,7 +76,7 @@ public class DatParserTests
     public void ScalarList()
     {
         DatDictionary d = DatParser.Parse("Items\n[\nalpha\nbeta\ngamma\n]\n");
-        Assert.True(d.TryGetList("Items", out DatList list));
+        Assert.True(d.TryGetList("Items", out var list));
         Assert.Equal(3, list.Items.Count);
         Assert.Equal("beta", ((DatValue)list.Items[1]).Value);
     }
@@ -86,7 +86,7 @@ public class DatParserTests
     {
         // Braces/brackets on their own lines (Unturned format); trailing commas exercise ConsumeBracket.
         DatDictionary d = DatParser.Parse("Tiles\n[\n{,\nX 1\n},\n[,\na\nb\n],\n]\n");
-        Assert.True(d.TryGetList("Tiles", out DatList list));
+        Assert.True(d.TryGetList("Tiles", out var list));
         Assert.Equal(2, list.Items.Count);
         Assert.IsType<DatDictionary>(list.Items[0]);
         Assert.IsType<DatList>(list.Items[1]);

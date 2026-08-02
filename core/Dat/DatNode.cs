@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 
 namespace UnturnedGodot.Dat;
@@ -42,25 +43,25 @@ public sealed class DatDictionary : DatNode
 
     public string? GetString(string key) => TryGetString(key, out string v) ? v : null;
 
-    public bool TryGetDictionary(string key, out DatDictionary dict)
+    public bool TryGetDictionary(string key, [MaybeNullWhen(false)] out DatDictionary dict)
     {
         if (_nodes.TryGetValue(key, out DatNode? node) && node is DatDictionary d)
         {
             dict = d;
             return true;
         }
-        dict = null!;
+        dict = null;
         return false;
     }
 
-    public bool TryGetList(string key, out DatList list)
+    public bool TryGetList(string key, [MaybeNullWhen(false)] out DatList list)
     {
         if (_nodes.TryGetValue(key, out DatNode? node) && node is DatList l)
         {
             list = l;
             return true;
         }
-        list = null!;
+        list = null;
         return false;
     }
 

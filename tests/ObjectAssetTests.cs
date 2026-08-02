@@ -10,7 +10,7 @@ public class ObjectAssetTests
     public void ParsesV1_RootGuid_WithDataNameFallback()
     {
         DatDictionary root = DatParser.Parse("GUID 2e698a7b85e94c019b3f91ec8796a961\nType Small\nID 57\nName FromData\n");
-        Assert.True(ObjectAsset.TryParse(root, localizedName: null, out ObjectAsset asset));
+        Assert.True(ObjectAsset.TryParse(root, localizedName: null, out var asset));
 
         Assert.Equal(57, asset.Id);
         Assert.Equal(EObjectType.Small, asset.Type);
@@ -22,7 +22,7 @@ public class ObjectAssetTests
     public void LocalizedNameTakesPriority()
     {
         DatDictionary root = DatParser.Parse("GUID 2e698a7b85e94c019b3f91ec8796a961\nType Small\nName FromData\n");
-        Assert.True(ObjectAsset.TryParse(root, "FromLocalization", out ObjectAsset asset));
+        Assert.True(ObjectAsset.TryParse(root, "FromLocalization", out var asset));
         Assert.Equal("FromLocalization", asset.Name);
     }
 
@@ -33,7 +33,7 @@ public class ObjectAssetTests
             "Metadata\n{\nGUID 2e698a7b85e94c019b3f91ec8796a961\nType SDG.Unturned.ObjectAsset\n}\n" +
             "Asset\n{\nType Large\nID 99\n}\n";
         DatDictionary root = DatParser.Parse(text);
-        Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset asset));
+        Assert.True(ObjectAsset.TryParse(root, null, out var asset));
 
         Assert.Equal(99, asset.Id);
         Assert.Equal(EObjectType.Large, asset.Type);
@@ -44,7 +44,7 @@ public class ObjectAssetTests
     {
         DatDictionary root = DatParser.Parse(
             "GUID 2e698a7b85e94c019b3f91ec8796a961\nType Medium\nID 1\nBundle_Override_Path /Objects/Medium/Furniture/Grave_0\n");
-        Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset asset));
+        Assert.True(ObjectAsset.TryParse(root, null, out var asset));
         Assert.Equal("/Objects/Medium/Furniture/Grave_0", asset.BundleOverridePath);
     }
 
@@ -52,7 +52,7 @@ public class ObjectAssetTests
     public void WithoutOverridePath_IsNull()
     {
         DatDictionary root = DatParser.Parse("GUID 2e698a7b85e94c019b3f91ec8796a961\nType Small\nID 1\n");
-        Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset asset));
+        Assert.True(ObjectAsset.TryParse(root, null, out var asset));
         Assert.Null(asset.BundleOverridePath);
         Assert.Equal(System.Guid.Empty, asset.MaterialPaletteGuid);
     }
@@ -62,7 +62,7 @@ public class ObjectAssetTests
     {
         DatDictionary root = DatParser.Parse(
             "GUID 2e698a7b85e94c019b3f91ec8796a961\nType Small\nID 1\nMaterial_Palette 3fcc42609bfb4154abb9dd39e7542ed8\n");
-        Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset asset));
+        Assert.True(ObjectAsset.TryParse(root, null, out var asset));
         Assert.NotEqual(System.Guid.Empty, asset.MaterialPaletteGuid);
     }
 
@@ -77,7 +77,7 @@ public class ObjectAssetTests
     public void MissingType_DefaultsToEmptyRawTypeAndUnknown()
     {
         DatDictionary root = DatParser.Parse("GUID 2e698a7b85e94c019b3f91ec8796a961\nID 5\n");
-        Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset asset));
+        Assert.True(ObjectAsset.TryParse(root, null, out var asset));
         Assert.Equal("", asset.RawType);
         Assert.Equal(EObjectType.Unknown, asset.Type);
     }
