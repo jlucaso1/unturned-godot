@@ -528,8 +528,8 @@ public static class ModelExtractor
 
     // A lower level is only worth caching if it is materially cheaper than the base one. Every level kept
     // costs a second MultiMesh and a second copy of the batch's placement transforms for the whole
-    // session, so a level that is within a tenth of the base triangle count is dropped: measured over the
-    // extracted cache that is 4 of 222 authored levels, and the other 218 median 49% of the base.
+    // session, so a level within a tenth of the base triangle count is dropped rather than kept for a
+    // saving that would not repay it. In practice this rejects only a handful of authored levels.
     private const float Lod1MaxTriangleRatio = 0.9f;
 
     // Writes through a temporary in the same directory and renames into place. A cached mesh is judged
