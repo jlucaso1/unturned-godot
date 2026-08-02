@@ -173,7 +173,7 @@ public sealed class PlayerListing
 public static class NetMessages
 {
     // Bump whenever a message layout changes; the server refuses mismatched clients at the handshake.
-    public const byte ProtocolVersion = 6;
+    public const byte ProtocolVersion = 7;
 
     // Two level names denote the same world. The name on the wire is the map's FOLDER name — the one
     // identity that survives the trip between two machines (paths and workshop ids do not) — and it
@@ -292,19 +292,24 @@ public static class NetMessages
         return (id, tick, players);
     }
 
-    public static byte[] WritePlayerJoined(PlayerListing player)
+    // The tick this player was admitted on. It is what lets a client tell a roster that simply predates
+    // a join from one that reports the player gone: reliable delivery retransmits, it does not reorder,
+    // so a Welcome and a PlayerJoined can arrive in either order and only their timestamps say which
+    // describes the newer world.
+    public static byte[] WritePlayerJoined(uint tick, PlayerListing player)
     {
         using var ms = new MemoryStream();
         using var w = new BinaryWriter(ms);
         w.Write((byte)ENetMessage.PlayerJoined);
+        w.Write(tick);
         WriteListing(w, player);
         return ms.ToArray();
     }
 
-    public static PlayerListing ReadPlayerJoined(byte[] payload)
+    public static (uint Tick, PlayerListing Player) ReadPlayerJoined(byte[] payload)
     {
         using BinaryReader r = Reader(payload);
-        return ReadListing(r);
+        return (r.ReadUInt32(), ReadListing(r));
     }
 
     public static byte[] WritePlayerLeft(byte playerId)

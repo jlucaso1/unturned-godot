@@ -15,14 +15,19 @@ public sealed class RemotePlayer
 
     public string Name { get; }
 
+    // The server tick this player was known to be present at. A roster taken no later than this cannot
+    // be evidence that they left — it simply predates them.
+    public uint KnownAtTick { get; }
+
     // Latest replicated stance and input-derived moving flag: discrete, so they snap (no interpolation).
     public UnturnedGodot.Player.EPlayerStance Stance { get; private set; }
     public bool Moving { get; private set; }
     public bool Grounded { get; private set; } = true;
 
-    public RemotePlayer(string name, in PoseSnapshot initial, double now)
+    public RemotePlayer(string name, in PoseSnapshot initial, double now, uint knownAtTick = 0)
     {
         Name = name;
+        KnownAtTick = knownAtTick;
         _buffer.UpdateLastSnapshot(initial, now);
         _lastUpdatePos = initial.Position;
     }
@@ -152,18 +157,18 @@ public sealed class NetClient
                         break;
                     }
 
-                    (byte id, _, List<PlayerListing> players) = welcome;
+                    (byte id, uint rosterTick, List<PlayerListing> players) = welcome;
                     PlayerId = id;
                     Joined = true;
                     _lastStateAt = now;
 
-                    // The roster is COMPLETE — "everyone already here" — so it replaces what we hold
-                    // rather than adding to it. A second Welcome is ordinary (an unadmitted client
-                    // re-Hellos every couple of seconds, and a joined session that Hellos again is
+                    // The roster is COMPLETE — "everyone already here" as of rosterTick — so it replaces
+                    // what we hold rather than adding to it. A second Welcome is ordinary (an unadmitted
+                    // client re-Hellos every couple of seconds, and a joined session that Hellos again is
                     // answered with a fresh roster), and UDP may hand it to us after the PlayerLeft it
                     // predates: merging left that player standing there forever, unseeable and
-                    // unshootable. Players still listed keep the remote we already have, so a
-                    // re-Welcome does not restart anyone's interpolation mid-session.
+                    // unshootable. Players still listed keep the remote we already have, so a re-Welcome
+                    // does not restart anyone's interpolation mid-session.
                     _rosterIds.Clear();
                     foreach (PlayerListing p in players)
                     {
@@ -171,15 +176,22 @@ public sealed class NetClient
                             continue; // the server does not list us; a roster that did would double us
                         _rosterIds.Add(p.PlayerId);
                         if (!_remotes.ContainsKey(p.PlayerId))
-                            _remotes[p.PlayerId] = SpawnRemote(p, now);
+                            _remotes[p.PlayerId] = SpawnRemote(p, now, rosterTick);
                     }
 
                     if (_remotes.Count > _rosterIds.Count)
                     {
                         _departed.Clear();
-                        foreach (byte known in _remotes.Keys)
-                            if (!_rosterIds.Contains(known))
+                        foreach ((byte known, RemotePlayer remote) in _remotes)
+                        {
+                            // Absent from a roster older than the player is no evidence they left: that
+                            // snapshot was taken before they arrived. Their PlayerJoined is reliable and
+                            // already consumed, so it is never replayed — dropping them here would leave
+                            // them invisible for the rest of the session, since state updates only move
+                            // remotes that already exist.
+                            if (!_rosterIds.Contains(known) && remote.KnownAtTick <= rosterTick)
                                 _departed.Add(known);
+                        }
                         foreach (byte gone in _departed)
                             _remotes.Remove(gone);
                     }
@@ -187,14 +199,15 @@ public sealed class NetClient
                 }
             case ENetMessage.PlayerJoined:
                 {
-                    if (!MalformedPacket.TryDecode(payload, ReadPlayerJoined, out var p))
+                    if (!MalformedPacket.TryDecode(payload, ReadPlayerJoined, out var joined))
                     {
                         MalformedPacketsDropped++;
                         break;
                     }
 
+                    (uint joinedTick, PlayerListing p) = joined;
                     if (p.PlayerId != PlayerId)
-                        _remotes[p.PlayerId] = SpawnRemote(p, now);
+                        _remotes[p.PlayerId] = SpawnRemote(p, now, joinedTick);
                     break;
                 }
             case ENetMessage.Reject:
@@ -243,15 +256,16 @@ public sealed class NetClient
     private static readonly Func<byte[], ENetMessage> ReadType = NetMessages.TypeOf;
     private static readonly Func<byte[], (byte PlayerId, uint Tick, List<PlayerListing> Players)> ReadWelcome =
         NetMessages.ReadWelcome;
-    private static readonly Func<byte[], PlayerListing> ReadPlayerJoined = NetMessages.ReadPlayerJoined;
+    private static readonly Func<byte[], (uint Tick, PlayerListing Player)> ReadPlayerJoined =
+        NetMessages.ReadPlayerJoined;
     private static readonly Func<byte[], JoinRejection> ReadReject = NetMessages.ReadReject;
     private static readonly Func<byte[], byte> ReadPlayerLeft = NetMessages.ReadPlayerLeft;
     private static readonly Func<byte[], (uint Tick, List<PlayerSnapshotState> States)> ReadStateUpdate =
         NetMessages.ReadStateUpdate;
 
-    private static RemotePlayer SpawnRemote(PlayerListing p, double now)
+    private static RemotePlayer SpawnRemote(PlayerListing p, double now, uint knownAtTick)
     {
-        var remote = new RemotePlayer(p.Name, Pose(p.Position, p.Pitch, p.Yaw), now);
+        var remote = new RemotePlayer(p.Name, Pose(p.Position, p.Pitch, p.Yaw), now, knownAtTick);
         remote.Push(Pose(p.Position, p.Pitch, p.Yaw), p.Stance, moving: false, grounded: true, now);
         return remote;
     }

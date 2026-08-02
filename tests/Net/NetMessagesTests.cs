@@ -131,7 +131,9 @@ public class NetMessagesTests
     public void JoinedAndLeft_RoundTrip()
     {
         var listing = new PlayerListing { PlayerId = 3, Name = "Cy", Position = Vector3.One, Pitch = 1, Yaw = 2 };
-        PlayerListing joined = NetMessages.ReadPlayerJoined(NetMessages.WritePlayerJoined(listing));
+        (uint tick, PlayerListing joined) =
+            NetMessages.ReadPlayerJoined(NetMessages.WritePlayerJoined(4321, listing));
+        Assert.Equal(4321u, tick); // when they joined, so a roster older than that cannot bury them
         Assert.Equal(3, joined.PlayerId);
         Assert.Equal("Cy", joined.Name);
 

@@ -98,7 +98,10 @@ public sealed class NetServer
         int caughtUp = 0;
         while (now >= _nextTick && caughtUp < MaxCatchUpTicks)
         {
-            List<PlayerSnapshotState> states = _simulation.Step();
+            // The simulation is handed the real clock, not just a tick count: with the catch-up bounded
+            // above, tick time and wall time part company after any stall, and the trusted-position
+            // budget is a speed limit — it has to be measured against the time that actually passed.
+            List<PlayerSnapshotState> states = _simulation.Step(now);
             if (states.Count > 0)
                 Broadcast(NetMessages.WriteStateUpdate(_simulation.Tick, states), ESendType.Unreliable);
             OnTick?.Invoke(_simulation.Tick);
@@ -241,7 +244,8 @@ public sealed class NetServer
 
         connection.Send(NetMessages.WriteWelcome(session.PlayerId, _simulation.Tick, existing), ESendType.Reliable);
 
-        byte[] joined = NetMessages.WritePlayerJoined(Listing(session, _simulation.GetState(session.PlayerId)));
+        byte[] joined = NetMessages.WritePlayerJoined(_simulation.Tick,
+            Listing(session, _simulation.GetState(session.PlayerId)));
         foreach ((ITransportConnection conn, Session other) in _sessions)
             if (other.Joined && other != session)
                 conn.Send(joined, ESendType.Reliable);

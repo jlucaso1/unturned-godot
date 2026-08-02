@@ -117,14 +117,18 @@ public sealed class ServerSimulation
         // last claim we accepted and when. Before any claim exists there is nothing to rate-limit against —
         // the server-invented spawn is not a position the client ever occupied (a host who opens to LAN
         // after already moving would otherwise be rejected forever, frozen at spawn for everyone else).
+        // "When" is the wall clock rather than the tick counter: those two part company the moment the
+        // host stalls, since the tick loop drops the time it could not make up (NetServer.MaxCatchUpTicks)
+        // while the player kept moving through all of it.
         public bool HasVerifiedPosition;
-        public uint LastAcceptedTick;
+        public double LastAcceptedAt;
         public bool HasReceivedPositionFrame;
         public uint LastReceivedPositionFrame;
     }
 
     private readonly IMoveSolver _solver;
     private readonly Dictionary<byte, Entry> _players = new();
+    private double _clock;
 
     public uint Tick { get; private set; }
 
@@ -192,9 +196,15 @@ public sealed class ServerSimulation
             entry.Inputs.Dequeue();
     }
 
+    // Advances one 0.08 s step on the nominal clock: each call is one tick of simulated time. What the
+    // owner of a real session calls is Step(now), because only the wall clock knows how long a stalled
+    // frame actually took.
+    public List<PlayerSnapshotState> Step() => Step(_clock + TickRate);
+
     // Advances one 0.08 s step for every player and returns the broadcastable snapshot list.
-    public List<PlayerSnapshotState> Step()
+    public List<PlayerSnapshotState> Step(double now)
     {
+        _clock = now;
         Tick++;
         var states = new List<PlayerSnapshotState>(_players.Count);
         foreach ((byte id, Entry entry) in _players)
@@ -238,12 +248,16 @@ public sealed class ServerSimulation
         {
             entry.State.Position = input.Position;
             entry.HasVerifiedPosition = true;
-            entry.LastAcceptedTick = Tick;
+            entry.LastAcceptedAt = _clock;
             return;
         }
 
-        uint elapsedTicks = Math.Max(1, Tick - entry.LastAcceptedTick);
-        float elapsed = elapsedTicks * TickRate;
+        // Never less than one tick (a claim in the same instant still gets a tick's worth of slack) and
+        // otherwise exactly the time that passed — including the seconds a stalled host could not
+        // simulate. Counting ticks instead would judge a five-second stall as a fraction of a second,
+        // freeze the avatar outside a window narrower than the player's real speed, and hold it there
+        // for as long again while the window inched open.
+        var elapsed = (float)Math.Max(TickRate, _clock - entry.LastAcceptedAt);
         Vector3 delta = input.Position - entry.State.Position;
         float horizontal = new Vector2(delta.X, delta.Z).Length();
         // Horizontal motion is bounded by sprint, while vertical motion independently allows terminal
@@ -254,7 +268,7 @@ public sealed class ServerSimulation
         if (horizontal <= horizontalBudget && MathF.Abs(delta.Y) <= verticalBudget)
         {
             entry.State.Position = input.Position;
-            entry.LastAcceptedTick = Tick;
+            entry.LastAcceptedAt = _clock;
         }
     }
 }

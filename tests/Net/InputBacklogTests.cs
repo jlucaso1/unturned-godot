@@ -131,6 +131,55 @@ public class InputBacklogTests
         Assert.Equal(PositionOf(alone), quiet.Position);
     }
 
+    // The budget that gates a trusted position is elapsed TIME, and time is the wall clock, not the tick
+    // counter. The two only agree while the server is keeping up: a host that stalls five seconds runs a
+    // handful of catch-up ticks and drops the rest (NetServer.MaxCatchUpTicks), so a tick-counted budget
+    // says a fraction of a second passed while the player really did sprint for five. Every claim then
+    // sits outside a window that grows slower than the player moves, and the avatar stands frozen for
+    // ten seconds before snapping — with the frames that would have walked it there trimmed away as
+    // stale, which is exactly what the jitter buffer is supposed to do with them.
+    [Fact]
+    public void AfterAHostStall_TheFirstClaimIsJudgedAgainstTheTimeThatReallyPassed()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        double now = 1000.0;
+        sim.QueueInput(1, new InputCommand(0, 0, 0, false, false, 0, 90, EPlayerStance.Stand, Spawn));
+        sim.Step(now); // baseline claim
+
+        // Five seconds of wall clock gone, of which the server only got to simulate a few ticks.
+        for (int i = 0; i < NetServer.MaxCatchUpTicks; i++)
+            sim.Step(now += ServerSimulation.TickRate);
+        now += 5.0;
+
+        // The client sprinted through all of it and says where it ended up.
+        var sprinted = new Vector3(0, 10f, -5f * PlayerConfig.SpeedSprint);
+        sim.QueueInput(1, new InputCommand(100, 0, -1, false, true, 0, 90, EPlayerStance.Sprint, sprinted));
+        sim.Step(now);
+
+        Assert.Equal(sprinted, PositionOf(sim));
+    }
+
+    // The same clock cuts both ways: no amount of tick churn buys distance that no time was available
+    // for, so a client cannot teleport by waiting for the server to run ticks on its behalf.
+    [Fact]
+    public void WithinOneTickOfWallClock_ATeleportIsStillRefused()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        double now = 1000.0;
+        sim.QueueInput(1, new InputCommand(0, 0, 0, false, false, 0, 90, EPlayerStance.Stand, Spawn));
+        sim.Step(now);
+
+        sim.QueueInput(1, new InputCommand(1, 0, -1, false, true, 0, 90, EPlayerStance.Sprint,
+            new Vector3(0, 10f, -400f)));
+        sim.Step(now + ServerSimulation.TickRate);
+
+        Assert.Equal(Spawn, PositionOf(sim));
+    }
+
     // Trusted-position frames are bounded the same way, and the speed budget still governs how fast the
     // authoritative position may converge on the survivor — a flood cannot buy a teleport by burying the
     // frames in between.

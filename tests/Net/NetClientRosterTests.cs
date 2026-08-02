@@ -68,6 +68,46 @@ public class NetClientRosterTests
         Assert.Same(first, client.Remotes[2]);
     }
 
+    // The mirror of the ghost, and the reason the roster carries the tick it was taken at: a join that
+    // is NEWER than the roster must survive it. PlayerJoined is reliable and already delivered, so it
+    // is never replayed — erase that remote and the player stays invisible for the rest of the session,
+    // since state updates only move remotes that already exist.
+    [Fact]
+    public void AWelcomeThatPredatesAJoin_DoesNotEraseThatPlayer()
+    {
+        var transport = new FakeClientTransport();
+        var client = new NetClient(transport, "Me", Level);
+
+        transport.Deliver(NetMessages.WriteWelcome(1, 5, new[] { Listing(2, "A") }));
+        transport.Deliver(NetMessages.WritePlayerJoined(9, Listing(3, "C"))); // joined after that roster
+        client.Update(0);
+        Assert.Equal(2, client.Remotes.Count);
+
+        // A second Welcome, taken BEFORE C joined, overtakes nothing it should undo.
+        transport.Deliver(NetMessages.WriteWelcome(1, 7, new[] { Listing(2, "A") }));
+        client.Update(1.0);
+
+        Assert.Equal(2, client.Remotes.Count);
+        Assert.Equal("C", client.Remotes[3].Name);
+    }
+
+    // A player who left is still dropped by a roster taken after they joined — the case the tick is
+    // there to tell apart from the one above.
+    [Fact]
+    public void ARosterTakenAfterAJoin_StillDropsThePlayerItOmits()
+    {
+        var transport = new FakeClientTransport();
+        var client = new NetClient(transport, "Me", Level);
+
+        transport.Deliver(NetMessages.WritePlayerJoined(9, Listing(3, "C")));
+        client.Update(0);
+
+        transport.Deliver(NetMessages.WriteWelcome(1, 12, new[] { Listing(2, "A") })); // C is gone by 12
+        client.Update(1.0);
+
+        Assert.Equal("A", Assert.Single(client.Remotes).Value.Name);
+    }
+
     // Our own id never belongs in the remote roster — the server does not list us, but a roster that
     // did would put a second copy of the local player in the world.
     [Fact]
