@@ -41,13 +41,6 @@ public sealed class NetServer
     // cadence, so it bounds a flood without shaping normal traffic.
     public const int MaxEventsPerUpdate = 512;
 
-    // Simulation steps run in one Update before the clock is resynchronised instead of caught up.
-    public const int MaxCatchUpTicks = 8;
-
-    // Ticks the simulation skipped to escape a catch-up spiral. Non-zero means the server was stalled
-    // longer than MaxCatchUpTicks * TickRate, which is worth knowing about.
-    public long SkippedTicks { get; private set; }
-
     // Extension seams for replicated systems (zombies, resources, doors): hook the fixed tick to run
     // server logic and use Broadcast to ship your own ENetMessage; hook OnPlayerAdmitted to send a
     // freshly admitted (or re-admitted) player your system's full state, the way Welcome carries the
@@ -105,31 +98,8 @@ public sealed class NetServer
 
         if (double.IsNaN(_nextTick))
             _nextTick = now;
-
-        // Catch-up is bounded. A stall — a long cold load, a suspended process, a debugger — leaves `now`
-        // arbitrarily far past _nextTick, and stepping all of it in one Update means that many simulation
-        // steps and that many broadcasts inside a single frame, which lengthens the frame, which deepens
-        // the debt. Past the cap the clock is resynchronised to now: the simulation loses those ticks
-        // rather than trying to replay them, which is the right trade when the alternative is a spiral
-        // the server does not come out of.
-        int steps = 0;
         while (now >= _nextTick)
         {
-            if (steps++ == MaxCatchUpTicks)
-            {
-                var skipped = (uint)Math.Min(
-                    (now - _nextTick) / ServerSimulation.TickRate + 1, uint.MaxValue);
-                SkippedTicks += skipped;
-
-                // The clock still has to account for the time, even though nothing simulated it: the
-                // trusted-position speed budget is measured in ticks, so dropping them would price a
-                // player's real movement through the stall against the handful of ticks that did run and
-                // reject it. See ServerSimulation.SkipTicks.
-                _simulation.SkipTicks(skipped);
-                _nextTick = now + ServerSimulation.TickRate;
-                break;
-            }
-
             List<PlayerSnapshotState> states = _simulation.Step();
             if (states.Count > 0)
                 Broadcast(NetMessages.WriteStateUpdate(_simulation.Tick, states), ESendType.Unreliable);

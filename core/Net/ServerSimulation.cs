@@ -121,42 +121,7 @@ public sealed class ServerSimulation
     private readonly IMoveSolver _solver;
     private readonly Dictionary<byte, Entry> _players = new();
 
-    // Roughly two and a half seconds of inputs at TickRate. Deep enough to absorb the jitter and
-    // reordering UDP delivers on a real connection, shallow enough that a client sending flat out cannot
-    // turn its queue into the server's memory.
-    public const int MaxQueuedInputsPerPlayer = 32;
-
     public uint Tick { get; private set; }
-
-    // Inputs discarded because a player's queue was already full. Non-zero means someone is sending faster
-    // than the simulation consumes — a broken client, or one trying to.
-    public long DroppedInputs { get; private set; }
-
-    // Queued inputs cleared because SkipTicks advanced the clock past them. Kept apart from DroppedInputs
-    // deliberately: that one means a client is sending faster than the simulation consumes, and folding
-    // stall-driven clears into it would make one server hiccup look like every joined player misbehaving.
-    public long InputsClearedBySkip { get; private set; }
-
-    // Advances the tick clock without simulating those ticks, for time the server lost to a stall.
-    //
-    // Tick is a clock, not a count of Steps, and ApplyTrustedPosition's speed budget is derived from
-    // Tick - LastAcceptedTick. If a resynchronising server dropped the skipped time instead of recording
-    // it, a player who legitimately kept moving through a ten-second stall would be measured against
-    // whatever few ticks did run, their real position rejected as too fast, and they would rubber-band
-    // until enough ticks accrued to cover the distance they had already travelled.
-    // Queued inputs are dropped with the time they belonged to. They describe an interval that no longer
-    // exists, and keeping them is worse than losing them: Step consumes one per tick while a client
-    // produces one per tick, so a backlog left over from a stall never drains — every replicated position
-    // would stay that many ticks stale for the rest of the session.
-    public void SkipTicks(uint count)
-    {
-        Tick += count;
-        foreach (Entry entry in _players.Values)
-        {
-            InputsClearedBySkip += entry.Inputs.Count;
-            entry.Inputs.Clear();
-        }
-    }
 
     public ServerSimulation(IMoveSolver solver) => _solver = solver;
 
@@ -200,17 +165,6 @@ public sealed class ServerSimulation
             entry.HasReceivedPositionFrame = true;
             entry.LastReceivedPositionFrame = input.Frame;
         }
-        // Step consumes exactly one input per tick, so a client that sends faster than TickRate grows this
-        // queue for as long as it likes — nothing else bounds it, and a joined client can send Input
-        // datagrams at line rate. Past a couple of seconds of backlog the extra entries are not buffered
-        // jitter any more, they are a queue the player will never catch up to: dropping the oldest keeps
-        // the newest input, which is both the one that matters and the one that bounds added latency.
-        while (entry.Inputs.Count >= MaxQueuedInputsPerPlayer)
-        {
-            entry.Inputs.Dequeue();
-            DroppedInputs++;
-        }
-
         entry.Inputs.Enqueue(input);
     }
 
