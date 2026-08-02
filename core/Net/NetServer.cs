@@ -27,9 +27,10 @@ public sealed class NetServer
 
     public int PlayerCount { get; private set; }
 
-    // How many more players this server can admit. Zero means the next Hello is refused; see PlayerIdPool
-    // for why the ceiling is 254 rather than 256.
-    public int FreePlayerSlots => _playerIds.Available;
+    // How many more players this server can admit at `now`. Zero means the next Hello is refused. This
+    // excludes ids that are free but still quarantined, so it never advertises room the server would then
+    // turn away; see PlayerIdPool for the quarantine, and for why the ceiling is 254 rather than 256.
+    public int FreePlayerSlotsAt(double now) => _playerIds.AvailableAt(now);
 
     // Datagrams that reached a decoder and did not survive it. Non-zero means someone is sending the
     // server bytes it cannot read — a mismatched build, a corrupt link, or a probe.

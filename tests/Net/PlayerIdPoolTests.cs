@@ -47,12 +47,12 @@ public class PlayerIdPoolTests
             Assert.True(pool.TryRent(0.0, out _));
 
         Assert.False(pool.TryRent(0.0, out _));
-        Assert.Equal(0, pool.Available);
+        Assert.Equal(0, pool.AvailableAt(0.0));
 
         pool.Return(42, 0.0);
 
-        Assert.Equal(1, pool.Available);
-        Assert.True(pool.TryRent(PlayerIdPool.QuarantineSeconds, out byte reused));
+        Assert.Equal(1, pool.Unheld);
+        Assert.True(pool.TryRent(PlayerIdPool.QuarantineSeconds + 0.001, out byte reused));
         Assert.Equal(42, reused);
     }
 
@@ -65,7 +65,9 @@ public class PlayerIdPoolTests
         pool.Return(id, 0.0);
         pool.Return(id, 0.0);
 
-        Assert.Equal(PlayerIdPool.Capacity, pool.Available);
+        // Unheld, not AvailableAt: the id is back in the pool but still cooling at this instant.
+        Assert.Equal(PlayerIdPool.Capacity, pool.Unheld);
+        Assert.Equal(PlayerIdPool.Capacity, pool.AvailableAt(PlayerIdPool.QuarantineSeconds + 0.001));
     }
 
     [Theory]
@@ -77,7 +79,25 @@ public class PlayerIdPoolTests
 
         pool.Return(reserved, 0.0);
 
-        Assert.Equal(PlayerIdPool.Capacity, pool.Available);
+        Assert.Equal(PlayerIdPool.Capacity, pool.AvailableAt(0.0));
+    }
+
+    // A cooling id is not a slot the server can fill, so it must not be advertised as one: a lobby or an
+    // admission gate reading this would offer room every join is then refused.
+    [Fact]
+    public void CoolingIdsAreNotCountedAsAvailable()
+    {
+        var pool = new PlayerIdPool();
+        for (int i = 0; i < PlayerIdPool.Capacity; i++)
+            Assert.True(pool.TryRent(0.0, out _));
+        for (byte id = PlayerIdPool.First; id <= PlayerIdPool.Last; id++)
+            pool.Return(id, 10.0);
+
+        Assert.Equal(PlayerIdPool.Capacity, pool.Unheld);
+        Assert.Equal(0, pool.AvailableAt(10.0));
+        Assert.False(pool.TryRent(10.0, out _));
+
+        Assert.Equal(PlayerIdPool.Capacity, pool.AvailableAt(10.0 + PlayerIdPool.QuarantineSeconds + 0.001));
     }
 
     // PlayerLeft and PlayerJoined are both reliable, and ReliableChannel delivers an unseen sequence as
@@ -104,7 +124,8 @@ public class PlayerIdPoolTests
 
         Assert.False(pool.NextRecycledIdHasCooled(5.0));
         Assert.False(pool.NextRecycledIdHasCooled(5.0 + PlayerIdPool.QuarantineSeconds - 0.001));
-        Assert.True(pool.NextRecycledIdHasCooled(5.0 + PlayerIdPool.QuarantineSeconds));
+        Assert.False(pool.NextRecycledIdHasCooled(5.0 + PlayerIdPool.QuarantineSeconds)); // still retransmittable
+        Assert.True(pool.NextRecycledIdHasCooled(5.0 + PlayerIdPool.QuarantineSeconds + 0.001));
     }
 
     [Fact]
@@ -127,7 +148,7 @@ public class PlayerIdPoolTests
         Assert.False(pool.TryRent(100.0, out _));
 
         // ...and it becomes available the moment the window closes.
-        double cooled = 100.0 + PlayerIdPool.QuarantineSeconds;
+        double cooled = 100.0 + PlayerIdPool.QuarantineSeconds + 0.001;
         Assert.True(pool.TryRent(cooled, out byte reused));
         Assert.Equal(7, reused);
     }
@@ -141,7 +162,7 @@ public class PlayerIdPoolTests
         pool.Return(3, 0.0);
         pool.Return(9, 1.0);
 
-        double afterFirst = PlayerIdPool.QuarantineSeconds;
+        double afterFirst = PlayerIdPool.QuarantineSeconds + 0.001;
         Assert.True(pool.TryRent(afterFirst, out byte first));
         Assert.Equal(3, first);
 
@@ -256,7 +277,7 @@ public class PlayerIdExhaustionTests
         }
 
         Assert.Equal(PlayerIdPool.Capacity, server.PlayerCount);
-        Assert.Equal(0, server.FreePlayerSlots);
+        Assert.Equal(0, server.FreePlayerSlotsAt(now));
 
         now += 0.001;
         FakeConnection turnedAway = Join(server, transport, now);
@@ -290,12 +311,14 @@ public class PlayerIdExhaustionTests
     {
         (NetServer server, FakeServerTransport transport) = Build();
         FakeConnection first = Join(server, transport, 0.0);
-        int freeWhileOccupied = server.FreePlayerSlots;
+        int freeWhileOccupied = server.FreePlayerSlotsAt(0.0);
 
         transport.Disconnect(first);
         server.Update(0.1);
 
         Assert.Equal(0, server.PlayerCount);
-        Assert.Equal(freeWhileOccupied + 1, server.FreePlayerSlots);
+        Assert.Equal(freeWhileOccupied, server.FreePlayerSlotsAt(0.1));
+        // ...and the returned id joins the count only once it has cooled.
+        Assert.Equal(freeWhileOccupied + 1, server.FreePlayerSlotsAt(0.1 + PlayerIdPool.QuarantineSeconds + 0.001));
     }
 }

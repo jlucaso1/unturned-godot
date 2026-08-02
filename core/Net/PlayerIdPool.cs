@@ -41,8 +41,26 @@ public sealed class PlayerIdPool
             _neverRented.Add((byte)id);
     }
 
-    // Ids not currently held by a player. Some of them may still be cooling.
-    public int Available => _neverRented.Count + _released.Count;
+    // Ids TryRent would actually hand out right now. Deliberately not "ids nobody holds": a cooling id is
+    // not a slot the server can fill, and a caller that reads this to decide whether to advertise room —
+    // a lobby listing, an admission gate, a test — must not be told 254 while every join is refused.
+    public int AvailableAt(double now) =>
+        _neverRented.Count + (NextRecycledIdHasCooled(now) ? CooledCount(now) : 0);
+
+    // Ids held by nobody, cooling or not. The ceiling AvailableAt approaches once the quarantine drains.
+    public int Unheld => _neverRented.Count + _released.Count;
+
+    private int CooledCount(double now)
+    {
+        int cooled = 0;
+        foreach ((byte _, double at) in _released)
+        {
+            if (now - at <= QuarantineSeconds)
+                break; // release order, so the first hot one ends the run
+            cooled++;
+        }
+        return cooled;
+    }
 
     // False only when every id is in use — the caller must refuse the join rather than invent one.
     public bool TryRent(double now, out byte id)
@@ -74,8 +92,13 @@ public sealed class PlayerIdPool
     }
 
     // Whether the next id TryRent would recycle has been free long enough to be safe to reuse.
+    //
+    // Strictly past the window, not at it. ReliableChannel drops a pending frame only once
+    // `now - firstSent > GiveUpAfter`, so at exactly GiveUpAfter the old PlayerLeft is still pending and
+    // that same Update retransmits it — ahead of the replacement's PlayerJoined, which UDP is free to
+    // deliver first. One tick of slack on the wrong side of the comparison reopens the whole race.
     public bool NextRecycledIdHasCooled(double now) =>
-        _released.Count > 0 && now - _released.Peek().At >= QuarantineSeconds;
+        _released.Count > 0 && now - _released.Peek().At > QuarantineSeconds;
 
     // Idempotent: returning an id that was never rented, or returning one twice, leaves the pool as it
     // was. Disconnect paths are the ones that call this and they are not always reached exactly once.
