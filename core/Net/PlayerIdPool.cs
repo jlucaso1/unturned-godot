@@ -23,9 +23,20 @@ public sealed class PlayerIdPool
     public const byte Last = 254;
     public const int Capacity = Last - First + 1;
 
-    // How long a returned id waits before it is handed out again. Matches the reliable channel's
-    // give-up deadline, which bounds how late a retransmitted PlayerLeft can arrive.
-    public const double QuarantineSeconds = ReliableChannel.GiveUpAfter;
+    // Extra seconds on top of the sender's retry deadline, for a datagram already in flight when that
+    // deadline passed. Generous next to any playable RTT — a peer that far behind is being dropped by the
+    // state timeout anyway.
+    public const double DeliveryGraceSeconds = 5.0;
+
+    // How long a returned id waits before it is handed out again.
+    //
+    // Be precise about what this does and does not buy. GiveUpAfter bounds when the last PlayerLeft
+    // retransmission is *sent*, not when it *arrives*, so no finite wait can prove a stale leave will not
+    // land after the replacement's PlayerJoined — the grace makes it require a datagram delayed by more
+    // than DeliveryGraceSeconds past the sender's final retry, which is not a window real networks hit.
+    // Closing it by construction means making leave handling ordered or generation-aware, which is a wire
+    // format change and belongs in its own PR; this one is about the byte counter that wrapped.
+    public const double QuarantineSeconds = ReliableChannel.GiveUpAfter + DeliveryGraceSeconds;
 
     // Never rented, lowest first — so a fresh server hands out 1, 2, 3 rather than something arbitrary.
     private readonly SortedSet<byte> _neverRented = new();
