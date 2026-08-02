@@ -697,4 +697,60 @@ public class LevelFoliageTests
             Assert.InRange(resident.Count, 1, 12); // no unbounded cache of previously visited chunks
         }
     }
+
+    // A workshop map's Foliage.blob is third-party content, so a corrupt count must not become an
+    // allocation: `new (int, int, long)[int.MaxValue]` is 32 GB, and OutOfMemoryException is not a
+    // failure the load path is prepared for — it reads as a bug in the parser rather than as bad input.
+    [Theory]
+    [InlineData(int.MaxValue)]
+    [InlineData(1_000_000)]
+    [InlineData(-1)]
+    public void Parse_ImplausibleTileCount_FailsWithoutAllocating(int tileCount)
+    {
+        byte[] blob = Build(2, Guid.NewGuid(), (0, 0, new[] { Translation(1, 2, 3) }));
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(blob.AsSpan(4), tileCount);
+
+        Assert.Throws<InvalidDataException>(() => LevelFoliage.Parse(blob));
+    }
+
+    [Theory]
+    [InlineData(int.MaxValue)]
+    [InlineData(-1)]
+    public void Parse_ImplausibleAssetCount_FailsWithoutAllocating(int assetCount)
+    {
+        byte[] blob = Build(2, Guid.NewGuid(), (0, 0, new[] { Translation(1, 2, 3) }));
+        // version(4) + tileCount(4) + one tile header(16) = 24, then the asset count.
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(blob.AsSpan(24), assetCount);
+
+        Assert.Throws<InvalidDataException>(() => LevelFoliage.Parse(blob));
+    }
+
+    // The streamed path reads the same counts off a FileStream rather than a byte[], so it needs its own
+    // bound — it is the default (UG_FOLIAGE_STREAM_LOAD), so this is the path a real load takes.
+    [Fact]
+    public void StreamedLoad_ImplausibleTileCount_FailsWithoutAllocating()
+    {
+        byte[] blob = Build(2, Guid.NewGuid(), (0, 0, new[] { Translation(1, 2, 3) }));
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(blob.AsSpan(4), int.MaxValue);
+
+        using var dir = new TempDir();
+        string path = dir.Write("Foliage.blob", blob);
+
+        Assert.Throws<InvalidDataException>(() => LevelFoliage.Load(path));
+    }
+
+    [Fact]
+    public void StreamedLoad_TileOffsetsPastTheEnd_FailWithADeclaredParseError()
+    {
+        byte[] blob = Build(2, Guid.NewGuid(),
+            (0, 0, new[] { Translation(1, 2, 3) }),
+            (1, 0, new[] { Translation(4, 5, 6) }));
+        // The first tile's offset (version(4) + tileCount(4) + x(4) + y(4) = 16) points past the body.
+        System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(blob.AsSpan(16), long.MaxValue / 2);
+
+        using var dir = new TempDir();
+        string path = dir.Write("Foliage.blob", blob);
+
+        Assert.Throws<InvalidDataException>(() => LevelFoliage.Load(path));
+    }
 }
