@@ -32,6 +32,10 @@ public sealed class UdpServerTransport : IServerTransport
 
     private readonly UdpClient _socket;
     private readonly Dictionary<string, Connection> _connections = new();
+    // How many undelivered events either transport will hold. Well past a full server's own cadence, so
+    // it bounds a flood without shaping normal traffic.
+    public const int MaxQueuedEvents = 4096;
+
     private readonly Queue<ServerTransportEvent> _events = new();
     private int _nextId = 1;
     private double _now;
@@ -47,9 +51,13 @@ public sealed class UdpServerTransport : IServerTransport
         return _events.TryDequeue(out evt);
     }
 
+    // Datagrams are drained into _events only while there is room. Past the cap they are left in the
+    // socket's receive buffer for the OS to discard, which is the right backpressure for UDP: an
+    // unauthenticated flood then costs kernel buffer rather than unbounded managed memory. NetServer's
+    // per-Update event budget bounds how much of this queue is *handled*; this bounds how large it gets.
     private void PumpSocket()
     {
-        while (_socket.Available > 0)
+        while (_events.Count < MaxQueuedEvents && _socket.Available > 0)
         {
             IPEndPoint remote = new(IPAddress.Any, 0);
             byte[] datagram;
@@ -153,9 +161,10 @@ public sealed class UdpClientTransport : IClientTransport
         return false;
     }
 
+    // Same bound as the server's, for the same reason — a client's socket is just as reachable.
     private void PumpSocket()
     {
-        while (_socket.Available > 0)
+        while (_incoming.Count < UdpServerTransport.MaxQueuedEvents && _socket.Available > 0)
         {
             IPEndPoint remote = new(IPAddress.Any, 0);
             byte[] datagram;

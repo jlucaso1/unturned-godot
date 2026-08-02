@@ -117,7 +117,15 @@ public sealed class NetServer
         {
             if (steps++ == MaxCatchUpTicks)
             {
-                SkippedTicks += (long)((now - _nextTick) / ServerSimulation.TickRate) + 1;
+                var skipped = (uint)Math.Min(
+                    (now - _nextTick) / ServerSimulation.TickRate + 1, uint.MaxValue);
+                SkippedTicks += skipped;
+
+                // The clock still has to account for the time, even though nothing simulated it: the
+                // trusted-position speed budget is measured in ticks, so dropping them would price a
+                // player's real movement through the stall against the handful of ticks that did run and
+                // reject it. See ServerSimulation.SkipTicks.
+                _simulation.SkipTicks(skipped);
                 _nextTick = now + ServerSimulation.TickRate;
                 break;
             }

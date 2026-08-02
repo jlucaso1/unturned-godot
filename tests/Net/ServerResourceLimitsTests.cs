@@ -114,13 +114,17 @@ public class ServerResourceLimitsTests
         ServerSimulation sim = FlatSim();
         var server = new NetServer(transport, sim, Vector3.Zero, "PEI");
 
+        // Counted through OnTick rather than sim.Tick: the clock deliberately jumps over skipped time
+        // (so the trusted-position budget stays honest), so only the callback tracks actual steps.
+        int stepped = 0;
+        server.OnTick += _ => stepped++;
+
         server.Update(0.0);
-        uint before = sim.Tick;
+        stepped = 0;
 
         server.Update(3600.0); // an hour of debt: 45,000 ticks if replayed
 
-        Assert.True(sim.Tick - before <= NetServer.MaxCatchUpTicks,
-            $"stepped {sim.Tick - before} ticks in one Update");
+        Assert.True(stepped <= NetServer.MaxCatchUpTicks, $"stepped {stepped} times in one Update");
         Assert.True(server.SkippedTicks > 0);
     }
 
@@ -131,14 +135,17 @@ public class ServerResourceLimitsTests
         ServerSimulation sim = FlatSim();
         var server = new NetServer(transport, sim, Vector3.Zero, "PEI");
 
+        int stepped = 0;
+        server.OnTick += _ => stepped++;
+
         server.Update(0.0);
         server.Update(3600.0);
-        uint afterStall = sim.Tick;
+        stepped = 0;
 
         // One tick's worth of time later, exactly one more step is due — not another catch-up burst.
         server.Update(3600.0 + (ServerSimulation.TickRate * 2));
 
-        Assert.True(sim.Tick - afterStall <= 2, $"stepped {sim.Tick - afterStall} ticks after resync");
+        Assert.True(stepped <= 2, $"stepped {stepped} times after resync");
     }
 
     [Fact]
@@ -159,6 +166,28 @@ public class ServerResourceLimitsTests
 
         Assert.Equal(50u, sim.Tick - before);
         Assert.Equal(0, server.SkippedTicks);
+    }
+
+    // Skipping ticks must still advance the clock. ApplyTrustedPosition's speed budget is measured in
+    // ticks, so dropping the stalled time would price a player's real movement through the stall against
+    // the handful of ticks that did run, reject it, and rubber-band them.
+    [Fact]
+    public void SkippedTicksStillAdvanceTheClock()
+    {
+        var transport = new FakeServerTransport();
+        ServerSimulation sim = FlatSim();
+        var server = new NetServer(transport, sim, Vector3.Zero, "PEI");
+
+        server.Update(0.0);
+        uint before = sim.Tick;
+
+        const double stall = 10.0;
+        server.Update(stall);
+
+        // The clock covers the whole stall, not just the ticks that were simulated.
+        uint advanced = sim.Tick - before;
+        Assert.True(advanced >= (uint)(stall / ServerSimulation.TickRate) - 1,
+            $"clock advanced only {advanced} ticks over a {stall}s stall");
     }
 
     // The receive loop ran until the transport was empty, so a peer decided how long the frame was. The

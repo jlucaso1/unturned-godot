@@ -132,6 +132,15 @@ public sealed class ServerSimulation
     // than the simulation consumes — a broken client, or one trying to.
     public long DroppedInputs { get; private set; }
 
+    // Advances the tick clock without simulating those ticks, for time the server lost to a stall.
+    //
+    // Tick is a clock, not a count of Steps, and ApplyTrustedPosition's speed budget is derived from
+    // Tick - LastAcceptedTick. If a resynchronising server dropped the skipped time instead of recording
+    // it, a player who legitimately kept moving through a ten-second stall would be measured against
+    // whatever few ticks did run, their real position rejected as too fast, and they would rubber-band
+    // until enough ticks accrued to cover the distance they had already travelled.
+    public void SkipTicks(uint count) => Tick += count;
+
     public ServerSimulation(IMoveSolver solver) => _solver = solver;
 
     public void AddPlayer(byte id, Vector3 spawnPosition)
