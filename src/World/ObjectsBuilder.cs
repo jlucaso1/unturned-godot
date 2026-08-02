@@ -36,6 +36,12 @@ public static class ObjectsBuilder
     private static readonly float ObjectChunkMetres = EnvFloat("UG_OBJECT_CHUNK_METRES", 1024f, 0f, 8192f);
     private static readonly long ObjectChunkMinTriangles = EnvLong("UG_OBJECT_CHUNK_MIN_TRIS", 0, 0, long.MaxValue);
     private static readonly bool ObjectChunkRequireSpread = EnvBool("UG_OBJECT_CHUNK_REQUIRE_SPREAD", true);
+    // Geometry an average cell must carry for its own draw call to be worth taking. See CellSizeFor.
+    // Zero restores a single fixed cell size for every group, which is the A/B control.
+    private static readonly long MinCellTriangles = EnvLong("UG_OBJECT_CELL_MIN_TRIS", 0, 0, long.MaxValue);
+    // Ceiling for that coarsening walk. Past the widest map a cell holds every copy of a group, so going
+    // further cannot change the partition — this only bounds the loop against degenerate coordinates.
+    private const float MaxCellMetres = 65_536f;
     private static readonly bool ChunkSparseObjects = EnvBool("UG_CHUNK_SPARSE_OBJECTS", true);
     private static readonly long SparseChunkMinTriangles =
         EnvLong("UG_SPARSE_OBJECT_MIN_TRIS", 0, 0, long.MaxValue);
@@ -111,7 +117,8 @@ public static class ObjectsBuilder
             float chunkMetres = lodMesh != null && ObjectChunkMetres > 0f && LodChunkMetres > 0f
                 ? Mathf.Min(ObjectChunkMetres, LodChunkMetres)
                 : ObjectChunkMetres;
-            long placementTriangles = TriangleCount(renderMesh) * transforms.Count;
+            long trianglesPerInstance = TriangleCount(renderMesh);
+            long placementTriangles = trianglesPerInstance * transforms.Count;
             bool spread = chunkMetres > 0f && transforms.Count > 1
                 && ExceedsCellSpan(transforms, chunkMetres);
             bool sparseWide = ChunkSparseObjects && transforms.Count < MinChunkedInstances && spread
@@ -120,16 +127,8 @@ public static class ObjectsBuilder
                 && placementTriangles >= ObjectChunkMinTriangles
                 && (!ObjectChunkRequireSpread || spread))
             {
-                var cells = new Dictionary<(int X, int Z), List<Transform3D>>();
-                foreach (Transform3D transform in transforms)
-                {
-                    var cell = (
-                        Mathf.FloorToInt(transform.Origin.X / chunkMetres),
-                        Mathf.FloorToInt(transform.Origin.Z / chunkMetres));
-                    if (!cells.TryGetValue(cell, out List<Transform3D>? inCell))
-                        cells[cell] = inCell = new List<Transform3D>();
-                    inCell.Add(transform);
-                }
+                chunkMetres = CellSizeFor(transforms, chunkMetres, trianglesPerInstance);
+                Dictionary<(int X, int Z), List<Transform3D>> cells = Cells(transforms, chunkMetres);
                 if (sparseWide)
                 {
                     sparseGroups++;
@@ -184,7 +183,8 @@ public static class ObjectsBuilder
         if (ObjectChunkMetres > 0f)
             Log.Print($"[unturned-godot] Object render batches: {renderBatches} " +
                 $"({ObjectChunkMetres:0} m cells, min {MinChunkedInstances} instances / " +
-                $"{ObjectChunkMinTriangles:N0} placement tris, require spread={ObjectChunkRequireSpread}, " +
+                $"{ObjectChunkMinTriangles:N0} placement tris, coarsen below {MinCellTriangles:N0} " +
+                $"tris/cell, require spread={ObjectChunkRequireSpread}, " +
                 $"sparse-wide >= {SparseChunkMinTriangles:N0} tris: {sparseGroups} groups / " +
                 $"+{sparseExtraBatches} batches)");
 
@@ -217,6 +217,59 @@ public static class ObjectsBuilder
         for (int surface = 0; surface < mesh.GetSurfaceCount(); surface++)
             triangles += mesh.SurfaceGetArrayIndexLen(surface) / 3;
         return triangles;
+    }
+
+    private static Dictionary<(int X, int Z), List<Transform3D>> Cells(
+        List<Transform3D> transforms, float cellSize)
+    {
+        var cells = new Dictionary<(int X, int Z), List<Transform3D>>();
+        foreach (Transform3D transform in transforms)
+        {
+            var cell = (
+                Mathf.FloorToInt(transform.Origin.X / cellSize),
+                Mathf.FloorToInt(transform.Origin.Z / cellSize));
+            if (!cells.TryGetValue(cell, out List<Transform3D>? inCell))
+                cells[cell] = inCell = new List<Transform3D>();
+            inCell.Add(transform);
+        }
+        return cells;
+    }
+
+    private static int CellCount(List<Transform3D> transforms, float cellSize)
+    {
+        var seen = new HashSet<(int X, int Z)>();
+        foreach (Transform3D transform in transforms)
+            seen.Add((Mathf.FloorToInt(transform.Origin.X / cellSize),
+                Mathf.FloorToInt(transform.Origin.Z / cellSize)));
+        return seen.Count;
+    }
+
+    // One cell size cannot suit every group. A split trades a draw call for the chance to reject
+    // geometry, so it pays in proportion to how much geometry lands in each cell it creates: cutting a
+    // group of heavy copies into cells sheds most of it at eye level, while cutting a group of tiny ones
+    // scatters near-empty batches across the map that reject almost nothing and are pure cost in any view
+    // that takes the whole map in at once. Both live in the same scene, and the count of cells a fixed
+    // size produces also grows with the map, so a single tuned number is either too fine for one map or
+    // too coarse for the other.
+    //
+    // Coarsen per group instead, from the configured size, until an average cell carries enough geometry
+    // to earn its draw call. Doubling keeps the grids nested, so the cell count falls monotonically and
+    // the walk always terminates — in the limit at the whole group in one cell, which is what a group too
+    // light to be worth splitting should be.
+    private static float CellSizeFor(List<Transform3D> transforms, float baseMetres,
+        long trianglesPerInstance)
+    {
+        if (MinCellTriangles <= 0 || trianglesPerInstance <= 0)
+            return baseMetres;
+        float metres = baseMetres;
+        while (metres < MaxCellMetres)
+        {
+            int cells = CellCount(transforms, metres);
+            if (cells <= 1 || trianglesPerInstance * transforms.Count / cells >= MinCellTriangles)
+                return metres;
+            metres *= 2f;
+        }
+        return metres;
     }
 
     private static bool ExceedsCellSpan(List<Transform3D> transforms, float cellSize)
