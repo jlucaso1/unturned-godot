@@ -70,6 +70,67 @@ public sealed class ExtractionIndexTests : IDisposable
         Assert.Empty(ExtractionIndex.Load(IndexPath, stamp: 7));
     }
 
+    // Colliders are written in the same pass as the mesh, so a current mesh beside a stale or truncated
+    // collider means the extraction was interrupted. Without this the GUID stayed "complete" forever and
+    // loaded with no collision, because nothing else ever rewrites that file.
+    [Fact]
+    public void AStaleColliderMakesItsMeshCountAsMissing()
+    {
+        Guid guid = Guid.NewGuid();
+        WriteCachedMesh(guid);
+        Assert.Empty(ExtractionIndex.MissingMeshes(_dir, new[] { guid }, new HashSet<Guid>()));
+
+        // The header-less format the old writer produced, and what a kill mid-write leaves behind.
+        File.WriteAllBytes(Path.Combine(_dir, guid.ToString("N") + ".collider"), new byte[] { 1, 0, 0, 0 });
+
+        Assert.Single(ExtractionIndex.MissingMeshes(_dir, new[] { guid }, new HashSet<Guid>()));
+    }
+
+    // The recovery path ColliderLibrary uses when a read fails. Corruption that leaves the file's length
+    // intact passes the header check, so only a read knows the payload is bad — and dropping the entry has
+    // to make the GUID incomplete again, or it would be skipped on every later load with nothing to rewrite
+    // it. Deleting only the collider would not do it: absence reads as "this prefab has none".
+    [Fact]
+    public void RemovingACachedAsset_MakesItsGuidMissingAgain()
+    {
+        Guid guid = Guid.NewGuid();
+        WriteCachedMesh(guid);
+        using (FileStream s = File.Create(Path.Combine(_dir, guid.ToString("N") + ".collider")))
+            ColliderCache.Write(s, new List<CachedCollider>
+            {
+                CachedCollider.Sphere(Godot.Transform3D.Identity, Godot.Vector3.Zero, 1f),
+            });
+        Assert.Empty(ExtractionIndex.MissingMeshes(_dir, new[] { guid }, new HashSet<Guid>()));
+
+        ExtractionIndex.RemoveCachedAsset(_dir, guid);
+
+        Assert.Single(ExtractionIndex.MissingMeshes(_dir, new[] { guid }, new HashSet<Guid>()));
+    }
+
+    [Fact]
+    public void AMeshWithNoColliderFileAtAllIsStillComplete()
+    {
+        // Most prefabs have no colliders, so no file is written for them. Absence is not corruption.
+        Guid guid = Guid.NewGuid();
+        WriteCachedMesh(guid);
+
+        Assert.Empty(ExtractionIndex.MissingMeshes(_dir, new[] { guid }, new HashSet<Guid>()));
+    }
+
+    [Fact]
+    public void AWellFormedColliderKeepsItsMeshComplete()
+    {
+        Guid guid = Guid.NewGuid();
+        WriteCachedMesh(guid);
+        using (FileStream s = File.Create(Path.Combine(_dir, guid.ToString("N") + ".collider")))
+            ColliderCache.Write(s, new List<CachedCollider>
+            {
+                CachedCollider.Sphere(Godot.Transform3D.Identity, Godot.Vector3.Zero, 1f),
+            });
+
+        Assert.Empty(ExtractionIndex.MissingMeshes(_dir, new[] { guid }, new HashSet<Guid>()));
+    }
+
     [Fact]
     public void MissingMeshesReportsOnlyWhatIsNeitherCachedNorAKnownMiss()
     {

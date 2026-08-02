@@ -537,11 +537,17 @@ public static class ModelExtractor
     // a truncated file that every later run accepts and then throws on.
     private static void WriteMeshAtomically(string path, string tempPath, Vector3[] vertices,
         Vector3[] normals, Vector2[] uvs, List<CachedSubmesh> submeshes)
+        => WriteAtomically(path, tempPath, s => MeshCache.Write(s, vertices, normals, uvs, submeshes));
+
+    // The same discipline for any cache file judged current by its header: write a temporary in the same
+    // directory, then rename into place. The collider cache used to be written directly, one statement
+    // below its mesh, and a kill mid-write left a truncated file that every later run accepted.
+    private static void WriteAtomically(string path, string tempPath, Action<FileStream> write)
     {
         try
         {
             using (var stream = File.Create(tempPath))
-                MeshCache.Write(stream, vertices, normals, uvs, submeshes);
+                write(stream);
             File.Move(tempPath, path, overwrite: true);
         }
         catch
@@ -766,15 +772,20 @@ public static class ModelExtractor
             producedGuids?.Add(asset.Guid);
 
             // Cache the object's colliders next to its mesh (Unity units; converted when the body is built).
+            // A previous source's collider must never survive for a colliding GUID, but the delete has to
+            // come after the replacement is in place, not before: the rename overwrites, and deleting first
+            // left a window where a kill or a failed write ended with no file at all — which the
+            // completeness check reads as "this prefab legitimately has none", so the object would have
+            // stayed collisionless with nothing to notice it.
             string colliderPath = Path.Combine(cacheDir, asset.Guid.ToString("N") + ".collider");
-            File.Delete(colliderPath); // never retain a previous source's collider for a colliding GUID
-            if (graph.CollidersByKey.TryGetValue(key, out List<ColliderPart>? colliderParts))
-            {
-                List<CachedCollider> colliders = BuildColliders(colliderParts, graph, file);
-                if (colliders.Count > 0)
-                    using (var cs = File.Create(colliderPath))
-                        ColliderCache.Write(cs, colliders);
-            }
+            List<CachedCollider>? colliders =
+                graph.CollidersByKey.TryGetValue(key, out List<ColliderPart>? colliderParts)
+                    ? BuildColliders(colliderParts, graph, file)
+                    : null;
+            if (colliders is { Count: > 0 })
+                WriteAtomically(colliderPath, stem + ".collider.tmp", s => ColliderCache.Write(s, colliders));
+            else
+                File.Delete(colliderPath); // this source really has no colliders: absence is the right state
         }
 
         if (foliageAssets != null)

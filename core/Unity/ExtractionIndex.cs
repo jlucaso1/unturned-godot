@@ -98,7 +98,8 @@ public static class ExtractionIndex
     public static HashSet<Guid> MissingMeshes(string cacheDir, IEnumerable<Guid> needed,
         IReadOnlySet<Guid> misses)
         => MissingMeshes(cacheDir, needed, misses,
-            guid => MeshCache.IsCurrent(Path.Combine(cacheDir, guid.ToString("N") + ".mesh")));
+            guid => MeshCache.IsCurrent(Path.Combine(cacheDir, guid.ToString("N") + ".mesh"))
+                && ColliderIsUsable(cacheDir, guid));
 
     // Same completeness check, but tied to the bundle that owns the GUID. Mesh GUIDs are not globally
     // unique across workshop content, so format magic alone cannot prove that a shared-cache entry came
@@ -122,9 +123,22 @@ public static class ExtractionIndex
         return missing;
     }
 
+    // A GUID's colliders are written in the same pass as its mesh, so a mesh that is current but whose
+    // collider file is stale or truncated means an interrupted extraction. Not having one at all is normal
+    // — most prefabs have no colliders and no file is written for them — so only a file that exists and
+    // fails its header marks the GUID incomplete, which is what gets it re-extracted rather than silently
+    // loading without collision.
+    private static bool ColliderIsUsable(string cacheDir, Guid guid)
+    {
+        string path = Path.Combine(cacheDir, guid.ToString("N") + ".collider");
+        return !File.Exists(path) || ColliderCache.IsCurrent(path);
+    }
+
     public static bool MeshBelongsTo(string cacheDir, Guid guid, string bundlePath, long stamp)
     {
         if (!MeshCache.IsCurrent(Path.Combine(cacheDir, guid.ToString("N") + ".mesh")))
+            return false;
+        if (!ColliderIsUsable(cacheDir, guid))
             return false;
 
         try

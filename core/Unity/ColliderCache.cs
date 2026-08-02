@@ -51,9 +51,65 @@ public readonly struct CachedCollider
 
 // Per-GUID cache of an object's colliders, written once during extraction and read at load — small, so plain
 // BinaryReader/Writer (unlike the hot-path mesh cache).
+//
+// The file opens with a magic and its own payload length, like every other cache format here. Without a
+// header a truncated file — a process killed mid-write — was indistinguishable from a whole one: the count
+// read as whatever the first four bytes happened to be and the reader ran off the end, which surfaced as a
+// load failure that nothing invalidated, so the map stayed unloadable until the cache was deleted by hand.
+//
+// The length is what makes truncation detectable without parsing: a magic alone would still call a file cut
+// short after its first four bytes "current", so the completeness check would accept it forever and the
+// object would silently load with no collision.
 public static class ColliderCache
 {
+    // "UGCL". Files written before this magic existed have no header at all; they are treated as stale and
+    // re-extracted, which is also how a bad or truncated file recovers.
+    private const uint Magic = 0x4C434755;
+
+    // magic + payload length.
+    private const int HeaderBytes = 8;
+
+    // Kind byte + a 12-float transform. Every collider costs at least this, so the declared count can be
+    // bounded against the bytes actually present instead of being trusted into an allocation.
+    private const int MinBytesPerCollider = 1 + (12 * 4);
+
+    // True when the file carries the current magic AND its length matches the one recorded in its header —
+    // i.e. the write completed. False for the header-less legacy format, a truncated file, a short file, or
+    // a missing path. Mirrors MeshCache.IsCurrent, but checks completeness rather than only the magic:
+    // callers use this to decide whether a GUID needs re-extracting, so "starts right" is not enough.
+    public static bool IsCurrent(string path)
+    {
+        try
+        {
+            using FileStream s = File.OpenRead(path);
+            Span<byte> head = stackalloc byte[HeaderBytes];
+            if (s.Read(head) != HeaderBytes)
+                return false;
+            if (System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(head) != Magic)
+                return false;
+            int payload = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(head[4..]);
+            return payload >= 0 && s.Length == HeaderBytes + (long)payload;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+    }
+
     public static void Write(Stream stream, IReadOnlyList<CachedCollider> colliders)
+    {
+        // The payload is measured before it is written, so the header can carry its length: BinaryWriter
+        // over the destination cannot go back and patch it on a non-seekable stream.
+        using var payload = new MemoryStream();
+        WritePayload(payload, colliders);
+
+        using var header = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true);
+        header.Write(Magic);
+        header.Write((int)payload.Length);
+        header.Flush();
+        payload.Position = 0;
+        payload.CopyTo(stream);
+    }
+
+    private static void WritePayload(Stream stream, IReadOnlyList<CachedCollider> colliders)
     {
         using var w = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true);
         w.Write(colliders.Count);
@@ -92,7 +148,30 @@ public static class ColliderCache
     public static List<CachedCollider> Read(Stream stream)
     {
         using var r = new BinaryReader(stream, System.Text.Encoding.UTF8, leaveOpen: true);
+        if (r.ReadUInt32() != Magic)
+            throw new InvalidDataException("Not an Unturned collider cache file.");
+
+        int declaredPayload = r.ReadInt32();
+        if (declaredPayload < 0)
+            throw new InvalidDataException($"Collider cache declares a negative length ({declaredPayload}).");
+        if (stream.CanSeek && stream.Length - stream.Position < declaredPayload)
+            throw new EndOfStreamException("Collider cache is shorter than its header declares.");
+
+        long payloadStart = stream.CanSeek ? stream.Position : -1;
         int count = r.ReadInt32();
+        if (count < 0)
+            throw new InvalidDataException($"Collider cache declares a negative count ({count}).");
+
+        // A corrupt-but-plausible count must not become an allocation. Every collider costs at least a kind
+        // byte and a transform, so the bytes actually present bound how many there can be — otherwise a
+        // count of int.MaxValue would OutOfMemory here, which is not a decode failure any caller catches.
+        long available = stream.CanSeek ? stream.Length - stream.Position : declaredPayload - sizeof(int);
+        if ((long)count * MinBytesPerCollider > available)
+        {
+            throw new InvalidDataException(
+                $"Collider cache declares {count} colliders but carries only {available} bytes.");
+        }
+
         var result = new List<CachedCollider>(count);
         for (int n = 0; n < count; n++)
         {
@@ -110,17 +189,48 @@ public static class ColliderCache
                     result.Add(CachedCollider.Capsule(t, ReadVec3(r), r.ReadSingle(), r.ReadSingle(), r.ReadInt32()));
                     break;
                 default:
-                    var verts = new Vector3[r.ReadInt32()];
+                    var verts = new Vector3[ReadBoundedCount(r, stream, sizeof(float) * 3, "vertices")];
                     for (int i = 0; i < verts.Length; i++)
                         verts[i] = ReadVec3(r);
-                    var indices = new int[r.ReadInt32()];
+                    var indices = new int[ReadBoundedCount(r, stream, sizeof(int), "indices")];
                     for (int i = 0; i < indices.Length; i++)
                         indices[i] = r.ReadInt32();
                     result.Add(CachedCollider.Mesh(t, verts, indices));
                     break;
             }
         }
+
+        // Finishing early is corruption too, and the quiet kind. Same-length damage that turns a count of
+        // 1 into 0 leaves the header consistent, so IsCurrent accepts the file and every bound above
+        // passes — Read would then hand back an empty list, no exception would reach ColliderLibrary, and
+        // the object would load without collision forever. Ending anywhere but the declared boundary is
+        // the signal that the payload is not what the header says it is.
+        if (payloadStart >= 0 && stream.Position - payloadStart != declaredPayload)
+        {
+            throw new InvalidDataException(
+                $"Collider cache parsed {stream.Position - payloadStart} bytes of a declared " +
+                $"{declaredPayload}.");
+        }
+
         return result;
+    }
+
+    // Reads a length prefix that is about to size an array, and refuses one the file cannot possibly back.
+    // Bounding the collider count alone is not enough: a single mesh collider whose nested vertex or index
+    // count is corrupted would still allocate before a byte of payload is read, and OutOfMemoryException is
+    // not a decode failure — no caller catches it, so the load dies anyway.
+    private static int ReadBoundedCount(BinaryReader r, Stream stream, int bytesPerItem, string what)
+    {
+        int count = r.ReadInt32();
+        if (count < 0)
+            throw new InvalidDataException($"Collider cache declares {count} {what}.");
+        if (stream.CanSeek && (long)count * bytesPerItem > stream.Length - stream.Position)
+        {
+            throw new InvalidDataException(
+                $"Collider cache declares {count} {what} but carries only " +
+                $"{stream.Length - stream.Position} bytes.");
+        }
+        return count;
     }
 
     private static void WriteTransform(BinaryWriter w, Transform3D t)

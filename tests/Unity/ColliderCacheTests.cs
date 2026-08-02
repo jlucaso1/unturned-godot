@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using Godot;
@@ -54,5 +55,175 @@ public class ColliderCacheTests
         ColliderCache.Write(ms, new List<CachedCollider>());
         ms.Position = 0;
         Assert.Empty(ColliderCache.Read(ms));
+    }
+
+    private static byte[] OneSphere()
+    {
+        using var ms = new MemoryStream();
+        ColliderCache.Write(ms, new List<CachedCollider> { CachedCollider.Sphere(Pose, Vector3.Zero, 1f) });
+        return ms.ToArray();
+    }
+
+    // Without a header the count read as whatever the first four bytes happened to be, so a truncated file
+    // was indistinguishable from a whole one and the reader ran off the end.
+    [Fact]
+    public void Read_BadMagic_Throws()
+    {
+        using var ms = new MemoryStream(new byte[] { 1, 0, 0, 0, 0, 0, 0, 0 });
+        Assert.Throws<InvalidDataException>(() => ColliderCache.Read(ms));
+    }
+
+    [Fact]
+    public void Read_LegacyHeaderlessFile_IsRejectedRatherThanMisparsed()
+    {
+        // Exactly what the old writer produced for a single sphere: a bare count, no magic.
+        using var legacy = new MemoryStream();
+        var w = new BinaryWriter(legacy);
+        w.Write(1);
+        w.Write((byte)EColliderKind.Sphere);
+        legacy.Position = 0;
+
+        Assert.Throws<InvalidDataException>(() => ColliderCache.Read(legacy));
+    }
+
+    [Fact]
+    public void Read_NegativeCount_Throws()
+    {
+        byte[] bytes = OneSphere();
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(4), -1);
+
+        using var ms = new MemoryStream(bytes);
+        Assert.Throws<InvalidDataException>(() => ColliderCache.Read(ms));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    [InlineData(6)]
+    [InlineData(9)]
+    public void Read_TruncatedAtAnyPrefix_ThrowsADeclaredParseFailure(int keep)
+    {
+        byte[] truncated = OneSphere()[..keep];
+
+        using var ms = new MemoryStream(truncated);
+        Exception e = Record.Exception(() => ColliderCache.Read(ms));
+
+        Assert.NotNull(e);
+        Assert.True(e is EndOfStreamException or InvalidDataException,
+            $"a truncated cache should fail as a parse error, got {e.GetType().Name}");
+    }
+
+    [Fact]
+    public void IsCurrent_TellsAWrittenFileFromALegacyOrMissingOne()
+    {
+        using var dir = new Helpers.TempDir();
+        string written = dir.Write("a.collider", OneSphere());
+        string legacy = dir.Write("b.collider", new byte[] { 1, 0, 0, 0 });
+        string tooShort = dir.Write("c.collider", new byte[] { 1, 2 });
+
+        Assert.True(ColliderCache.IsCurrent(written));
+        Assert.False(ColliderCache.IsCurrent(legacy));
+        Assert.False(ColliderCache.IsCurrent(tooShort));
+        Assert.False(ColliderCache.IsCurrent(Path.Combine(dir.Path, "absent.collider")));
+    }
+
+    // A magic check alone would call this current: the header is intact and only the payload is missing.
+    // The completeness check would then accept it forever and the object would load with no collision,
+    // which is exactly the outcome the header was added to prevent.
+    [Theory]
+    [InlineData(8)]   // header only
+    [InlineData(12)]  // header + count
+    [InlineData(20)]  // part-way through the first collider
+    public void IsCurrent_RejectsAFileTruncatedAfterItsHeader(int keep)
+    {
+        using var dir = new Helpers.TempDir();
+        string path = dir.Write("truncated.collider", OneSphere()[..keep]);
+
+        Assert.False(ColliderCache.IsCurrent(path));
+    }
+
+    [Fact]
+    public void IsCurrent_RejectsAFileLongerThanItsHeaderDeclares()
+    {
+        using var dir = new Helpers.TempDir();
+        byte[] padded = new byte[OneSphere().Length + 16];
+        OneSphere().CopyTo(padded, 0);
+
+        Assert.False(ColliderCache.IsCurrent(dir.Write("padded.collider", padded)));
+    }
+
+    // A count corrupted to something plausible-but-huge must not become an allocation: OutOfMemoryException
+    // is not a decode failure, so no caller catches it and it would take the load down anyway.
+    [Fact]
+    public void Read_ImplausibleCount_FailsWithoutAllocating()
+    {
+        byte[] bytes = OneSphere();
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(8), int.MaxValue);
+
+        using var ms = new MemoryStream(bytes);
+        Assert.Throws<InvalidDataException>(() => ColliderCache.Read(ms));
+    }
+
+    // Bounding the collider count is not enough on its own: a mesh collider's nested vertex and index
+    // counts each size an array of their own.
+    [Theory]
+    [InlineData(true)]   // corrupt the vertex count
+    [InlineData(false)]  // corrupt the index count
+    public void Read_ImplausibleMeshCount_FailsWithoutAllocating(bool vertices)
+    {
+        using var ms = new MemoryStream();
+        ColliderCache.Write(ms, new List<CachedCollider>
+        {
+            CachedCollider.Mesh(Pose, new[] { Vector3.Zero, Vector3.One, Vector3.Up }, new[] { 0, 1, 2 }),
+        });
+        byte[] bytes = ms.ToArray();
+
+        // header(8) + count(4) + kind(1) + transform(48) = 61; vertex count, then 3 vertices, then indices.
+        int offset = vertices ? 61 : 61 + 4 + (3 * 12);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(offset), int.MaxValue);
+
+        using var corrupt = new MemoryStream(bytes);
+        Assert.Throws<InvalidDataException>(() => ColliderCache.Read(corrupt));
+    }
+
+    // The quiet corruption: same length, header still consistent, but the count now says fewer colliders
+    // than the payload holds. Every bound passes and Read would just return a short list — no exception,
+    // so nothing invalidates the file and the object loads without collision forever.
+    [Fact]
+    public void Read_CountSmallerThanThePayload_ThrowsRatherThanReturningAShortList()
+    {
+        using var ms = new MemoryStream();
+        ColliderCache.Write(ms, new List<CachedCollider>
+        {
+            CachedCollider.Sphere(Pose, Vector3.Zero, 1f),
+            CachedCollider.Sphere(Pose, Vector3.One, 2f),
+        });
+        byte[] bytes = ms.ToArray();
+
+        // Header(8) then the count: claim one collider where the payload carries two.
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(8), 1);
+
+        using var corrupt = new MemoryStream(bytes);
+        Assert.Throws<InvalidDataException>(() => ColliderCache.Read(corrupt));
+    }
+
+    [Fact]
+    public void Read_ZeroedCount_ThrowsRatherThanReturningNothing()
+    {
+        byte[] bytes = OneSphere();
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(8), 0);
+
+        using var corrupt = new MemoryStream(bytes);
+        Assert.Throws<InvalidDataException>(() => ColliderCache.Read(corrupt));
+    }
+
+    [Fact]
+    public void Read_PayloadShorterThanTheHeaderDeclares_Throws()
+    {
+        byte[] bytes = OneSphere();
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(4), bytes.Length * 4);
+
+        using var ms = new MemoryStream(bytes);
+        Assert.Throws<EndOfStreamException>(() => ColliderCache.Read(ms));
     }
 }
