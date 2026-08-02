@@ -271,8 +271,8 @@ public partial class Main : Node3D
 
         var body = new CharacterBody3D
         {
-            CollisionLayer = 2,
-            CollisionMask = 1 | ObjectsBuilder.MediumFurnitureLayer,
+            CollisionLayer = CollisionLayers.Player,
+            CollisionMask = CollisionLayers.CharacterMask,
             FloorMaxAngle = Mathf.DegToRad(Player.PlayerConfig.MaxWalkableSlopeDegrees),
             FloorSnapLength = 0.5f,
             FloorStopOnSlope = true,
