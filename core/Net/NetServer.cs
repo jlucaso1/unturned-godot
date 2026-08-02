@@ -26,6 +26,16 @@ public sealed class NetServer
     private readonly PlayerIdPool _playerIds = new();
     private double _nextTick = double.NaN;
 
+    // Bumped on every membership event — one admission, one departure, one step — and stamped on the
+    // Welcome, PlayerJoined and PlayerLeft it produces. Several of those can happen inside one frame,
+    // so the simulation tick cannot order them for a client that receives them out of order; this can.
+    private uint _rosterVersion;
+
+    // How many 0.08 s steps one Update may run to make up for lost time. Enough to absorb the jitter of
+    // a machine that misses a few frames; short of the "replay the whole stall at once" behaviour that
+    // turns a hitch into a burst of hundreds of datagrams per client.
+    public const int MaxCatchUpTicks = 5; // 0.4 s
+
     public int PlayerCount { get; private set; }
 
     // How many more players this server can admit at `now`. Zero means the next Hello is refused. This
@@ -90,14 +100,44 @@ public sealed class NetServer
 
         if (double.IsNaN(_nextTick))
             _nextTick = now;
-        while (now >= _nextTick)
+
+        // Time the budget below cannot make up is dropped HERE, before any step runs, so the steps that
+        // do run carry recent instants. Dropping it afterwards instead left them stamped with the
+        // moment the stall began: the claims still in the buffer describe where the player got to
+        // DURING the stall, and judged against a third of a second of budget every one of them was
+        // refused — the avatar sitting at its pre-stall position until the next frame arrived. The gap
+        // is still credited exactly once, to the first step that runs.
+        double unmakeable = now - _nextTick - (MaxCatchUpTicks * ServerSimulation.TickRate);
+        if (unmakeable > 0)
+            _nextTick = now - ((MaxCatchUpTicks - 1) * ServerSimulation.TickRate);
+
+        int caughtUp = 0;
+        while (now >= _nextTick && caughtUp < MaxCatchUpTicks)
         {
-            List<PlayerSnapshotState> states = _simulation.Step();
+            // Each step is stamped with the instant it was SCHEDULED for, not with the clock reading of
+            // the frame running it. The two differ whenever one frame makes up several ticks, and the
+            // trusted-position budget is a speed limit: handing every step of a late frame the same
+            // reading pays each of them a fresh minimum tick of movement on top of the one real gap,
+            // which on a persistently late server is a standing speed bonus. Scheduled instants are
+            // monotonic, one TickRate apart, and after a stall the re-anchor below leaves a gap the
+            // size of the stall — so the time that really passed is credited exactly once.
+            double stepAt = _nextTick;
+            _nextTick += ServerSimulation.TickRate;
+            List<PlayerSnapshotState> states = _simulation.Step(stepAt);
             if (states.Count > 0)
                 Broadcast(NetMessages.WriteStateUpdate(_simulation.Tick, states), ESendType.Unreliable);
             OnTick?.Invoke(_simulation.Tick);
-            _nextTick += ServerSimulation.TickRate;
+            caughtUp++;
         }
+
+        // Whatever is left of the gap is dropped rather than replayed, and the clock comes back to the
+        // present. A host stalls for real reasons — the world streamer finishing, a navmesh reconcile,
+        // a laptop lid — and replaying a minute of ticks inside one frame floods every client with
+        // hundreds of datagrams, jumps the zombies a minute along their paths, and makes the very frame
+        // that is already late do all of it. Left behind instead, the loop would spend its full budget
+        // on every following frame and never catch up at all.
+        if (now >= _nextTick)
+            _nextTick = now + ServerSimulation.TickRate;
     }
 
     private void HandleMessage(ITransportConnection connection, byte[] payload, double now)
@@ -172,7 +212,9 @@ public sealed class NetServer
                         foreach (Session other in _sessions.Values)
                             if (other.Joined && other != session)
                                 roster.Add(Listing(other, _simulation.GetState(other.PlayerId)));
-                        connection.Send(NetMessages.WriteWelcome(session.PlayerId, _simulation.Tick, roster),
+                        connection.Send(
+                            NetMessages.WriteWelcome(session.PlayerId, _simulation.Tick, _rosterVersion,
+                                roster),
                             ESendType.Reliable);
                         OnPlayerAdmitted?.Invoke(session.PlayerId, connection);
                     }
@@ -223,9 +265,17 @@ public sealed class NetServer
             if (other.Joined && other != session)
                 existing.Add(Listing(other, _simulation.GetState(other.PlayerId)));
 
-        connection.Send(NetMessages.WriteWelcome(session.PlayerId, _simulation.Tick, existing), ESendType.Reliable);
+        // The admission is itself a membership event, and the roster above predates it: the new player's
+        // own Welcome carries the version BEFORE the bump, the PlayerJoined everyone else receives
+        // carries the version after. Anyone holding the older roster can then tell that this join is
+        // newer than it, rather than deleting a player who has only just arrived.
+        connection.Send(
+            NetMessages.WriteWelcome(session.PlayerId, _simulation.Tick, _rosterVersion, existing),
+            ESendType.Reliable);
 
-        byte[] joined = NetMessages.WritePlayerJoined(Listing(session, _simulation.GetState(session.PlayerId)));
+        _rosterVersion++;
+        byte[] joined = NetMessages.WritePlayerJoined(_rosterVersion,
+            Listing(session, _simulation.GetState(session.PlayerId)));
         foreach ((ITransportConnection conn, Session other) in _sessions)
             if (other.Joined && other != session)
                 conn.Send(joined, ESendType.Reliable);
@@ -241,7 +291,8 @@ public sealed class NetServer
         PlayerCount--;
         _simulation.RemovePlayer(session.PlayerId);
         _playerIds.Return(session.PlayerId, now);
-        Broadcast(NetMessages.WritePlayerLeft(session.PlayerId), ESendType.Reliable);
+        _rosterVersion++;
+        Broadcast(NetMessages.WritePlayerLeft(_rosterVersion, session.PlayerId), ESendType.Reliable);
     }
 
     public void Broadcast(byte[] payload, ESendType sendType)
