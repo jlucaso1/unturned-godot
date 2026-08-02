@@ -772,15 +772,20 @@ public static class ModelExtractor
             producedGuids?.Add(asset.Guid);
 
             // Cache the object's colliders next to its mesh (Unity units; converted when the body is built).
+            // A previous source's collider must never survive for a colliding GUID, but the delete has to
+            // come after the replacement is in place, not before: the rename overwrites, and deleting first
+            // left a window where a kill or a failed write ended with no file at all — which the
+            // completeness check reads as "this prefab legitimately has none", so the object would have
+            // stayed collisionless with nothing to notice it.
             string colliderPath = Path.Combine(cacheDir, asset.Guid.ToString("N") + ".collider");
-            File.Delete(colliderPath); // never retain a previous source's collider for a colliding GUID
-            if (graph.CollidersByKey.TryGetValue(key, out List<ColliderPart>? colliderParts))
-            {
-                List<CachedCollider> colliders = BuildColliders(colliderParts, graph, file);
-                if (colliders.Count > 0)
-                    WriteAtomically(colliderPath, stem + ".collider.tmp",
-                        s => ColliderCache.Write(s, colliders));
-            }
+            List<CachedCollider>? colliders =
+                graph.CollidersByKey.TryGetValue(key, out List<ColliderPart>? colliderParts)
+                    ? BuildColliders(colliderParts, graph, file)
+                    : null;
+            if (colliders is { Count: > 0 })
+                WriteAtomically(colliderPath, stem + ".collider.tmp", s => ColliderCache.Write(s, colliders));
+            else
+                File.Delete(colliderPath); // this source really has no colliders: absence is the right state
         }
 
         if (foliageAssets != null)

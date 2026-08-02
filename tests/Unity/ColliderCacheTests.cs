@@ -126,4 +126,51 @@ public class ColliderCacheTests
         Assert.False(ColliderCache.IsCurrent(tooShort));
         Assert.False(ColliderCache.IsCurrent(Path.Combine(dir.Path, "absent.collider")));
     }
+
+    // A magic check alone would call this current: the header is intact and only the payload is missing.
+    // The completeness check would then accept it forever and the object would load with no collision,
+    // which is exactly the outcome the header was added to prevent.
+    [Theory]
+    [InlineData(8)]   // header only
+    [InlineData(12)]  // header + count
+    [InlineData(20)]  // part-way through the first collider
+    public void IsCurrent_RejectsAFileTruncatedAfterItsHeader(int keep)
+    {
+        using var dir = new Helpers.TempDir();
+        string path = dir.Write("truncated.collider", OneSphere()[..keep]);
+
+        Assert.False(ColliderCache.IsCurrent(path));
+    }
+
+    [Fact]
+    public void IsCurrent_RejectsAFileLongerThanItsHeaderDeclares()
+    {
+        using var dir = new Helpers.TempDir();
+        byte[] padded = new byte[OneSphere().Length + 16];
+        OneSphere().CopyTo(padded, 0);
+
+        Assert.False(ColliderCache.IsCurrent(dir.Write("padded.collider", padded)));
+    }
+
+    // A count corrupted to something plausible-but-huge must not become an allocation: OutOfMemoryException
+    // is not a decode failure, so no caller catches it and it would take the load down anyway.
+    [Fact]
+    public void Read_ImplausibleCount_FailsWithoutAllocating()
+    {
+        byte[] bytes = OneSphere();
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(8), int.MaxValue);
+
+        using var ms = new MemoryStream(bytes);
+        Assert.Throws<InvalidDataException>(() => ColliderCache.Read(ms));
+    }
+
+    [Fact]
+    public void Read_PayloadShorterThanTheHeaderDeclares_Throws()
+    {
+        byte[] bytes = OneSphere();
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(4), bytes.Length * 4);
+
+        using var ms = new MemoryStream(bytes);
+        Assert.Throws<EndOfStreamException>(() => ColliderCache.Read(ms));
+    }
 }
