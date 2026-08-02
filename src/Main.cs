@@ -65,14 +65,14 @@ public partial class Main : Node3D
         // CHAR_ONLY=1: just the character + a light + a front camera, no world build. For fast iteration on
         // the character material/shader (renders in seconds instead of the ~2 min full-world build).
         string shotOnly = OS.GetEnvironment("SCREENSHOT_PATH");
-        if (OS.GetEnvironment("CHAR_ONLY") == "1" && !string.IsNullOrEmpty(shotOnly))
+        if (EnvFlag.IsOn(OS.GetEnvironment("CHAR_ONLY"), whenUnset: false) && !string.IsNullOrEmpty(shotOnly))
         {
             if (CharacterModel.Build(unturnedPath) is { } model)
             {
                 if (model is CharacterSkeleton rig && OS.GetEnvironment("CHAR_STANCE") is { Length: > 0 } s)
                 {
                     rig.SetState(System.Enum.Parse<Player.EPlayerStance>(s, ignoreCase: true),
-                        OS.GetEnvironment("CHAR_MOVING") == "1");
+                        EnvFlag.IsOn(OS.GetEnvironment("CHAR_MOVING"), whenUnset: false));
                     if (OS.GetEnvironment("CHAR_PITCH") is { Length: > 0 } cp)
                         rig.SetPitch(cp.ToFloat()); // look pitch -> spine/skull bend
                     rig.Seek(OS.GetEnvironment("CHAR_ANIM_TIME") is { Length: > 0 } at ? at.ToFloat() : 0f);
@@ -91,8 +91,8 @@ public partial class Main : Node3D
             });
             var cam = new Camera3D { Current = true };
             AddChild(cam);
-            float side = OS.GetEnvironment("CHAR_BACK") == "1" ? 3.2f : -3.2f; // -Z is the front
-            cam.Position = OS.GetEnvironment("CHAR_SIDE") == "1"
+            float side = EnvFlag.IsOn(OS.GetEnvironment("CHAR_BACK"), whenUnset: false) ? 3.2f : -3.2f; // -Z is the front
+            cam.Position = EnvFlag.IsOn(OS.GetEnvironment("CHAR_SIDE"), whenUnset: false)
                 ? new Vector3(4.0f, 1.0f, 0f)  // side profile, for reading prone/lie-down poses
                 : new Vector3(0, 1.1f, side);  // full-body 3/4-front, so any stance is framed
             cam.LookAt(new Vector3(0, 0.5f, 0));
@@ -163,14 +163,14 @@ public partial class Main : Node3D
         // apart. UG_HEADLESS_INTERACTIVE=1 runs the normal interactive path with no driver at all, and
         // differencing the two answers how much of RSS is the renderer. A screenshot still wins, since it
         // needs something drawn.
-        bool headlessInteractive = headless && OS.GetEnvironment("UG_HEADLESS_INTERACTIVE") == "1"
+        bool headlessInteractive = headless && EnvFlag.IsOn(OS.GetEnvironment("UG_HEADLESS_INTERACTIVE"), whenUnset: false)
             && string.IsNullOrEmpty(shot);
         _headlessInteractive = headlessInteractive;
         if (headlessInteractive)
             Log.Print("[unturned-godot] Headless interactive: no rendering driver; "
                 + "view-dependent metrics (draw calls, primitives, frame time) do not apply.");
 
-        if (!string.IsNullOrEmpty(shot) && OS.GetEnvironment("MENU_SHOT") == "1")
+        if (!string.IsNullOrEmpty(shot) && EnvFlag.IsOn(OS.GetEnvironment("MENU_SHOT"), whenUnset: false))
         {
             // Screenshot of the boot menu, no world.
             AddChild(new MainMenu { Name = "MainMenu", UnturnedPath = unturnedPath, InitialMap = _mapName });
@@ -202,7 +202,7 @@ public partial class Main : Node3D
 
             // A screenshot uses the free camera + SHOT_CAM by default; PLAYER=1 spawns the character and
             // shoots from its (third-person) camera instead.
-            if (OS.GetEnvironment("PLAYER") == "1")
+            if (EnvFlag.IsOn(OS.GetEnvironment("PLAYER"), whenUnset: false))
             {
                 SpawnPlayer(world.Terrain, thirdPerson: true, unturnedPath, world.Heights);
                 RunPendingAudioExtraction(); // no streamer on this path; extract right away
@@ -223,8 +223,8 @@ public partial class Main : Node3D
         // automation; OPEN_LAN is only for tests where a second client actually joins.
         // A headless interactive session has no menu to click, so it always boots into the world.
         bool autoStart = headlessInteractive
-            || OS.GetEnvironment("SOLO") == "1"
-            || OS.GetEnvironment("FREECAM") == "1" || OS.GetEnvironment("OPEN_LAN") == "1"
+            || EnvFlag.IsOn(OS.GetEnvironment("SOLO"), whenUnset: false)
+            || EnvFlag.IsOn(OS.GetEnvironment("FREECAM"), whenUnset: false) || EnvFlag.IsOn(OS.GetEnvironment("OPEN_LAN"), whenUnset: false)
             || OS.GetEnvironment("OPEN_LAN_AFTER") is { Length: > 0 }
             || OS.GetEnvironment("JOIN") is { Length: > 0 }
             || OS.GetEnvironment("MAP") is { Length: > 0 };
@@ -497,7 +497,7 @@ public partial class Main : Node3D
         string? stepProbe = OS.GetEnvironment("STEP_PROBE") is { Length: > 0 } probe ? probe : null;
         // STEP_PROBE is a diagnostic run with no player/input. It starts from MeshesReady below rather
         // than from a guessed delay, so it always sees the object collision world it measures.
-        if (stepProbe == null && OS.GetEnvironment("FREECAM") == "1")
+        if (stepProbe == null && EnvFlag.IsOn(OS.GetEnvironment("FREECAM"), whenUnset: false))
             AddFreeCamera();
         else if (stepProbe == null)
             _player = SpawnPlayer(terrain, thirdPerson: false, unturnedPath, heights);
@@ -618,7 +618,7 @@ public partial class Main : Node3D
                 AppShutdown.RequestQuit(GetTree());
             };
 
-        if (OS.GetEnvironment("OPEN_LAN") == "1")
+        if (EnvFlag.IsOn(OS.GetEnvironment("OPEN_LAN"), whenUnset: false))
             network.OpenToLan(NetworkManager.DefaultPort);
         else if (OS.GetEnvironment("OPEN_LAN_AFTER") is { Length: > 0 } delay)
             GetTree().CreateTimer(delay.ToFloat()).Timeout += () => network.OpenToLan(NetworkManager.DefaultPort);
@@ -837,7 +837,7 @@ public partial class Main : Node3D
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
 
         // PLAYER_FRONT=1 frames the character from the front (its face) instead of the over-the-shoulder view.
-        if (OS.GetEnvironment("PLAYER_FRONT") == "1" && GetNodeOrNull<Node3D>("Player") is { } player)
+        if (EnvFlag.IsOn(OS.GetEnvironment("PLAYER_FRONT"), whenUnset: false) && GetNodeOrNull<Node3D>("Player") is { } player)
         {
             Vector3 headTarget = player.GlobalPosition + new Vector3(0, 1.7f, 0);
             Vector3 forward = -player.GlobalTransform.Basis.Z; // the character's facing

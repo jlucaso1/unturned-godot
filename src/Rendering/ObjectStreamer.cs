@@ -424,7 +424,7 @@ public partial class ObjectStreamer : Node
     {
         // The freecam mode never spawns the player, so collision bodies would sit unused — skip the collider
         // library entirely there and build the objects render-only (saves the shape/BVH build + its memory).
-        var colliderLibrary = OS.GetEnvironment("FREECAM") == "1"
+        var colliderLibrary = EnvFlag.IsOn(OS.GetEnvironment("FREECAM"), whenUnset: false)
             ? new Dictionary<Guid, List<CachedCollider>>()
             : ColliderLibrary.Load(_cacheDir, _neededGuids);
         var stage = Stopwatch.StartNew();

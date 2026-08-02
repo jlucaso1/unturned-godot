@@ -96,7 +96,7 @@ public partial class DayNightController : Node
         controller.AddChild(controller._sun);
 
         // Off by default, exactly like the game (GraphicsSettingsData.SunShaftsQuality = OFF).
-        if (OS.GetEnvironment("SUN_SHAFTS") == "1")
+        if (EnvFlag.IsOn(OS.GetEnvironment("SUN_SHAFTS"), whenUnset: false))
         {
             controller._shafts = SunShafts.Create(controller._sun);
             controller.AddChild(controller._shafts);

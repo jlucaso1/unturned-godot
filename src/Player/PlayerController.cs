@@ -68,7 +68,7 @@ public partial class PlayerController : CharacterBody3D
     public override void _Ready()
     {
         _thirdPerson = StartThirdPerson;
-        _benchmarkMovement = OS.GetEnvironment("UG_RUNTIME_BENCH_MOVE") == "1";
+        _benchmarkMovement = EnvFlag.IsOn(OS.GetEnvironment("UG_RUNTIME_BENCH_MOVE"), whenUnset: false);
         _benchmarkMovementStarted = Engine.GetPhysicsFrames();
 
         // The body lives on layer 2 so the zombie brain's world queries (ground rays, vision rays,

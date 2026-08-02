@@ -300,7 +300,7 @@ public partial class MapPicker : PanelContainer
     private readonly Dictionary<string, ImageTexture?> _textureCache = new();
 
     private Dictionary<string, ImageTexture?> TextureCache =>
-        OS.GetEnvironment("UG_STATIC_MAP_PREVIEW_CACHE") == "1" ? LegacyTextureCache : _textureCache;
+        EnvFlag.IsOn(OS.GetEnvironment("UG_STATIC_MAP_PREVIEW_CACHE"), whenUnset: false) ? LegacyTextureCache : _textureCache;
 
     // Map artwork lives outside res://, so it is loaded from disk and cached per path (the same icon is
     // re-read every time the panel rebuilds otherwise).
@@ -325,7 +325,7 @@ public partial class MapPicker : PanelContainer
         // Child TextureRects release their last references as the menu subtree is destroyed. Dropping
         // ours here makes the ownership boundary explicit and prevents a later menu from inheriting a
         // session-sized cache. Godot frees the corresponding GPU resources after the render fence.
-        if (OS.GetEnvironment("UG_STATIC_MAP_PREVIEW_CACHE") != "1")
+        if (!EnvFlag.IsOn(OS.GetEnvironment("UG_STATIC_MAP_PREVIEW_CACHE"), whenUnset: false))
             _textureCache.Clear();
     }
 }

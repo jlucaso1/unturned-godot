@@ -37,7 +37,7 @@ public partial class MultiMeshRidRenderer : Node3D
     {
         SetNotifyTransform(true);
         Rid scenario = GetWorld3D().Scenario;
-        bool compact = OS.GetEnvironment("UG_KEEP_RID_UPLOAD_METADATA") != "1";
+        bool compact = !EnvFlag.IsOn(OS.GetEnvironment("UG_KEEP_RID_UPLOAD_METADATA"), whenUnset: false);
         if (compact)
         {
             _retainedMeshes.Capacity = _entries.Count;

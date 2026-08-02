@@ -182,6 +182,12 @@ aggregate-AABB range, so an instance near a chunk edge never fades early. These 
 materials, shadows and world transforms; they change only submission/culling granularity and how quickly
 the already-usable baked navigation graph is refined.
 
+Every boolean flag below goes through `EnvFlag`, so `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` all
+work, in any case. A value that is none of those is treated as unset and the flag keeps its default —
+previously the value was compared rather than read, so `UG_FOLIAGE_RESIDENCY=false` *enabled* residency
+(`"false" != "0"`) and `UG_NODE_MULTIMESH=true` left it off (`"true" != "1"`). Flags that take a number or
+a path (`UG_OBJECT_CHUNK_METRES`, `SCREENSHOT_PATH`, `TIME_OF_DAY`, …) are unaffected.
+
 - `TERRAIN_OCCLUDERS=0` disables the default coarse terrain occluders. Every occluder triangle is built
   below the minimum source height of its complete cell, so it cannot hide geometry above the terrain;
   disabling is retained for performance and screenshot A/B checks.

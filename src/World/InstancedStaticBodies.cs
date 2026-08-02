@@ -55,11 +55,11 @@ public partial class InstancedStaticBodies : Node3D
             PhysicsServer3D.BodySetSpace(body, space); // join once, after every shape
             _names[body] = definition.Name;
             _bodyCount++;
-            if (OS.GetEnvironment("UG_KEEP_PHYSICS_PLACEMENTS") != "1")
+            if (!EnvFlag.IsOn(OS.GetEnvironment("UG_KEEP_PHYSICS_PLACEMENTS"), whenUnset: false))
                 definition.Placements = System.Array.Empty<(int, Transform3D)>();
         }
-        if (OS.GetEnvironment("UG_KEEP_RID_UPLOAD_METADATA") != "1"
-            && OS.GetEnvironment("UG_KEEP_PHYSICS_PLACEMENTS") != "1")
+        if (!EnvFlag.IsOn(OS.GetEnvironment("UG_KEEP_RID_UPLOAD_METADATA"), whenUnset: false)
+            && !EnvFlag.IsOn(OS.GetEnvironment("UG_KEEP_PHYSICS_PLACEMENTS"), whenUnset: false))
         {
             _definitions = new List<Definition>();
             int retainedShapes = 0;
