@@ -36,6 +36,13 @@ public static class ObjectsBuilder
     private static readonly float ObjectChunkMetres = EnvFloat("UG_OBJECT_CHUNK_METRES", 1024f, 0f, 8192f);
     private static readonly long ObjectChunkMinTriangles = EnvLong("UG_OBJECT_CHUNK_MIN_TRIS", 0, 0, long.MaxValue);
     private static readonly bool ObjectChunkRequireSpread = EnvBool("UG_OBJECT_CHUNK_REQUIRE_SPREAD", true);
+    // Geometry one batch is meant to carry. Subdivision stops once a region is under it, so the batch
+    // count follows a group's geometry rather than its spread. Zero falls back to the fixed grid.
+    private static readonly long CellTriangleBudget = EnvLong("UG_OBJECT_CELL_TRIS", 0, 0, long.MaxValue);
+    // How small subdivision is allowed to make a region. Past this, copies are close enough that the
+    // camera almost always has them all in view together, so another split buys nothing and costs a
+    // draw call. Independent of the eligibility cell size, which decides whether a group is cut at all.
+    private static readonly float CellFloorMetres = EnvFloat("UG_OBJECT_CELL_MIN_METRES", 128f, 1f, 8192f);
     // Geometry an average cell must carry for its own draw call to be worth taking. See CellSizeFor.
     // Zero restores a single fixed cell size for every group, which is the A/B control.
     private static readonly long MinCellTriangles = EnvLong("UG_OBJECT_CELL_MIN_TRIS", 0, 0, long.MaxValue);
@@ -127,14 +134,15 @@ public static class ObjectsBuilder
                 && placementTriangles >= ObjectChunkMinTriangles
                 && (!ObjectChunkRequireSpread || spread))
             {
-                chunkMetres = CellSizeFor(transforms, chunkMetres, trianglesPerInstance);
-                Dictionary<(int X, int Z), List<Transform3D>> cells = Cells(transforms, chunkMetres);
+                List<List<Transform3D>> cells = CellTriangleBudget > 0
+                    ? Subdivide(transforms, trianglesPerInstance, CellFloorMetres)
+                    : FixedCells(transforms, CellSizeFor(transforms, chunkMetres, trianglesPerInstance));
                 if (sparseWide)
                 {
                     sparseGroups++;
                     sparseExtraBatches += cells.Count - 1;
                 }
-                foreach (((int x, int z), List<Transform3D> inCell) in cells)
+                foreach (List<Transform3D> inCell in cells)
                 {
                     renderBatches += AddLevels(root, render, renderMesh, lodMesh, inCell);
                 }
@@ -183,8 +191,9 @@ public static class ObjectsBuilder
         if (ObjectChunkMetres > 0f)
             Log.Print($"[unturned-godot] Object render batches: {renderBatches} " +
                 $"({ObjectChunkMetres:0} m cells, min {MinChunkedInstances} instances / " +
-                $"{ObjectChunkMinTriangles:N0} placement tris, coarsen below {MinCellTriangles:N0} " +
-                $"tris/cell, require spread={ObjectChunkRequireSpread}, " +
+                $"{ObjectChunkMinTriangles:N0} placement tris, budget {CellTriangleBudget:N0} tris/cell " +
+                $"down to {CellFloorMetres:0} m, coarsen below {MinCellTriangles:N0} tris/cell, " +
+                $"require spread={ObjectChunkRequireSpread}, " +
                 $"sparse-wide >= {SparseChunkMinTriangles:N0} tris: {sparseGroups} groups / " +
                 $"+{sparseExtraBatches} batches)");
 
@@ -236,8 +245,7 @@ public static class ObjectsBuilder
         return anchor;
     }
 
-    private static Dictionary<(int X, int Z), List<Transform3D>> Cells(
-        List<Transform3D> transforms, float cellSize)
+    private static List<List<Transform3D>> FixedCells(List<Transform3D> transforms, float cellSize)
     {
         Vector3 anchor = AnchorOf(transforms);
         var cells = new Dictionary<(int X, int Z), List<Transform3D>>();
@@ -248,7 +256,62 @@ public static class ObjectsBuilder
                 cells[cell] = inCell = new List<Transform3D>();
             inCell.Add(transform);
         }
+        return new List<List<Transform3D>>(cells.Values);
+    }
+
+    // A grid of one size spends as many batches on an empty field as on a town, which is backwards on
+    // both counts: the batches that cost a view taking in the whole map at once are the near-empty ones,
+    // and the batches that repay a view at eye level are the dense ones. Split on the geometry instead —
+    // subdivide a region only while it holds more than one batch's worth — so the cuts land where there
+    // is something to reject and sparse scatter stays in one cheap batch. The resulting batch count then
+    // tracks how much geometry a group has rather than how far it is spread, which is what lets one
+    // setting suit maps of different sizes.
+    //
+    // The floor stops subdivision once a region is small enough that cutting it again would separate
+    // copies the camera almost always sees together.
+    private static List<List<Transform3D>> Subdivide(List<Transform3D> transforms,
+        long trianglesPerInstance, float minCellMetres)
+    {
+        var cells = new List<List<Transform3D>>();
+        SubdivideInto(cells, transforms, trianglesPerInstance, minCellMetres);
         return cells;
+    }
+
+    private static void SubdivideInto(List<List<Transform3D>> cells, List<Transform3D> transforms,
+        long trianglesPerInstance, float minCellMetres)
+    {
+        Vector3 min = transforms[0].Origin, max = min;
+        foreach (Transform3D transform in transforms)
+        {
+            min = min.Min(transform.Origin);
+            max = max.Max(transform.Origin);
+        }
+        float widest = MathF.Max(max.X - min.X, max.Z - min.Z);
+        if (transforms.Count == 1 || widest <= minCellMetres
+            || trianglesPerInstance * transforms.Count <= CellTriangleBudget)
+        {
+            cells.Add(transforms);
+            return;
+        }
+
+        float midX = (min.X + max.X) * 0.5f, midZ = (min.Z + max.Z) * 0.5f;
+        var quadrants = new List<Transform3D>?[4];
+        foreach (Transform3D transform in transforms)
+        {
+            int quadrant = (transform.Origin.X >= midX ? 1 : 0) | (transform.Origin.Z >= midZ ? 2 : 0);
+            (quadrants[quadrant] ??= new List<Transform3D>()).Add(transform);
+        }
+        foreach (List<Transform3D>? quadrant in quadrants)
+        {
+            if (quadrant == null)
+                continue;
+            // Copies sharing one position cannot be separated, and splitting the same set forever is how
+            // that would end. Emit such a region as it stands.
+            if (quadrant.Count == transforms.Count)
+                cells.Add(quadrant);
+            else
+                SubdivideInto(cells, quadrant, trianglesPerInstance, minCellMetres);
+        }
     }
 
     private static int CellCount(List<Transform3D> transforms, float cellSize)
