@@ -219,15 +219,31 @@ public static class ObjectsBuilder
         return triangles;
     }
 
+    // The grid is laid out from the group's own lowest corner, not from the world origin. Anchoring it
+    // at the origin makes the partition depend on where the map happens to sit relative to it: a group
+    // straddling the origin is cut along it however large the cells are, so it can never fall below four
+    // batches — and on a map centred there, that is most of them. Anchoring per group means the cell size
+    // alone decides how a group is cut, wherever it lies.
+    private static (int X, int Z) CellOf(Vector3 origin, Vector3 anchor, float cellSize) => (
+        Mathf.FloorToInt((origin.X - anchor.X) / cellSize),
+        Mathf.FloorToInt((origin.Z - anchor.Z) / cellSize));
+
+    private static Vector3 AnchorOf(List<Transform3D> transforms)
+    {
+        Vector3 anchor = transforms[0].Origin;
+        foreach (Transform3D transform in transforms)
+            anchor = anchor.Min(transform.Origin);
+        return anchor;
+    }
+
     private static Dictionary<(int X, int Z), List<Transform3D>> Cells(
         List<Transform3D> transforms, float cellSize)
     {
+        Vector3 anchor = AnchorOf(transforms);
         var cells = new Dictionary<(int X, int Z), List<Transform3D>>();
         foreach (Transform3D transform in transforms)
         {
-            var cell = (
-                Mathf.FloorToInt(transform.Origin.X / cellSize),
-                Mathf.FloorToInt(transform.Origin.Z / cellSize));
+            (int X, int Z) cell = CellOf(transform.Origin, anchor, cellSize);
             if (!cells.TryGetValue(cell, out List<Transform3D>? inCell))
                 cells[cell] = inCell = new List<Transform3D>();
             inCell.Add(transform);
@@ -237,10 +253,10 @@ public static class ObjectsBuilder
 
     private static int CellCount(List<Transform3D> transforms, float cellSize)
     {
+        Vector3 anchor = AnchorOf(transforms);
         var seen = new HashSet<(int X, int Z)>();
         foreach (Transform3D transform in transforms)
-            seen.Add((Mathf.FloorToInt(transform.Origin.X / cellSize),
-                Mathf.FloorToInt(transform.Origin.Z / cellSize)));
+            seen.Add(CellOf(transform.Origin, anchor, cellSize));
         return seen.Count;
     }
 
@@ -827,10 +843,12 @@ public static class ObjectsBuilder
         if (ObjectChunkMetres > 0f && items.Count > 1)
         {
             var cells = new Dictionary<(int X, int Z), List<(Transform3D transform, Color color)>>();
+            Vector3 anchor = items[0].transform.Origin;
+            foreach ((Transform3D transform, Color _) in items)
+                anchor = anchor.Min(transform.Origin);
             foreach ((Transform3D transform, Color color) in items)
             {
-                var cell = (Mathf.FloorToInt(transform.Origin.X / ObjectChunkMetres),
-                    Mathf.FloorToInt(transform.Origin.Z / ObjectChunkMetres));
+                (int X, int Z) cell = CellOf(transform.Origin, anchor, ObjectChunkMetres);
                 if (!cells.TryGetValue(cell,
                     out List<(Transform3D transform, Color color)>? inCell))
                     cells[cell] = inCell = new List<(Transform3D, Color)>();
