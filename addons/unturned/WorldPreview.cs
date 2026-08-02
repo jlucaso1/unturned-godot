@@ -289,8 +289,10 @@ public static class WorldPreview
         // would draw LOD-0 at every distance and so stop matching the scene a session actually renders —
         // which is most of what a preview is for. Skipped entirely when the feature is off, so the flag
         // costs nothing here either.
+        // Objects are their own preview toggle, and only the objects block below reads this: a
+        // foliage-only preview would otherwise realise a whole library it never draws.
         Dictionary<Guid, ArrayMesh>? lod1Library = null;
-        if (ObjectsBuilder.ObjectLodEnabled)
+        if (options.Objects && ObjectsBuilder.ObjectLodEnabled)
             try
             {
                 lod1Library = await ModelLibrary.LoadStagedAsync(CacheDir, registry, yieldOn,
