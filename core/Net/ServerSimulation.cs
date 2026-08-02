@@ -121,7 +121,16 @@ public sealed class ServerSimulation
     private readonly IMoveSolver _solver;
     private readonly Dictionary<byte, Entry> _players = new();
 
+    // Roughly two and a half seconds of inputs at TickRate. Deep enough to absorb the jitter and
+    // reordering UDP delivers on a real connection, shallow enough that a client sending flat out cannot
+    // turn its queue into the server's memory.
+    public const int MaxQueuedInputsPerPlayer = 32;
+
     public uint Tick { get; private set; }
+
+    // Inputs discarded because a player's queue was already full. Non-zero means someone is sending faster
+    // than the simulation consumes — a broken client, or one trying to.
+    public long DroppedInputs { get; private set; }
 
     public ServerSimulation(IMoveSolver solver) => _solver = solver;
 
@@ -165,6 +174,17 @@ public sealed class ServerSimulation
             entry.HasReceivedPositionFrame = true;
             entry.LastReceivedPositionFrame = input.Frame;
         }
+        // Step consumes exactly one input per tick, so a client that sends faster than TickRate grows this
+        // queue for as long as it likes — nothing else bounds it, and a joined client can send Input
+        // datagrams at line rate. Past a couple of seconds of backlog the extra entries are not buffered
+        // jitter any more, they are a queue the player will never catch up to: dropping the oldest keeps
+        // the newest input, which is both the one that matters and the one that bounds added latency.
+        while (entry.Inputs.Count >= MaxQueuedInputsPerPlayer)
+        {
+            entry.Inputs.Dequeue();
+            DroppedInputs++;
+        }
+
         entry.Inputs.Enqueue(input);
     }
 
