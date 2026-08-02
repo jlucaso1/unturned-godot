@@ -19,6 +19,17 @@ public sealed class ReliableChannel
 
     private const int DedupWindow = 1024;
 
+    // Outstanding unacked reliable frames. Every one is retained until acked or GiveUpAfter, and Update
+    // scans and retransmits the whole set, so this is both a memory bound and a per-Update work bound.
+    //
+    // It matters most before a peer has authenticated: a flood of ServerInfoRequest — answerable, by
+    // design, on a connection that has said nothing else — produces one reliable reply each, and without
+    // this the set grows as fast as the requests arrive.
+    public const int MaxPending = 256;
+
+    // Reliable sends refused because MaxPending was already reached.
+    public long RefusedSends { get; private set; }
+
     private readonly Action<byte[]> _rawSend;
     private readonly Dictionary<ushort, (byte[] Datagram, double FirstSent, double LastSent)> _pending = new();
     private readonly HashSet<ushort> _seen = new();
@@ -38,6 +49,15 @@ public sealed class ReliableChannel
             datagram[0] = ChannelUnreliable;
             payload.CopyTo(datagram, 1);
             _rawSend(datagram);
+            return;
+        }
+
+        if (_pending.Count >= MaxPending)
+        {
+            // Dropping a reliable send breaks its delivery guarantee, which is the point: a peer that has
+            // this many frames outstanding is either gone or not reading, and either way the answer is to
+            // stop generating more rather than to keep retransmitting a set nobody is acknowledging.
+            RefusedSends++;
             return;
         }
 

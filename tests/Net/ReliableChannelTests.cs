@@ -99,7 +99,11 @@ public class ReliableChannelTests
     {
         var senderWire = new Wire();
         var sender = new ReliableChannel(senderWire.Send);
-        var receiver = new ReliableChannel(_ => { });
+
+        // The receiver's acks go back to the sender, as a real peer's would. Without them the sender's
+        // pending set fills and it stops sending — which is the correct behaviour against a peer that
+        // never acknowledges, but it is not what this test is about.
+        var receiver = new ReliableChannel(ack => sender.HandleDatagram(ack, out _));
 
         // Push more than the window of distinct sequences through; every fresh one delivers.
         int delivered = 0;

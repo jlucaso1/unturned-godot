@@ -217,6 +217,51 @@ public class ServerResourceLimitsTests
         Assert.Equal(before.Position.Z, after.Position.Z, 3);
     }
 
+    // A stall is not a client misbehaving, so it must not show up in the counter that means one is.
+    [Fact]
+    public void StallClearsAreCountedApartFromFloodDrops()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Vector3.Zero);
+        for (uint i = 0; i < 4; i++)
+            sim.QueueInput(1, Forward(i));
+
+        sim.SkipTicks(100);
+
+        Assert.Equal(0, sim.DroppedInputs);
+        Assert.Equal(4, sim.InputsClearedBySkip);
+    }
+
+    // A reliable send is retained until acked or GiveUpAfter, and Update retransmits the whole set. A peer
+    // that never acks — a flood of pre-join ServerInfoRequests, each answered reliably — would otherwise
+    // grow that set as fast as it could ask.
+    [Fact]
+    public void OutstandingReliableSendsAreBounded()
+    {
+        var sent = new List<byte[]>();
+        var channel = new ReliableChannel(sent.Add);
+
+        for (int i = 0; i < ReliableChannel.MaxPending * 4; i++)
+            channel.Send(new byte[] { (byte)ENetMessage.PlayerLeft, 1 }, ESendType.Reliable, now: 0);
+
+        Assert.Equal(ReliableChannel.MaxPending, sent.Count);
+        Assert.True(channel.RefusedSends > 0);
+    }
+
+    [Fact]
+    public void UnreliableSendsAreNotBoundedByThePendingCap()
+    {
+        var sent = new List<byte[]>();
+        var channel = new ReliableChannel(sent.Add);
+
+        for (int i = 0; i < ReliableChannel.MaxPending * 4; i++)
+            channel.Send(new byte[] { (byte)ENetMessage.StateUpdate }, ESendType.Unreliable, now: 0);
+
+        // Nothing is retained for an unreliable frame, so there is nothing to bound.
+        Assert.Equal(ReliableChannel.MaxPending * 4, sent.Count);
+        Assert.Equal(0, channel.RefusedSends);
+    }
+
     // A composite transport is how a listen server works: the host's loopback plus a LAN UDP transport.
     // Restarting at the first child on every TryReceive meant a backlogged host could consume the whole
     // per-Update budget forever and the LAN side would never be polled.

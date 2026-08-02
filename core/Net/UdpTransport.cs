@@ -36,9 +36,22 @@ public sealed class UdpServerTransport : IServerTransport
     // it bounds a flood without shaping normal traffic.
     public const int MaxQueuedEvents = 4096;
 
-    // Datagrams read from the socket per pump, whatever they turn out to be. Bounds the loop even when
+    // Datagrams read from the socket per Update, whatever they turn out to be. Bounds the loop even when
     // nothing being sent produces an event.
     public const int MaxReadsPerPump = 1024;
+
+    // Counting events is not a memory bound: an unreliable datagram can carry ~65 KiB, so a full queue of
+    // them is hundreds of megabytes retained before anyone has said Hello. The largest message the
+    // protocol writes is a full ZombieList at roughly 6 KiB, so anything past this is not ours.
+    public const int MaxPayloadBytes = 16 * 1024;
+
+    // And the queue is bounded by what it holds, not only by how many things it holds.
+    public const int MaxQueuedBytes = 4 * 1024 * 1024;
+
+    private int _queuedBytes;
+
+    // Datagrams dropped for exceeding MaxPayloadBytes or the queued-byte budget.
+    public long OversizedDropped { get; private set; }
 
     private readonly Queue<ServerTransportEvent> _events = new();
     private int _nextId = 1;
@@ -49,10 +62,16 @@ public sealed class UdpServerTransport : IServerTransport
         _socket = new UdpClient(new IPEndPoint(IPAddress.Any, port));
     }
 
+    // Dequeue only. Pumping happens once per Update, not per dequeue: NetServer drains up to
+    // MaxEventsPerUpdate events, and a per-pump read budget reset on each of those would have allowed
+    // MaxEventsPerUpdate * MaxReadsPerPump socket reads in one frame — half a million — which is not a
+    // bound on frame work at all. One pump per Update is the bound.
     public bool TryReceive(out ServerTransportEvent evt)
     {
-        PumpSocket();
-        return _events.TryDequeue(out evt);
+        bool got = _events.TryDequeue(out evt);
+        if (got)
+            _queuedBytes -= evt.Payload.Length;
+        return got;
     }
 
     // Two separate bounds, because they stop different things.
@@ -67,7 +86,10 @@ public sealed class UdpServerTransport : IServerTransport
     private void PumpSocket()
     {
         int reads = MaxReadsPerPump;
-        while (reads-- > 0 && _events.Count < MaxQueuedEvents && _socket.Available > 0)
+        while (reads-- > 0
+            && _events.Count < MaxQueuedEvents
+            && _queuedBytes < MaxQueuedBytes
+            && _socket.Available > 0)
         {
             IPEndPoint remote = new(IPAddress.Any, 0);
             byte[] datagram;
@@ -78,6 +100,12 @@ public sealed class UdpServerTransport : IServerTransport
             catch (SocketException)
             {
                 return; // ICMP port-unreachable surfacing on Windows/loopback; nothing to read
+            }
+
+            if (datagram.Length > MaxPayloadBytes)
+            {
+                OversizedDropped++;
+                continue; // nothing this protocol writes is this big
             }
 
             string key = remote.ToString();
@@ -102,13 +130,18 @@ public sealed class UdpServerTransport : IServerTransport
 
             connection.LastHeard = _now;
             if (connection.Channel.HandleDatagram(datagram, out byte[] payload))
+            {
                 _events.Enqueue(new ServerTransportEvent(ETransportEvent.Message, connection, payload));
+                _queuedBytes += payload.Length;
+            }
         }
     }
 
     public void Update(double now)
     {
         _now = now;
+        PumpSocket();
+
         List<Connection>? dead = null;
         foreach (Connection connection in _connections.Values)
         {
@@ -161,7 +194,6 @@ public sealed class UdpClientTransport : IClientTransport
 
     public bool TryReceive(out byte[] payload)
     {
-        PumpSocket();
         if (_incoming.TryDequeue(out byte[]? dequeued))
         {
             payload = dequeued;
@@ -190,6 +222,8 @@ public sealed class UdpClientTransport : IClientTransport
             {
                 return;
             }
+            if (datagram.Length > UdpServerTransport.MaxPayloadBytes)
+                continue;
             if (_channel.HandleDatagram(datagram, out byte[] payload))
                 _incoming.Enqueue(payload);
         }
@@ -198,6 +232,7 @@ public sealed class UdpClientTransport : IClientTransport
     public void Update(double now)
     {
         _now = now;
+        PumpSocket();
         _channel.Update(now);
         if (_channel.HasGivenUp)
             IsConnected = false;

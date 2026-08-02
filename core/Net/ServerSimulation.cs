@@ -132,6 +132,11 @@ public sealed class ServerSimulation
     // than the simulation consumes — a broken client, or one trying to.
     public long DroppedInputs { get; private set; }
 
+    // Queued inputs cleared because SkipTicks advanced the clock past them. Kept apart from DroppedInputs
+    // deliberately: that one means a client is sending faster than the simulation consumes, and folding
+    // stall-driven clears into it would make one server hiccup look like every joined player misbehaving.
+    public long InputsClearedBySkip { get; private set; }
+
     // Advances the tick clock without simulating those ticks, for time the server lost to a stall.
     //
     // Tick is a clock, not a count of Steps, and ApplyTrustedPosition's speed budget is derived from
@@ -148,7 +153,7 @@ public sealed class ServerSimulation
         Tick += count;
         foreach (Entry entry in _players.Values)
         {
-            DroppedInputs += entry.Inputs.Count;
+            InputsClearedBySkip += entry.Inputs.Count;
             entry.Inputs.Clear();
         }
     }
