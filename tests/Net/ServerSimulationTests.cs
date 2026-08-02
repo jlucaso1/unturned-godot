@@ -16,8 +16,13 @@ public class ServerSimulationTests
 
     private static ServerSimulation FlatSim() => new(new HeightfieldMoveSolver(FlatGround));
 
-    private static InputCommand Forward(bool sprint = false, byte yaw = 0) =>
-        new(0, 0, -1, jump: false, sprint: sprint, yaw: yaw, pitch: 90);
+    // Frames are numbered, because the server drops an input older than one it already has: a real
+    // client counts every 0.08 s frame it sends, and reusing one number reads as a stale datagram.
+    // xUnit builds a fresh instance per test, so the counter is per test.
+    private uint _frame;
+
+    private InputCommand Forward(bool sprint = false, byte yaw = 0) =>
+        new(_frame++, 0, -1, jump: false, sprint: sprint, yaw: yaw, pitch: 90);
 
     [Fact]
     public void SpawnedPlayer_FallsAndLandsOnTheGround()
@@ -81,9 +86,9 @@ public class ServerSimulationTests
         sim.AddPlayer(1, new Vector3(0, 10f, 0));
         sim.Step();
 
-        for (int i = 0; i < 10; i++)
+        for (uint i = 0; i < 10; i++)
         {
-            sim.QueueInput(1, new InputCommand(0, 1, 0, false, false, yaw: 0, pitch: 90));
+            sim.QueueInput(1, new InputCommand(i, 1, 0, false, false, yaw: 0, pitch: 90));
             sim.Step();
         }
 
@@ -128,6 +133,57 @@ public class ServerSimulationTests
         Assert.Equal(10f, state.Position.Y, 3); // gravity still ran
         Assert.Equal(0f, state.Position.X, 3);  // but no drift
         Assert.Equal(0f, state.Position.Z, 3);
+    }
+
+    // A starved tick means "we did not hear from this player", not "this player stood up". The filler
+    // input the server invents carries no stance, so a prone or crouched player snapped upright on every
+    // late or lost frame — at 12.5 Hz over UDP that is a visible flicker for everyone watching them, and
+    // it is the stance the whole world sees (hitbox, animation, the pose an ambush depends on).
+    [Theory]
+    [InlineData(EPlayerStance.Prone)]
+    [InlineData(EPlayerStance.Crouch)]
+    [InlineData(EPlayerStance.Sprint)]
+    public void AStarvedTick_KeepsTheStanceThePlayerWasLastIn(EPlayerStance stance)
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, new Vector3(0, 10f, 0));
+        sim.QueueInput(1, new InputCommand(0, 0, 0, jump: false, sprint: false, yaw: 0, pitch: 90, stance));
+        sim.Step();
+
+        List<PlayerSnapshotState> starved = sim.Step(); // nothing arrived this tick
+
+        Assert.Equal(stance, Assert.Single(starved).Stance);
+        Assert.True(sim.TryGetState(1, out PlayerMoveState state));
+        Assert.Equal(stance, state.Stance);
+    }
+
+    // default(EPlayerStance) is 0 and the enum starts at Sprint = 2, so an uninitialised stance is not
+    // a stance at all — it reaches zombie detection (which sizes its radius by stance) and every
+    // client's animator. It went unnoticed while the filler input defaulted to Stand and overwrote it
+    // on the very first tick.
+    [Fact]
+    public void AJustAdmittedPlayer_IsStanding_BeforeSayingAnything()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, new Vector3(0, 10f, 0));
+
+        Assert.True(sim.TryGetState(1, out PlayerMoveState fresh));
+        Assert.Equal(EPlayerStance.Stand, fresh.Stance);
+        Assert.Equal(EPlayerStance.Stand, Assert.Single(sim.Step()).Stance);
+    }
+
+    // The same holds for a client the server trusts positions from: its stance came in with the last
+    // frame that arrived, and silence does not revoke it.
+    [Fact]
+    public void AStarvedTick_AfterATrustedPositionFrame_KeepsTheStance()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, new Vector3(0, 10f, 0));
+        sim.QueueInput(1, new InputCommand(0, 0, 0, false, false, 0, 90, EPlayerStance.Prone,
+            new Vector3(0, 10f, 0)));
+        sim.Step();
+
+        Assert.Equal(EPlayerStance.Prone, Assert.Single(sim.Step()).Stance);
     }
 
     [Fact]

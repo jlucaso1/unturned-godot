@@ -102,6 +102,11 @@ public sealed class ServerSimulation
 {
     public const float TickRate = 0.08f; // PlayerInput.RATE / Provider.UPDATE_TIME
 
+    // How many input frames a player may have waiting. Purely a jitter buffer: the loop plays exactly
+    // one per tick, so anything beyond this is not "more detail", it is the avatar falling behind the
+    // player by that many ticks — permanently, since the backlog never drains at matched rates.
+    public const int MaxQueuedInputs = 4; // 0.32 s of absorbed jitter
+
     private sealed class Entry
     {
         public PlayerMoveState State;
@@ -112,14 +117,20 @@ public sealed class ServerSimulation
         // last claim we accepted and when. Before any claim exists there is nothing to rate-limit against —
         // the server-invented spawn is not a position the client ever occupied (a host who opens to LAN
         // after already moving would otherwise be rejected forever, frozen at spawn for everyone else).
+        // "When" is the wall clock rather than the tick counter: those two part company the moment the
+        // host stalls, since the tick loop drops the time it could not make up (NetServer.MaxCatchUpTicks)
+        // while the player kept moving through all of it.
         public bool HasVerifiedPosition;
-        public uint LastAcceptedTick;
-        public bool HasReceivedPositionFrame;
-        public uint LastReceivedPositionFrame;
+        public double LastAcceptedAt;
+        // The newest frame number this player has ever sent, for every kind of input: what makes a
+        // reordered datagram recognisable as stale rather than as the latest word.
+        public bool HasReceivedFrame;
+        public uint LastReceivedFrame;
     }
 
     private readonly IMoveSolver _solver;
     private readonly Dictionary<byte, Entry> _players = new();
+    private double _clock;
 
     public uint Tick { get; private set; }
 
@@ -138,7 +149,16 @@ public sealed class ServerSimulation
     {
         _players[id] = new Entry
         {
-            State = new PlayerMoveState { Position = spawnPosition, Grounded = false },
+            // Stance is spelled out because default(EPlayerStance) is 0, which is not one of them —
+            // the enum starts at Sprint = 2, mirroring the game's own numbering. A player who joins and
+            // says nothing is standing, and until the stance carried across starved ticks that invalid
+            // 0 was hidden by the filler input defaulting to Stand.
+            State = new PlayerMoveState
+            {
+                Position = spawnPosition,
+                Grounded = false,
+                Stance = EPlayerStance.Stand,
+            },
         };
     }
 
@@ -163,43 +183,72 @@ public sealed class ServerSimulation
         if (!_players.TryGetValue(id, out Entry? entry))
             return;
 
-        // UDP may duplicate or reorder input datagrams. A trusted-position command older than one already
-        // queued/processed must never rewind the player. Signed subtraction is the standard wrap-safe
-        // sequence comparison as long as the sender cannot be over 2^31 frames ahead.
-        if (input.HasPosition)
+        // A non-finite position is refused here rather than filtered later, because once one lands the
+        // slot never recovers. The first trusted position is adopted outright — there is no previous one
+        // to measure against — and every comparison against NaN afterwards is false, so the speed budget
+        // rejects every subsequent position forever. The player stays at NaN for the rest of the session,
+        // and that NaN goes out in every StateUpdate to every client.
+        //
+        // Ahead of the freshness guard so a refused command leaves no trace in the sequence state it was
+        // refused before reaching. Behind it, the NaN would still have advanced LastReceivedFrame on its
+        // way out, and a command the server threw away would be deciding which later ones it accepts.
+        //
+        // Worth saying what this is NOT, since the ordering looks more dramatic than it is: it does not
+        // stop a client muting itself. Anything the burnt frame number would then suppress is
+        // lower-numbered, and dropping those is the freshness guard doing its ordinary job — NaN or not.
+        // QueueInput is per player, so the only inputs at stake are the sender's own. Moving this after
+        // the guard leaves all 47 position and trusted-position tests green, which is the honest measure
+        // of how much rides on it: the ordering is hygiene, not a fix for a second defect.
+        if (input.HasPosition && !IsFinite(input.Position))
         {
-            // A non-finite position is refused here rather than filtered later, because once one lands the
-            // slot never recovers. The first trusted position is adopted outright — there is no previous
-            // one to measure against — and every comparison against NaN afterwards is false, so the speed
-            // budget rejects every subsequent position forever. The player stays at NaN for the rest of
-            // the session, and that NaN goes out in every StateUpdate to every client.
-            if (!IsFinite(input.Position))
-            {
-                RejectedPositions++;
-                return;
-            }
-
-            if (entry.HasReceivedPositionFrame
-                && unchecked((int)(input.Frame - entry.LastReceivedPositionFrame)) <= 0)
-                return;
-            entry.HasReceivedPositionFrame = true;
-            entry.LastReceivedPositionFrame = input.Frame;
+            RejectedPositions++;
+            return;
         }
+
+        // UDP may duplicate or reorder input datagrams, so freshness is what the FRAME number says and
+        // never what the socket happened to hand over last. A command older than one already queued or
+        // played must not rewind the player — not just its position, but the stance, the jump and the
+        // direction it was steering. Signed subtraction is the standard wrap-safe sequence comparison,
+        // as long as the sender cannot be over 2^31 frames ahead.
+        if (entry.HasReceivedFrame && unchecked((int)(input.Frame - entry.LastReceivedFrame)) <= 0)
+            return;
+        entry.HasReceivedFrame = true;
+        entry.LastReceivedFrame = input.Frame;
         entry.Inputs.Enqueue(input);
+
+        // The loop plays one frame per tick, so a client that sends faster than the server ticks builds
+        // a backlog that never drains — and a backlog is time: the avatar everyone else sees keeps
+        // replaying inputs from seconds ago, further behind after every burst, on top of a queue that
+        // grows without bound. The buffer therefore has a ceiling, and what falls off it is the STALE
+        // end: where a player was two seconds ago is worth nothing when a fresher frame is in hand.
+        // Bursts are ordinary — the client drains its send timer once per frame, so any hitch is
+        // followed by a flurry — and a hostile client can simply send as fast as it likes.
+        while (entry.Inputs.Count > MaxQueuedInputs)
+            entry.Inputs.Dequeue();
     }
 
+    // Advances one 0.08 s step on the nominal clock: each call is one tick of simulated time. What the
+    // owner of a real session calls is Step(now), because only the wall clock knows how long a stalled
+    // frame actually took.
+    public List<PlayerSnapshotState> Step() => Step(_clock + TickRate);
+
     // Advances one 0.08 s step for every player and returns the broadcastable snapshot list.
-    public List<PlayerSnapshotState> Step()
+    public List<PlayerSnapshotState> Step(double now)
     {
+        _clock = now;
         Tick++;
         var states = new List<PlayerSnapshotState>(_players.Count);
         foreach ((byte id, Entry entry) in _players)
         {
             // Consume one input per tick; a starved player repeats "stand still" at their last view angles
             // (gravity and momentum still integrate, so a disconnect mid-air falls to the ground).
+            // The STANCE carries over too: silence means we did not hear from this player, not that they
+            // stood up. Defaulting it snapped a prone or crouched player upright on every late or lost
+            // frame — a flicker at 12.5 Hz that the whole session sees, hitbox included.
             InputCommand input = entry.Inputs.TryDequeue(out InputCommand queued)
                 ? queued
-                : new InputCommand(0, 0, 0, false, false, entry.LastInput.Yaw, entry.LastInput.Pitch);
+                : new InputCommand(0, 0, 0, false, false, entry.LastInput.Yaw, entry.LastInput.Pitch,
+                    entry.State.Stance, entry.State.Grounded);
             entry.LastInput = input;
 
             if (input.HasPosition)
@@ -230,12 +279,16 @@ public sealed class ServerSimulation
         {
             entry.State.Position = input.Position;
             entry.HasVerifiedPosition = true;
-            entry.LastAcceptedTick = Tick;
+            entry.LastAcceptedAt = _clock;
             return;
         }
 
-        uint elapsedTicks = Math.Max(1, Tick - entry.LastAcceptedTick);
-        float elapsed = elapsedTicks * TickRate;
+        // Never less than one tick (a claim in the same instant still gets a tick's worth of slack) and
+        // otherwise exactly the time that passed — including the seconds a stalled host could not
+        // simulate. Counting ticks instead would judge a five-second stall as a fraction of a second,
+        // freeze the avatar outside a window narrower than the player's real speed, and hold it there
+        // for as long again while the window inched open.
+        var elapsed = (float)Math.Max(TickRate, _clock - entry.LastAcceptedAt);
         Vector3 delta = input.Position - entry.State.Position;
         float horizontal = new Vector2(delta.X, delta.Z).Length();
         // Horizontal motion is bounded by sprint, while vertical motion independently allows terminal
@@ -246,7 +299,7 @@ public sealed class ServerSimulation
         if (horizontal <= horizontalBudget && MathF.Abs(delta.Y) <= verticalBudget)
         {
             entry.State.Position = input.Position;
-            entry.LastAcceptedTick = Tick;
+            entry.LastAcceptedAt = _clock;
         }
     }
 }
