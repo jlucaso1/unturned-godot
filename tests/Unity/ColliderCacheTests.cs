@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using Godot;
@@ -54,5 +55,75 @@ public class ColliderCacheTests
         ColliderCache.Write(ms, new List<CachedCollider>());
         ms.Position = 0;
         Assert.Empty(ColliderCache.Read(ms));
+    }
+
+    private static byte[] OneSphere()
+    {
+        using var ms = new MemoryStream();
+        ColliderCache.Write(ms, new List<CachedCollider> { CachedCollider.Sphere(Pose, Vector3.Zero, 1f) });
+        return ms.ToArray();
+    }
+
+    // Without a header the count read as whatever the first four bytes happened to be, so a truncated file
+    // was indistinguishable from a whole one and the reader ran off the end.
+    [Fact]
+    public void Read_BadMagic_Throws()
+    {
+        using var ms = new MemoryStream(new byte[] { 1, 0, 0, 0, 0, 0, 0, 0 });
+        Assert.Throws<InvalidDataException>(() => ColliderCache.Read(ms));
+    }
+
+    [Fact]
+    public void Read_LegacyHeaderlessFile_IsRejectedRatherThanMisparsed()
+    {
+        // Exactly what the old writer produced for a single sphere: a bare count, no magic.
+        using var legacy = new MemoryStream();
+        var w = new BinaryWriter(legacy);
+        w.Write(1);
+        w.Write((byte)EColliderKind.Sphere);
+        legacy.Position = 0;
+
+        Assert.Throws<InvalidDataException>(() => ColliderCache.Read(legacy));
+    }
+
+    [Fact]
+    public void Read_NegativeCount_Throws()
+    {
+        byte[] bytes = OneSphere();
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(4), -1);
+
+        using var ms = new MemoryStream(bytes);
+        Assert.Throws<InvalidDataException>(() => ColliderCache.Read(ms));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    [InlineData(6)]
+    [InlineData(9)]
+    public void Read_TruncatedAtAnyPrefix_ThrowsADeclaredParseFailure(int keep)
+    {
+        byte[] truncated = OneSphere()[..keep];
+
+        using var ms = new MemoryStream(truncated);
+        Exception e = Record.Exception(() => ColliderCache.Read(ms));
+
+        Assert.NotNull(e);
+        Assert.True(e is EndOfStreamException or InvalidDataException,
+            $"a truncated cache should fail as a parse error, got {e.GetType().Name}");
+    }
+
+    [Fact]
+    public void IsCurrent_TellsAWrittenFileFromALegacyOrMissingOne()
+    {
+        using var dir = new Helpers.TempDir();
+        string written = dir.Write("a.collider", OneSphere());
+        string legacy = dir.Write("b.collider", new byte[] { 1, 0, 0, 0 });
+        string tooShort = dir.Write("c.collider", new byte[] { 1, 2 });
+
+        Assert.True(ColliderCache.IsCurrent(written));
+        Assert.False(ColliderCache.IsCurrent(legacy));
+        Assert.False(ColliderCache.IsCurrent(tooShort));
+        Assert.False(ColliderCache.IsCurrent(Path.Combine(dir.Path, "absent.collider")));
     }
 }

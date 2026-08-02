@@ -537,11 +537,17 @@ public static class ModelExtractor
     // a truncated file that every later run accepts and then throws on.
     private static void WriteMeshAtomically(string path, string tempPath, Vector3[] vertices,
         Vector3[] normals, Vector2[] uvs, List<CachedSubmesh> submeshes)
+        => WriteAtomically(path, tempPath, s => MeshCache.Write(s, vertices, normals, uvs, submeshes));
+
+    // The same discipline for any cache file judged current by its header: write a temporary in the same
+    // directory, then rename into place. The collider cache used to be written directly, one statement
+    // below its mesh, and a kill mid-write left a truncated file that every later run accepted.
+    private static void WriteAtomically(string path, string tempPath, Action<FileStream> write)
     {
         try
         {
             using (var stream = File.Create(tempPath))
-                MeshCache.Write(stream, vertices, normals, uvs, submeshes);
+                write(stream);
             File.Move(tempPath, path, overwrite: true);
         }
         catch
@@ -772,8 +778,8 @@ public static class ModelExtractor
             {
                 List<CachedCollider> colliders = BuildColliders(colliderParts, graph, file);
                 if (colliders.Count > 0)
-                    using (var cs = File.Create(colliderPath))
-                        ColliderCache.Write(cs, colliders);
+                    WriteAtomically(colliderPath, stem + ".collider.tmp",
+                        s => ColliderCache.Write(s, colliders));
             }
         }
 

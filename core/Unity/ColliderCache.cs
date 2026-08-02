@@ -51,11 +51,35 @@ public readonly struct CachedCollider
 
 // Per-GUID cache of an object's colliders, written once during extraction and read at load — small, so plain
 // BinaryReader/Writer (unlike the hot-path mesh cache).
+//
+// The file opens with a magic, like every other cache format here. Without one a truncated file — a process
+// killed mid-write — was indistinguishable from a whole one: the count read as whatever the first four bytes
+// happened to be and the reader ran off the end, which surfaced as a load failure that nothing invalidated,
+// so the map stayed unloadable until the cache was deleted by hand.
 public static class ColliderCache
 {
+    // "UGCL". Files written before this magic existed have no header at all; they are treated as stale and
+    // re-extracted, which is also how a bad or truncated file recovers.
+    private const uint Magic = 0x4C434755;
+
+    // True when the file starts with the current format magic; false for the header-less legacy format,
+    // short files, or a missing path. Mirrors MeshCache.IsCurrent.
+    public static bool IsCurrent(string path)
+    {
+        try
+        {
+            using FileStream s = File.OpenRead(path);
+            Span<byte> head = stackalloc byte[4];
+            return s.Read(head) == 4 && System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(head) == Magic;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+    }
+
     public static void Write(Stream stream, IReadOnlyList<CachedCollider> colliders)
     {
         using var w = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true);
+        w.Write(Magic);
         w.Write(colliders.Count);
         foreach (CachedCollider c in colliders)
         {
@@ -92,7 +116,11 @@ public static class ColliderCache
     public static List<CachedCollider> Read(Stream stream)
     {
         using var r = new BinaryReader(stream, System.Text.Encoding.UTF8, leaveOpen: true);
+        if (r.ReadUInt32() != Magic)
+            throw new InvalidDataException("Not an Unturned collider cache file.");
         int count = r.ReadInt32();
+        if (count < 0)
+            throw new InvalidDataException($"Collider cache declares a negative count ({count}).");
         var result = new List<CachedCollider>(count);
         for (int n = 0; n < count; n++)
         {
