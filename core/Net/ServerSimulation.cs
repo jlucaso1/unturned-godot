@@ -123,6 +123,15 @@ public sealed class ServerSimulation
 
     public uint Tick { get; private set; }
 
+    // Trusted positions refused for not being finite. Non-zero means a client sent NaN or an infinity —
+    // a physics glitch on its end, or a deliberate attempt to wedge its own slot.
+    public long RejectedPositions { get; private set; }
+
+    // Kept explicit rather than using Vector3.IsFinite, at the one place that has to reason about why a
+    // non-finite component is unrecoverable here rather than merely wrong.
+    private static bool IsFinite(in Vector3 v) =>
+        float.IsFinite(v.X) && float.IsFinite(v.Y) && float.IsFinite(v.Z);
+
     public ServerSimulation(IMoveSolver solver) => _solver = solver;
 
     public void AddPlayer(byte id, Vector3 spawnPosition)
@@ -159,6 +168,17 @@ public sealed class ServerSimulation
         // sequence comparison as long as the sender cannot be over 2^31 frames ahead.
         if (input.HasPosition)
         {
+            // A non-finite position is refused here rather than filtered later, because once one lands the
+            // slot never recovers. The first trusted position is adopted outright — there is no previous
+            // one to measure against — and every comparison against NaN afterwards is false, so the speed
+            // budget rejects every subsequent position forever. The player stays at NaN for the rest of
+            // the session, and that NaN goes out in every StateUpdate to every client.
+            if (!IsFinite(input.Position))
+            {
+                RejectedPositions++;
+                return;
+            }
+
             if (entry.HasReceivedPositionFrame
                 && unchecked((int)(input.Frame - entry.LastReceivedPositionFrame)) <= 0)
                 return;
