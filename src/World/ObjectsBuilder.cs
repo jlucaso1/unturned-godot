@@ -51,7 +51,8 @@ public static class ObjectsBuilder
 
     public static Node3D Build(IReadOnlyList<PlacedObject> objects, ObjectAssetDatabase db,
         IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary,
-        IReadOnlyDictionary<Guid, List<CachedCollider>> colliderLibrary, out int withMesh)
+        IReadOnlyDictionary<Guid, List<CachedCollider>> colliderLibrary, out int withMesh,
+        IReadOnlyDictionary<Guid, ArrayMesh>? lod1Library = null)
     {
         var root = new Node3D { Name = "Objects" };
 
@@ -88,6 +89,14 @@ public static class ObjectsBuilder
         {
             // No MaterialOverride: the mesh's per-submesh surface materials carry the textures.
             ArrayMesh renderMesh = meshLibrary[guid];
+            // The prefab's own lower level, if it shipped one, and the distance past which it takes over.
+            ArrayMesh? lodMesh = null;
+            float switchDistance = 0f;
+            if (LodEnabled && lod1Library != null && lod1Library.TryGetValue(guid, out ArrayMesh? candidate))
+            {
+                lodMesh = candidate;
+                switchDistance = SwitchDistanceFor(renderMesh);
+            }
             long placementTriangles = TriangleCount(renderMesh) * transforms.Count;
             bool spread = ObjectChunkMetres > 0f && transforms.Count > 1
                 && ExceedsCellSpan(transforms, ObjectChunkMetres);
@@ -114,14 +123,12 @@ public static class ObjectsBuilder
                 }
                 foreach (((int x, int z), List<Transform3D> inCell) in cells)
                 {
-                    AddRenderBatch(root, render, BuildMultiMesh(renderMesh, inCell));
-                    renderBatches++;
+                    renderBatches += AddLevels(root, render, renderMesh, lodMesh, inCell, switchDistance);
                 }
             }
             else
             {
-                AddRenderBatch(root, render, BuildMultiMesh(renderMesh, transforms));
-                renderBatches++;
+                renderBatches += AddLevels(root, render, renderMesh, lodMesh, transforms, switchDistance);
             }
             withMesh += transforms.Count;
 
@@ -624,12 +631,59 @@ public static class ObjectsBuilder
         return multimesh;
     }
 
-    private static void AddRenderBatch(Node3D root, MultiMeshRidRenderer? renderer, MultiMesh multimesh)
+    // Unturned's prefabs carry their own lower LOD levels; the port used to keep only LOD-0 and draw full
+    // detail at every distance. UG_OBJECT_LOD=0 restores that for A/B measurement.
+    private static readonly bool LodEnabled = OS.GetEnvironment("UG_OBJECT_LOD") != "0";
+
+    // Unity switches level by projected screen height, so the threshold scales with the object: a tree
+    // holds its detail much further out than a crate. Approximate that with a multiple of the mesh's
+    // bounding radius, tunable because the authored per-prefab thresholds are not extracted yet.
+    private static readonly float LodSwitchRadii =
+        float.TryParse(OS.GetEnvironment("UG_OBJECT_LOD_RADII"), System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out float radii)
+            ? Mathf.Clamp(radii, 2f, 200f) : 24f;
+    private const float LodFadeMargin = 8f;
+
+    private static float SwitchDistanceFor(Mesh mesh)
+    {
+        float radius = mesh.GetAabb().Size.Length() * 0.5f;
+        return Mathf.Max(LodFadeMargin * 2f, radius * LodSwitchRadii);
+    }
+
+    // One batch when the prefab has a single level, two sharing the same transforms when it has a lower
+    // one: LOD-0 up to the switch distance, the lower level from there out. Godot's visibility range
+    // keeps exactly one of the pair drawn, with a fade margin so the swap is not a pop.
+    private static int AddLevels(Node3D root, MultiMeshRidRenderer? renderer, ArrayMesh mesh,
+        ArrayMesh? lodMesh, List<Transform3D> transforms, float switchDistance)
+    {
+        if (lodMesh == null)
+        {
+            AddRenderBatch(root, renderer, BuildMultiMesh(mesh, transforms));
+            return 1;
+        }
+        AddRenderBatch(root, renderer, BuildMultiMesh(mesh, transforms),
+            visibilityEnd: switchDistance, visibilityMargin: LodFadeMargin);
+        AddRenderBatch(root, renderer, BuildMultiMesh(lodMesh, transforms),
+            visibilityBegin: switchDistance, visibilityMargin: LodFadeMargin);
+        return 2;
+    }
+
+    private static void AddRenderBatch(Node3D root, MultiMeshRidRenderer? renderer, MultiMesh multimesh,
+        float visibilityEnd = 0f, float visibilityMargin = 0f, float visibilityBegin = 0f)
     {
         if (renderer != null)
-            renderer.Add(multimesh, Transform3D.Identity);
+            renderer.Add(multimesh, Transform3D.Identity, shadows: true, visibilityEnd, visibilityMargin,
+                visibilityBegin);
         else
-            root.AddChild(new MultiMeshInstance3D { Multimesh = multimesh });
+            root.AddChild(new MultiMeshInstance3D
+            {
+                Multimesh = multimesh,
+                VisibilityRangeBegin = visibilityBegin,
+                VisibilityRangeEnd = visibilityEnd,
+                VisibilityRangeBeginMargin = visibilityBegin > 0f ? visibilityMargin : 0f,
+                VisibilityRangeEndMargin = visibilityEnd > 0f ? visibilityMargin : 0f,
+                VisibilityRangeFadeMode = GeometryInstance3D.VisibilityRangeFadeModeEnum.Self,
+            });
     }
 
     private static Node3D BuildFallbackBoxes(List<(Transform3D transform, Color color)> items)

@@ -201,7 +201,10 @@ public class PhysicsBodyOrderTests
         string objects = File.ReadAllText(objectsPath);
         Assert.Contains("RenderingServer.InstanceCreate()", owner);
         Assert.Contains("RenderingServer.InstanceSetScenario", owner);
-        Assert.Contains("InstanceGeometrySetVisibilityRange(instance, 0f, entry.VisibilityEnd,\n                    0f, entry.VisibilityMargin", owner);
+        // The owner drives both ends of the range from the entry: an end alone fades a batch out with
+        // distance, and a begin is what lets an authored lower LOD take over instead of drawing as well.
+        Assert.Contains("InstanceGeometrySetVisibilityRange(instance, entry.VisibilityBegin,\n                    entry.VisibilityEnd,", owner);
+        Assert.Contains("entry.VisibilityEnd > 0f || entry.VisibilityBegin > 0f", owner);
         Assert.Contains("GlobalTransform * entry.Transform", owner);
         Assert.Contains("RenderingServer.FreeRid(instance)", owner);
         Assert.True(owner.IndexOf("RenderingServer.FreeRid(instance)", System.StringComparison.Ordinal)
@@ -209,7 +212,11 @@ public class PhysicsBodyOrderTests
         Assert.Contains("new MultiMeshRidRenderer { Name = \"Foliage\" }", foliage);
         Assert.Contains("rid.Add(multimesh", foliage);
         Assert.Contains("new MultiMeshRidRenderer { Name = \"ObjectBatches\" }", objects);
-        Assert.Contains("AddRenderBatch(root, render, BuildMultiMesh", objects);
+        // Objects reach the shared RID owner through AddLevels, which emits either one batch or the
+        // LOD-0/LOD-1 pair; either way the batch itself still goes through AddRenderBatch.
+        Assert.Contains("AddLevels(root, render, renderMesh, lodMesh", objects);
+        Assert.Contains("AddRenderBatch(root, renderer, BuildMultiMesh", objects);
+        Assert.Contains("renderer.Add(multimesh, Transform3D.Identity", objects);
         if (FindRepositoryFile(Path.Combine("src", "Benchmark", "SceneMetrics.cs")) is { } metricsPath)
             Assert.Contains("case MultiMeshRidRenderer", File.ReadAllText(metricsPath));
     }

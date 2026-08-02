@@ -59,7 +59,8 @@ public readonly struct ColliderPart
 }
 
 // Reads a masterbundle SerializedFile's prefab structure: every object by path id, the asset container,
-// and each prefab's LOD-0 renderable mesh parts grouped by key (objects/<folder> or trees/<folder>). This
+// and each prefab's renderable mesh parts grouped by key (objects/<folder> or trees/<folder>), kept per
+// LOD level so distant instances can render the authored lower-detail mesh instead of LOD-0. This
 // is the shape ModelExtractor walks; material/texture resolution layers on top via MaterialResolver.
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed class PrefabGraph
@@ -74,11 +75,15 @@ public sealed class PrefabGraph
     public IReadOnlyDictionary<string, long> ContainerByPath { get; }
     public string AssetPrefix { get; }
     public IReadOnlyDictionary<string, List<MeshPart>> PartsByKey { get; }
+    // The "*_1" sibling of each PartsByKey entry, where the prefab ships one. Absent for a prefab whose
+    // author gave it a single level, which then renders at full detail everywhere, as it did before.
+    public IReadOnlyDictionary<string, List<MeshPart>> Lod1PartsByKey { get; }
     public IReadOnlyDictionary<string, List<ColliderPart>> CollidersByKey { get; }
 
     private PrefabGraph(SerializedFile file, Dictionary<long, SerializedObject> objectsByPathId,
         Dictionary<string, long> containerByPath, string assetPrefix,
         Dictionary<string, List<MeshPart>> partsByKey,
+        Dictionary<string, List<MeshPart>> lod1PartsByKey,
         Dictionary<string, List<ColliderPart>> collidersByKey)
     {
         File = file;
@@ -86,6 +91,7 @@ public sealed class PrefabGraph
         ContainerByPath = containerByPath;
         AssetPrefix = assetPrefix;
         PartsByKey = partsByKey;
+        Lod1PartsByKey = lod1PartsByKey;
         CollidersByKey = collidersByKey;
     }
 
@@ -100,11 +106,13 @@ public sealed class PrefabGraph
         BuildTransformMaps(file, out var goToTransform, out var transformFather, out var transformGo,
             out var localById);
         Dictionary<string, List<MeshPart>> partsByKey = MapObjectKeysToMeshes(
-            file, objectsByPathId, pathByRootGo, goToTransform, transformFather, transformGo, localById);
+            file, out Dictionary<string, List<MeshPart>> lod1PartsByKey,
+            objectsByPathId, pathByRootGo, goToTransform, transformFather, transformGo, localById);
         Dictionary<string, List<ColliderPart>> collidersByKey = MapObjectKeysToColliders(
             file, objectsByPathId, pathByRootGo, goToTransform, transformFather, transformGo, localById);
 
-        return new PrefabGraph(file, objectsByPathId, containerByPath, assetPrefix, partsByKey, collidersByKey);
+        return new PrefabGraph(file, objectsByPathId, containerByPath, assetPrefix, partsByKey,
+            lod1PartsByKey, collidersByKey);
     }
 
     private static Dictionary<string, long> ReadContainer(SerializedFile file, out string assetPrefix,
@@ -179,11 +187,13 @@ public sealed class PrefabGraph
     // Groups each prefab's LOD-0 renderable parts by key. Highest detail is the "*_0" suffix (Model_0,
     // Foliage_0); a prefab whose meshes carry no LOD names falls back to its first mesh.
     private static Dictionary<string, List<MeshPart>> MapObjectKeysToMeshes(SerializedFile file,
+        out Dictionary<string, List<MeshPart>> lod1ByKey,
         Dictionary<long, SerializedObject> objectsByPathId, Dictionary<long, string> pathByRootGo,
         Dictionary<long, long> goToTransform, Dictionary<long, long> transformFather,
         Dictionary<long, long> transformGo, Dictionary<long, Transform3D> localById)
     {
         var lod0 = new Dictionary<string, List<MeshPart>>();
+        var lod1 = new Dictionary<string, List<MeshPart>>();
         var firstByKey = new Dictionary<string, MeshPart>();
         var nameCache = new Dictionary<long, string>();
 
@@ -221,20 +231,33 @@ public sealed class PrefabGraph
 
             string key = PrefabKey(path);
             var part = new MeshPart(meshId, MeshRendererMaterials(file, objectsByPathId, goId), localToRoot);
-            if (GameObjectName(file, objectsByPathId, nameCache, goId).EndsWith("_0", StringComparison.Ordinal))
+            string partName = GameObjectName(file, objectsByPathId, nameCache, goId);
+            if (partName.EndsWith("_0", StringComparison.Ordinal))
             {
                 if (!lod0.TryGetValue(key, out List<MeshPart>? list))
                     lod0[key] = list = new List<MeshPart>();
+                list.Add(part);
+            }
+            else if (partName.EndsWith("_1", StringComparison.Ordinal))
+            {
+                if (!lod1.TryGetValue(key, out List<MeshPart>? list))
+                    lod1[key] = list = new List<MeshPart>();
                 list.Add(part);
             }
             firstByKey.TryAdd(key, part);
         }
 
         var result = new Dictionary<string, List<MeshPart>>();
+        lod1ByKey = new Dictionary<string, List<MeshPart>>();
         foreach (KeyValuePair<string, MeshPart> kv in firstByKey)
-            result[kv.Key] = lod0.TryGetValue(kv.Key, out List<MeshPart>? parts)
-                ? parts
-                : new List<MeshPart> { kv.Value };
+        {
+            bool authored = lod0.TryGetValue(kv.Key, out List<MeshPart>? parts);
+            result[kv.Key] = authored ? parts! : new List<MeshPart> { kv.Value };
+            // A lower level is only meaningful against an authored LOD-0 set. Where the fallback above
+            // picked an unnamed first mesh, there is no level structure to switch between.
+            if (authored && lod1.TryGetValue(kv.Key, out List<MeshPart>? lower))
+                lod1ByKey[kv.Key] = lower;
+        }
         return result;
     }
 

@@ -403,7 +403,15 @@ public partial class ObjectStreamer : Node
             ? new Dictionary<Guid, List<CachedCollider>>()
             : ColliderLibrary.Load(_cacheDir, _neededGuids);
         var stage = Stopwatch.StartNew();
-        Node3D root = ObjectsBuilder.Build(_objects, _db, meshLibrary, colliderLibrary, out int withMesh);
+        // The prefabs' own lower levels, where they shipped one. A separate, smaller pass: the set is a
+        // subset of the meshes above and costs nothing when a map's prefabs are all single-level.
+        Dictionary<Guid, ArrayMesh> lod1Library =
+            ModelLibrary.Load(_cacheDir, _registry, _neededGuids, ModelExtractor.Lod1Suffix);
+        Node3D root = ObjectsBuilder.Build(_objects, _db, meshLibrary, colliderLibrary, out int withMesh,
+            lod1Library);
+        if (lod1Library.Count > 0)
+            Log.Print($"[stream] object LOD levels: {lod1Library.Count} of {meshLibrary.Count} meshes "
+                + "have an authored lower level");
         double buildMs = stage.Elapsed.TotalMilliseconds;
         stage.Restart();
         AddChild(root);

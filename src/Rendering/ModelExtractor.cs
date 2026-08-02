@@ -515,8 +515,30 @@ public static class ModelExtractor
         return slash >= 0 ? path[(slash + 1)..] : path;
     }
 
+    // The cached lower level sits beside "<guid>.mesh" under a suffix the plain-mesh scan cannot match.
+    public const string Lod1Suffix = ".lod1.mesh";
+
+    private static int TriangleTotal(List<CachedSubmesh> submeshes)
+    {
+        int total = 0;
+        foreach (CachedSubmesh sub in submeshes)
+            total += sub.Indices.Length / 3;
+        return total;
+    }
+
     private static int CachedMeshCountLoose(string cacheDir) =>
-        Directory.Exists(cacheDir) ? Directory.GetFiles(cacheDir, "*.mesh").Length : 0;
+        Directory.Exists(cacheDir) ? PlainMeshFiles(cacheDir).Count : 0;
+
+    // "*.mesh" also matches the cached lower levels, which are not separate objects and must not be
+    // counted as extracted meshes or scanned as if they were one.
+    private static List<string> PlainMeshFiles(string cacheDir)
+    {
+        var plain = new List<string>();
+        foreach (string path in Directory.GetFiles(cacheDir, "*.mesh"))
+            if (!path.EndsWith(Lod1Suffix, StringComparison.Ordinal))
+                plain.Add(path);
+        return plain;
+    }
 
     // Builds the per-GUID meshes from an already-decoded SerializedFile. When neededTextures is supplied,
     // it is filled with the metadata of every referenced texture so a caller can stream in the pixels.
@@ -583,54 +605,63 @@ public static class ModelExtractor
                 continue;
 
             MaterialPalette? palette = materials.PaletteFor(asset.MaterialPaletteGuid);
-            var verts = new List<Vector3>();
-            var normals = new List<Vector3>();
-            var uvs = new List<Vector2>();
-            var submeshes = new List<CachedSubmesh>();
-            bool allNormals = true; // authored normals are only usable when every part carries them
 
-            // A prefab's renderable geometry can span several child GameObjects (a tree is a trunk plus a
-            // separate foliage mesh, each with its own material and local pose). Bake each part's
-            // local-to-root transform into its vertices and concatenate them into one indexed mesh.
-            foreach (MeshPart part in parts)
+            // Builds one indexed mesh out of a prefab's parts at a single LOD level. Called for the
+            // authored LOD-0 set and, where the prefab ships one, for its "*_1" siblings, so a distant
+            // instance can render the lower level the artist already provided instead of full detail.
+            bool BuildLevel(List<MeshPart> levelParts, out List<Vector3> verts, out List<Vector3> normals,
+                out List<Vector2> uvs, out List<CachedSubmesh> submeshes, out bool allNormals)
             {
-                if (!graph.ObjectsByPathId.TryGetValue(part.MeshId, out SerializedObject? meshObj))
-                    continue;
-                UnityMesh mesh = UnityMesh.Read(TypeTreeReader.Read(meshObj.TypeTree, file.ReaderFor(meshObj)));
-                if (!mesh.Usable)
-                    continue;
-
-                int baseVertex = verts.Count;
-                // Normals transform by the inverse-transpose of the part's basis (correct under the
-                // non-uniform scales some prefab children carry), stored in Unity space like the vertices.
-                Basis normalBasis = part.LocalToRoot.Basis.Inverse().Transposed();
-                bool hasNormals = mesh.Normals.Length == mesh.Vertices.Length;
-                allNormals &= hasNormals;
-                for (int i = 0; i < mesh.Vertices.Length; i++)
+                verts = new List<Vector3>();
+                normals = new List<Vector3>();
+                uvs = new List<Vector2>();
+                submeshes = new List<CachedSubmesh>();
+                allNormals = true; // authored normals are only usable when every part carries them
+                                   // A prefab's renderable geometry can span several child GameObjects (a tree is a trunk plus a
+                                   // separate foliage mesh, each with its own material and local pose). Bake each part's
+                                   // local-to-root transform into its vertices and concatenate them into one indexed mesh.
+                foreach (MeshPart part in levelParts)
                 {
-                    verts.Add(part.LocalToRoot * mesh.Vertices[i]);
-                    normals.Add(hasNormals ? (normalBasis * mesh.Normals[i]).Normalized() : Vector3.Up);
-                    uvs.Add(i < mesh.Uvs.Length ? mesh.Uvs[i] : Vector2.Zero);
-                }
+                    if (!graph.ObjectsByPathId.TryGetValue(part.MeshId, out SerializedObject? meshObj))
+                        continue;
+                    UnityMesh mesh = UnityMesh.Read(TypeTreeReader.Read(meshObj.TypeTree, file.ReaderFor(meshObj)));
+                    if (!mesh.Usable)
+                        continue;
 
-                for (int si = 0; si < mesh.Submeshes.Count; si++)
-                {
-                    (Color color, string texKey, UnityMaterial.Blend blend, long texId,
-                        float metallic, float smoothness, EShaderCull cull) =
-                        materials.Resolve(si, palette, part.Materials);
-                    if (neededTextures != null && texId != 0 && !neededTextures.ContainsKey((bundleTag, texId)) &&
-                        graph.ObjectsByPathId.TryGetValue(texId, out SerializedObject? texObj))
-                        neededTextures[(bundleTag, texId)] = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, file.ReaderFor(texObj)));
+                    int baseVertex = verts.Count;
+                    // Normals transform by the inverse-transpose of the part's basis (correct under the
+                    // non-uniform scales some prefab children carry), stored in Unity space like the vertices.
+                    Basis normalBasis = part.LocalToRoot.Basis.Inverse().Transposed();
+                    bool hasNormals = mesh.Normals.Length == mesh.Vertices.Length;
+                    allNormals &= hasNormals;
+                    for (int i = 0; i < mesh.Vertices.Length; i++)
+                    {
+                        verts.Add(part.LocalToRoot * mesh.Vertices[i]);
+                        normals.Add(hasNormals ? (normalBasis * mesh.Normals[i]).Normalized() : Vector3.Up);
+                        uvs.Add(i < mesh.Uvs.Length ? mesh.Uvs[i] : Vector2.Zero);
+                    }
 
-                    int[] src = mesh.Submeshes[si];
-                    var indices = new int[src.Length];
-                    for (int k = 0; k < src.Length; k++)
-                        indices[k] = src[k] + baseVertex;
-                    submeshes.Add(new CachedSubmesh(indices, color, texKey, blend, metallic, smoothness, cull));
+                    for (int si = 0; si < mesh.Submeshes.Count; si++)
+                    {
+                        (Color color, string texKey, UnityMaterial.Blend blend, long texId,
+                            float metallic, float smoothness, EShaderCull cull) =
+                            materials.Resolve(si, palette, part.Materials);
+                        if (neededTextures != null && texId != 0 && !neededTextures.ContainsKey((bundleTag, texId)) &&
+                            graph.ObjectsByPathId.TryGetValue(texId, out SerializedObject? texObj))
+                            neededTextures[(bundleTag, texId)] = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, file.ReaderFor(texObj)));
+
+                        int[] src = mesh.Submeshes[si];
+                        var indices = new int[src.Length];
+                        for (int k = 0; k < src.Length; k++)
+                            indices[k] = src[k] + baseVertex;
+                        submeshes.Add(new CachedSubmesh(indices, color, texKey, blend, metallic, smoothness, cull));
+                    }
                 }
+                return submeshes.Count > 0;
             }
 
-            if (submeshes.Count == 0)
+            if (!BuildLevel(parts, out List<Vector3> verts, out List<Vector3> normals,
+                out List<Vector2> uvs, out List<CachedSubmesh> submeshes, out bool allNormals))
                 continue;
 
             // Cache the authored per-vertex normals (Unturned's own hard/soft edges); ModelLibrary falls
@@ -640,6 +671,20 @@ public static class ModelExtractor
                     allNormals ? normals.ToArray() : Array.Empty<Vector3>(), uvs.ToArray(), submeshes);
             extracted++;
             producedGuids?.Add(asset.Guid);
+
+            // The prefab's own lower level, cached beside it. Written only when it actually builds and is
+            // smaller: a level that is not cheaper buys nothing and would only add an instance to cull.
+            string lod1Path = Path.Combine(cacheDir, asset.Guid.ToString("N") + Lod1Suffix);
+            File.Delete(lod1Path); // never keep a previous source's level for a colliding GUID
+            if (graph.Lod1PartsByKey.TryGetValue(key, out List<MeshPart>? lod1Parts)
+                && BuildLevel(lod1Parts, out List<Vector3> lodVerts, out List<Vector3> lodNormals,
+                    out List<Vector2> lodUvs, out List<CachedSubmesh> lodSubmeshes, out bool lodNormalsOk)
+                && TriangleTotal(lodSubmeshes) < TriangleTotal(submeshes))
+            {
+                using var lodStream = File.Create(lod1Path);
+                MeshCache.Write(lodStream, lodVerts.ToArray(),
+                    lodNormalsOk ? lodNormals.ToArray() : Array.Empty<Vector3>(), lodUvs.ToArray(), lodSubmeshes);
+            }
 
             // Cache the object's colliders next to its mesh (Unity units; converted when the body is built).
             string colliderPath = Path.Combine(cacheDir, asset.Guid.ToString("N") + ".collider");
@@ -863,7 +908,7 @@ public static class ModelExtractor
         if (!Directory.Exists(cacheDir))
             return ids;
 
-        foreach (string path in Directory.GetFiles(cacheDir, "*.mesh"))
+        foreach (string path in PlainMeshFiles(cacheDir))
         {
             byte[] data;
             try { data = File.ReadAllBytes(path); }
