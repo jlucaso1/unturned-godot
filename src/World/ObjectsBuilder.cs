@@ -642,7 +642,9 @@ public static class ObjectsBuilder
     // Unity switches level by projected screen height, so the threshold scales with the object: a tree
     // holds its detail much further out than a crate. Approximate that with a multiple of the mesh's
     // bounding radius, tunable because the authored per-prefab thresholds are not extracted yet.
-    private static readonly float LodSwitchRadii = EnvFloat("UG_OBJECT_LOD_RADII", 24f, 2f, 200f);
+    // Measured on PEI: 6 bounding radii submits the fewest primitives at both gameplay poses. Wider
+    // switches keep more full-detail geometry on screen; the sweep is in the PR that introduced this.
+    private static readonly float LodSwitchRadii = EnvFloat("UG_OBJECT_LOD_RADII", 6f, 2f, 200f);
     // Unity's LODGroup switches level outright unless cross-fade is explicitly authored, so a hard swap
     // is both the parity behaviour and the cheaper one: inside a fade margin Godot dithers the two levels
     // together, which draws BOTH. UG_OBJECT_LOD_FADE=1 opts back into the dithered swap.

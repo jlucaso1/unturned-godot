@@ -1,6 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.RegularExpressions;
+using Godot;
+using UnturnedGodot.Unity;
 using Xunit;
 
 namespace UnturnedGodot.Tests;
@@ -656,8 +659,28 @@ public class PhysicsBodyOrderTests
 
         string source = File.ReadAllText(path);
         Assert.Contains("private const uint Magic = 0x414D4755;", source); // "UGMA"
-        Assert.DoesNotContain("private const uint Magic = 0x394D4755;", source); // UGM9
-        Assert.DoesNotContain("private const uint Magic = 0x384D4755;", source); // UGM8
+    }
+
+    // The source check above pins the constant; this one proves the constant does its job. A cache
+    // written by any earlier format must be rejected, because rejection is the only thing that forces
+    // the extra extraction pass — a per-mesh completeness check cannot tell a missing lower level from
+    // a prefab that never had one.
+    [Fact]
+    public void MeshCacheRejectsEveryEarlierFormatAndAcceptsWhatItWrites()
+    {
+        var written = new MemoryStream();
+        MeshCache.Write(written, new[] { Vector3.Zero, Vector3.Right, Vector3.Up },
+            System.Array.Empty<Vector3>(), new[] { Vector2.Zero, Vector2.Zero, Vector2.Zero },
+            new List<CachedSubmesh> { new(new[] { 0, 1, 2 }, Colors.White, "", UnityMaterial.Blend.Opaque, 0f, 0f, EShaderCull.Back) });
+        byte[] current = written.ToArray();
+        Assert.True(MeshCache.IsCurrent(current));
+
+        foreach (uint stale in new uint[] { 0x394D4755, 0x384D4755 }) // UGM9, UGM8
+        {
+            byte[] older = (byte[])current.Clone();
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(older, stale);
+            Assert.False(MeshCache.IsCurrent(older), $"a cache written as {stale:X} must be rejected");
+        }
     }
 
     [Fact]
