@@ -16,8 +16,13 @@ public class ServerSimulationTests
 
     private static ServerSimulation FlatSim() => new(new HeightfieldMoveSolver(FlatGround));
 
-    private static InputCommand Forward(bool sprint = false, byte yaw = 0) =>
-        new(0, 0, -1, jump: false, sprint: sprint, yaw: yaw, pitch: 90);
+    // Frames are numbered, because the server drops an input older than one it already has: a real
+    // client counts every 0.08 s frame it sends, and reusing one number reads as a stale datagram.
+    // xUnit builds a fresh instance per test, so the counter is per test.
+    private uint _frame;
+
+    private InputCommand Forward(bool sprint = false, byte yaw = 0) =>
+        new(_frame++, 0, -1, jump: false, sprint: sprint, yaw: yaw, pitch: 90);
 
     [Fact]
     public void SpawnedPlayer_FallsAndLandsOnTheGround()
@@ -81,9 +86,9 @@ public class ServerSimulationTests
         sim.AddPlayer(1, new Vector3(0, 10f, 0));
         sim.Step();
 
-        for (int i = 0; i < 10; i++)
+        for (uint i = 0; i < 10; i++)
         {
-            sim.QueueInput(1, new InputCommand(0, 1, 0, false, false, yaw: 0, pitch: 90));
+            sim.QueueInput(1, new InputCommand(i, 1, 0, false, false, yaw: 0, pitch: 90));
             sim.Step();
         }
 

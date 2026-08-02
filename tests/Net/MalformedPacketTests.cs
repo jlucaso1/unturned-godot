@@ -257,7 +257,7 @@ public class MalformedPacketTests
     {
         var transport = new FakeClientTransport();
         var client = new NetClient(transport, "player", Level);
-        transport.Deliver(NetMessages.WriteWelcome(1, 0,
+        transport.Deliver(NetMessages.WriteWelcome(1, 0, 1,
             new[] { new PlayerListing { PlayerId = 2, Name = "A" } }));
         transport.Deliver(payload);
 

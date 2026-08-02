@@ -37,13 +37,13 @@ public class NetClientRosterTests
         var transport = new FakeClientTransport();
         var client = new NetClient(transport, "Me", Level);
 
-        transport.Deliver(NetMessages.WriteWelcome(1, 0, new[] { Listing(2, "A"), Listing(3, "B") }));
+        transport.Deliver(NetMessages.WriteWelcome(1, 0, 1, new[] { Listing(2, "A"), Listing(3, "B") }));
         client.Update(0);
         Assert.Equal(2, client.Remotes.Count);
 
         // B left while our Hello was being answered a second time, and the PlayerLeft overtook the
         // roster on the wire. The newer roster is the truth.
-        transport.Deliver(NetMessages.WriteWelcome(1, 5, new[] { Listing(2, "A") }));
+        transport.Deliver(NetMessages.WriteWelcome(1, 0, 5, new[] { Listing(2, "A") }));
         client.Update(1.0);
 
         Assert.Equal("A", Assert.Single(client.Remotes).Value.Name);
@@ -57,11 +57,11 @@ public class NetClientRosterTests
         var transport = new FakeClientTransport();
         var client = new NetClient(transport, "Me", Level);
 
-        transport.Deliver(NetMessages.WriteWelcome(1, 0, new[] { Listing(2, "A") }));
+        transport.Deliver(NetMessages.WriteWelcome(1, 0, 1, new[] { Listing(2, "A") }));
         client.Update(0);
         RemotePlayer first = client.Remotes[2];
 
-        transport.Deliver(NetMessages.WriteWelcome(1, 5, new[] { Listing(2, "A"), Listing(3, "B") }));
+        transport.Deliver(NetMessages.WriteWelcome(1, 0, 5, new[] { Listing(2, "A"), Listing(3, "B") }));
         client.Update(1.0);
 
         Assert.Equal(2, client.Remotes.Count);
@@ -78,13 +78,13 @@ public class NetClientRosterTests
         var transport = new FakeClientTransport();
         var client = new NetClient(transport, "Me", Level);
 
-        transport.Deliver(NetMessages.WriteWelcome(1, 5, new[] { Listing(2, "A") }));
+        transport.Deliver(NetMessages.WriteWelcome(1, 0, 5, new[] { Listing(2, "A") }));
         transport.Deliver(NetMessages.WritePlayerJoined(9, Listing(3, "C"))); // joined after that roster
         client.Update(0);
         Assert.Equal(2, client.Remotes.Count);
 
         // A second Welcome, taken BEFORE C joined, overtakes nothing it should undo.
-        transport.Deliver(NetMessages.WriteWelcome(1, 7, new[] { Listing(2, "A") }));
+        transport.Deliver(NetMessages.WriteWelcome(1, 0, 7, new[] { Listing(2, "A") }));
         client.Update(1.0);
 
         Assert.Equal(2, client.Remotes.Count);
@@ -102,10 +102,64 @@ public class NetClientRosterTests
         transport.Deliver(NetMessages.WritePlayerJoined(9, Listing(3, "C")));
         client.Update(0);
 
-        transport.Deliver(NetMessages.WriteWelcome(1, 12, new[] { Listing(2, "A") })); // C is gone by 12
+        transport.Deliver(NetMessages.WriteWelcome(1, 0, 12, new[] { Listing(2, "A") })); // C is gone by 12
         client.Update(1.0);
 
         Assert.Equal("A", Assert.Single(client.Remotes).Value.Name);
+    }
+
+    // Roster events are ordered by their own counter, not by the simulation tick, because several of
+    // them happen inside ONE server frame: a joined client re-Hellos (answered with a roster) and a new
+    // player Hellos (broadcast as a join) before the next 0.08 s step runs, so both carry the same tick.
+    // On that tie the older roster used to win and delete the newer player — reliably joined, already
+    // consumed, never replayed, invisible for the session.
+    [Fact]
+    public void AJoinAndARosterFromTheSameServerFrame_KeepTheJoin()
+    {
+        var transport = new FakeClientTransport();
+        var client = new NetClient(transport, "Me", Level);
+
+        transport.Deliver(NetMessages.WritePlayerJoined(4, Listing(3, "C"))); // the newer event
+        transport.Deliver(NetMessages.WriteWelcome(1, 0, 3, new[] { Listing(2, "A") }));
+        client.Update(0);
+
+        Assert.Equal(2, client.Remotes.Count);
+        Assert.Equal("C", client.Remotes[3].Name);
+    }
+
+    // The mirror: a roster taken BEFORE a departure must not bring that player back. The leave carries
+    // its own place in the order, so a listing older than it is refused rather than respawned.
+    [Fact]
+    public void AStaleRoster_DoesNotResurrectAPlayerWhoLeft()
+    {
+        var transport = new FakeClientTransport();
+        var client = new NetClient(transport, "Me", Level);
+
+        transport.Deliver(NetMessages.WriteWelcome(1, 0, 2, new[] { Listing(2, "A"), Listing(3, "C") }));
+        client.Update(0);
+        Assert.Equal(2, client.Remotes.Count);
+
+        transport.Deliver(NetMessages.WritePlayerLeft(5, 3));                               // C leaves
+        transport.Deliver(NetMessages.WriteWelcome(1, 0, 4, new[] { Listing(2, "A"), Listing(3, "C") }));
+        client.Update(1.0); // the older roster arrives second
+
+        Assert.Equal("A", Assert.Single(client.Remotes).Value.Name);
+    }
+
+    // A departure does not bury the id forever: the pool hands it out again, and a join newer than the
+    // leave is a different player who must appear.
+    [Fact]
+    public void AnIdHandedOutAgainAfterALeave_StillJoins()
+    {
+        var transport = new FakeClientTransport();
+        var client = new NetClient(transport, "Me", Level);
+
+        transport.Deliver(NetMessages.WriteWelcome(1, 0, 2, new[] { Listing(3, "C") }));
+        transport.Deliver(NetMessages.WritePlayerLeft(5, 3));
+        transport.Deliver(NetMessages.WritePlayerJoined(6, Listing(3, "Someone else")));
+        client.Update(0);
+
+        Assert.Equal("Someone else", Assert.Single(client.Remotes).Value.Name);
     }
 
     // Our own id never belongs in the remote roster — the server does not list us, but a roster that
@@ -116,7 +170,7 @@ public class NetClientRosterTests
         var transport = new FakeClientTransport();
         var client = new NetClient(transport, "Me", Level);
 
-        transport.Deliver(NetMessages.WriteWelcome(1, 0, new[] { Listing(1, "Me"), Listing(2, "A") }));
+        transport.Deliver(NetMessages.WriteWelcome(1, 0, 1, new[] { Listing(1, "Me"), Listing(2, "A") }));
         client.Update(0);
 
         Assert.Equal(1, client.PlayerId);

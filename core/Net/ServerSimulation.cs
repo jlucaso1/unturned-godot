@@ -122,8 +122,10 @@ public sealed class ServerSimulation
         // while the player kept moving through all of it.
         public bool HasVerifiedPosition;
         public double LastAcceptedAt;
-        public bool HasReceivedPositionFrame;
-        public uint LastReceivedPositionFrame;
+        // The newest frame number this player has ever sent, for every kind of input: what makes a
+        // reordered datagram recognisable as stale rather than as the latest word.
+        public bool HasReceivedFrame;
+        public uint LastReceivedFrame;
     }
 
     private readonly IMoveSolver _solver;
@@ -172,17 +174,15 @@ public sealed class ServerSimulation
         if (!_players.TryGetValue(id, out Entry? entry))
             return;
 
-        // UDP may duplicate or reorder input datagrams. A trusted-position command older than one already
-        // queued/processed must never rewind the player. Signed subtraction is the standard wrap-safe
-        // sequence comparison as long as the sender cannot be over 2^31 frames ahead.
-        if (input.HasPosition)
-        {
-            if (entry.HasReceivedPositionFrame
-                && unchecked((int)(input.Frame - entry.LastReceivedPositionFrame)) <= 0)
-                return;
-            entry.HasReceivedPositionFrame = true;
-            entry.LastReceivedPositionFrame = input.Frame;
-        }
+        // UDP may duplicate or reorder input datagrams, so freshness is what the FRAME number says and
+        // never what the socket happened to hand over last. A command older than one already queued or
+        // played must not rewind the player — not just its position, but the stance, the jump and the
+        // direction it was steering. Signed subtraction is the standard wrap-safe sequence comparison,
+        // as long as the sender cannot be over 2^31 frames ahead.
+        if (entry.HasReceivedFrame && unchecked((int)(input.Frame - entry.LastReceivedFrame)) <= 0)
+            return;
+        entry.HasReceivedFrame = true;
+        entry.LastReceivedFrame = input.Frame;
         entry.Inputs.Enqueue(input);
 
         // The loop plays one frame per tick, so a client that sends faster than the server ticks builds

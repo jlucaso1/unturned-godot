@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Godot;
 using UnturnedGodot.Net;
+using UnturnedGodot.Player;
 using Xunit;
 
 namespace UnturnedGodot.Tests.Net;
@@ -116,6 +117,47 @@ public class ServerTickPacingTests
         }
 
         Assert.Equal(10, player.Count(ENetMessage.StateUpdate));
+    }
+
+    // Catch-up steps are separate instants, not the same one repeated. The trusted-position budget is
+    // "how far could you have moved since your last accepted claim", so handing every step of a slow
+    // frame the same clock reading pays each of them a fresh minimum tick of movement on top of the one
+    // real gap: four claims inside a 0.4 s frame could bank 0.4 s + three more ticks of sprint, well past
+    // the 1.5x limit. On a server that is persistently late that is a standing speed bonus.
+    [Fact]
+    public void ASlowFrame_DoesNotHandOutMoreMovementThanTheTimeItCovered()
+    {
+        var transport = new FakeServerTransport();
+        var server = new NetServer(transport, new ServerSimulation(new HeightfieldMoveSolver(FlatGround)),
+            Vector3.Zero, Level);
+        var conn = new FakeConnection();
+        transport.Connect(conn);
+
+        const double start = 1000.0;
+        transport.Message(conn, NetMessages.WriteHello("A", Level));
+        transport.Message(conn, NetMessages.WriteInput(new InputCommand(0, 0, 0, false, false, 0, 90,
+            EPlayerStance.Stand, Vector3.Zero)));
+        server.Update(start); // admitted, baseline claim accepted
+
+        // Four claims — the whole jitter buffer. The first spends nearly the entire stall allowance;
+        // each of the rest asks for another tick's worth on top, which is only affordable if every step
+        // of this frame is treated as a fresh instant.
+        float tickBudget = PlayerConfig.SpeedSprint * ServerSimulation.TickRate * 1.5f;
+        for (uint frame = 1; frame <= NetServer.MaxCatchUpTicks - 1; frame++)
+        {
+            float metres = tickBudget * (3.9f + (0.95f * (frame - 1)));
+            transport.Message(conn, NetMessages.WriteInput(new InputCommand(frame, 0, -1, false, true, 0, 90,
+                EPlayerStance.Sprint, new Vector3(0, 0, -metres))));
+        }
+
+        double elapsed = ServerSimulation.TickRate * (NetServer.MaxCatchUpTicks - 1);
+        server.Update(start + elapsed); // one late frame covering all of it
+
+        (_, List<PlayerSnapshotState> states) = NetMessages.ReadStateUpdate(
+            conn.Sent.Last(p => NetMessages.TypeOf(p) == ENetMessage.StateUpdate));
+        float travelled = states[0].Position.Length();
+        float allowed = (float)(PlayerConfig.SpeedSprint * elapsed * 1.5);
+        Assert.True(travelled <= allowed + 0.001f, $"moved {travelled} m in {elapsed} s, budget {allowed} m");
     }
 
     // The simulation must not fast-forward through the gap either: a zombie that pathed for a minute of

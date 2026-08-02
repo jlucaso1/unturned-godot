@@ -107,6 +107,48 @@ public class InputBacklogTests
         Assert.Equal(NetAngles.DequantizeYaw(oldestKept), state.Yaw);
     }
 
+    // Inputs travel unreliably, so they arrive out of order, and freshness is what the FRAME number
+    // says — not what the socket happened to hand over last. Trimming by arrival threw away the newest
+    // frames of a reordered burst and kept the oldest, so the server steered the avatar with movement,
+    // stance and jumps the player had already moved on from. Position-carrying frames were guarded;
+    // everything else (bots, and any client that lets the server simulate it) was not.
+    [Fact]
+    public void ReorderedFrames_AreJudgedByTheirNumber_NotTheirArrival()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        // Frames 8..11 overtake the delayed 4..7. The four that survive must be the newest four.
+        for (uint frame = 8; frame <= 11; frame++)
+            sim.QueueInput(1, Walk(frame, yaw: (byte)frame));
+        for (uint frame = 4; frame <= 7; frame++)
+            sim.QueueInput(1, Walk(frame, yaw: (byte)frame));
+
+        sim.Step();
+
+        Assert.True(sim.TryGetState(1, out PlayerMoveState state));
+        Assert.Equal(NetAngles.DequantizeYaw(8), state.Yaw);
+    }
+
+    // An input already superseded is not worth playing at all, whatever room the buffer has.
+    [Fact]
+    public void AFrameOlderThanOneAlreadyPlayed_IsIgnored()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        sim.QueueInput(1, Walk(20, yaw: 20));
+        sim.Step();
+        Vector3 after = PositionOf(sim);
+
+        sim.QueueInput(1, Walk(19, yaw: 19)); // the delayed predecessor finally turns up
+        sim.Step();
+
+        Assert.True(sim.TryGetState(1, out PlayerMoveState state));
+        Assert.Equal(NetAngles.DequantizeYaw(20), state.Yaw); // still steering by the newer frame
+        Assert.Equal(after, PositionOf(sim)); // and the tick ran starved: no walking on a stale frame
+    }
+
     // The ceiling is per player: one client flooding must not cost another client their buffer.
     [Fact]
     public void OneFloodingClient_DoesNotDisturbAnother()

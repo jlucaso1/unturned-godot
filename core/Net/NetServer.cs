@@ -26,6 +26,11 @@ public sealed class NetServer
     private readonly PlayerIdPool _playerIds = new();
     private double _nextTick = double.NaN;
 
+    // Bumped on every membership event — one admission, one departure, one step — and stamped on the
+    // Welcome, PlayerJoined and PlayerLeft it produces. Several of those can happen inside one frame,
+    // so the simulation tick cannot order them for a client that receives them out of order; this can.
+    private uint _rosterVersion;
+
     // How many 0.08 s steps one Update may run to make up for lost time. Enough to absorb the jitter of
     // a machine that misses a few frames; short of the "replay the whole stall at once" behaviour that
     // turns a hitch into a burst of hundreds of datagrams per client.
@@ -98,14 +103,19 @@ public sealed class NetServer
         int caughtUp = 0;
         while (now >= _nextTick && caughtUp < MaxCatchUpTicks)
         {
-            // The simulation is handed the real clock, not just a tick count: with the catch-up bounded
-            // above, tick time and wall time part company after any stall, and the trusted-position
-            // budget is a speed limit — it has to be measured against the time that actually passed.
-            List<PlayerSnapshotState> states = _simulation.Step(now);
+            // Each step is stamped with the instant it was SCHEDULED for, not with the clock reading of
+            // the frame running it. The two differ whenever one frame makes up several ticks, and the
+            // trusted-position budget is a speed limit: handing every step of a late frame the same
+            // reading pays each of them a fresh minimum tick of movement on top of the one real gap,
+            // which on a persistently late server is a standing speed bonus. Scheduled instants are
+            // monotonic, one TickRate apart, and after a stall the re-anchor below leaves a gap the
+            // size of the stall — so the time that really passed is credited exactly once.
+            double stepAt = _nextTick;
+            _nextTick += ServerSimulation.TickRate;
+            List<PlayerSnapshotState> states = _simulation.Step(stepAt);
             if (states.Count > 0)
                 Broadcast(NetMessages.WriteStateUpdate(_simulation.Tick, states), ESendType.Unreliable);
             OnTick?.Invoke(_simulation.Tick);
-            _nextTick += ServerSimulation.TickRate;
             caughtUp++;
         }
 
@@ -191,7 +201,9 @@ public sealed class NetServer
                         foreach (Session other in _sessions.Values)
                             if (other.Joined && other != session)
                                 roster.Add(Listing(other, _simulation.GetState(other.PlayerId)));
-                        connection.Send(NetMessages.WriteWelcome(session.PlayerId, _simulation.Tick, roster),
+                        connection.Send(
+                            NetMessages.WriteWelcome(session.PlayerId, _simulation.Tick, _rosterVersion,
+                                roster),
                             ESendType.Reliable);
                         OnPlayerAdmitted?.Invoke(session.PlayerId, connection);
                     }
@@ -242,9 +254,16 @@ public sealed class NetServer
             if (other.Joined && other != session)
                 existing.Add(Listing(other, _simulation.GetState(other.PlayerId)));
 
-        connection.Send(NetMessages.WriteWelcome(session.PlayerId, _simulation.Tick, existing), ESendType.Reliable);
+        // The admission is itself a membership event, and the roster above predates it: the new player's
+        // own Welcome carries the version BEFORE the bump, the PlayerJoined everyone else receives
+        // carries the version after. Anyone holding the older roster can then tell that this join is
+        // newer than it, rather than deleting a player who has only just arrived.
+        connection.Send(
+            NetMessages.WriteWelcome(session.PlayerId, _simulation.Tick, _rosterVersion, existing),
+            ESendType.Reliable);
 
-        byte[] joined = NetMessages.WritePlayerJoined(_simulation.Tick,
+        _rosterVersion++;
+        byte[] joined = NetMessages.WritePlayerJoined(_rosterVersion,
             Listing(session, _simulation.GetState(session.PlayerId)));
         foreach ((ITransportConnection conn, Session other) in _sessions)
             if (other.Joined && other != session)
@@ -261,7 +280,8 @@ public sealed class NetServer
         PlayerCount--;
         _simulation.RemovePlayer(session.PlayerId);
         _playerIds.Return(session.PlayerId, now);
-        Broadcast(NetMessages.WritePlayerLeft(session.PlayerId), ESendType.Reliable);
+        _rosterVersion++;
+        Broadcast(NetMessages.WritePlayerLeft(_rosterVersion, session.PlayerId), ESendType.Reliable);
     }
 
     public void Broadcast(byte[] payload, ESendType sendType)
