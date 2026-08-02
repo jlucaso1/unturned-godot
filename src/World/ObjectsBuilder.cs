@@ -100,7 +100,10 @@ public static class ObjectsBuilder
             // a batch that reaches the player draws the coarse mesh right in front of them. Groups that
             // have a lower level are cut into cells small enough for the switch to mean something; groups
             // without one keep the coarse cells, which are the ones tuned for large-map culling.
-            float chunkMetres = lodMesh != null && ObjectChunkMetres > 0f
+            // LodChunkMetres is an override, so 0 means "no finer cells", not "no cells": dropping to 0
+            // here would leave levelled groups as one map-spanning batch — the opposite of the point, and
+            // the opposite of what UG_OBJECT_CHUNK_METRES=0 means for everything else.
+            float chunkMetres = lodMesh != null && ObjectChunkMetres > 0f && LodChunkMetres > 0f
                 ? Mathf.Min(ObjectChunkMetres, LodChunkMetres)
                 : ObjectChunkMetres;
             long placementTriangles = TriangleCount(renderMesh) * transforms.Count;
