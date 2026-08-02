@@ -190,6 +190,41 @@ public static class NetMessages
     // The transport drops empty payloads, so this is the second line of defence rather than the first —
     // but it is the one every reader funnels through, and reading [0] off an empty array is the
     // cheapest way to lose a server to a one-byte datagram.
+    // The longest player name, in UTF-8 bytes, that the roster may carry.
+    //
+    // Welcome names every joined player, so one oversized name inflates the Welcome sent to everyone who
+    // joins afterwards. With the transport now refusing datagrams past MaxPayloadBytes, an unbounded name
+    // does not merely bloat the roster — it makes a full server's Welcome undeliverable, and the clients
+    // it was meant for are admitted and then time out without ever joining.
+    //
+    // Bounded in bytes rather than characters because that is what the datagram is measured in: 32
+    // characters of CJK is 96 bytes and of astral-plane emoji is 128. At 32 bytes, a full 254-player
+    // roster is about 12.5 KB, comfortably inside the transport's 16 KiB ceiling.
+    public const int MaxNameBytes = 32;
+
+    // Truncates on a character boundary, so a clamped name is never cut through a multi-byte sequence.
+    public static string ClampName(string name)
+    {
+        if (string.IsNullOrEmpty(name))
+            return string.Empty;
+        if (System.Text.Encoding.UTF8.GetByteCount(name) <= MaxNameBytes)
+            return name;
+
+        int bytes = 0;
+        var element = System.Globalization.StringInfo.GetTextElementEnumerator(name);
+        var kept = new System.Text.StringBuilder();
+        while (element.MoveNext())
+        {
+            var text = (string)element.Current;
+            int size = System.Text.Encoding.UTF8.GetByteCount(text);
+            if (bytes + size > MaxNameBytes)
+                break;
+            bytes += size;
+            kept.Append(text);
+        }
+        return kept.ToString();
+    }
+
     public static ENetMessage TypeOf(byte[] payload) =>
         payload.Length == 0
             ? throw new InvalidDataException("Empty net payload carries no message type.")

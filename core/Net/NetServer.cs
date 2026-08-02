@@ -47,6 +47,10 @@ public sealed class NetServer
     // server bytes it cannot read — a mismatched build, a corrupt link, or a probe.
     public long MalformedPacketsDropped { get; private set; }
 
+    // Transport events handled per Update. Comfortably above what a full server generates at its own
+    // cadence, so it bounds a flood without shaping normal traffic.
+    public const int MaxEventsPerUpdate = 512;
+
     // Extension seams for replicated systems (zombies, resources, doors): hook the fixed tick to run
     // server logic and use Broadcast to ship your own ENetMessage; hook OnPlayerAdmitted to send a
     // freshly admitted (or re-admitted) player your system's full state, the way Welcome carries the
@@ -82,7 +86,11 @@ public sealed class NetServer
     {
         _transport.Update(now);
 
-        while (_transport.TryReceive(out ServerTransportEvent evt))
+        // Drain what is queued, but not without limit: how much work this loop does was decided entirely by
+        // how much anyone chose to send, and it runs on the frame thread. Anything left over is still
+        // queued in the transport and drains next Update, so a burst is spread rather than dropped.
+        int budget = MaxEventsPerUpdate;
+        while (budget-- > 0 && _transport.TryReceive(out ServerTransportEvent evt))
         {
             switch (evt.Type)
             {
@@ -255,7 +263,7 @@ public sealed class NetServer
             return false;
 
         session.PlayerId = playerId;
-        session.Name = name;
+        session.Name = NetMessages.ClampName(name);
         session.Joined = true;
         PlayerCount++;
         _simulation.AddPlayer(session.PlayerId, _spawnPosition);

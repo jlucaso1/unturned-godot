@@ -71,11 +71,23 @@ public sealed class CompositeServerTransport : IServerTransport
     // singleplayer loopback server simply gains a UDP transport, no restart, no second code path.
     public void Add(IServerTransport transport) => _transports.Add(transport);
 
+    // Round-robin rather than always restarting at the first child. NetServer drains a bounded number of
+    // events per Update, so a child that stays backlogged would otherwise consume every slot on every
+    // Update and the ones after it would never be polled — on a listen server that is the host's loopback
+    // starving the LAN transport's handshakes, inputs and disconnects indefinitely.
+    private int _next;
+
     public bool TryReceive(out ServerTransportEvent evt)
     {
-        foreach (IServerTransport transport in _transports)
-            if (transport.TryReceive(out evt))
+        for (int i = 0; i < _transports.Count; i++)
+        {
+            int at = (_next + i) % _transports.Count;
+            if (_transports[at].TryReceive(out evt))
+            {
+                _next = (at + 1) % _transports.Count;
                 return true;
+            }
+        }
         evt = default;
         return false;
     }
