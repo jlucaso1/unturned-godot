@@ -126,7 +126,7 @@ public sealed class LevelFoliage
 
     public static LevelFoliage? Load(string blobPath) =>
         !File.Exists(blobPath) ? null
-        : System.Environment.GetEnvironmentVariable("UG_FOLIAGE_STREAM_LOAD") == "0"
+        : !EnvFlag.IsOn(System.Environment.GetEnvironmentVariable("UG_FOLIAGE_STREAM_LOAD"), whenUnset: true)
             ? Parse(File.ReadAllBytes(blobPath)) : ParseBatchedFile(blobPath);
 
     // The workshop California2 blob is 273 MiB, while an individual tile region is at most ~62 KiB.

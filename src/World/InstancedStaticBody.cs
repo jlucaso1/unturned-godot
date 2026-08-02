@@ -46,7 +46,7 @@ public partial class InstancedStaticBody : Node3D
         PhysicsServer3D.BodySetSpace(_body, GetWorld3D().Space);
         // PhysicsServer copied every shape RID/transform above. Keeping thousands of managed tuples on
         // every body serves no later query and inflated steady-state RAM for the whole session.
-        if (OS.GetEnvironment("UG_KEEP_PHYSICS_PLACEMENTS") != "1")
+        if (!EnvFlag.IsOn(OS.GetEnvironment("UG_KEEP_PHYSICS_PLACEMENTS"), whenUnset: false))
             Placements = System.Array.Empty<(int Shape, Transform3D Transform)>();
     }
 

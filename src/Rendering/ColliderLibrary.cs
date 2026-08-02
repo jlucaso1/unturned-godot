@@ -39,7 +39,7 @@ public static class ColliderLibrary
                     continue;
                 sources.Add((guid, path));
             }
-        bool deduplicate = System.Environment.GetEnvironmentVariable("UG_DEDUP_COLLIDERS") != "0";
+        bool deduplicate = EnvFlag.IsOn(System.Environment.GetEnvironmentVariable("UG_DEDUP_COLLIDERS"), whenUnset: true);
         int skipped = 0;
         foreach (ExactFileGroups.Group<Guid> group in ExactFileGroups.Build(sources, deduplicate))
         {

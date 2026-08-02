@@ -58,7 +58,7 @@ public static class RoadsBuilder
         dirtFallback.SetShaderParameter("paved", false);
         var terrain = new SampledTerrain(heights);
         var byMaterial = new Dictionary<int, (Material material, float inverseRepeat)>();
-        bool useArrays = OS.GetEnvironment("UG_ROAD_ARRAYS") != "0";
+        bool useArrays = EnvFlag.IsOn(OS.GetEnvironment("UG_ROAD_ARRAYS"), whenUnset: true);
         // Roads of the same material index share texture, tiling and width, so merge their strips into one
         // mesh per material — a handful of draw calls instead of one per road.
         var merged = new Dictionary<int, (SurfaceTool tool, Material material, int verts)>();

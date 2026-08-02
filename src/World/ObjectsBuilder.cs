@@ -80,15 +80,15 @@ public static class ObjectsBuilder
         }
 
         var collision = new Node3D { Name = "ObjectCollision" };
-        InstancedStaticBodies? collisionOwner = OS.GetEnvironment("UG_NODE_PHYSICS") == "1"
+        InstancedStaticBodies? collisionOwner = EnvFlag.IsOn(OS.GetEnvironment("UG_NODE_PHYSICS"), whenUnset: false)
             ? null : new InstancedStaticBodies { Name = "ObjectBodies" };
         int collisionBodyCount = 0;
-        MultiMeshRidRenderer? render = OS.GetEnvironment("UG_NODE_MULTIMESH") == "1"
+        MultiMeshRidRenderer? render = EnvFlag.IsOn(OS.GetEnvironment("UG_NODE_MULTIMESH"), whenUnset: false)
             ? null : new MultiMeshRidRenderer { Name = "ObjectBatches" };
         var collisionShapes = new CollisionShapePool();
         withMesh = 0;
         int renderBatches = 0, sparseGroups = 0, sparseExtraBatches = 0;
-        if (OS.GetEnvironment("UG_OBJECT_PROFILE") == "1")
+        if (EnvFlag.IsOn(OS.GetEnvironment("UG_OBJECT_PROFILE"), whenUnset: false))
             PrintObjectCosts(byMesh, meshLibrary, db);
         foreach ((Guid guid, List<Transform3D> transforms) in byMesh)
         {
@@ -293,7 +293,7 @@ public static class ObjectsBuilder
         private readonly Dictionary<PrimitiveShapeIdentity, int> _finalPrimitives = new();
         private readonly Dictionary<string, int> _finalMeshes = new(StringComparer.Ordinal);
         private static readonly bool DeduplicateFinal =
-            System.Environment.GetEnvironmentVariable("UG_DEDUP_FINAL_SHAPES") != "0";
+            EnvFlag.IsOn(System.Environment.GetEnvironmentVariable("UG_DEDUP_FINAL_SHAPES"), whenUnset: true);
         public int PrimitiveAliases { get; private set; }
         public int MeshAliases { get; private set; }
         public int Add(Shape3D shape) { Shapes.Add(shape); return Shapes.Count - 1; }
@@ -355,7 +355,7 @@ public static class ObjectsBuilder
                 primitives.Add((c, colliderIndex));
         }
 
-        bool directBuckets = OS.GetEnvironment("UG_DIRECT_COLLISION_BUCKETS") != "0";
+        bool directBuckets = EnvFlag.IsOn(OS.GetEnvironment("UG_DIRECT_COLLISION_BUCKETS"), whenUnset: true);
         bool mayChunk = CollisionChunkMetres > 0f
             && (long)instances.Count * (primitives.Count + meshes.Count) >= MinChunkedCollisionShapes;
         SpatialBuckets<(int Shape, Transform3D Transform)>? buckets = directBuckets && mayChunk

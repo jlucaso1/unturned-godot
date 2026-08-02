@@ -364,7 +364,7 @@ public static class GpuBenchmark
             poses.Add(("ground_diag", Look(ground + new Vector3(0, 12f, 0),
                 ground + new Vector3(80f, 2f, -80f), Vector3.Up)));
         }
-        if (OS.GetEnvironment("UG_FOLIAGE_TRAVERSAL") == "1")
+        if (EnvFlag.IsOn(OS.GetEnvironment("UG_FOLIAGE_TRAVERSAL"), whenUnset: false))
             AddFoliageTraversalPoses(poses, bounds, heights);
         return poses;
     }

@@ -70,7 +70,7 @@ public partial class PauseMenu : CanvasLayer
         _status.AddThemeFontSizeOverride("font_size", 13);
         column.AddChild(_status);
 
-        if (OS.GetEnvironment("SHOW_PAUSE_MENU") == "1") // screenshot/debug aid
+        if (EnvFlag.IsOn(OS.GetEnvironment("SHOW_PAUSE_MENU"), whenUnset: false)) // screenshot/debug aid
             Open();
     }
 

@@ -29,8 +29,8 @@ public static class FoliageBuilder
     public static int RuntimeChunkTiles => ChunkTiles;
     public static float FadeMarginValue => FadeMargin;
     public static bool SpatialResidencyEnabled =>
-        System.Environment.GetEnvironmentVariable("UG_FOLIAGE_RESIDENCY") != "0"
-        && System.Environment.GetEnvironmentVariable("UG_NODE_MULTIMESH") != "1";
+        EnvFlag.IsOn(System.Environment.GetEnvironmentVariable("UG_FOLIAGE_RESIDENCY"), whenUnset: true)
+        && !EnvFlag.IsOn(System.Environment.GetEnvironmentVariable("UG_NODE_MULTIMESH"), whenUnset: false);
 
     public static Node3D Build(FoliageResidencyIndex? foliage,
         IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary) => foliage == null
@@ -40,13 +40,13 @@ public static class FoliageBuilder
     public static Node3D Build(LevelFoliageChunks? foliage,
         IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary)
     {
-        bool nodeWrappers = OS.GetEnvironment("UG_NODE_MULTIMESH") == "1";
+        bool nodeWrappers = EnvFlag.IsOn(OS.GetEnvironment("UG_NODE_MULTIMESH"), whenUnset: false);
         Node3D root = nodeWrappers
             ? new Node3D { Name = "Foliage" }
             : new MultiMeshRidRenderer { Name = "Foliage" };
         if (foliage == null) return root;
         var rebaseWatch = System.Diagnostics.Stopwatch.StartNew();
-        foliage.RebaseAll(OS.GetEnvironment("UG_PARALLEL_FOLIAGE_REBASE") != "0");
+        foliage.RebaseAll(EnvFlag.IsOn(OS.GetEnvironment("UG_PARALLEL_FOLIAGE_REBASE"), whenUnset: true));
         double rebaseMs = rebaseWatch.Elapsed.TotalMilliseconds;
         int total = 0, renderedChunks = 0;
         foreach (FoliageChunk chunk in foliage.Chunks)
