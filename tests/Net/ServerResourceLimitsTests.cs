@@ -125,12 +125,9 @@ public class ServerResourceLimitsTests
             });
         }
 
-        // MERGE NOTE: #36 adds a roster version to this signature, so whichever of the two lands second
-        // needs this one call updated to WriteWelcome(1, 0, 0, roster). Nothing else here collides — the
-        // rest of the merge is clean, verified by merging the two branches and building the result. It
-        // has to go through WriteWelcome because WriteListing is private, and measuring the real encoded
-        // datagram is the whole point: the assertion is that the clamp keeps a full roster deliverable.
-        byte[] welcome = NetMessages.WriteWelcome(1, 0, roster);
+        // Through WriteWelcome because WriteListing is private, and measuring the real encoded datagram
+        // is the point: the assertion is that the clamp keeps a full roster deliverable.
+        byte[] welcome = NetMessages.WriteWelcome(1, tick: 0, rosterVersion: 0, roster);
 
         Assert.True(welcome.Length < UdpServerTransport.MaxPayloadBytes,
             $"a full roster is {welcome.Length} bytes, past the " +
