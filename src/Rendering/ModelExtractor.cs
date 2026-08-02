@@ -516,7 +516,34 @@ public static class ModelExtractor
     }
 
     // The cached lower level sits beside "<guid>.mesh" under a suffix the plain-mesh scan cannot match.
-    public const string Lod1Suffix = ".lod1.mesh";
+    // Named in the cache layer because the dependency index has to open both levels of a GUID and cannot
+    // reach into the extractor.
+    public const string Lod1Suffix = MeshCache.Lod1Suffix;
+
+    // A lower level is only worth caching if it is materially cheaper than the base one. Every level kept
+    // costs a second MultiMesh and a second copy of the batch's placement transforms for the whole
+    // session, so a level that is within a tenth of the base triangle count is dropped: measured over the
+    // extracted cache that is 4 of 222 authored levels, and the other 218 median 49% of the base.
+    private const float Lod1MaxTriangleRatio = 0.9f;
+
+    // Writes through a temporary in the same directory and renames into place. A cached mesh is judged
+    // current by its 4-byte header alone, so a process killed part-way through a direct write would leave
+    // a truncated file that every later run accepts and then throws on.
+    private static void WriteMeshAtomically(string path, string tempPath, Vector3[] vertices,
+        Vector3[] normals, Vector2[] uvs, List<CachedSubmesh> submeshes)
+    {
+        try
+        {
+            using (var stream = File.Create(tempPath))
+                MeshCache.Write(stream, vertices, normals, uvs, submeshes);
+            File.Move(tempPath, path, overwrite: true);
+        }
+        catch
+        {
+            File.Delete(tempPath);
+            throw;
+        }
+    }
 
     private static int TriangleTotal(List<CachedSubmesh> submeshes)
     {
@@ -675,28 +702,34 @@ public static class ModelExtractor
                 out List<Vector2> uvs, out List<CachedSubmesh> submeshes, out bool allNormals))
                 continue;
 
-            // Cache the authored per-vertex normals (Unturned's own hard/soft edges); ModelLibrary falls
-            // back to deriving smooth normals only when a part shipped without them.
-            using (var stream = File.Create(Path.Combine(cacheDir, asset.Guid.ToString("N") + ".mesh")))
-                MeshCache.Write(stream, verts.ToArray(),
-                    allNormals ? normals.ToArray() : Array.Empty<Vector3>(), uvs.ToArray(), submeshes);
-            extracted++;
-            producedGuids?.Add(asset.Guid);
-
-            // The prefab's own lower level, cached beside it. Written only when it actually builds and is
-            // smaller: a level that is not cheaper buys nothing and would only add an instance to cull.
-            string lod1Path = Path.Combine(cacheDir, asset.Guid.ToString("N") + Lod1Suffix);
+            // The prefab's own lower level, cached beside it — and cached BEFORE the base mesh becomes
+            // current. Presence of "<guid>.mesh" in the current format is the whole warm-cache signal, so
+            // a crash between the two writes with the base first would leave an entry that is complete by
+            // its own rules and permanently missing its level. Writing the level first makes the base
+            // mesh the commit point for the pair.
+            string stem = Path.Combine(cacheDir, asset.Guid.ToString("N"));
+            string lod1Path = stem + Lod1Suffix;
             File.Delete(lod1Path); // never keep a previous source's level for a colliding GUID
+            // Written only when it actually builds and is materially cheaper: a level within
+            // Lod1MaxTriangleRatio of the base saves almost no geometry while its MultiMesh and its copy
+            // of the placement transforms stay resident for the whole session.
             if (graph.Lod1PartsByKey.TryGetValue(key, out List<MeshPart>? lod1Parts)
                 && BuildLevel(lod1Parts, out List<Vector3> lodVerts, out List<Vector3> lodNormals,
                     out List<Vector2> lodUvs, out List<CachedSubmesh> lodSubmeshes, out bool lodNormalsOk,
                     requireEveryPart: true)
-                && TriangleTotal(lodSubmeshes) < TriangleTotal(submeshes))
+                && TriangleTotal(lodSubmeshes) <= TriangleTotal(submeshes) * Lod1MaxTriangleRatio)
             {
-                using var lodStream = File.Create(lod1Path);
-                MeshCache.Write(lodStream, lodVerts.ToArray(),
+                WriteMeshAtomically(lod1Path, stem + ".lod1.tmp", lodVerts.ToArray(),
                     lodNormalsOk ? lodNormals.ToArray() : Array.Empty<Vector3>(), lodUvs.ToArray(), lodSubmeshes);
             }
+
+            // Cache the authored per-vertex normals (Unturned's own hard/soft edges); ModelLibrary falls
+            // back to deriving smooth normals only when a part shipped without them. Written through a
+            // temporary so a kill mid-write cannot leave a truncated file whose header still reads current.
+            WriteMeshAtomically(stem + ".mesh", stem + ".tmp", verts.ToArray(),
+                allNormals ? normals.ToArray() : Array.Empty<Vector3>(), uvs.ToArray(), submeshes);
+            extracted++;
+            producedGuids?.Add(asset.Guid);
 
             // Cache the object's colliders next to its mesh (Unity units; converted when the body is built).
             string colliderPath = Path.Combine(cacheDir, asset.Guid.ToString("N") + ".collider");

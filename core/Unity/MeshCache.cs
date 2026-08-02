@@ -37,12 +37,18 @@ public readonly struct CachedSubmesh
 // texture keys), so the 1.4 GB bundle is parsed once and runtime loads only the small meshes it needs.
 public static class MeshCache
 {
-    // "UGMA": extraction now also caches each prefab's authored lower LOD level beside its mesh. A cache
-    // written by UGM9 is complete by its own rules but has no <guid>.lod1.mesh anywhere, and completeness
-    // is decided per mesh — a missing lower level is indistinguishable from a prefab that never had one.
-    // Bumping is what forces one more extraction pass so the levels exist at all; without it the feature
-    // stays silently off for every install that already has a warm cache.
-    private const uint Magic = 0x414D4755;
+    // "UGMB": extraction now also caches each prefab's authored lower LOD level beside its mesh, and keeps
+    // a level only when it is materially cheaper than the base one. A cache written by an earlier magic is
+    // complete by its own rules but has no <guid>.lod1.mesh anywhere, and completeness is decided per mesh
+    // — a missing lower level is indistinguishable from a prefab that never had one. Bumping is what
+    // forces one more extraction pass so the levels exist at all and match the current selection rule;
+    // without it the feature stays silently off for every install that already has a warm cache.
+    private const uint Magic = 0x424D4755;
+
+    // A prefab's authored lower level is cached beside its mesh as "<guid>.lod1.mesh". The suffix still
+    // ends in ".mesh" so a directory scan finds both levels; callers that want only the base level filter
+    // this out explicitly.
+    public const string Lod1Suffix = ".lod1.mesh";
 
     // True when the file starts with the current format magic; false for stale formats, short files or a
     // missing path. Cold-load detection uses this so a format bump re-extracts instead of crashing on Read.

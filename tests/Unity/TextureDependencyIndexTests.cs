@@ -81,13 +81,52 @@ public class TextureDependencyIndexTests
         Assert.False(File.Exists(Path.Combine(textures, TextureKey.For("mod-2", 42) + ".tex")));
     }
 
-    private static void WriteMesh(string directory, Guid guid, params string[] keys)
+    [Fact]
+    public void TheAuthoredLowerLevelsOwnTexturesAreNeededAndPlannedToo()
+    {
+        using var dir = new TempDir();
+        string meshes = Directory.CreateDirectory(Path.Combine(dir.Path, "meshes")).FullName;
+        string textures = Directory.CreateDirectory(Path.Combine(dir.Path, "textures")).FullName;
+        string bundle = dir.Write("mod.masterbundle", new byte[] { 1 });
+        long stamp = ExtractionIndex.StampFor(bundle);
+        Guid needed = Guid.NewGuid();
+
+        // The lower level can bake several of the base level's materials into an atlas of its own, so its
+        // texture is not necessarily one the base mesh references. Planning from the base alone would
+        // leave that atlas undecoded and the level untextured everywhere past the switch distance.
+        WriteMesh(meshes, needed, TextureKey.For("mod", 10));
+        WriteLod1Mesh(meshes, needed, TextureKey.For("mod", 11));
+
+        Assert.Equal(new HashSet<long> { 10, 11 },
+            TextureDependencyIndex.NeededTextureIds(meshes, "mod", new[] { needed }));
+        Assert.Equal(new HashSet<long> { 10, 11 }, TextureDependencyIndex.MissingTextureIds(
+            meshes, textures, "mod", new[] { needed }, bundle, stamp));
+
+        WriteTexture(textures, TextureKey.For("mod", 10), bundle, stamp);
+        WriteTexture(textures, TextureKey.For("mod", 11), bundle, stamp);
+        Assert.Empty(TextureDependencyIndex.MissingTextureIds(
+            meshes, textures, "mod", new[] { needed }, bundle, stamp));
+
+        // And a prefab that never shipped a lower level is unaffected: no file, nothing extra planned.
+        Guid plain = Guid.NewGuid();
+        WriteMesh(meshes, plain, TextureKey.For("mod", 12));
+        Assert.Equal(new HashSet<long> { 12 },
+            TextureDependencyIndex.NeededTextureIds(meshes, "mod", new[] { plain }));
+    }
+
+    private static void WriteMesh(string directory, Guid guid, params string[] keys) =>
+        WriteMeshLevel(directory, guid, ".mesh", keys);
+
+    private static void WriteLod1Mesh(string directory, Guid guid, params string[] keys) =>
+        WriteMeshLevel(directory, guid, MeshCache.Lod1Suffix, keys);
+
+    private static void WriteMeshLevel(string directory, Guid guid, string suffix, string[] keys)
     {
         var submeshes = new List<CachedSubmesh>();
         foreach (string key in keys)
             submeshes.Add(new CachedSubmesh(Array.Empty<int>(), Colors.White, key,
                 UnityMaterial.Blend.Cutout));
-        using FileStream stream = File.Create(Path.Combine(directory, guid.ToString("N") + ".mesh"));
+        using FileStream stream = File.Create(Path.Combine(directory, guid.ToString("N") + suffix));
         MeshCache.Write(stream, Array.Empty<Vector3>(), Array.Empty<Vector3>(), Array.Empty<Vector2>(), submeshes);
     }
 

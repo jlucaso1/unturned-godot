@@ -28,32 +28,41 @@ public static class TextureDependencyIndex
         {
             if (guid == Guid.Empty)
                 continue;
-            string path = Path.Combine(meshCacheDir, guid.ToString("N") + ".mesh");
-            byte[] data;
-            try { data = File.ReadAllBytes(path); }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }
-
-            if (!MeshCache.IsCurrent(data))
-                continue;
-            try
-            {
-                (_, _, _, List<CachedSubmesh> submeshes) = MeshCache.Read(data);
-                foreach (CachedSubmesh sm in submeshes)
-                    if (TextureKey.TryParse(sm.TextureKey, out string owner, out _)
-                        && (string.Equals(owner, bundleTag, StringComparison.Ordinal)
-                            || (includeSecondary && IsBundleFileTag(owner, bundleTag))))
-                    {
-                        keys.Add(sm.TextureKey);
-                    }
-            }
-            catch (Exception e) when (e is InvalidDataException or ArgumentOutOfRangeException
-                or IndexOutOfRangeException or OverflowException)
-            {
-                // A corrupt cache entry is already unusable as a mesh. Let mesh completeness drive its
-                // replacement; it must not prevent the remaining valid entries from being inspected.
-            }
+            // Both cached levels: a texture worn only by the authored lower level is just as needed, and
+            // leaving it out of the plan is what would make that level render untextured at distance.
+            string stem = Path.Combine(meshCacheDir, guid.ToString("N"));
+            AddKeysFrom(stem + ".mesh", keys, bundleTag, includeSecondary);
+            AddKeysFrom(stem + MeshCache.Lod1Suffix, keys, bundleTag, includeSecondary);
         }
         return keys;
+    }
+
+    private static void AddKeysFrom(string path, HashSet<string> keys, string bundleTag,
+        bool includeSecondary)
+    {
+        byte[] data;
+        try { data = File.ReadAllBytes(path); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return; }
+
+        if (!MeshCache.IsCurrent(data))
+            return;
+        try
+        {
+            (_, _, _, List<CachedSubmesh> submeshes) = MeshCache.Read(data);
+            foreach (CachedSubmesh sm in submeshes)
+                if (TextureKey.TryParse(sm.TextureKey, out string owner, out _)
+                    && (string.Equals(owner, bundleTag, StringComparison.Ordinal)
+                        || (includeSecondary && IsBundleFileTag(owner, bundleTag))))
+                {
+                    keys.Add(sm.TextureKey);
+                }
+        }
+        catch (Exception e) when (e is InvalidDataException or ArgumentOutOfRangeException
+            or IndexOutOfRangeException or OverflowException)
+        {
+            // A corrupt cache entry is already unusable as a mesh. Let mesh completeness drive its
+            // replacement; it must not prevent the remaining valid entries from being inspected.
+        }
     }
 
     public static HashSet<long> MissingTextureIds(string meshCacheDir, string textureCacheDir,
