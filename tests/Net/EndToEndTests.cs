@@ -18,6 +18,9 @@ public class EndToEndTests
 
     private static readonly Vector3 Spawn = new(0, 10f, 0);
 
+    // The level the server runs; clients build it too unless a test says otherwise.
+    private const string Level = "PEI";
+
     private sealed class Harness
     {
         public readonly LoopbackServerTransport ServerTransport = new();
@@ -30,16 +33,16 @@ public class EndToEndTests
         public Harness(IServerTransport? transport = null)
         {
             Server = new NetServer(transport ?? ServerTransport,
-                new ServerSimulation(new HeightfieldMoveSolver(FlatGround)), Spawn);
+                new ServerSimulation(new HeightfieldMoveSolver(FlatGround)), Spawn, Level);
         }
 
         public readonly List<LoopbackClientTransport> Transports = new();
 
-        public NetClient Join(string name)
+        public NetClient Join(string name, string level = Level)
         {
             LoopbackClientTransport transport = ServerTransport.CreateClient();
             Transports.Add(transport);
-            var client = new NetClient(transport, name);
+            var client = new NetClient(transport, name, level);
             Clients.Add(client);
             return client;
         }
@@ -55,6 +58,25 @@ public class EndToEndTests
                     client.Update(Now);
             }
         }
+    }
+
+    // The bug end to end: the host opened PEI, a friend's client had California 2 selected, and the
+    // friend joined anyway. Now that client is refused with a reason and never appears in the session,
+    // while a client on the right map plays on beside it.
+    [Fact]
+    public void APlayerWhoBuiltAnotherMap_NeverEntersTheSession()
+    {
+        var h = new Harness();
+        NetClient right = h.Join("Right");
+        NetClient wrong = h.Join("Wrong", "California 2");
+        h.Pump(4);
+
+        Assert.True(right.Joined);
+        Assert.False(wrong.Joined);
+        Assert.Equal(1, h.Server.PlayerCount);
+        Assert.Empty(right.Remotes);  // nobody from another world showed up in this one
+        Assert.Equal(EJoinRejection.LevelMismatch, wrong.Rejection!.Value.Reason);
+        Assert.Equal(Level, wrong.Rejection!.Value.ServerLevel);
     }
 
     [Fact]
@@ -151,10 +173,10 @@ public class EndToEndTests
         var hostSide = new LoopbackServerTransport();
         var lanSide = new LoopbackServerTransport();
         var server = new NetServer(new CompositeServerTransport(hostSide, lanSide),
-            new ServerSimulation(new HeightfieldMoveSolver(FlatGround)), Spawn);
+            new ServerSimulation(new HeightfieldMoveSolver(FlatGround)), Spawn, Level);
 
-        var host = new NetClient(hostSide.CreateClient(), "Host");
-        var friend = new NetClient(lanSide.CreateClient(), "Friend");
+        var host = new NetClient(hostSide.CreateClient(), "Host", Level);
+        var friend = new NetClient(lanSide.CreateClient(), "Friend", Level);
 
         double now = 0;
         for (int i = 0; i < 30; i++)
@@ -184,7 +206,7 @@ public class EndToEndTests
         // Hello re-sends on its retry cadence and the join completes once the server appears.
         var h = new Harness();
         LoopbackClientTransport transport = h.ServerTransport.CreateClient();
-        var late = new NetClient(transport, "Late");
+        var late = new NetClient(transport, "Late", Level);
         h.Clients.Add(late);
 
         // Pump ONLY the client for a while (the server never drains its queue = effectively absent).
@@ -225,8 +247,8 @@ public class EndToEndTests
         var hostSide = new LoopbackServerTransport();
         var composite = new CompositeServerTransport(hostSide);
         var server = new NetServer(composite,
-            new ServerSimulation(new HeightfieldMoveSolver(FlatGround)), Spawn);
-        var host = new NetClient(hostSide.CreateClient(), "Host");
+            new ServerSimulation(new HeightfieldMoveSolver(FlatGround)), Spawn, Level);
+        var host = new NetClient(hostSide.CreateClient(), "Host", Level);
 
         double now = 5000;
         for (int i = 0; i < 5; i++)
@@ -239,7 +261,7 @@ public class EndToEndTests
 
         var lanSide = new LoopbackServerTransport();
         composite.Add(lanSide); // the pause-menu button
-        var friend = new NetClient(lanSide.CreateClient(), "Friend");
+        var friend = new NetClient(lanSide.CreateClient(), "Friend", Level);
         for (int i = 0; i < 5; i++)
         {
             now += ServerSimulation.TickRate;

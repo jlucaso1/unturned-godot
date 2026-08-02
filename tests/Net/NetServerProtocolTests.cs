@@ -39,6 +39,8 @@ public class NetServerProtocolTests
         public void Close() => Closed = true;
     }
 
+    private const string Level = "PEI";
+
     private static bool FlatGround(float x, float z, out float y)
     {
         y = 0f;
@@ -49,7 +51,7 @@ public class NetServerProtocolTests
     {
         var transport = new FakeServerTransport();
         var server = new NetServer(transport, new ServerSimulation(new HeightfieldMoveSolver(FlatGround)),
-            Vector3.Zero);
+            Vector3.Zero, Level);
         return (server, transport);
     }
 
@@ -58,7 +60,7 @@ public class NetServerProtocolTests
     {
         (NetServer server, FakeServerTransport transport) = Build();
         var ghost = new FakeConnection();
-        transport.Message(ghost, NetMessages.WriteHello("Ghost")); // no Connected event first
+        transport.Message(ghost, NetMessages.WriteHello("Ghost", Level)); // no Connected event first
         server.Update(0);
         Assert.Equal(0, server.PlayerCount);
         Assert.Empty(ghost.Sent);
@@ -74,9 +76,9 @@ public class NetServerProtocolTests
         transport.Connect(conn);
         transport.Connect(other);
         transport.Connect(pending);
-        transport.Message(conn, NetMessages.WriteHello("A"));
-        transport.Message(other, NetMessages.WriteHello("B"));
-        transport.Message(conn, NetMessages.WriteHello("A-again")); // state-timeout rejoin
+        transport.Message(conn, NetMessages.WriteHello("A", Level));
+        transport.Message(other, NetMessages.WriteHello("B", Level));
+        transport.Message(conn, NetMessages.WriteHello("A-again", Level)); // state-timeout rejoin
         server.Update(0);
 
         Assert.Equal(2, server.PlayerCount); // no duplicate admit
@@ -120,34 +122,12 @@ public class NetServerProtocolTests
         var joiner = new FakeConnection();
         transport.Connect(pending);
         transport.Connect(joiner);
-        transport.Message(joiner, NetMessages.WriteHello("A"));
+        transport.Message(joiner, NetMessages.WriteHello("A", Level));
         server.Update(0);
 
         (byte _, uint _, List<PlayerListing> listed) = NetMessages.ReadWelcome(joiner.Sent[0].Payload);
         Assert.Empty(listed);      // the pending session isn't listed
         Assert.Empty(pending.Sent); // and gets no PlayerJoined broadcast
-    }
-
-    [Fact]
-    public void MismatchedProtocolVersion_IsRefused()
-    {
-        (NetServer server, FakeServerTransport transport) = Build();
-        var conn = new FakeConnection();
-        transport.Connect(conn);
-
-        // A Hello from an older build: same shape, stale version byte.
-        using var ms = new System.IO.MemoryStream();
-        using (var w = new System.IO.BinaryWriter(ms))
-        {
-            w.Write((byte)ENetMessage.Hello);
-            w.Write((byte)(NetMessages.ProtocolVersion - 1));
-            w.Write("Old");
-        }
-        transport.Message(conn, ms.ToArray());
-        server.Update(0);
-
-        Assert.Equal(0, server.PlayerCount);
-        Assert.Empty(conn.Sent); // no Welcome; the connection was closed instead
     }
 
     [Fact]

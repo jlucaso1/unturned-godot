@@ -131,6 +131,7 @@ public class ZombieHostTests
     }
 
     private static readonly Vector3 Spawn = new(0, 10f, 0);
+    private const string Level = "PEI";
 
     private sealed class Harness
     {
@@ -155,7 +156,7 @@ public class ZombieHostTests
             var table = new ZombieTable { Name = "Civilian", Health = 100, Damage = 10 };
             System = new ZombieSystem(new[] { table }, bounds, FlatGround);
             Server = new NetServer(ServerTransport,
-                new ServerSimulation(new HeightfieldMoveSolver(FlatGround)), Spawn);
+                new ServerSimulation(new HeightfieldMoveSolver(FlatGround)), Spawn, Level);
             _ = new ZombieHost(System, Server);
         }
 
@@ -196,7 +197,7 @@ public class ZombieHostTests
     {
         LoopbackClientTransport transport = h.ServerTransport.CreateClient();
         h.Transports.Add(transport);
-        var client = new NetClient(transport, name);
+        var client = new NetClient(transport, name, Level);
         var zoo = new List<ZombieListing>();
         var batches = new List<List<ZombieSnapshotState>>();
         client.OnUnhandledMessage = payload =>
