@@ -206,6 +206,12 @@ a path (`UG_OBJECT_CHUNK_METRES`, `SCREENSHOT_PATH`, `TIME_OF_DAY`, …) are una
   which is the A/B control for the whole mechanism. It responds to how dense a group is rather than how
   far it is spread, which is why one setting suits maps of different sizes: a wider map multiplies spread
   but not density.
+- `UG_OBJECT_LOD=0` drops the prefab's authored lower level and draws LOD-0 at every distance.
+  `UG_OBJECT_LOD_RADII=<n>` is how many mesh radii away that level takes over, `UG_OBJECT_LOD_FADE=1`
+  opts into the dithered swap, and `UG_OBJECT_LOD_CHUNK_METRES` bounds the cells of levelled groups.
+- `UG_MESH_LOD_THRESHOLD=<pixels>` sets the viewport's mesh LOD threshold, which drives the levels
+  Godot generates for every mesh itself; zero disables it and is the control for measuring what
+  automatic LOD contributes.
 - `UG_COLLISION_CHUNK_METRES=0` disables physics-body partitioning for A/B comparisons.
 - `UG_FOLIAGE_CHUNK_TILES=<1..32>` changes the number of 32 m foliage tiles per render chunk;
   `UG_FOLIAGE_DISTANCE=<metres>` changes its fade range.
@@ -291,5 +297,33 @@ interactive spawn. The deterministic far-pose run retired 704 chunks before repo
 resident chunks, and recorded zero visible-set misses, stale results, and decode failures. Frame timing is
 intentionally not summarized from one pair; use repeated reports because compositor and host scheduling
 noise is larger than the observed difference.
+
+## Object LOD ideas that were measured and dropped
+
+Recorded because each one looks obviously worth doing until it is measured, and the counts that rule
+them out cost hours to reproduce. Measured per pose on PEI and Germany against the shipped defaults.
+
+**A third authored level.** Prefabs name their levels `_0`, `_1`, `_2`; the port caches the first two.
+Only a tenth of prefab roots ship a third, and maps place few of them: on the two maps measured they
+were about 3% and 4% of placements, bounding what a third level could remove at roughly 2-4% of the
+ground view's geometry — and that bound assumes every such placement is simultaneously far enough to
+use it. Against that, every extra level costs another batch per chunked group, which is the cost the
+cell sizing works to avoid. The assets involved are mostly street furniture (lights, signals, signs),
+not the trees and fences that dominate placed geometry.
+
+**Reading Unity's authored LOD distances.** A `LODGroup` stores a screen-height fraction per level,
+which at a fixed FOV is a multiple of object size — the same rule shape the port already uses, so the
+only question was the constant and the per-asset spread. The authored switches cluster around the value
+the port uses, and sweeping that value across a factor of four moves the ground view's geometry by well
+under a percent while leaving the aerial poses byte-identical. Per-asset thresholds cannot beat that
+bound. The reason is that automatic mesh LOD has already decimated the base mesh by the distances where
+an authored level would take over, so which of the two answers first barely matters.
+
+**Raising the viewport's mesh LOD threshold.** This one does have an effect, and an uneven one: it
+barely moves a standing ground view while roughly halving a near view and taking a tenth off the aerial
+poses. It is not adopted here because the harness has no vantage that would show its cost — the
+ground-level pose it captures is open beach, where foliage submits nothing at all (an all-resident
+foliage control reproduces the counts byte-identically). Judging it needs a town-dense, foliage-dense
+pose; until then the shipped value stays at Godot's default.
 
 Profiling output (`*.nettrace`, `heaptrack.*.zst`, `massif.out.*`, `perf.data`, `*.rgp`) is git-ignored.
