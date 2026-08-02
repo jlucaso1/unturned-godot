@@ -1097,6 +1097,26 @@ public class PhysicsBodyOrderTests
     }
 
     [Fact]
+    public void BenchmarkScriptBuildsTheManagedProjectUnlessExplicitlySkipped()
+    {
+        if (FindRepositoryFile(Path.Combine("scripts", "run-benchmark.sh")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        int tierValidation = source.IndexOf("case \"$tier\" in", StringComparison.Ordinal);
+        int skipGuard = source.IndexOf("${UG_BENCH_SKIP_BUILD:-0}", tierValidation,
+            StringComparison.Ordinal);
+        int build = source.IndexOf("dotnet build \"$repo_dir/unturned-godot.csproj\"", skipGuard,
+            StringComparison.Ordinal);
+        int launch = source.IndexOf("case \"$tier\" in", tierValidation + 1, StringComparison.Ordinal);
+
+        Assert.True(tierValidation >= 0 && skipGuard > tierValidation && build > skipGuard,
+            "the benchmark must not let Godot silently run a stale managed assembly");
+        Assert.True(launch > build, "the managed build must finish before any benchmark tier launches");
+        Assert.Contains("command -v dotnet", source);
+    }
+
+    [Fact]
     public void ShutdownKeepsTheFirstFailureCodeAcrossRepeatedQuitRequests()
     {
         if (FindRepositoryFile(Path.Combine("src", "AppShutdown.cs")) is not { } path)

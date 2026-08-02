@@ -99,6 +99,11 @@ the incantation:
 ./scripts/run-benchmark.sh runtime      # Tier 3 — same
 ```
 
+The runner builds the managed Godot project before launching because command-line Godot does not compile
+C# sources and otherwise can silently benchmark an assembly left by another checkout. For a scripted
+matrix, build the exact checkout once and set `UG_BENCH_SKIP_BUILD=1` on its individual runs; do not use
+that opt-out across source changes.
+
 **What survives software rendering, measured rather than assumed.** Two identical runs of each tier on a
 GPU-less 4-vCPU container:
 
