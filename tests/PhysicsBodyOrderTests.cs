@@ -325,14 +325,22 @@ public class PhysicsBodyOrderTests
     {
         if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } path)
             return;
+        // The cold build stages part of its work across frames, so it is a Task rather than a void
+        // callback and settles _completion through a faulted continuation — the same shape the warm path
+        // uses. What must not change is that a throw reaches _completion instead of leaving the loading
+        // flow awaiting forever.
         string source = File.ReadAllText(path);
-        int method = source.IndexOf("private void OnMeshesExtracted()", StringComparison.Ordinal);
-        int nextMethod = source.IndexOf("public override void _Process", method + 1, StringComparison.Ordinal);
-        Assert.True(method >= 0 && nextMethod > method);
-        string body = source.Substring(method, nextMethod - method);
-        Assert.Contains("try", body);
-        Assert.Contains("catch (Exception e)", body);
-        Assert.Contains("_completion.TrySetException(e)", body);
+        int start = source.IndexOf("if (_meshesExtracted && !_coldBuildStarted)", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the cold build must keep its single-entry latch");
+        int end = source.IndexOf("private ", start + 1, StringComparison.Ordinal);
+        string body = source.Substring(start, end - start);
+        Assert.Contains("_coldBuildTask = OnMeshesExtractedAsync();", body);
+        Assert.Contains("_completion.TrySetException(t.Exception!.InnerExceptions)", body);
+        Assert.Contains("TaskContinuationOptions.OnlyOnFaulted", body);
+        // The build spans frames now, so a cancel can land mid-flight: the task has to be reachable from
+        // CancelAsync, and the build itself must not attach a scene to a node already on its way out.
+        Assert.Contains("await ObserveStopped(_coldBuildTask);", source);
+        Assert.Contains("if (_loadCancellation.IsCancellationRequested)\n            return;", source);
     }
 
     [Fact]
