@@ -6,10 +6,16 @@ namespace UnturnedGodot;
 // Headless scripted client for standalone multiplayer verification: BOT_JOIN=host:port connects a
 // NetClient over UDP, walks forward, and periodically prints what it sees (its own server state and
 // every remote player's interpolated position). BOT_SECONDS bounds the run (default 20).
+//
+// It asks the server which level it runs before saying Hello. A real client does that to BUILD the
+// right world; this one builds nothing, so it simply adopts the answer — which also makes every bot
+// run an end-to-end exercise of the pre-join query over real sockets.
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class BotClient : Node
 {
-    private NetClient _client = null!;
+    private NetClient? _client;
+    private ServerQuery _query = null!;
+    private string _botName = "Bot";
     private IClientTransport _transport = null!;
     private double _started = -1;
     private double _lastReport;
@@ -32,10 +38,20 @@ public partial class BotClient : Node
         {
             Name = "BotClient",
             _transport = transport,
-            _client = new NetClient(transport, name),
+            _botName = name,
             _lifetime = lifetime,
         };
-        node._client.OnUnhandledMessage += payload =>
+        node._query = new ServerQuery(transport);
+        Log.Print($"[bot] '{name}' asking {host}:{port} which level it runs ({lifetime}s run)");
+        return node;
+    }
+
+    private NetClient StartSession(string level)
+    {
+        var client = new NetClient(_transport, _botName, level);
+        client.OnRejected += rejection =>
+            Log.PushWarning($"[bot] refused: {NetworkManager.Describe(rejection)}");
+        client.OnUnhandledMessage += payload =>
         {
             // A subscriber that reads the wire owns its decode guard — NetClient's is scoped to its own
             // messages, so a truncated ZombieList reaching here unguarded would end the process.
@@ -46,15 +62,15 @@ public partial class BotClient : Node
             {
                 case ENetMessage.ZombieList:
                     if (MalformedPacket.TryDecode(payload, ReadZombieList, out var list))
-                        node._zombiesListed += list.Listings.Count;
+                        _zombiesListed += list.Listings.Count;
                     break;
                 case ENetMessage.ZombieStates:
-                    node._zombieStateMessages++;
+                    _zombieStateMessages++;
                     break;
             }
         };
-        Log.Print($"[bot] '{name}' connecting to {host}:{port} for {lifetime}s");
-        return node;
+        Log.Print($"[bot] '{_botName}' joining on '{level}'");
+        return client;
     }
 
     public override void _PhysicsProcess(double delta)
@@ -63,12 +79,37 @@ public partial class BotClient : Node
         if (_started < 0)
             _started = now;
 
-        _client.Update(now);
+        // Checked before anything else so BOT_SECONDS bounds the run even if the handshake never
+        // completes (no server there, or one that refuses us).
+        if (now - _started > _lifetime)
+        {
+            Log.Print("[bot] done");
+            GetTree().Quit();
+            return;
+        }
 
-        if (_client.Joined && now - _lastInput >= UnturnedGodot.Net.ServerSimulation.TickRate)
+        // Nothing to say until we know which world this server runs.
+        if (_client == null)
+        {
+            _query.Update(now);
+            if (_query.State == EServerQueryState.TimedOut)
+            {
+                Log.PrintErr("[bot] no server answered the level query; giving up");
+                GetTree().Quit(1);
+                return;
+            }
+            if (_query.State != EServerQueryState.Answered)
+                return;
+            _client = StartSession(_query.Info!.Level);
+        }
+
+        NetClient client = _client;
+        client.Update(now);
+
+        if (client.Joined && now - _lastInput >= UnturnedGodot.Net.ServerSimulation.TickRate)
         {
             _lastInput = now;
-            _client.SendInput(new InputCommand(_frame++, 0, -1, jump: false, sprint: false,
+            client.SendInput(new InputCommand(_frame++, 0, -1, jump: false, sprint: false,
                 yaw: NetAngles.QuantizeYaw(0f), pitch: 90));
         }
 
@@ -76,21 +117,15 @@ public partial class BotClient : Node
         {
             _lastReport = now;
             var line = new System.Text.StringBuilder();
-            line.Append($"[bot] joined={_client.Joined} id={_client.PlayerId} " +
-                $"self=({_client.LocalServerState.Position.X:F1},{_client.LocalServerState.Position.Y:F1},{_client.LocalServerState.Position.Z:F1})");
-            foreach ((byte id, RemotePlayer remote) in _client.Remotes)
+            line.Append($"[bot] joined={client.Joined} id={client.PlayerId} " +
+                $"self=({client.LocalServerState.Position.X:F1},{client.LocalServerState.Position.Y:F1},{client.LocalServerState.Position.Z:F1})");
+            foreach ((byte id, RemotePlayer remote) in client.Remotes)
             {
                 PoseSnapshot pose = remote.Sample(now);
                 line.Append($" | {remote.Name}#{id}=({pose.Position.X:F1},{pose.Position.Y:F1},{pose.Position.Z:F1})");
             }
             line.Append($" | zombies={_zombiesListed} zombieStateMsgs={_zombieStateMessages}");
             Log.Print(line.ToString());
-        }
-
-        if (now - _started > _lifetime)
-        {
-            Log.Print("[bot] done");
-            GetTree().Quit();
         }
     }
 

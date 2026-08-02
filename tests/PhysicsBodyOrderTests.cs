@@ -187,8 +187,14 @@ public class PhysicsBodyOrderTests
 
         string menu = File.ReadAllText(menuPath);
         string picker = File.ReadAllText(pickerPath);
-        Assert.Equal(2, CountOccurrences(menu, "OnStart?.Invoke(map.SelectionKey"));
+
+        // Play carries the exact selection key, because workshop folder names are not unique.
+        Assert.Equal(1, CountOccurrences(menu, "OnStart?.Invoke(map.SelectionKey"));
         Assert.Contains("_maps[i].SelectionKey", picker);
+
+        // Connect carries no map at all: the server names the level it runs and the client builds
+        // that one. Passing the browser's selection here is what put a joining player on the wrong map.
+        Assert.Equal(1, CountOccurrences(menu, "OnStart?.Invoke(\"\", address)"));
     }
 
     [Fact]

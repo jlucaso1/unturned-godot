@@ -1,6 +1,7 @@
 using Godot;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Data;
+using UnturnedGodot.Net;
 
 namespace UnturnedGodot;
 
@@ -127,7 +128,8 @@ public partial class Main : Node3D
 
             _mapName = serverMap.SelectionKey;
             (Vector3 serverSpawn, _) = ResolveSpawn(unturnedPath, _mapName, heights: null);
-            AddChild(DedicatedServer.Create(unturnedPath, _mapName, serverSpawn, serverPort));
+            AddChild(DedicatedServer.Create(unturnedPath, _mapName, serverMap.FolderName, serverSpawn,
+                serverPort));
             return;
         }
 
@@ -230,7 +232,7 @@ public partial class Main : Node3D
             || OS.GetEnvironment("MAP") is { Length: > 0 };
         if (autoStart)
         {
-            _ = StartInteractiveWorld(unturnedPath, environmentDir, lighting,
+            _ = StartInteractiveWorld(unturnedPath,
                 OS.GetEnvironment("JOIN") is { Length: > 0 } join ? join : null);
             return;
         }
@@ -239,14 +241,14 @@ public partial class Main : Node3D
         menu.OnStart = (mapName, joinTarget) =>
         {
             menu.QueueFree();
-            _mapName = mapName;
-            SaveLastMap(mapName);
-
-            // The map is only known now, so its lighting is read here rather than at boot.
-            string mapEnvironment = EnvironmentDir(unturnedPath, mapName);
-            LevelLighting? mapLighting =
-                LevelLighting.Load(System.IO.Path.Combine(mapEnvironment, "Lighting.dat"));
-            _ = StartInteractiveWorld(unturnedPath, mapEnvironment, mapLighting, joinTarget);
+            // Joining carries no map: the server's answer decides it, so the remembered pick stays
+            // untouched — including when the join never gets off the ground and we come back here.
+            if (joinTarget == null)
+            {
+                _mapName = mapName;
+                SaveLastMap(mapName);
+            }
+            _ = StartInteractiveWorld(unturnedPath, joinTarget);
         };
         AddChild(menu);
     }
@@ -271,8 +273,8 @@ public partial class Main : Node3D
 
         var body = new CharacterBody3D
         {
-            CollisionLayer = 2,
-            CollisionMask = 1 | ObjectsBuilder.MediumFurnitureLayer,
+            CollisionLayer = CollisionLayers.Player,
+            CollisionMask = CollisionLayers.CharacterMask,
             FloorMaxAngle = Mathf.DegToRad(Player.PlayerConfig.MaxWalkableSlopeDegrees),
             FloorSnapLength = 0.5f,
             FloorStopOnSlope = true,
@@ -342,6 +344,19 @@ public partial class Main : Node3D
         return map is { SizeMetres: > 0f } ? map.SizeMetres : 4 * Landscape.TILE_SIZE;
     }
 
+    // How this map is named ON THE WIRE: its folder name, the one identity two machines can agree on.
+    // A selection key can be a workshop path that exists nowhere else, and a display name is localized.
+    //
+    // Folder names are not globally unique — two workshop items can ship "Ireland" — so this cannot
+    // prove the two ends hold the SAME content, only that they agree on which map they mean. A
+    // stronger identity would have to be a content signature: the workshop item id is not it, since
+    // the same map reached through a subscription on one machine and the game's bundled copy on the
+    // other carries different ids and would refuse a join that is perfectly fine. Unturned itself
+    // keys servers by map name for the same reason. What this does close is the reported failure —
+    // two different maps, silently played at once.
+    private static string LevelIdentity(string unturnedPath, string mapName) =>
+        MapCatalog.Find(unturnedPath, mapName)?.FolderName ?? mapName;
+
     // The map's localized name for the UI, falling back to the folder name.
     private static string MapDisplayName(string unturnedPath, string mapName) =>
         MapCatalog.Read(MapCatalog.ResolvePath(unturnedPath, mapName), MapSource.Official)?.DisplayName
@@ -392,15 +407,27 @@ public partial class Main : Node3D
 
     // Builds the streamed interactive world behind a loading screen, yielding to the render loop between
     // stages (and inside the heavy ones) so the UI never freezes; joinTarget != null also connects there.
-    private async System.Threading.Tasks.Task StartInteractiveWorld(string unturnedPath, string environmentDir,
-        LevelLighting? lighting, string? joinTarget)
+    private async System.Threading.Tasks.Task StartInteractiveWorld(string unturnedPath, string? joinTarget)
     {
         _pendingJoin = joinTarget;
 
-        var loading = new LoadingScreen { Name = "LoadingScreen", MapName = MapDisplayName(unturnedPath, _mapName) };
+        var loading = new LoadingScreen
+        {
+            Name = "LoadingScreen",
+            MapName = joinTarget == null ? MapDisplayName(unturnedPath, _mapName) : "",
+        };
         AddChild(loading);
         await NextFrame(); // paint the loading screen before any heavy work
         long loadStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+
+        // Joining: the SERVER decides which map is played, so ask it before building anything. The
+        // client used to build whatever the map browser had selected and connect regardless, which is
+        // how a player joined a PEI host and spawned into California 2 — same session, two worlds.
+        if (joinTarget != null && !await AdoptServerMap(unturnedPath, joinTarget, loading))
+            return;
+
+        string environmentDir = EnvironmentDir(unturnedPath, _mapName);
+        LevelLighting? lighting = LevelLighting.Load(System.IO.Path.Combine(environmentDir, "Lighting.dat"));
 
         // The navigation map goes up next, not before the screen: parsing the pre-baked navmesh and handing
         // it to the NavigationServer takes a couple of seconds on a large map, and doing that first meant
@@ -429,9 +456,136 @@ public partial class Main : Node3D
         }
     }
 
+    // Asks the server which level it runs and points this session at that map. False means the join is
+    // over before it started (nobody answered, or the map is not installed here) — the loading screen
+    // already says why and offers the way back.
+    private async System.Threading.Tasks.Task<bool> AdoptServerMap(string unturnedPath, string joinTarget,
+        LoadingScreen loading)
+    {
+        (string host, ushort port) = ParseJoinTarget(joinTarget);
+        loading.SetStatus($"Asking {host}:{port} which map it is running…");
+
+        ServerInfo? info;
+        try
+        {
+            info = await QueryServer(host, port);
+        }
+        catch (System.Exception e) when (e is System.Net.Sockets.SocketException or System.ArgumentException)
+        {
+            // An unresolvable host never gets as far as a datagram.
+            return FailJoin(loading, $"Could not reach {host}:{port} — {e.Message}");
+        }
+
+        if (info == null)
+            return FailJoin(loading, $"No server answered at {host}:{port}.");
+
+        // Everything the handshake would refuse us for is already knowable here, and finding out now
+        // costs seconds instead of a full world build followed by a kick.
+        if (info.ProtocolVersion != NetMessages.ProtocolVersion)
+        {
+            return FailJoin(loading, $"That server speaks protocol {info.ProtocolVersion} and this "
+                + $"build speaks {NetMessages.ProtocolVersion}: one of them needs updating.");
+        }
+        if (info.FreeSlots == 0)
+            return FailJoin(loading, $"That server is full ({info.PlayerCount} players).");
+
+        // The wire carries the map's FOLDER name; resolve it against what is installed here, exactly
+        // as the map browser and the command line do.
+        MapEntry? map = MapCatalog.Find(unturnedPath, info.Level);
+        if (map == null)
+        {
+            return FailJoin(loading,
+                $"That server is running '{info.Level}', which is not installed on this machine.");
+        }
+        if (!map.IsSupported)
+        {
+            return FailJoin(loading, $"That server is running '{map.DisplayName}', whose terrain format "
+                + "this port cannot read yet.");
+        }
+
+        _mapName = map.SelectionKey;
+        loading.SetMap(map.DisplayName);
+        Log.Print($"[net] {host}:{port} is running '{info.Level}' ({info.PlayerCount} online); loading it");
+        return true;
+    }
+
+    // Always false, so the callers can `return FailJoin(...)`: the join is over either way.
+    private bool FailJoin(LoadingScreen loading, string message)
+    {
+        Log.PrintErr($"[net] could not join: {message}");
+        if (_headlessInteractive)
+        {
+            // No display to show the screen on and no input to press its button with; the same reason
+            // a failed world build ends the process in this mode.
+            GetTree().Quit(1);
+            return false;
+        }
+        loading.Fail(message, BackToMenu, "Could not join.");
+        return false;
+    }
+
+    // Runs the pre-join query on its own short-lived socket, pumped from the frame loop. The session's
+    // real connection is opened later, once the world is built: holding this one open through a load
+    // that takes minutes would only have the server time it out.
+    private async System.Threading.Tasks.Task<ServerInfo?> QueryServer(string host, ushort port)
+    {
+        var transport = new UdpClientTransport(host, port);
+        try
+        {
+            var query = new ServerQuery(transport);
+            while (query.State == EServerQueryState.Pending)
+            {
+                if (AppShutdown.IsShuttingDown)
+                    return null;
+                query.Update(NetworkManager.Now);
+                await NextFrame();
+            }
+            return query.Info;
+        }
+        finally
+        {
+            transport.Close();
+        }
+    }
+
+    // "host", "host:port" or an IPv4 address with either shape.
+    private static (string Host, ushort Port) ParseJoinTarget(string target)
+    {
+        string[] parts = target.Split(':');
+        return (parts[0],
+            parts.Length > 1 && ushort.TryParse(parts[1], out ushort port) ? port : NetworkManager.DefaultPort);
+    }
+
+    // The server hung up on us. The join flow asks which map to build before connecting, so reaching
+    // here means something changed underneath (the host switched maps, filled up, or runs another
+    // build): say so and offer the way back, rather than leaving the player alone in a loaded world.
+    private void ShowJoinRefused(JoinRejection rejection)
+    {
+        if (_joinRefused)
+            return;
+        _joinRefused = true; // one screen per session; BackToMenu clears it for the next attempt
+
+        if (_headlessInteractive)
+        {
+            // Same reason FailJoin quits: no display for the screen, no input for its button. A
+            // benchmark would otherwise wait on an overlay nothing can ever dismiss.
+            Log.PrintErr($"[net] the server refused the join: {NetworkManager.Describe(rejection)}");
+            GetTree().Quit(1);
+            return;
+        }
+
+        // The player was walking when this arrived, so the cursor is captured and the button under it
+        // is unclickable. Release it, exactly as the menu and the pause screen do.
+        Input.MouseMode = Input.MouseModeEnum.Visible;
+        var screen = new LoadingScreen { Name = "JoinRefused" };
+        AddChild(screen);
+        screen.Fail(NetworkManager.Describe(rejection), BackToMenu, "The server refused the join:");
+    }
+
     // Returns to the map browser after a failed load, clearing whatever the attempt already built.
     private ObjectStreamer? _activeLoadStreamer;
     private bool _returningToMenu;
+    private bool _joinRefused;
     private bool _headlessInteractive;
 
     private async void BackToMenu()
@@ -442,6 +596,7 @@ public partial class Main : Node3D
 
         ObjectStreamer? failedStreamer = _activeLoadStreamer;
         _activeLoadStreamer = null;
+        _joinRefused = false; // the next attempt gets its own refusal screen
         if (failedStreamer != null)
             await failedStreamer.CancelAsync();
 
@@ -456,11 +611,12 @@ public partial class Main : Node3D
         menu.OnStart = (mapName, joinTarget) =>
         {
             menu.QueueFree();
-            _mapName = mapName;
-            SaveLastMap(mapName);
-            string mapEnvironment = EnvironmentDir(_unturnedPath, mapName);
-            _ = StartInteractiveWorld(_unturnedPath, mapEnvironment,
-                LevelLighting.Load(System.IO.Path.Combine(mapEnvironment, "Lighting.dat")), joinTarget);
+            if (joinTarget == null)
+            {
+                _mapName = mapName;
+                SaveLastMap(mapName);
+            }
+            _ = StartInteractiveWorld(_unturnedPath, joinTarget);
         };
         AddChild(menu);
         _returningToMenu = false;
@@ -568,8 +724,9 @@ public partial class Main : Node3D
 
         (Vector3 spawnPosition, float spawnYaw) = ResolveSpawn(unturnedPath, _mapName, heights);
 
-        var network = new NetworkManager { Name = "Network" };
+        var network = new NetworkManager { Name = "Network", LevelName = LevelIdentity(unturnedPath, _mapName) };
         _network = network;
+        network.OnRejected += ShowJoinRefused;
         if (heights != null)
             network.Configure(heights, spawnPosition);
         AddChild(network);
@@ -595,10 +752,8 @@ public partial class Main : Node3D
         // one-player simulation step; the lone StateUpdate doubles as the self-healing keepalive.
         if (_pendingJoin is { Length: > 0 } join)
         {
-            string[] parts = join.Split(':');
-            network.JoinServer(parts[0],
-                parts.Length > 1 && ushort.TryParse(parts[1], out ushort p) ? p : NetworkManager.DefaultPort,
-                playerName);
+            (string host, ushort port) = ParseJoinTarget(join);
+            network.JoinServer(host, port, playerName);
         }
         else
         {
