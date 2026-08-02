@@ -5,8 +5,12 @@ version: 2
 # specifically to lift a published advisory out of a transitive dependency — a mitigation nothing kept
 # fresh is the kind that quietly goes stale.
 updates:
+  # tools/PerfHarness is not in unturned-godot.sln and has its own PackageReference set, so a single "/"
+  # entry would never have seen it. CI builds it separately for the same reason.
   - package-ecosystem: nuget
-    directory: "/"
+    directories:
+      - "/"
+      - "/tools/PerfHarness"
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
