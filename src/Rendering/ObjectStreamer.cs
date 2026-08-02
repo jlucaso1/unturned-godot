@@ -69,6 +69,7 @@ public partial class ObjectStreamer : Node
     // signalling its mesh phase, and the streamer being in the tree with the world around it.
     private volatile bool _cold;
     private bool _meshesExtracted;
+    private bool _coldBuildStarted;
     private bool _readyToBuild;
     private bool _began;
 
@@ -220,8 +221,17 @@ public partial class ObjectStreamer : Node
             return;
         }
 
-        if (_meshesExtracted)
-            OnMeshesExtracted();
+        // Unlike the warm path this cannot mark _sceneBuilt up front as its re-entry guard: that flag
+        // also releases _Process to apply textures, which must not start before the scene exists. A
+        // dedicated latch keeps a second call from building the world twice while the first is still
+        // realising.
+        if (_meshesExtracted && !_coldBuildStarted)
+        {
+            _coldBuildStarted = true;
+            _ = OnMeshesExtractedAsync().ContinueWith(
+                t => _completion.TrySetException(t.Exception!.InnerExceptions),
+                System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted);
+        }
     }
 
     // What the terrain still owes, grouped by the bundle that carries it. Cached layers are excluded, so
@@ -399,11 +409,6 @@ public partial class ObjectStreamer : Node
         catch (Exception) { /* non-Linux or unreadable — diagnostic only */ }
         return 0;
     }
-
-    private void BuildObjects() => BuildObjects(ModelLibrary.Load(_cacheDir, _registry, _neededGuids),
-        ObjectsBuilder.ObjectLodEnabled
-            ? ModelLibrary.Load(_cacheDir, _registry, _neededGuids, ModelExtractor.Lod1Suffix)
-            : new Dictionary<Guid, ArrayMesh>());
 
     private void BuildObjects(Dictionary<Guid, ArrayMesh> meshLibrary,
         Dictionary<Guid, ArrayMesh> lod1Library)
@@ -583,33 +588,35 @@ public partial class ObjectStreamer : Node
 
     // Main thread: meshes are cached — build the (untextured) scene. Textures keep streaming in on the
     // worker; _Process applies them (once this registry exists) as their keys land in the queue.
-    private void OnMeshesExtracted()
+    private async Task OnMeshesExtractedAsync()
     {
-        try
-        {
-            double meshMs = _coldWatch.Elapsed.TotalMilliseconds;
-            BuildObjects();
-            _sceneBuilt = true;
+        Dictionary<Guid, ArrayMesh> meshLibrary = ModelLibrary.Load(_cacheDir, _registry, _neededGuids);
 
-            // Whatever the decode already produced goes on before the world is shown. Applying a texture
-            // changes the material's shader key (an albedo map appears, the filter may switch to nearest, a
-            // cutout swaps shader), so a material that reaches the scene bare and is textured a frame later
-            // makes the renderer build its pipelines twice. Everything still arriving keeps streaming through
-            // _Process; this only closes the gap for what was ready all along, at a cost of tens of ms.
-            _appliedTextures += _registry.ApplyAllAvailable();
+        // Staged across frames, as the warm path already does. Realising these synchronously here
+        // doubled the main-thread stall this callback already had, and it is the one moment the
+        // loading screen is meant to keep animating.
+        Dictionary<Guid, ArrayMesh> lod1Library = ObjectsBuilder.ObjectLodEnabled
+            ? await ModelLibrary.LoadStagedAsync(_cacheDir, _registry, this, _neededGuids,
+                ModelExtractor.Lod1Suffix)
+            : new Dictionary<Guid, ArrayMesh>();
 
-            EmitSignal(SignalName.MeshesReady, meshMs);
-            EmitSignal(SignalName.Progress, _appliedTextures, _totalTextureKeys);
-            Log.Print($"[stream] playable in {meshMs:0} ms ({_appliedTextures}/{_totalTextureKeys} "
-                + "textures already applied); the rest stream in...");
-        }
-        catch (Exception e)
-        {
-            // This callback is deferred from the extraction worker, so an exception cannot fault that
-            // worker. Settle the task the loading flow actually awaits; Main will cancel the remaining
-            // texture pass and return to the menu with the original build error.
-            _completion.TrySetException(e);
-        }
+        BuildObjects(meshLibrary, lod1Library);
+        _sceneBuilt = true;
+        // Read after the build, not before it: this is reported as time-to-playable, and the staged
+        // realise above happens while the player is still waiting.
+        double meshMs = _coldWatch.Elapsed.TotalMilliseconds;
+
+        // Whatever the decode already produced goes on before the world is shown. Applying a texture
+        // changes the material's shader key (an albedo map appears, the filter may switch to nearest, a
+        // cutout swaps shader), so a material that reaches the scene bare and is textured a frame later
+        // makes the renderer build its pipelines twice. Everything still arriving keeps streaming through
+        // _Process; this only closes the gap for what was ready all along, at a cost of tens of ms.
+        _appliedTextures += _registry.ApplyAllAvailable();
+
+        EmitSignal(SignalName.MeshesReady, meshMs);
+        EmitSignal(SignalName.Progress, _appliedTextures, _totalTextureKeys);
+        Log.Print($"[stream] playable in {meshMs:0} ms ({_appliedTextures}/{_totalTextureKeys} "
+            + "textures already applied); the rest stream in...");
     }
 
     public override void _Process(double delta)

@@ -29,6 +29,16 @@ public partial class Main : Node3D
 
     public override void _Ready()
     {
+        // Godot's own automatic mesh LOD, in pixels of screen-space error. 0 disables it outright, which
+        // is the only way to A/B what the meshoptimizer chain ModelLibrary already generates is worth.
+        if (OS.GetEnvironment("UG_MESH_LOD_THRESHOLD") is { Length: > 0 } lodThreshold
+            && float.TryParse(lodThreshold, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out float thresholdPixels)
+            && GetViewport() is { } viewport)
+        {
+            viewport.MeshLodThreshold = Mathf.Clamp(thresholdPixels, 0f, 1024f);
+        }
+
         if (OS.GetEnvironment("MAP") is { Length: > 0 } mapOverride)
             _mapName = mapOverride;
         else if (LoadLastMap() is { Length: > 0 } remembered)
