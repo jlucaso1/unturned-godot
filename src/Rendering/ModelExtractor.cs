@@ -119,6 +119,7 @@ public static class ModelExtractor
             return 0;
         UnityBundle bundle = UnityBundle.Read(raw, SerializedFileCap(raw)); // SerializedFile only
         var produced = new HashSet<Guid>();
+        var staleLevels = new HashSet<Guid>();
         int extracted = 0;
         int serializedFile = 0;
         foreach (KeyValuePair<string, byte[]> f in bundle.Files)
@@ -130,10 +131,11 @@ public static class ModelExtractor
 
             string fileTag = serializedFile++ == 0 ? bundleTag : $"{bundleTag}-{serializedFile}";
             extracted += ExtractMeshesFromSerializedFile(f.Value, fileTag, objectBundlesDir, treeBundlesDir,
-                assetsDir, neededGuids, cacheDir, db, neededTextures: null, foliageAssets, produced);
+                assetsDir, neededGuids, cacheDir, db, neededTextures: null, foliageAssets, produced,
+                staleLevelGuids: staleLevels);
         }
         if (!cancellationToken.IsCancellationRequested)
-            RecordMisses(bundlePath, cacheDir, neededGuids, foliageAssets, produced);
+            RecordMisses(bundlePath, cacheDir, neededGuids, foliageAssets, produced, staleLevels);
         AppShutdown.PrintUnlessQuitting($"[extract] meshes={extracted}");
         return extracted;
     }
@@ -144,7 +146,8 @@ public static class ModelExtractor
     // adds a prefab heals the entry. Only call this after a pass that ran to completion — recording misses
     // from a half-finished decode would permanently blacklist GUIDs that were simply never reached.
     private static void RecordMisses(string bundlePath, string cacheDir, HashSet<Guid> neededGuids,
-        IReadOnlyList<FoliageAsset>? foliageAssets, HashSet<Guid> produced)
+        IReadOnlyList<FoliageAsset>? foliageAssets, HashSet<Guid> produced,
+        HashSet<Guid>? staleLevels = null)
     {
         string indexPath = Path.Combine(cacheDir, ExtractionIndex.FileNameFor(bundlePath));
         long stamp = ExtractionIndex.StampFor(bundlePath);
@@ -162,7 +165,8 @@ public static class ModelExtractor
         misses.ExceptWith(produced);
 
         foreach (Guid guid in produced)
-            ExtractionIndex.RecordMeshOwner(cacheDir, guid, bundlePath, stamp);
+            if (staleLevels?.Contains(guid) != true) // an unrefreshed lower level must stay cold
+                ExtractionIndex.RecordMeshOwner(cacheDir, guid, bundlePath, stamp);
         foreach (Guid guid in failed)
             ExtractionIndex.RemoveCachedAsset(cacheDir, guid);
 
@@ -228,6 +232,7 @@ public static class ModelExtractor
         var neededTextures = new Dictionary<(string Tag, long Id), UnityTexture>();
         var layerTextures = new Dictionary<string, UnityTexture>(StringComparer.Ordinal);
         var produced = new HashSet<Guid>();
+        var staleLevels = new HashSet<Guid>();
 
         // Strictly physical order, whatever the bundle's layout: the decoder only moves forward, so a node
         // that is skipped rather than read leaves every following one misaligned. A bundle with more than
@@ -262,7 +267,7 @@ public static class ModelExtractor
 
                 ReadSerializedNode(stream, (int)node.Size, bundlePath, fileTag, objectBundlesDir,
                     treeBundlesDir, assetsDir, neededGuids, cacheDir, db, neededTextures, layerTextures,
-                    foliageAssets, isCoreBundle, layerWants, onLayerTexture, produced);
+                    foliageAssets, isCoreBundle, layerWants, onLayerTexture, produced, staleLevels);
 
                 // Settle what needs no stream at all, once per texture: pixels stored inline are in hand
                 // already, and anything extracted on an earlier boot only needs its key handed back. Both
@@ -276,7 +281,7 @@ public static class ModelExtractor
                 {
                     // All serialized files have now been scanned. A miss index written by an earlier
                     // file would permanently hide GUIDs owned by a later file after an interrupted pass.
-                    RecordMisses(bundlePath, cacheDir, neededGuids, foliageAssets, produced);
+                    RecordMisses(bundlePath, cacheDir, neededGuids, foliageAssets, produced, staleLevels);
                     AppShutdown.PrintUnlessQuitting($"[extract] meshes={CachedMeshCountLoose(cacheDir)} "
                         + $"(streamed); {neededTextures.Count + layerTextures.Count} textures referenced");
                     onMeshesReady();
@@ -419,11 +424,12 @@ public static class ModelExtractor
         Dictionary<(string Tag, long Id), UnityTexture> neededTextures, Dictionary<string, UnityTexture> layerTextures,
         IReadOnlyList<FoliageAsset>? foliageAssets, bool isCoreBundle,
         IReadOnlyDictionary<string, Guid[]> layerWants, Action<Guid, CachedTexture>? onLayerTexture,
-        HashSet<Guid> produced)
+        HashSet<Guid> produced, HashSet<Guid> staleLevels)
     {
         SerializedFile file = SerializedFile.Read(stream.Read(size));
         ExtractMeshesFrom(file, bundleTag, objectBundlesDir, treeBundlesDir, assetsDir, neededGuids,
-            cacheDir, db, neededTextures, foliageAssets, produced, isCoreBundle ? bundlePath : null);
+            cacheDir, db, neededTextures, foliageAssets, produced, isCoreBundle ? bundlePath : null,
+            staleLevels);
 
         // Meshes land before the potentially long texture tail. If shutdown interrupted that tail, the
         // next load sees current meshes and ExtractFoliageMeshes/Object extraction correctly skips them;
@@ -575,10 +581,10 @@ public static class ModelExtractor
         string objectBundlesDir, string treeBundlesDir, string assetsDir, HashSet<Guid> neededGuids,
         string cacheDir, ObjectAssetDatabase db, Dictionary<(string Tag, long Id), UnityTexture>? neededTextures,
         IReadOnlyList<FoliageAsset>? foliageAssets = null, HashSet<Guid>? producedGuids = null,
-        string? typeTreeCacheFor = null) =>
+        string? typeTreeCacheFor = null, HashSet<Guid>? staleLevelGuids = null) =>
         ExtractMeshesFrom(SerializedFile.Read(sfBytes), bundleTag, objectBundlesDir, treeBundlesDir,
             assetsDir, neededGuids, cacheDir, db, neededTextures, foliageAssets, producedGuids,
-            typeTreeCacheFor);
+            typeTreeCacheFor, staleLevelGuids);
 
     // Same, for a caller that already holds the decoded file (the streaming pass reads it once and then
     // uses it for the meshes, the type trees and the terrain layers alike).
@@ -586,7 +592,7 @@ public static class ModelExtractor
         string treeBundlesDir, string assetsDir, HashSet<Guid> neededGuids, string cacheDir,
         ObjectAssetDatabase db, Dictionary<(string Tag, long Id), UnityTexture>? neededTextures,
         IReadOnlyList<FoliageAsset>? foliageAssets = null, HashSet<Guid>? producedGuids = null,
-        string? typeTreeCacheFor = null)
+        string? typeTreeCacheFor = null, HashSet<Guid>? staleLevelGuids = null)
     {
 
         // The per-class type trees are a by-product of having read this file. Handing them to the cache
@@ -744,9 +750,10 @@ public static class ModelExtractor
             }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {
-                // Deliberate lesser harm: this may leave a previous source's level beside a fresh base
-                // mesh, which shows as the wrong coarse shape past the switch distance. Giving up on the
-                // base mesh instead would put a placeholder box there at every distance.
+                // Keep the base mesh — a placeholder box at every distance is worse than a stale coarse
+                // shape past the switch distance — but do not let this GUID be stamped as current, or the
+                // stale level would be loaded forever. Left unstamped it reads as cold and is retried.
+                staleLevelGuids?.Add(asset.Guid);
                 AppShutdown.PrintUnlessQuitting($"[extract] lower level not cached for {asset.Guid:N}: {e.Message}");
             }
 
