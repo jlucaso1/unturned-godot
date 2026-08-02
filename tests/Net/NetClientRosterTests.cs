@@ -146,6 +146,24 @@ public class NetClientRosterTests
         Assert.Equal("A", Assert.Single(client.Remotes).Value.Name);
     }
 
+    // A join can be stale too. Someone who connects and drops straight back out produces a join and a
+    // leave moments apart, and the leave may arrive first — after which the join describes a world that
+    // is already over. Respawning from it leaves a player standing there for good: state updates do not
+    // remove remotes, and no second leave is coming.
+    [Fact]
+    public void AJoinAlreadySupersededByALeave_IsIgnored()
+    {
+        var transport = new FakeClientTransport();
+        var client = new NetClient(transport, "Me", Level);
+
+        transport.Deliver(NetMessages.WriteWelcome(1, 0, 3, new[] { Listing(2, "A") }));
+        transport.Deliver(NetMessages.WritePlayerLeft(5, 3));               // C's departure, first
+        transport.Deliver(NetMessages.WritePlayerJoined(4, Listing(3, "C"))); // C's arrival, second
+        client.Update(0);
+
+        Assert.Equal("A", Assert.Single(client.Remotes).Value.Name);
+    }
+
     // A departure does not bury the id forever: the pool hands it out again, and a join newer than the
     // leave is a different player who must appear.
     [Fact]

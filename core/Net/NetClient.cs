@@ -217,7 +217,11 @@ public sealed class NetClient
                     }
 
                     (uint joinedVersion, PlayerListing p) = joined;
-                    if (p.PlayerId != PlayerId)
+                    // A join can be the stale message: someone who connects and drops straight back out
+                    // produces a join and a leave moments apart, and the leave may arrive first. Acting
+                    // on the join then leaves that player standing there for good — nothing removes a
+                    // remote except a leave, and theirs has already been spent.
+                    if (p.PlayerId != PlayerId && _leftAtVersion[p.PlayerId] <= joinedVersion)
                         _remotes[p.PlayerId] = SpawnRemote(p, now, joinedVersion);
                     break;
                 }
