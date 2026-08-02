@@ -50,7 +50,11 @@ public sealed class UdpServerTransport : IServerTransport
 
     private int _queuedBytes;
 
-    // Datagrams dropped for exceeding MaxPayloadBytes or the queued-byte budget.
+    // Datagrams dropped for exceeding MaxPayloadBytes, and only those. Reaching the queued-byte or
+    // queued-event budget stops the pump instead: those datagrams are never read, so they stay in the
+    // socket's receive buffer for the OS to discard and there is nothing here to count. Worth being
+    // precise about — read as "all backpressure", this counter would sit at zero through exactly the
+    // overload it looks like it measures.
     public long OversizedDropped { get; private set; }
 
     private readonly Queue<ServerTransportEvent> _events = new();
