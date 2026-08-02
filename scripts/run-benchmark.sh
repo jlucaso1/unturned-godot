@@ -14,6 +14,7 @@
 #   UNTURNED_PATH          the game content (default: what fetch-game-data.sh laid down)
 #   MAP                    which map (default: PEI)
 #   UG_RUNTIME_BENCH_SECS  Tier 3 sampling window (default: 12)
+#   UG_BENCH_SKIP_BUILD    1 only when the caller already built the exact checkout being measured
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,6 +25,19 @@ case "$tier" in
     structural|gpu|runtime) ;;
     *) sed -n '2,18p' "${BASH_SOURCE[0]}"; exit 2 ;;
 esac
+
+# Godot's command-line runner does not compile C# sources. It will happily load whatever assembly the
+# editor or a previous checkout left under .godot/mono, which makes a successful benchmark especially
+# dangerous: its adapter and timing data look valid while it is measuring old code. Build before any
+# content work so every report describes this checkout. Large scripted matrices may build once up front
+# and set UG_BENCH_SKIP_BUILD=1 for the individual runs.
+if [[ "${UG_BENCH_SKIP_BUILD:-0}" != "1" ]]; then
+    if ! command -v dotnet > /dev/null; then
+        echo "No dotnet SDK found; cannot ensure the benchmark assembly matches the source." >&2
+        exit 1
+    fi
+    dotnet build "$repo_dir/unturned-godot.csproj" -c Debug --nologo --verbosity quiet
+fi
 
 # Pin the map before Godot starts. Main._Ready only reads MAP when it is set, and otherwise falls back
 # to whatever the last interactive session left in user://menu.cfg — so leaving it unset would silently
