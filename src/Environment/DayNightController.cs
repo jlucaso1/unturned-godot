@@ -112,6 +112,13 @@ public partial class DayNightController : Node
             controller._time = Mathf.PosMod(fixedTime.ToFloat(), 1f);
             controller._frozen = true;
         }
+
+        // The editor is not a game loop. Nodes built from managed code run _Process even in the editor —
+        // the [Tool] gate only covers scripts the engine instantiates while deserializing a scene — which
+        // is why the preview renders at all, and also why an unfrozen sky would keep advancing the cycle
+        // and forcing a sky + radiance-map rebuild for as long as the scene tab stays open.
+        if (Engine.IsEditorHint())
+            controller._frozen = true;
         if (OS.GetEnvironment("MOON_PHASE") is { Length: > 0 } phase)
             controller._moonPhase = Mathf.PosMod(phase.ToInt(), LightingCycle.MoonPhaseCount);
         if (OS.GetEnvironment("DAY_SPEED") is { Length: > 0 } speed)
