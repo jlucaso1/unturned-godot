@@ -164,6 +164,28 @@ public class ColliderCacheTests
         Assert.Throws<InvalidDataException>(() => ColliderCache.Read(ms));
     }
 
+    // Bounding the collider count is not enough on its own: a mesh collider's nested vertex and index
+    // counts each size an array of their own.
+    [Theory]
+    [InlineData(true)]   // corrupt the vertex count
+    [InlineData(false)]  // corrupt the index count
+    public void Read_ImplausibleMeshCount_FailsWithoutAllocating(bool vertices)
+    {
+        using var ms = new MemoryStream();
+        ColliderCache.Write(ms, new List<CachedCollider>
+        {
+            CachedCollider.Mesh(Pose, new[] { Vector3.Zero, Vector3.One, Vector3.Up }, new[] { 0, 1, 2 }),
+        });
+        byte[] bytes = ms.ToArray();
+
+        // header(8) + count(4) + kind(1) + transform(48) = 61; vertex count, then 3 vertices, then indices.
+        int offset = vertices ? 61 : 61 + 4 + (3 * 12);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(offset), int.MaxValue);
+
+        using var corrupt = new MemoryStream(bytes);
+        Assert.Throws<InvalidDataException>(() => ColliderCache.Read(corrupt));
+    }
+
     [Fact]
     public void Read_PayloadShorterThanTheHeaderDeclares_Throws()
     {

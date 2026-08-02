@@ -188,10 +188,10 @@ public static class ColliderCache
                     result.Add(CachedCollider.Capsule(t, ReadVec3(r), r.ReadSingle(), r.ReadSingle(), r.ReadInt32()));
                     break;
                 default:
-                    var verts = new Vector3[r.ReadInt32()];
+                    var verts = new Vector3[ReadBoundedCount(r, stream, sizeof(float) * 3, "vertices")];
                     for (int i = 0; i < verts.Length; i++)
                         verts[i] = ReadVec3(r);
-                    var indices = new int[r.ReadInt32()];
+                    var indices = new int[ReadBoundedCount(r, stream, sizeof(int), "indices")];
                     for (int i = 0; i < indices.Length; i++)
                         indices[i] = r.ReadInt32();
                     result.Add(CachedCollider.Mesh(t, verts, indices));
@@ -199,6 +199,24 @@ public static class ColliderCache
             }
         }
         return result;
+    }
+
+    // Reads a length prefix that is about to size an array, and refuses one the file cannot possibly back.
+    // Bounding the collider count alone is not enough: a single mesh collider whose nested vertex or index
+    // count is corrupted would still allocate before a byte of payload is read, and OutOfMemoryException is
+    // not a decode failure — no caller catches it, so the load dies anyway.
+    private static int ReadBoundedCount(BinaryReader r, Stream stream, int bytesPerItem, string what)
+    {
+        int count = r.ReadInt32();
+        if (count < 0)
+            throw new InvalidDataException($"Collider cache declares {count} {what}.");
+        if (stream.CanSeek && (long)count * bytesPerItem > stream.Length - stream.Position)
+        {
+            throw new InvalidDataException(
+                $"Collider cache declares {count} {what} but carries only " +
+                $"{stream.Length - stream.Position} bytes.");
+        }
+        return count;
     }
 
     private static void WriteTransform(BinaryWriter w, Transform3D t)
