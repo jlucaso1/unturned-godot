@@ -134,6 +134,15 @@ public sealed class ServerSimulation
 
     public uint Tick { get; private set; }
 
+    // Trusted positions refused for not being finite. Non-zero means a client sent NaN or an infinity —
+    // a physics glitch on its end, or a deliberate attempt to wedge its own slot.
+    public long RejectedPositions { get; private set; }
+
+    // Kept explicit rather than using Vector3.IsFinite, at the one place that has to reason about why a
+    // non-finite component is unrecoverable here rather than merely wrong.
+    private static bool IsFinite(in Vector3 v) =>
+        float.IsFinite(v.X) && float.IsFinite(v.Y) && float.IsFinite(v.Z);
+
     public ServerSimulation(IMoveSolver solver) => _solver = solver;
 
     public void AddPlayer(byte id, Vector3 spawnPosition)
@@ -173,6 +182,28 @@ public sealed class ServerSimulation
     {
         if (!_players.TryGetValue(id, out Entry? entry))
             return;
+
+        // A non-finite position is refused here rather than filtered later, because once one lands the
+        // slot never recovers. The first trusted position is adopted outright — there is no previous one
+        // to measure against — and every comparison against NaN afterwards is false, so the speed budget
+        // rejects every subsequent position forever. The player stays at NaN for the rest of the session,
+        // and that NaN goes out in every StateUpdate to every client.
+        //
+        // Ahead of the freshness guard so a refused command leaves no trace in the sequence state it was
+        // refused before reaching. Behind it, the NaN would still have advanced LastReceivedFrame on its
+        // way out, and a command the server threw away would be deciding which later ones it accepts.
+        //
+        // Worth saying what this is NOT, since the ordering looks more dramatic than it is: it does not
+        // stop a client muting itself. Anything the burnt frame number would then suppress is
+        // lower-numbered, and dropping those is the freshness guard doing its ordinary job — NaN or not.
+        // QueueInput is per player, so the only inputs at stake are the sender's own. Moving this after
+        // the guard leaves all 47 position and trusted-position tests green, which is the honest measure
+        // of how much rides on it: the ordering is hygiene, not a fix for a second defect.
+        if (input.HasPosition && !IsFinite(input.Position))
+        {
+            RejectedPositions++;
+            return;
+        }
 
         // UDP may duplicate or reorder input datagrams, so freshness is what the FRAME number says and
         // never what the socket happened to hand over last. A command older than one already queued or
