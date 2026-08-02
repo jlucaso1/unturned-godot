@@ -22,10 +22,15 @@ public sealed class NetServer
     private readonly ServerSimulation _simulation;
     private readonly Vector3 _spawnPosition;
     private readonly Dictionary<ITransportConnection, Session> _sessions = new();
-    private byte _nextPlayerId = 1;
+    private readonly PlayerIdPool _playerIds = new();
     private double _nextTick = double.NaN;
 
     public int PlayerCount { get; private set; }
+
+    // How many more players this server can admit at `now`. Zero means the next Hello is refused. This
+    // excludes ids that are free but still quarantined, so it never advertises room the server would then
+    // turn away; see PlayerIdPool for the quarantine, and for why the ceiling is 254 rather than 256.
+    public int FreePlayerSlotsAt(double now) => _playerIds.AvailableAt(now);
 
     // Datagrams that reached a decoder and did not survive it. Non-zero means someone is sending the
     // server bytes it cannot read — a mismatched build, a corrupt link, or a probe.
@@ -68,10 +73,10 @@ public sealed class NetServer
                     _sessions[evt.Connection] = new Session();
                     break;
                 case ETransportEvent.Message:
-                    HandleMessage(evt.Connection, evt.Payload);
+                    HandleMessage(evt.Connection, evt.Payload, now);
                     break;
                 case ETransportEvent.Disconnected:
-                    HandleDisconnect(evt.Connection);
+                    HandleDisconnect(evt.Connection, now);
                     break;
             }
         }
@@ -88,7 +93,7 @@ public sealed class NetServer
         }
     }
 
-    private void HandleMessage(ITransportConnection connection, byte[] payload)
+    private void HandleMessage(ITransportConnection connection, byte[] payload, double now)
     {
         if (!_sessions.TryGetValue(connection, out Session? session))
             return;
@@ -120,7 +125,8 @@ public sealed class NetServer
                     }
                     else if (!session.Joined)
                     {
-                        AdmitPlayer(connection, session, name);
+                        if (!AdmitPlayer(connection, session, name, now))
+                            connection.Close(); // server full: refuse cleanly, do not invent an id
                     }
                     else
                     {
@@ -150,9 +156,16 @@ public sealed class NetServer
     private static readonly Func<byte[], (byte Version, string Name)> ReadHello = NetMessages.ReadHello;
     private static readonly Func<byte[], InputCommand> ReadInput = NetMessages.ReadInput;
 
-    private void AdmitPlayer(ITransportConnection connection, Session session, string name)
+    // False when there is no id left to give — the caller refuses the join. Ids come from a pool and go
+    // back on disconnect: a bare incrementing byte wrapped after 255 admissions and handed a live
+    // player's id to the next joiner, which overwrote their simulation state and then deleted it when
+    // the newcomer left, so the admission after that threw out of GetState.
+    private bool AdmitPlayer(ITransportConnection connection, Session session, string name, double now)
     {
-        session.PlayerId = _nextPlayerId++;
+        if (!_playerIds.TryRent(now, out byte playerId))
+            return false;
+
+        session.PlayerId = playerId;
         session.Name = name;
         session.Joined = true;
         PlayerCount++;
@@ -171,14 +184,16 @@ public sealed class NetServer
                 conn.Send(joined, ESendType.Reliable);
 
         OnPlayerAdmitted?.Invoke(session.PlayerId, connection);
+        return true;
     }
 
-    private void HandleDisconnect(ITransportConnection connection)
+    private void HandleDisconnect(ITransportConnection connection, double now)
     {
         if (!_sessions.Remove(connection, out Session? session) || !session.Joined)
             return;
         PlayerCount--;
         _simulation.RemovePlayer(session.PlayerId);
+        _playerIds.Return(session.PlayerId, now);
         Broadcast(NetMessages.WritePlayerLeft(session.PlayerId), ESendType.Reliable);
     }
 
