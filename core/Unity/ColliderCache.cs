@@ -157,6 +157,7 @@ public static class ColliderCache
         if (stream.CanSeek && stream.Length - stream.Position < declaredPayload)
             throw new EndOfStreamException("Collider cache is shorter than its header declares.");
 
+        long payloadStart = stream.CanSeek ? stream.Position : -1;
         int count = r.ReadInt32();
         if (count < 0)
             throw new InvalidDataException($"Collider cache declares a negative count ({count}).");
@@ -198,6 +199,19 @@ public static class ColliderCache
                     break;
             }
         }
+
+        // Finishing early is corruption too, and the quiet kind. Same-length damage that turns a count of
+        // 1 into 0 leaves the header consistent, so IsCurrent accepts the file and every bound above
+        // passes — Read would then hand back an empty list, no exception would reach ColliderLibrary, and
+        // the object would load without collision forever. Ending anywhere but the declared boundary is
+        // the signal that the payload is not what the header says it is.
+        if (payloadStart >= 0 && stream.Position - payloadStart != declaredPayload)
+        {
+            throw new InvalidDataException(
+                $"Collider cache parsed {stream.Position - payloadStart} bytes of a declared " +
+                $"{declaredPayload}.");
+        }
+
         return result;
     }
 

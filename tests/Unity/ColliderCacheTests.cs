@@ -186,6 +186,37 @@ public class ColliderCacheTests
         Assert.Throws<InvalidDataException>(() => ColliderCache.Read(corrupt));
     }
 
+    // The quiet corruption: same length, header still consistent, but the count now says fewer colliders
+    // than the payload holds. Every bound passes and Read would just return a short list — no exception,
+    // so nothing invalidates the file and the object loads without collision forever.
+    [Fact]
+    public void Read_CountSmallerThanThePayload_ThrowsRatherThanReturningAShortList()
+    {
+        using var ms = new MemoryStream();
+        ColliderCache.Write(ms, new List<CachedCollider>
+        {
+            CachedCollider.Sphere(Pose, Vector3.Zero, 1f),
+            CachedCollider.Sphere(Pose, Vector3.One, 2f),
+        });
+        byte[] bytes = ms.ToArray();
+
+        // Header(8) then the count: claim one collider where the payload carries two.
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(8), 1);
+
+        using var corrupt = new MemoryStream(bytes);
+        Assert.Throws<InvalidDataException>(() => ColliderCache.Read(corrupt));
+    }
+
+    [Fact]
+    public void Read_ZeroedCount_ThrowsRatherThanReturningNothing()
+    {
+        byte[] bytes = OneSphere();
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(8), 0);
+
+        using var corrupt = new MemoryStream(bytes);
+        Assert.Throws<InvalidDataException>(() => ColliderCache.Read(corrupt));
+    }
+
     [Fact]
     public void Read_PayloadShorterThanTheHeaderDeclares_Throws()
     {
