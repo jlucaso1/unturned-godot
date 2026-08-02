@@ -547,6 +547,26 @@ public class PhysicsBodyOrderTests
     }
 
     [Fact]
+    public void ObjectCellsAreAnchoredPerGroupAndCoarsenedByTheGeometryTheyCarry()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs")) is not { } path)
+            return;
+        string source = File.ReadAllText(path);
+        // Anchoring the grid at the world origin cuts every group straddling it along both axes whatever
+        // the cell size is, so such a group can never fall below four batches — and official maps are
+        // centred there. The anchor has to come from the group.
+        Assert.Contains("AnchorOf(transforms)", source);
+        Assert.Contains("(origin.X - anchor.X) / cellSize", source);
+        Assert.Contains("(origin.Z - anchor.Z) / cellSize", source);
+        // Splitting buys frustum rejection and costs a draw call per cell, so it pays in proportion to
+        // the geometry each cell carries. Coarsening by doubling keeps the grids nested, which is what
+        // makes the cell count fall monotonically and the walk terminate.
+        Assert.Contains("UG_OBJECT_CELL_MIN_TRIS", source);
+        Assert.Contains("trianglesPerInstance * transforms.Count / cells >= MinCellTriangles", source);
+        Assert.Contains("metres *= 2f", source);
+    }
+
+    [Fact]
     public void RidOwnersDiscardUploadMetadataButRetainServerResourcesAndTransforms()
     {
         if (FindRepositoryFile(Path.Combine("src", "World", "InstancedStaticBodies.cs")) is not { } bodyPath
