@@ -673,8 +673,13 @@ public static class ObjectsBuilder
     // Unity switches level by projected screen height, so the threshold scales with the object: a tree
     // holds its detail much further out than a crate. Approximate that with a multiple of the mesh's
     // bounding radius, tunable because the authored per-prefab thresholds are not extracted yet.
-    // Measured on PEI: 6 bounding radii submits the fewest primitives at both gameplay poses. Wider
-    // switches keep more full-detail geometry on screen; the sweep is in the PR that introduced this.
+    //
+    // Be aware of how little this does at the shipped cell size. AddLevels adds the batch's placement
+    // radius on top, and a full 1024 m cell carries several hundred metres of that against a few tens of
+    // metres from the mesh, so the batch radius is most of the threshold. Swept 2 / 6 / 24 on PEI: four of
+    // the eight poses are byte-identical at all three, and `ground` moves 0.22% across the whole 12x range.
+    // This knob only starts to matter once cells are small enough for the two terms to be comparable —
+    // UG_OBJECT_LOD_CHUNK_METRES is the lever that actually moves the numbers today.
     private static readonly float LodSwitchRadii = EnvFloat("UG_OBJECT_LOD_RADII", 6f, 2f, 200f);
     // Unity's LODGroup switches level outright unless cross-fade is explicitly authored, so a hard swap
     // is both the parity behaviour and the cheaper one: inside a fade margin Godot dithers the two levels
