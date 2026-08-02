@@ -179,6 +179,7 @@ public sealed class UdpClientTransport : IClientTransport
     private readonly UdpClient _socket;
     private readonly ReliableChannel _channel;
     private readonly Queue<byte[]> _incoming = new();
+    private int _queuedBytes;
     private double _now;
 
     public bool IsConnected { get; private set; } = true;
@@ -196,6 +197,7 @@ public sealed class UdpClientTransport : IClientTransport
     {
         if (_incoming.TryDequeue(out byte[]? dequeued))
         {
+            _queuedBytes -= dequeued.Length;
             payload = dequeued;
             return true;
         }
@@ -210,6 +212,7 @@ public sealed class UdpClientTransport : IClientTransport
         int reads = UdpServerTransport.MaxReadsPerPump;
         while (reads-- > 0
             && _incoming.Count < UdpServerTransport.MaxQueuedEvents
+            && _queuedBytes < UdpServerTransport.MaxQueuedBytes
             && _socket.Available > 0)
         {
             IPEndPoint remote = new(IPAddress.Any, 0);
@@ -225,7 +228,10 @@ public sealed class UdpClientTransport : IClientTransport
             if (datagram.Length > UdpServerTransport.MaxPayloadBytes)
                 continue;
             if (_channel.HandleDatagram(datagram, out byte[] payload))
+            {
                 _incoming.Enqueue(payload);
+                _queuedBytes += payload.Length;
+            }
         }
     }
 
