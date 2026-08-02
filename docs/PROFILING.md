@@ -167,9 +167,10 @@ something drawn.
 
 ## Spatial-culling A/B controls
 
-The production defaults partition only object groups spread across more than one 4096 m cell, use 128 m
-foliage chunks with a 160 m per-instance visibility range, and give navmesh reconciliation 0.25 ms per
-physics frame on every map. Object collision compounds are partitioned into 2048 m cells; the partitioner
+The production defaults partition only object groups spread across more than one cell (`UG_OBJECT_CHUNK_METRES`),
+use 128 m foliage chunks with a 160 m per-instance visibility range, and give navmesh reconciliation 0.25 ms per
+physics frame on every map. Read the current cell size from the default in `ObjectsBuilder` rather than from
+this page — it is tuned against measurements and moves. Object collision compounds are partitioned into 2048 m cells; the partitioner
 stops expanding compounds after 8,000 object bodies so its extra bodies cannot consume Jolt's remaining
 pool. The foliage chunk's actual positional and scaled-mesh radii are added to Godot's
 aggregate-AABB range, so an instance near a chunk edge never fades early. These preserve geometry,
