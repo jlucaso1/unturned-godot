@@ -163,7 +163,10 @@ public sealed class PlayerListing
     public Vector3 Position;
     public byte Pitch;
     public byte Yaw;
-    public EPlayerStance Stance;
+
+    // Spelled out because default(EPlayerStance) is 0 and the enum starts at Sprint = 2 (the game's own
+    // numbering): a listing nobody filled in must read as a standing player, not as no stance at all.
+    public EPlayerStance Stance = EPlayerStance.Stand;
 }
 
 // Encoders/decoders for each message. Little-endian BinaryWriter framing; the first byte is ENetMessage.

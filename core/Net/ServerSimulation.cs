@@ -102,6 +102,11 @@ public sealed class ServerSimulation
 {
     public const float TickRate = 0.08f; // PlayerInput.RATE / Provider.UPDATE_TIME
 
+    // How many input frames a player may have waiting. Purely a jitter buffer: the loop plays exactly
+    // one per tick, so anything beyond this is not "more detail", it is the avatar falling behind the
+    // player by that many ticks — permanently, since the backlog never drains at matched rates.
+    public const int MaxQueuedInputs = 4; // 0.32 s of absorbed jitter
+
     private sealed class Entry
     {
         public PlayerMoveState State;
@@ -129,7 +134,16 @@ public sealed class ServerSimulation
     {
         _players[id] = new Entry
         {
-            State = new PlayerMoveState { Position = spawnPosition, Grounded = false },
+            // Stance is spelled out because default(EPlayerStance) is 0, which is not one of them —
+            // the enum starts at Sprint = 2, mirroring the game's own numbering. A player who joins and
+            // says nothing is standing, and until the stance carried across starved ticks that invalid
+            // 0 was hidden by the filler input defaulting to Stand.
+            State = new PlayerMoveState
+            {
+                Position = spawnPosition,
+                Grounded = false,
+                Stance = EPlayerStance.Stand,
+            },
         };
     }
 
@@ -166,6 +180,16 @@ public sealed class ServerSimulation
             entry.LastReceivedPositionFrame = input.Frame;
         }
         entry.Inputs.Enqueue(input);
+
+        // The loop plays one frame per tick, so a client that sends faster than the server ticks builds
+        // a backlog that never drains — and a backlog is time: the avatar everyone else sees keeps
+        // replaying inputs from seconds ago, further behind after every burst, on top of a queue that
+        // grows without bound. The buffer therefore has a ceiling, and what falls off it is the STALE
+        // end: where a player was two seconds ago is worth nothing when a fresher frame is in hand.
+        // Bursts are ordinary — the client drains its send timer once per frame, so any hitch is
+        // followed by a flurry — and a hostile client can simply send as fast as it likes.
+        while (entry.Inputs.Count > MaxQueuedInputs)
+            entry.Inputs.Dequeue();
     }
 
     // Advances one 0.08 s step for every player and returns the broadcastable snapshot list.
@@ -177,9 +201,13 @@ public sealed class ServerSimulation
         {
             // Consume one input per tick; a starved player repeats "stand still" at their last view angles
             // (gravity and momentum still integrate, so a disconnect mid-air falls to the ground).
+            // The STANCE carries over too: silence means we did not hear from this player, not that they
+            // stood up. Defaulting it snapped a prone or crouched player upright on every late or lost
+            // frame — a flicker at 12.5 Hz that the whole session sees, hitbox included.
             InputCommand input = entry.Inputs.TryDequeue(out InputCommand queued)
                 ? queued
-                : new InputCommand(0, 0, 0, false, false, entry.LastInput.Yaw, entry.LastInput.Pitch);
+                : new InputCommand(0, 0, 0, false, false, entry.LastInput.Yaw, entry.LastInput.Pitch,
+                    entry.State.Stance, entry.State.Grounded);
             entry.LastInput = input;
 
             if (input.HasPosition)

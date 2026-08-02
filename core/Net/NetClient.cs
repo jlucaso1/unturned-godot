@@ -52,6 +52,11 @@ public sealed class NetClient
     private readonly IClientTransport _transport;
     private readonly Dictionary<byte, RemotePlayer> _remotes = new();
 
+    // Scratch for reconciling a Welcome's roster against the remotes we hold; reused so a rejoin storm
+    // does not allocate a set and a list per message.
+    private readonly HashSet<byte> _rosterIds = new();
+    private readonly List<byte> _departed = new();
+
     public byte PlayerId { get; private set; }
 
     // Datagrams that reached a decoder and did not survive it. See NetServer.MalformedPacketsDropped.
@@ -151,8 +156,33 @@ public sealed class NetClient
                     PlayerId = id;
                     Joined = true;
                     _lastStateAt = now;
+
+                    // The roster is COMPLETE — "everyone already here" — so it replaces what we hold
+                    // rather than adding to it. A second Welcome is ordinary (an unadmitted client
+                    // re-Hellos every couple of seconds, and a joined session that Hellos again is
+                    // answered with a fresh roster), and UDP may hand it to us after the PlayerLeft it
+                    // predates: merging left that player standing there forever, unseeable and
+                    // unshootable. Players still listed keep the remote we already have, so a
+                    // re-Welcome does not restart anyone's interpolation mid-session.
+                    _rosterIds.Clear();
                     foreach (PlayerListing p in players)
-                        _remotes[p.PlayerId] = SpawnRemote(p, now);
+                    {
+                        if (p.PlayerId == PlayerId)
+                            continue; // the server does not list us; a roster that did would double us
+                        _rosterIds.Add(p.PlayerId);
+                        if (!_remotes.ContainsKey(p.PlayerId))
+                            _remotes[p.PlayerId] = SpawnRemote(p, now);
+                    }
+
+                    if (_remotes.Count > _rosterIds.Count)
+                    {
+                        _departed.Clear();
+                        foreach (byte known in _remotes.Keys)
+                            if (!_rosterIds.Contains(known))
+                                _departed.Add(known);
+                        foreach (byte gone in _departed)
+                            _remotes.Remove(gone);
+                    }
                     break;
                 }
             case ENetMessage.PlayerJoined:

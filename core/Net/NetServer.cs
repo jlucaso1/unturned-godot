@@ -26,6 +26,11 @@ public sealed class NetServer
     private readonly PlayerIdPool _playerIds = new();
     private double _nextTick = double.NaN;
 
+    // How many 0.08 s steps one Update may run to make up for lost time. Enough to absorb the jitter of
+    // a machine that misses a few frames; short of the "replay the whole stall at once" behaviour that
+    // turns a hitch into a burst of hundreds of datagrams per client.
+    public const int MaxCatchUpTicks = 5; // 0.4 s
+
     public int PlayerCount { get; private set; }
 
     // How many more players this server can admit at `now`. Zero means the next Hello is refused. This
@@ -90,14 +95,25 @@ public sealed class NetServer
 
         if (double.IsNaN(_nextTick))
             _nextTick = now;
-        while (now >= _nextTick)
+        int caughtUp = 0;
+        while (now >= _nextTick && caughtUp < MaxCatchUpTicks)
         {
             List<PlayerSnapshotState> states = _simulation.Step();
             if (states.Count > 0)
                 Broadcast(NetMessages.WriteStateUpdate(_simulation.Tick, states), ESendType.Unreliable);
             OnTick?.Invoke(_simulation.Tick);
             _nextTick += ServerSimulation.TickRate;
+            caughtUp++;
         }
+
+        // Whatever is left of the gap is dropped rather than replayed, and the clock comes back to the
+        // present. A host stalls for real reasons — the world streamer finishing, a navmesh reconcile,
+        // a laptop lid — and replaying a minute of ticks inside one frame floods every client with
+        // hundreds of datagrams, jumps the zombies a minute along their paths, and makes the very frame
+        // that is already late do all of it. Left behind instead, the loop would spend its full budget
+        // on every following frame and never catch up at all.
+        if (now >= _nextTick)
+            _nextTick = now + ServerSimulation.TickRate;
     }
 
     private void HandleMessage(ITransportConnection connection, byte[] payload, double now)

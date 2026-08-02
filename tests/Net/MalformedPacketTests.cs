@@ -234,6 +234,58 @@ public class MalformedPacketTests
         Assert.Equal(2, client.MalformedPacketsDropped);
     }
 
+    // Every message the client decodes, truncated where its body begins. A joined client keeps its
+    // roster and its session: a torn datagram is dropped and counted, never acted on halfway.
+    public static TheoryData<string, byte[]> HostileServerPayloads() => new()
+    {
+        { "PlayerJoined with no listing", new[] { (byte)ENetMessage.PlayerJoined } },
+        { "PlayerLeft with no id", new[] { (byte)ENetMessage.PlayerLeft } },
+        { "StateUpdate with no tick", new[] { (byte)ENetMessage.StateUpdate } },
+        // A snapshot count the payload cannot back up.
+        {
+            "StateUpdate promising states it does not carry",
+            new[] { (byte)ENetMessage.StateUpdate, (byte)0, (byte)0, (byte)0, (byte)0, (byte)4 }
+        },
+        { "Reject with no reason", new[] { (byte)ENetMessage.Reject } },
+        // ServerInfo is deliberately absent: NetClient does not decode it (the pre-join ServerQuery
+        // does, and guards it there), so it reaches OnUnhandledMessage rather than a reader here.
+    };
+
+    [Theory]
+    [MemberData(nameof(HostileServerPayloads))]
+    public void AHostileServerDatagram_IsDropped_AndTheSessionSurvives(string _, byte[] payload)
+    {
+        var transport = new FakeClientTransport();
+        var client = new NetClient(transport, "player", Level);
+        transport.Deliver(NetMessages.WriteWelcome(1, 0,
+            new[] { new PlayerListing { PlayerId = 2, Name = "A" } }));
+        transport.Deliver(payload);
+
+        client.Update(0.0); // must not throw
+
+        Assert.True(client.Joined);
+        Assert.Single(client.Remotes); // the roster it already had is untouched
+        Assert.Equal(1, client.MalformedPacketsDropped);
+        Assert.Null(client.Rejection);
+    }
+
+    // Inputs are the one message a JOINED client sends, so their decode guard only runs on a session
+    // the server already admitted.
+    [Fact]
+    public void ATruncatedInputFromAJoinedPlayer_IsDropped_AndTheSessionSurvives()
+    {
+        (NetServer server, FakeServerTransport transport) = Build();
+        var conn = new FakeConnection();
+        transport.Connect(conn);
+        transport.Message(conn, NetMessages.WriteHello("player", Level));
+        transport.Message(conn, new[] { (byte)ENetMessage.Input, (byte)1 }); // ends mid-frame
+        server.Update(0.0);
+
+        Assert.Equal(1, server.PlayerCount);
+        Assert.Equal(1, server.MalformedPacketsDropped);
+        Assert.Equal(Level, server.LevelName);
+    }
+
     // The guard is scoped to decoding on purpose. Everything past it is our own code, so a fault there
     // is a defect: counting it as someone else's bad packet would bury exactly the bug worth seeing.
     [Fact]
