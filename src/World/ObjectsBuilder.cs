@@ -25,10 +25,14 @@ public static class ObjectsBuilder
     // without an extracted mesh fall back to colored placeholder boxes.
     //
     // A map-wide MultiMesh gives every copy of an asset one enormous AABB, preventing Godot from culling
-    // or selecting LODs for distant copies independently. Split only groups whose placement bounds exceed
-    // a 4 km cell: California2 sheds millions of off-screen triangles while compact maps/groups retain the
-    // original single draw batch. Set UG_OBJECT_CHUNK_METRES=0 to disable for repeatable A/B profiling.
-    private static readonly float ObjectChunkMetres = EnvFloat("UG_OBJECT_CHUNK_METRES", 4096f, 0f, 8192f);
+    // or selecting LODs for distant copies independently. Splitting groups into cells is what gives the
+    // frustum something to reject. Set UG_OBJECT_CHUNK_METRES=0 to disable for repeatable A/B profiling.
+    //
+    // The cell size is a trade, not a free win: finer cells shed geometry at eye level, where most of a
+    // group is behind the camera or beyond it, and cost draw calls in views that take in the whole map at
+    // once, where nothing can be rejected. This default sits at the knee — cutting it further keeps
+    // improving the ground view but the aerial cost climbs faster than the gain.
+    private static readonly float ObjectChunkMetres = EnvFloat("UG_OBJECT_CHUNK_METRES", 1024f, 0f, 8192f);
     private static readonly long ObjectChunkMinTriangles = EnvLong("UG_OBJECT_CHUNK_MIN_TRIS", 0, 0, long.MaxValue);
     private static readonly bool ObjectChunkRequireSpread = EnvBool("UG_OBJECT_CHUNK_REQUIRE_SPREAD", true);
     private static readonly bool ChunkSparseObjects = EnvBool("UG_CHUNK_SPARSE_OBJECTS", true);
@@ -675,21 +679,20 @@ public static class ObjectsBuilder
     // bounding radius, tunable because the authored per-prefab thresholds are not extracted yet.
     //
     // Be aware of how little this does at the shipped cell size. AddLevels adds the batch's placement
-    // radius on top, and a full 1024 m cell carries several hundred metres of that against a few tens of
-    // metres from the mesh, so the batch radius is most of the threshold. Swept 2 / 6 / 24 on PEI: four of
-    // the eight poses are byte-identical at all three, and `ground` moves 0.22% across the whole 12x range.
-    // This knob only starts to matter once cells are small enough for the two terms to be comparable —
-    // UG_OBJECT_LOD_CHUNK_METRES is the lever that actually moves the numbers today.
+    // radius on top, and that radius dominates the threshold whenever a cell is large next to the objects
+    // inside it — sweeping this knob across its whole range then barely moves what is submitted. It only
+    // starts to matter once cells are small enough for the two terms to be comparable, so
+    // UG_OBJECT_LOD_CHUNK_METRES is the lever to reach for first.
     private static readonly float LodSwitchRadii = EnvFloat("UG_OBJECT_LOD_RADII", 6f, 2f, 200f);
     // Unity's LODGroup switches level outright unless cross-fade is explicitly authored, so a hard swap
     // is both the parity behaviour and the cheaper one: inside a fade margin Godot dithers the two levels
     // together, which draws BOTH. UG_OBJECT_LOD_FADE=1 opts back into the dithered swap.
     private static readonly bool LodFade = EnvBool("UG_OBJECT_LOD_FADE", false);
 
-    // Cell size for groups that have a lower level. Measured on PEI at 4096 m (the shipped cell size for
-    // everything else) the switch is arbitrary enough that two poses get worse; at 1024 m every one of the
-    // eight benchmark poses submits fewer primitives. Smaller still keeps winning on primitives but costs
-    // draw calls fast — 512 m more than doubles them at the aerial poses for another ~5%.
+    // Cell size for groups that have a lower level, capped by ObjectChunkMetres above. A batch switches
+    // level as a whole, so cells that are large next to their own switch distance make the choice
+    // arbitrary and some poses get worse. Cutting further keeps shedding primitives but costs draw calls
+    // at the poses that see the whole map at once, which is the same trade ObjectChunkMetres makes.
     private static readonly float LodChunkMetres = EnvFloat("UG_OBJECT_LOD_CHUNK_METRES", 1024f, 0f, 8192f);
     private static float LodFadeMargin => LodFade ? 8f : 0f;
 
