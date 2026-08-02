@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Hashing;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -36,7 +37,12 @@ public sealed class FoliageChunkMetadata
 // buffers, so the runtime can decode only the chunks whose existing visibility range approaches a camera.
 public sealed class FoliageResidencyIndex
 {
-    private const int CacheVersion = 1;
+    private const int CacheVersion = 2;
+    // Identity for a cache, not a signature: it exists to catch a source edited behind an unchanged
+    // path, length and timestamp. That is accident detection, so it does not need a cryptographic hash,
+    // and SHA-256 made every warm boot re-read the whole blob at ~1 GiB/s just to prove it had not
+    // changed. xxHash64 answers the same question several times faster over the same bytes.
+    private const int SourceHashBytes = 8;
     private const string Magic = "UGFIDX1";
     private const int MatrixRecordBytes = 65;
     private const int DecodeRecordsPerBatch = 4096;
@@ -187,9 +193,8 @@ public sealed class FoliageResidencyIndex
             chunks[i] = new FoliageChunkMetadata(builder.Key, builder.Count, builder.Bounds,
                 builder.Runs.ToArray());
         }
-        byte[] sourceHash;
         stream.Position = 0;
-        sourceHash = SHA256.HashData(stream);
+        byte[] sourceHash = HashSource(stream);
         var info = new FileInfo(fullPath);
         return new FoliageResidencyIndex(fullPath, info.Length, info.LastWriteTimeUtc.Ticks,
             sourceHash, version, chunkTiles, assets, chunks);
@@ -320,6 +325,14 @@ public sealed class FoliageResidencyIndex
         }
     }
 
+    // Streams the source so a 273 MB blob is never materialised just to be verified.
+    private static byte[] HashSource(Stream source)
+    {
+        var hash = new XxHash64();
+        hash.Append(source);
+        return hash.GetCurrentHash();
+    }
+
     public static bool TryRead(string cachePath, string sourcePath, int chunkTiles,
         out FoliageResidencyIndex? index)
     {
@@ -338,13 +351,13 @@ public sealed class FoliageResidencyIndex
                 || reader.ReadInt64() != source.Length
                 || reader.ReadInt64() != source.LastWriteTimeUtc.Ticks)
                 return false;
-            byte[] expectedHash = reader.ReadBytes(32);
-            if (expectedHash.Length != 32)
+            byte[] expectedHash = reader.ReadBytes(SourceHashBytes);
+            if (expectedHash.Length != SourceHashBytes)
                 return false;
             byte[] actualHash;
             using (FileStream hashStream = OpenRead(fullPath, FileOptions.SequentialScan))
-                actualHash = SHA256.HashData(hashStream);
-            if (!CryptographicOperations.FixedTimeEquals(expectedHash, actualHash))
+                actualHash = HashSource(hashStream);
+            if (!expectedHash.AsSpan().SequenceEqual(actualHash))
                 return false;
             int blobVersion = reader.ReadInt32();
             if (reader.ReadInt32() != chunkTiles)

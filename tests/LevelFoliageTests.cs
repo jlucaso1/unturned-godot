@@ -447,6 +447,35 @@ public class LevelFoliageTests
         Assert.False(FoliageResidencyIndex.TryRead(cache, source, 4, out _));
     }
 
+    // The identity hash is the cache's only defence against a source edited behind an unchanged path,
+    // length and timestamp, and its width is part of the sidecar layout. A sidecar written by an older
+    // build must therefore be rejected on the version alone, before anything reads a differently sized
+    // hash and misinterprets the bytes after it.
+    [Fact]
+    public void ResidencyIndex_SidecarFromAnEarlierCacheVersionIsRejected()
+    {
+        Guid asset = Guid.NewGuid();
+        using var dir = new TempDir();
+        string source = dir.Write("Foliage.blob",
+            Build(2, asset, (0, 0, new[] { Translation(1, 2, 3) })));
+        string cache = Path.Combine(dir.Path, "cache", "map.fidx");
+        FoliageResidencyIndex.Build(source, 4).Write(cache);
+        Assert.True(FoliageResidencyIndex.TryRead(cache, source, 4, out _));
+
+        // Rewrite only the version field that follows the magic string.
+        byte[] sidecar = File.ReadAllBytes(cache);
+        int versionAt = 1 + System.Text.Encoding.UTF8.GetByteCount("UGFIDX1");
+        sidecar[versionAt] = 1;
+        File.WriteAllBytes(cache, sidecar);
+
+        Assert.False(FoliageResidencyIndex.TryRead(cache, source, 4, out _));
+        // And the caller still recovers by rebuilding rather than failing the load.
+        FoliageResidencyIndex? rebuilt = FoliageResidencyIndex.LoadOrBuild(source, cache, 4, out bool hit);
+        Assert.False(hit);
+        Assert.Single(rebuilt!.Chunks);
+        Assert.True(FoliageResidencyIndex.TryRead(cache, source, 4, out _));
+    }
+
     [Fact]
     public void ResidencyIndex_CorruptOrInterruptedCacheFallsBackToRebuild()
     {
