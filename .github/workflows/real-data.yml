@@ -28,6 +28,9 @@ jobs:
   real-data:
     name: tests against real content
     runs-on: ubuntu-latest
+    # fetch-game-data.sh retries the Steam connection eight times with no per-attempt timeout, so a CM
+    # outage would otherwise burn the 360-minute default before failing.
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v7
@@ -118,6 +121,7 @@ jobs:
     # frame time. Timings are deliberately not gated: see scripts/check-structural-metrics.sh.
     name: structural metrics
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v7
