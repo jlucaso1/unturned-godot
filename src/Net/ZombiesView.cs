@@ -111,10 +111,25 @@ public partial class ZombiesView : Node3D
 
     private void Handle(byte[] payload)
     {
-        switch (NetMessages.TypeOf(payload))
+        // NetClient hands unhandled messages here without decoding them, so this reads straight off the
+        // wire and owns its own guard — same rule as NetServer.HandleMessage: decode inside, act outside,
+        // so a truncated zombie payload costs a dropped datagram and a fault in the view still surfaces.
+        if (!MalformedPacket.TryDecode(payload, ReadType, out ENetMessage type))
+        {
+            MalformedPacketsDropped++;
+            return;
+        }
+
+        switch (type)
         {
             case ENetMessage.ZombieList:
-                (byte bound, List<ZombieListing> listings) = ZombieNetMessages.ReadZombieList(payload);
+                if (!MalformedPacket.TryDecode(payload, ReadZombieList, out var list))
+                {
+                    MalformedPacketsDropped++;
+                    break;
+                }
+
+                (byte bound, List<ZombieListing> listings) = list;
                 // A reliable list can outrun the player: if it names a region the local player is NOT
                 // standing in right now (computed fresh — the cached bound lags a frame), it is a late
                 // delivery for a region already left. Drop it: instancing it would resurrect avatars
@@ -127,12 +142,28 @@ public partial class ZombiesView : Node3D
                     SpawnOrReset(listing, bound);
                 break;
             case ENetMessage.ZombieStates:
+                if (!MalformedPacket.TryDecode(payload, ReadZombieStates, out var update))
+                {
+                    MalformedPacketsDropped++;
+                    break;
+                }
+
                 double now = NetworkManager.Now;
-                foreach (ZombieSnapshotState state in ZombieNetMessages.ReadZombieStates(payload).States)
+                foreach (ZombieSnapshotState state in update.States)
                     Push(state, now);
                 break;
         }
     }
+
+    // Zombie datagrams that reached a decoder and did not survive it; see NetServer.MalformedPacketsDropped.
+    public long MalformedPacketsDropped { get; private set; }
+
+    // Cached so a method group does not allocate a delegate on every received message.
+    private static readonly System.Func<byte[], ENetMessage> ReadType = NetMessages.TypeOf;
+    private static readonly System.Func<byte[], (byte Bound, List<ZombieListing> Listings)> ReadZombieList =
+        ZombieNetMessages.ReadZombieList;
+    private static readonly System.Func<byte[], (uint Tick, List<ZombieSnapshotState> States)> ReadZombieStates =
+        ZombieNetMessages.ReadZombieStates;
 
     private void SpawnOrReset(in ZombieListing listing, byte bound)
     {
