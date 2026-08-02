@@ -180,6 +180,26 @@ public class NetClientRosterTests
         Assert.Equal("Someone else", Assert.Single(client.Remotes).Value.Name);
     }
 
+    // Ids are recycled, so two players can be described by messages about the same id, and the older
+    // description may arrive last. Overwriting the current occupant with it loses BOTH: the stale
+    // remote is then removed by the previous occupant's leave, and nothing recreates the player who
+    // actually holds the id — state updates only move remotes that already exist.
+    [Fact]
+    public void AnOlderJoinForARecycledId_DoesNotDisplaceItsCurrentOccupant()
+    {
+        var transport = new FakeClientTransport();
+        var client = new NetClient(transport, "Me", Level);
+
+        transport.Deliver(NetMessages.WriteWelcome(1, 0, 2, new[] { Listing(2, "A") }));
+        transport.Deliver(NetMessages.WritePlayerJoined(6, Listing(3, "D"))); // the id's occupant now
+        transport.Deliver(NetMessages.WritePlayerJoined(4, Listing(3, "C"))); // its previous one, late
+        transport.Deliver(NetMessages.WritePlayerLeft(5, 3));                 // and their leave, later
+        client.Update(0);
+
+        Assert.Equal(2, client.Remotes.Count);
+        Assert.Equal("D", client.Remotes[3].Name);
+    }
+
     // Our own id never belongs in the remote roster — the server does not list us, but a roster that
     // did would put a second copy of the local player in the world.
     [Fact]
