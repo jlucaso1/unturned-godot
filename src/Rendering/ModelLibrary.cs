@@ -165,7 +165,7 @@ public static class ModelLibrary
         // one StandardMaterial3D (fewer material objects + GPU parameter buffers, fewer render-state
         // changes). Scoped to this load so nothing leaks between calls.
         var materials = new Dictionary<(string, Color, UnityMaterial.Blend, float, float, EShaderCull), Material>();
-        var sources = new List<(Guid Item, string Path)>(CachedMeshPaths(cacheDir, only));
+        var sources = new List<(Guid Item, string Path)>(CachedMeshPaths(cacheDir, only, suffix));
         IReadOnlyList<ExactFileGroups.Group<Guid>> groups = ExactFileGroups.Build(sources, DeduplicateGpu);
         for (int start = 0; start < groups.Count; start += PrepareChunk)
         {
