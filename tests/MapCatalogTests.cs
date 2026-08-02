@@ -391,11 +391,10 @@ public class MapCatalogTests
     }
 
     // With the game installed, the real scan must find PEI and agree with what is on disk.
-    [Fact]
+    [RealDataFact]
     public void Scan_RealInstall_FindsTheShippedMaps()
     {
-        if (GameData.Install is not { } install)
-            return;
+        string install = GameData.Install!;
 
         IReadOnlyList<MapEntry> maps = MapCatalog.Scan(install);
 

@@ -128,15 +128,22 @@ public class LevelPlayersTests
 
     // The shipped maps: every one is version 4 with a file length of exactly 2 + count * 14, and every
     // spawn sits inside the map's own bounds.
-    [Theory]
+    [RealDataTheory]
     [InlineData("PEI", 22)]
     [InlineData("Washington", 24)]
     [InlineData("Yukon", 18)]
     [InlineData("Germany", 14)]
     public void Load_RealMap_MatchesTheShippedSpawnCount(string mapName, int expected)
     {
-        if (GameData.Map(mapName) is not { } mapDir)
+        // The attribute covers "is there an install at all"; which maps it has still varies, and xUnit v2
+        // cannot skip one [InlineData] case. Only PEI is guaranteed — it is what fetch-game-data.sh pulls —
+        // so that one is asserted and the rest stay opportunistic against a fuller Steam install.
+        string? mapDir = GameData.Map(mapName);
+        if (mapDir == null)
+        {
+            Assert.False(mapName == "PEI", "PEI is missing from an install the suite already resolved");
             return;
+        }
 
         List<PlayerSpawnpoint> spawns = LevelPlayers.Load(mapDir);
 

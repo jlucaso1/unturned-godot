@@ -268,11 +268,10 @@ public class UnturnedInstallTests
     }
 
     // With the game installed, the real lookup must land on a directory that actually holds it.
-    [Fact]
+    [RealDataFact]
     public void Find_ResolvesTheRealInstall_WhenPresent()
     {
-        if (GameData.Install is not { } install)
-            return;
+        string install = GameData.Install!;
 
         Assert.True(Directory.Exists(Path.Combine(install, "Bundles")));
         Assert.NotNull(UnturnedInstall.FindMasterBundle(install));

@@ -93,11 +93,10 @@ public class MasterBundleConfigTests
         Assert.Null(MasterBundleConfig.Load(dir.Path));
     }
 
-    [Fact]
+    [RealDataFact]
     public void Load_RealInstall_MatchesTheShippedConfig()
     {
-        if (GameData.Install is not { } install)
-            return;
+        string install = GameData.Install!;
 
         MasterBundleConfig? config = MasterBundleConfig.Load(Path.Combine(install, "Bundles"));
 
