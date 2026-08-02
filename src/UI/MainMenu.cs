@@ -5,7 +5,8 @@ namespace UnturnedGodot;
 
 // The boot scene: no map loaded yet, just the Unturned-style menu over a sky gradient. The map browser
 // lists every map installed on this machine and Play loads the selected one; Connect reveals a host:port
-// field and joins (loading the selected map locally, since the protocol does not name one); Quit exits.
+// field and joins, loading whichever map THAT SERVER says it is running (the browser selection is only
+// for Play — a joining client is a guest on someone else's world); Quit exits.
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class MainMenu : CanvasLayer
 {
@@ -14,6 +15,7 @@ public partial class MainMenu : CanvasLayer
     public string? InitialMap { get; init; }
 
     // Called with the map folder to load, and null for singleplayer or "host[:port]" to join a server.
+    // When joining, the map is decided by the server, so the value passed here is ignored.
     public System.Action<string, string?>? OnStart { get; set; }
 
     private MapPicker _picker = null!;
@@ -144,12 +146,10 @@ public partial class MainMenu : CanvasLayer
             _status.Text = "Enter an address (host:port).";
             return;
         }
-        if (_picker.Selected is not { IsSupported: true } map)
-        {
-            _status.Text = "Pick a playable map first: the client builds the world locally.";
-            return;
-        }
-        _status.Text = $"Connecting to {address} on {map.DisplayName}…";
-        OnStart?.Invoke(map.SelectionKey, address);
+        // No map is passed, and none has to be picked: the server is asked which one it runs and that
+        // is what gets built. Sending the browser's selection along is what let a player join a PEI
+        // host and land in California 2.
+        _status.Text = $"Connecting to {address}…";
+        OnStart?.Invoke("", address);
     }
 }

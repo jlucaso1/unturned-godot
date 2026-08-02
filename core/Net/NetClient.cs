@@ -60,6 +60,15 @@ public sealed class NetClient
     // Extension seam: message types this client doesn't handle (future replicated systems) land here
     // instead of being dropped, so a feature module can subscribe without editing NetClient.
     public Action<byte[]>? OnUnhandledMessage;
+
+    // Set once the server refuses us (wrong map, wrong build, full). Terminal: the retry loop stops,
+    // and the UI has a reason to show instead of a join that quietly never happens.
+    public JoinRejection? Rejection { get; private set; }
+    public Action<JoinRejection>? OnRejected;
+
+    // The level this client built, as sent in the Hello.
+    public string Level => _level;
+
     public bool Joined { get; private set; }
     public PlayerSnapshotState LocalServerState { get; private set; }
     public IReadOnlyDictionary<byte, RemotePlayer> Remotes => _remotes;
@@ -71,13 +80,17 @@ public sealed class NetClient
     public const double StateTimeout = 10.0;
 
     private readonly string _name;
+    private readonly string _level;
     private double _lastHello = double.NegativeInfinity;
     private double _lastStateAt;
 
-    public NetClient(IClientTransport transport, string name)
+    // levelName is the map folder this client actually built. The server admits us only onto that
+    // world; see NetMessages.LevelsMatch.
+    public NetClient(IClientTransport transport, string name, string levelName)
     {
         _transport = transport;
         _name = name;
+        _level = levelName;
     }
 
     public void SendInput(in InputCommand input) =>
@@ -87,12 +100,14 @@ public sealed class NetClient
     {
         _transport.Update(now); // give the transport the clock BEFORE any reliable send
 
-        if (!Joined && now - _lastHello >= HelloRetryInterval)
+        // A rejection is an answer, not a hiccup: retrying a Hello the server has already refused only
+        // hammers it with a request whose verdict cannot change.
+        if (!Joined && Rejection == null && now - _lastHello >= HelloRetryInterval)
         {
             // Deferred from the constructor: a reliable frame stamped before the transport ever saw the
             // real clock would look GiveUpAfter-seconds old on the next Update and kill the channel.
             _lastHello = now;
-            _transport.Send(NetMessages.WriteHello(_name), ESendType.Reliable);
+            _transport.Send(NetMessages.WriteHello(_name, _level), ESendType.Reliable);
         }
 
         while (_transport.TryReceive(out byte[] payload))
@@ -152,6 +167,20 @@ public sealed class NetClient
                         _remotes[p.PlayerId] = SpawnRemote(p, now);
                     break;
                 }
+            case ENetMessage.Reject:
+                {
+                    if (!MalformedPacket.TryDecode(payload, ReadReject, out JoinRejection rejection))
+                    {
+                        MalformedPacketsDropped++;
+                        break;
+                    }
+
+                    Rejection = rejection;
+                    Joined = false;
+                    _remotes.Clear();
+                    OnRejected?.Invoke(rejection);
+                    break;
+                }
             case ENetMessage.PlayerLeft:
                 if (MalformedPacket.TryDecode(payload, ReadPlayerLeft, out byte left))
                     _remotes.Remove(left);
@@ -185,6 +214,7 @@ public sealed class NetClient
     private static readonly Func<byte[], (byte PlayerId, uint Tick, List<PlayerListing> Players)> ReadWelcome =
         NetMessages.ReadWelcome;
     private static readonly Func<byte[], PlayerListing> ReadPlayerJoined = NetMessages.ReadPlayerJoined;
+    private static readonly Func<byte[], JoinRejection> ReadReject = NetMessages.ReadReject;
     private static readonly Func<byte[], byte> ReadPlayerLeft = NetMessages.ReadPlayerLeft;
     private static readonly Func<byte[], (uint Tick, List<PlayerSnapshotState> States)> ReadStateUpdate =
         NetMessages.ReadStateUpdate;

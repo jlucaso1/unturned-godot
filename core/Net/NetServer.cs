@@ -21,6 +21,7 @@ public sealed class NetServer
     private readonly IServerTransport _transport;
     private readonly ServerSimulation _simulation;
     private readonly Vector3 _spawnPosition;
+    private readonly string _levelName;
     private readonly Dictionary<ITransportConnection, Session> _sessions = new();
     private readonly PlayerIdPool _playerIds = new();
     private double _nextTick = double.NaN;
@@ -54,11 +55,17 @@ public sealed class NetServer
                 visit(session.PlayerId, _simulation.GetState(session.PlayerId), connection);
     }
 
-    public NetServer(IServerTransport transport, ServerSimulation simulation, Vector3 spawnPosition)
+    // The level this server runs, by folder name. Not optional: a server always hosts one specific
+    // world, and a handshake that cannot name it is how two players ended up walking different maps.
+    public string LevelName => _levelName;
+
+    public NetServer(IServerTransport transport, ServerSimulation simulation, Vector3 spawnPosition,
+        string levelName)
     {
         _transport = transport;
         _simulation = simulation;
         _spawnPosition = spawnPosition;
+        _levelName = levelName;
     }
 
     public void Update(double now)
@@ -110,23 +117,52 @@ public sealed class NetServer
 
         switch (type)
         {
+            // Answerable before (and without) joining: this is the pre-flight a client runs to learn
+            // which level to build, so it must work on a connection that has said nothing else.
+            case ENetMessage.ServerInfoRequest:
+                connection.Send(
+                    NetMessages.WriteServerInfo(_levelName, PlayerCount, FreePlayerSlotsAt(now)),
+                    ESendType.Reliable);
+                break;
             case ENetMessage.Hello:
                 {
-                    if (!MalformedPacket.TryDecode(payload, ReadHello, out (byte Version, string Name) hello))
+                    // The version comes first and alone. Reading the whole Hello up front would make
+                    // an older client's shorter one merely "malformed": no refusal, no close, and —
+                    // since the transport acks it anyway — a client free to retry that forever.
+                    if (!MalformedPacket.TryDecode(payload, ReadHelloVersion, out byte version))
                     {
                         MalformedPacketsDropped++;
                         break;
                     }
 
-                    (byte version, string name) = hello;
                     if (version != NetMessages.ProtocolVersion)
                     {
-                        connection.Close(); // incompatible build: refuse cleanly instead of mis-parsing frames
+                        // Incompatible build: refuse cleanly instead of mis-parsing its frames. The
+                        // reason is sent anyway — a build that speaks a version we do not know may
+                        // still read this message, and one that cannot is no worse off.
+                        Refuse(connection, EJoinRejection.ProtocolMismatch);
+                        break;
+                    }
+
+                    if (!MalformedPacket.TryDecode(payload, ReadHello,
+                        out (byte Version, string Name, string Level) hello))
+                    {
+                        MalformedPacketsDropped++;
+                        break;
+                    }
+
+                    (_, string name, string level) = hello;
+                    if (!NetMessages.LevelsMatch(level, _levelName))
+                    {
+                        // The reported bug, refused at its source: this client built another world.
+                        // The reason carries our level, so the client can say which map to load
+                        // instead of leaving the player to guess.
+                        Refuse(connection, EJoinRejection.LevelMismatch);
                     }
                     else if (!session.Joined)
                     {
                         if (!AdmitPlayer(connection, session, name, now))
-                            connection.Close(); // server full: refuse cleanly, do not invent an id
+                            Refuse(connection, EJoinRejection.ServerFull); // do not invent an id
                     }
                     else
                     {
@@ -151,9 +187,20 @@ public sealed class NetServer
         }
     }
 
+    // Says why, then hangs up. The send dispatches the datagram immediately, so the reason is on the
+    // wire before the close drops the connection (and with it any retransmission of it). Losing that
+    // one datagram is not fatal: the client keeps re-Helloing until it is told, or gives up.
+    private void Refuse(ITransportConnection connection, EJoinRejection reason)
+    {
+        connection.Send(NetMessages.WriteReject(reason, _levelName), ESendType.Reliable);
+        connection.Close();
+    }
+
     // Cached so a method group does not allocate a delegate on every received message.
     private static readonly Func<byte[], ENetMessage> ReadType = NetMessages.TypeOf;
-    private static readonly Func<byte[], (byte Version, string Name)> ReadHello = NetMessages.ReadHello;
+    private static readonly Func<byte[], byte> ReadHelloVersion = NetMessages.ReadHelloVersion;
+    private static readonly Func<byte[], (byte Version, string Name, string Level)> ReadHello =
+        NetMessages.ReadHello;
     private static readonly Func<byte[], InputCommand> ReadInput = NetMessages.ReadInput;
 
     // False when there is no id left to give — the caller refuses the join. Ids come from a pool and go

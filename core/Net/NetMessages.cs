@@ -17,7 +17,7 @@ namespace UnturnedGodot.Net;
 // mis-parsing each other's frames.
 public enum ENetMessage : byte
 {
-    Hello,        // client -> server, reliable: I want to join (name + protocol version)
+    Hello,        // client -> server, reliable: I want to join (name + protocol version + level)
     Welcome,      // server -> client, reliable: your id + everyone already here
     PlayerJoined, // server -> all, reliable
     PlayerLeft,   // server -> all, reliable
@@ -25,6 +25,45 @@ public enum ENetMessage : byte
     StateUpdate,  // server -> all, unreliable: every player's position, view angles and stance
     ZombieList,   // server -> client, reliable: a chunk of the zombie population (sent on admission)
     ZombieStates, // server -> all, unreliable: the zombies that moved or changed state this tick
+
+    // Pre-join, before the client has built anything: "what are you running?". This is what lets a
+    // client load the server's level instead of guessing — see ServerQuery.
+    ServerInfoRequest, // client -> server, reliable
+    ServerInfo,        // server -> client, reliable: protocol version, level, population
+    Reject,            // server -> client, reliable: why this Hello will never be admitted
+}
+
+// Why a Hello was refused. Sent before the connection is closed so the player is told what happened
+// instead of watching a join silently fail (or, worse, succeed onto the wrong world).
+public enum EJoinRejection : byte
+{
+    ProtocolMismatch, // incompatible build
+    LevelMismatch,    // the client built another map than the one this server runs
+    ServerFull,       // no player id left to hand out
+}
+
+public readonly struct JoinRejection
+{
+    public readonly EJoinRejection Reason;
+    public readonly byte ServerProtocolVersion;
+    public readonly string ServerLevel;
+
+    public JoinRejection(EJoinRejection reason, byte serverProtocolVersion, string serverLevel)
+    {
+        Reason = reason;
+        ServerProtocolVersion = serverProtocolVersion;
+        ServerLevel = serverLevel;
+    }
+}
+
+// What a server answers a pre-join query with: enough to build the right world and to show the player
+// what they are about to join.
+public sealed class ServerInfo
+{
+    public required byte ProtocolVersion { get; init; }
+    public required string Level { get; init; }
+    public byte PlayerCount { get; init; }
+    public byte FreeSlots { get; init; }
 }
 
 public static class NetAngles
@@ -131,7 +170,19 @@ public sealed class PlayerListing
 public static class NetMessages
 {
     // Bump whenever a message layout changes; the server refuses mismatched clients at the handshake.
-    public const byte ProtocolVersion = 5;
+    public const byte ProtocolVersion = 6;
+
+    // Two level names denote the same world. The name on the wire is the map's FOLDER name — the one
+    // identity that survives the trip between two machines (paths and workshop ids do not) — and it
+    // reaches us from menus and command lines, so case and stray spaces are not a different map.
+    // Empty never matches anything, including another empty: a client that cannot name its world is
+    // exactly the client this check exists for.
+    public static bool LevelsMatch(string a, string b)
+    {
+        a = a.Trim();
+        b = b.Trim();
+        return a.Length > 0 && string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+    }
 
     // The transport drops empty payloads, so this is the second line of defence rather than the first —
     // but it is the one every reader funnels through, and reading [0] off an empty array is the
@@ -141,20 +192,76 @@ public static class NetMessages
             ? throw new InvalidDataException("Empty net payload carries no message type.")
             : (ENetMessage)payload[0];
 
-    public static byte[] WriteHello(string name)
+    // The level travels with the join request, not as an afterthought: the server admits a player onto
+    // its world only if that is the world the client actually built.
+    public static byte[] WriteHello(string name, string level)
     {
         using var ms = new MemoryStream();
         using var w = new BinaryWriter(ms);
         w.Write((byte)ENetMessage.Hello);
         w.Write(ProtocolVersion);
         w.Write(name);
+        w.Write(level);
         return ms.ToArray();
     }
 
-    public static (byte Version, string Name) ReadHello(byte[] payload)
+    public static (byte Version, string Name, string Level) ReadHello(byte[] payload)
     {
         using BinaryReader r = Reader(payload);
-        return (r.ReadByte(), r.ReadString());
+        return (r.ReadByte(), r.ReadString(), r.ReadString());
+    }
+
+    // The version alone, read WITHOUT touching the rest of the message. Everything after it is
+    // versioned — the level field only exists from 6 on — so decoding the whole Hello first turns an
+    // older client's shorter one into a malformed packet, and it never hears the refusal it is owed.
+    // The version byte is the one field the format promises never to move.
+    public static byte ReadHelloVersion(byte[] payload)
+    {
+        using BinaryReader r = Reader(payload);
+        return r.ReadByte();
+    }
+
+    public static byte[] WriteServerInfoRequest() => new[] { (byte)ENetMessage.ServerInfoRequest };
+
+    public static byte[] WriteServerInfo(string level, int playerCount, int freeSlots)
+    {
+        using var ms = new MemoryStream();
+        using var w = new BinaryWriter(ms);
+        w.Write((byte)ENetMessage.ServerInfo);
+        w.Write(ProtocolVersion);
+        w.Write(level);
+        w.Write((byte)Math.Clamp(playerCount, 0, byte.MaxValue));
+        w.Write((byte)Math.Clamp(freeSlots, 0, byte.MaxValue));
+        return ms.ToArray();
+    }
+
+    public static ServerInfo ReadServerInfo(byte[] payload)
+    {
+        using BinaryReader r = Reader(payload);
+        return new ServerInfo
+        {
+            ProtocolVersion = r.ReadByte(),
+            Level = r.ReadString(),
+            PlayerCount = r.ReadByte(),
+            FreeSlots = r.ReadByte(),
+        };
+    }
+
+    public static byte[] WriteReject(EJoinRejection reason, string serverLevel)
+    {
+        using var ms = new MemoryStream();
+        using var w = new BinaryWriter(ms);
+        w.Write((byte)ENetMessage.Reject);
+        w.Write((byte)reason);
+        w.Write(ProtocolVersion);
+        w.Write(serverLevel);
+        return ms.ToArray();
+    }
+
+    public static JoinRejection ReadReject(byte[] payload)
+    {
+        using BinaryReader r = Reader(payload);
+        return new JoinRejection((EJoinRejection)r.ReadByte(), r.ReadByte(), r.ReadString());
     }
 
     public static byte[] WriteWelcome(byte playerId, uint tick, IReadOnlyList<PlayerListing> players)

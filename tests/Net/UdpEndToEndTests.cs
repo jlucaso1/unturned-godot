@@ -11,6 +11,8 @@ namespace UnturnedGodot.Tests.Net;
 // Same scenario the loopback E2E proves, now through the wire (framing, acks, endpoint tracking).
 public class UdpEndToEndTests
 {
+    private const string Level = "PEI";
+
     private static bool FlatGround(float x, float z, out float y)
     {
         y = 0f;
@@ -30,12 +32,12 @@ public class UdpEndToEndTests
         ushort port = FreePort();
         var serverTransport = new UdpServerTransport(port);
         var server = new NetServer(serverTransport,
-            new ServerSimulation(new HeightfieldMoveSolver(FlatGround)), new Vector3(0, 0, 0));
+            new ServerSimulation(new HeightfieldMoveSolver(FlatGround)), new Vector3(0, 0, 0), Level);
 
         var aTransport = new UdpClientTransport("127.0.0.1", port);
         var bTransport = new UdpClientTransport("127.0.0.1", port);
-        var a = new NetClient(aTransport, "A");
-        var b = new NetClient(bTransport, "B");
+        var a = new NetClient(aTransport, "A", Level);
+        var b = new NetClient(bTransport, "B", Level);
 
         try
         {

@@ -29,6 +29,15 @@ public partial class NetworkManager : Node
     private GroundSampler _ground = FlatFallback;
     private Vector3 _spawn;
 
+    // The map folder this session's world was built from — the identity both ends of the handshake
+    // agree on, so nobody plays on a map the server is not running. Main sets it before any session
+    // starts (see Main.LevelIdentity).
+    public string LevelName { get; set; } = "";
+
+    // Raised when the server refuses our join (wrong map, wrong build, full). Main turns it into a
+    // message and the way back to the menu, instead of a session that silently never starts.
+    public System.Action<JoinRejection>? OnRejected;
+
     private static bool FlatFallback(float x, float z, out float y)
     {
         y = 0f;
@@ -52,10 +61,12 @@ public partial class NetworkManager : Node
             return;
         var loopback = new LoopbackServerTransport();
         _serverTransport = new CompositeServerTransport(loopback);
-        _server = new NetServer(_serverTransport, new ServerSimulation(new HeightfieldMoveSolver(_ground)), _spawn);
+        _server = new NetServer(_serverTransport, new ServerSimulation(new HeightfieldMoveSolver(_ground)),
+            _spawn, LevelName);
         _clientTransport = loopback.CreateClient();
-        _client = new NetClient(_clientTransport, hostName);
-        Log.Print($"[net] local session up; '{hostName}' joined via loopback");
+        _client = new NetClient(_clientTransport, hostName, LevelName);
+        WatchForRejection(_client);
+        Log.Print($"[net] local session up on '{LevelName}'; '{hostName}' joined via loopback");
     }
 
     // Minecraft-style "open to LAN": attach a UDP listener to the ALREADY-RUNNING local server.
@@ -553,9 +564,30 @@ public partial class NetworkManager : Node
         if (IsActive)
             return;
         _clientTransport = new UdpClientTransport(host, port);
-        _client = new NetClient(_clientTransport, name);
-        Log.Print($"[net] joining {host}:{port} as '{name}'");
+        _client = new NetClient(_clientTransport, name, LevelName);
+        WatchForRejection(_client);
+        Log.Print($"[net] joining {host}:{port} as '{name}' on '{LevelName}'");
     }
+
+    // The join flow asks the server which level it runs and builds that one, so a refusal here means
+    // something changed under us (the host switched maps, filled up, or updated). Say so out loud.
+    private void WatchForRejection(NetClient client) =>
+        client.OnRejected += rejection =>
+        {
+            Log.PushWarning($"[net] the server refused the join: {Describe(rejection)}");
+            OnRejected?.Invoke(rejection);
+        };
+
+    public static string Describe(JoinRejection rejection) => rejection.Reason switch
+    {
+        EJoinRejection.LevelMismatch =>
+            $"it is running '{rejection.ServerLevel}', and this session built another map.",
+        EJoinRejection.ProtocolMismatch =>
+            $"it speaks protocol {rejection.ServerProtocolVersion}, this build speaks "
+            + $"{NetMessages.ProtocolVersion}.",
+        EJoinRejection.ServerFull => "it is full.",
+        _ => "no reason given.",
+    };
 
     public override void _PhysicsProcess(double delta)
     {
