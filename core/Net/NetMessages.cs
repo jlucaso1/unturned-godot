@@ -133,7 +133,13 @@ public static class NetMessages
     // Bump whenever a message layout changes; the server refuses mismatched clients at the handshake.
     public const byte ProtocolVersion = 5;
 
-    public static ENetMessage TypeOf(byte[] payload) => (ENetMessage)payload[0];
+    // The transport drops empty payloads, so this is the second line of defence rather than the first —
+    // but it is the one every reader funnels through, and reading [0] off an empty array is the
+    // cheapest way to lose a server to a one-byte datagram.
+    public static ENetMessage TypeOf(byte[] payload) =>
+        payload.Length == 0
+            ? throw new InvalidDataException("Empty net payload carries no message type.")
+            : (ENetMessage)payload[0];
 
     public static byte[] WriteHello(string name)
     {

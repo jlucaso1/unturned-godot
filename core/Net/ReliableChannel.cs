@@ -61,6 +61,11 @@ public sealed class ReliableChannel
         switch (datagram[0])
         {
             case ChannelUnreliable:
+                // A payload has to carry at least its message-type byte. A bare channel prefix decodes
+                // to an empty payload, which every reader indexes at [0] — drop it here rather than
+                // making each of them defend itself.
+                if (datagram.Length < 2)
+                    return false;
                 payload = datagram[1..];
                 return true;
 
@@ -75,6 +80,10 @@ public sealed class ReliableChannel
                     _seenOrder.Enqueue(seq);
                     if (_seenOrder.Count > DedupWindow)
                         _seen.Remove(_seenOrder.Dequeue());
+                    // Acked above so the sender stops retrying, but an empty payload carries no message
+                    // type and must not reach a reader. Same rule as the unreliable channel.
+                    if (datagram.Length < 4)
+                        return false;
                     payload = datagram[3..];
                     return true;
                 }

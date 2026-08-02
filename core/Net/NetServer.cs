@@ -27,6 +27,10 @@ public sealed class NetServer
 
     public int PlayerCount { get; private set; }
 
+    // Datagrams that reached a decoder and did not survive it. Non-zero means someone is sending the
+    // server bytes it cannot read — a mismatched build, a corrupt link, or a probe.
+    public long MalformedPacketsDropped { get; private set; }
+
     // Extension seams for replicated systems (zombies, resources, doors): hook the fixed tick to run
     // server logic and use Broadcast to ship your own ENetMessage; hook OnPlayerAdmitted to send a
     // freshly admitted (or re-admitted) player your system's full state, the way Welcome carries the
@@ -64,7 +68,17 @@ public sealed class NetServer
                     _sessions[evt.Connection] = new Session();
                     break;
                 case ETransportEvent.Message:
-                    HandleMessage(evt.Connection, evt.Payload);
+                    // Update runs inside _PhysicsProcess, so an exception here ends the process. Anyone
+                    // who can reach the port can send bytes that do not decode; that has to cost them a
+                    // dropped datagram, not the server.
+                    try
+                    {
+                        HandleMessage(evt.Connection, evt.Payload);
+                    }
+                    catch (Exception e) when (MalformedPacket.IsDecodeFailure(e))
+                    {
+                        MalformedPacketsDropped++;
+                    }
                     break;
                 case ETransportEvent.Disconnected:
                     HandleDisconnect(evt.Connection);

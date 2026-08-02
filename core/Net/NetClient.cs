@@ -54,6 +54,9 @@ public sealed class NetClient
 
     public byte PlayerId { get; private set; }
 
+    // Datagrams that reached a decoder and did not survive it. See NetServer.MalformedPacketsDropped.
+    public long MalformedPacketsDropped { get; private set; }
+
     // Extension seam: message types this client doesn't handle (future replicated systems) land here
     // instead of being dropped, so a feature module can subscribe without editing NetClient.
     public Action<byte[]>? OnUnhandledMessage;
@@ -93,7 +96,18 @@ public sealed class NetClient
         }
 
         while (_transport.TryReceive(out byte[] payload))
-            Handle(payload, now);
+        {
+            // A client trusts its server no further than a server trusts its clients: the bytes still
+            // arrive over UDP from whatever address answered, and this loop is on the frame thread.
+            try
+            {
+                Handle(payload, now);
+            }
+            catch (Exception e) when (MalformedPacket.IsDecodeFailure(e))
+            {
+                MalformedPacketsDropped++;
+            }
+        }
 
         if (Joined && now - _lastStateAt > StateTimeout)
         {
