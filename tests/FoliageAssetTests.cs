@@ -36,7 +36,7 @@ public class FoliageAssetTests
     [Fact]
     public void TryParse_ReadsMeshMaterialAndSettings()
     {
-        Assert.True(FoliageAsset.TryParse(DatParser.Parse(GrassAsset), out FoliageAsset asset));
+        Assert.True(FoliageAsset.TryParse(DatParser.Parse(GrassAsset), out var asset));
 
         Assert.Equal(new Guid("c928fb99bae9434795563319a64f6461"), asset.Guid);
         Assert.Equal("Terrain/Foliage/Grass/Grass_00_Mesh.fbx", asset.MeshPath);
@@ -62,7 +62,7 @@ public class FoliageAssetTests
                 }
             }
             """;
-        Assert.True(FoliageAsset.TryParse(DatParser.Parse(minimal), out FoliageAsset asset));
+        Assert.True(FoliageAsset.TryParse(DatParser.Parse(minimal), out var asset));
         Assert.False(asset.CastShadows);      // absent -> false
         Assert.Equal(-1, asset.DrawDistance); // absent -> global (-1)
         Assert.Equal(string.Empty, asset.MaterialPath);
@@ -192,7 +192,7 @@ public class FoliageAssetTests
                 }
             }
             """;
-        Assert.True(FoliageAsset.TryParse(DatParser.Parse(noMatPath), out FoliageAsset asset));
+        Assert.True(FoliageAsset.TryParse(DatParser.Parse(noMatPath), out var asset));
         Assert.Equal(string.Empty, asset.MaterialPath);
     }
 

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using UnturnedGodot.Dat;
 
@@ -38,12 +39,12 @@ public sealed class LandscapeMaterialAsset
         PhysicsMaterial = physicsMaterial;
     }
 
-    public static bool TryParse(DatDictionary root, out LandscapeMaterialAsset asset)
+    public static bool TryParse(DatDictionary root, [MaybeNullWhen(false)] out LandscapeMaterialAsset asset)
     {
-        asset = null!;
+        asset = null;
 
-        if (!root.TryGetDictionary("Metadata", out DatDictionary meta) ||
-            !root.TryGetDictionary("Asset", out DatDictionary data))
+        if (!root.TryGetDictionary("Metadata", out var meta) ||
+            !root.TryGetDictionary("Asset", out var data))
             return false;
         if (!meta.TryGetGuid("GUID", out Guid guid))
             return false;
@@ -62,7 +63,7 @@ public sealed class LandscapeMaterialAsset
 
     // A "Texture { Name <bundle> Path <path> }" block; both keys are present but empty when unused.
     private static (string Bundle, string Path) ReadReference(DatDictionary data, string key) =>
-        data.TryGetDictionary(key, out DatDictionary reference)
+        data.TryGetDictionary(key, out var reference)
             ? (reference.GetString("Name") ?? string.Empty, reference.GetString("Path") ?? string.Empty)
             : (string.Empty, string.Empty);
 
@@ -88,7 +89,7 @@ public sealed class LandscapeMaterialAsset
                     continue;
                 }
 
-                if (TryParse(parsed, out LandscapeMaterialAsset asset))
+                if (TryParse(parsed, out var asset))
                     result.TryAdd(asset.Guid, asset);
             }
         }

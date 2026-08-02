@@ -50,8 +50,8 @@ public class PhysicsMaterialAssetTests
     private static PhysicsMaterialBank Bank()
     {
         var bank = new PhysicsMaterialBank();
-        Assert.True(PhysicsMaterialAsset.TryParse(DatParser.Parse(FoliageDat), out PhysicsMaterialAsset foliage));
-        Assert.True(PhysicsMaterialAsset.TryParse(DatParser.Parse(PeaksGrassDat), out PhysicsMaterialAsset peaks));
+        Assert.True(PhysicsMaterialAsset.TryParse(DatParser.Parse(FoliageDat), out var foliage));
+        Assert.True(PhysicsMaterialAsset.TryParse(DatParser.Parse(PeaksGrassDat), out var peaks));
         bank.Add(foliage);
         bank.Add(peaks);
         return bank;
@@ -60,7 +60,7 @@ public class PhysicsMaterialAssetTests
     [Fact]
     public void Parse_ReadsNamesFallbackAndAudioDefs()
     {
-        Assert.True(PhysicsMaterialAsset.TryParse(DatParser.Parse(PeaksGrassDat), out PhysicsMaterialAsset peaks));
+        Assert.True(PhysicsMaterialAsset.TryParse(DatParser.Parse(PeaksGrassDat), out var peaks));
         Assert.Equal(new[] { "Peaks_Grass_Dry" }, peaks.UnityNames);
         Assert.Equal(Guid.Parse("1c3a3c6664f14aa486d73528a5d9f92c"), peaks.Fallback);
         Assert.Empty(peaks.AudioDefs);
@@ -109,7 +109,7 @@ public class PhysicsMaterialAssetTests
             }
             """;
         var bank = new PhysicsMaterialBank();
-        Assert.True(PhysicsMaterialAsset.TryParse(DatParser.Parse(loop), out PhysicsMaterialAsset asset));
+        Assert.True(PhysicsMaterialAsset.TryParse(DatParser.Parse(loop), out var asset));
         bank.Add(asset);
         Assert.Null(bank.FindAudioDefPath("Loop", "FootstepWalk"));
     }
@@ -181,7 +181,7 @@ public class PhysicsMaterialAssetTests
                 }
             }
             """;
-        Assert.True(PhysicsMaterialAsset.TryParse(DatParser.Parse(odd), out PhysicsMaterialAsset asset));
+        Assert.True(PhysicsMaterialAsset.TryParse(DatParser.Parse(odd), out var asset));
         Assert.Equal(new[] { "Odd" }, asset.UnityNames);
         Assert.Single(asset.AudioDefs);
     }
@@ -205,7 +205,7 @@ public class PhysicsMaterialAssetTests
             }
             """;
         var bank = new PhysicsMaterialBank();
-        Assert.True(PhysicsMaterialAsset.TryParse(DatParser.Parse(dangling), out PhysicsMaterialAsset asset));
+        Assert.True(PhysicsMaterialAsset.TryParse(DatParser.Parse(dangling), out var asset));
         bank.Add(asset);
         Assert.Null(bank.FindAudioDefPath("Dangling", "FootstepWalk"));
     }

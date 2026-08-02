@@ -12,7 +12,7 @@ public class ObjectAssetDatabaseTests
     private static ObjectAsset Make(string guid, ushort id, string type)
     {
         DatDictionary root = DatParser.Parse($"GUID {guid}\nType {type}\nID {id}\n");
-        Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset asset));
+        Assert.True(ObjectAsset.TryParse(root, null, out var asset));
         return asset;
     }
 
@@ -122,7 +122,7 @@ public class ObjectAssetDatabaseTests
     public void Add_AssetWithoutId_NotIndexedById()
     {
         DatDictionary root = DatParser.Parse("GUID 2e698a7b85e94c019b3f91ec8796a961\nType Small\n"); // no ID
-        Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset asset));
+        Assert.True(ObjectAsset.TryParse(root, null, out var asset));
         Assert.Equal(0, asset.Id);
 
         var db = new ObjectAssetDatabase();

@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics.CodeAnalysis;
 using UnturnedGodot.Dat;
 
 namespace UnturnedGodot.Assets;
@@ -46,14 +47,15 @@ public sealed class ObjectAsset
     }
 
     // A v2 file wraps identity in a "Metadata" block; v1 keeps it at the root (optionally under "Asset").
-    public static bool TryParse(DatDictionary root, string? localizedName, out ObjectAsset asset)
+    public static bool TryParse(DatDictionary root, string? localizedName,
+        [MaybeNullWhen(false)] out ObjectAsset asset)
     {
-        DatDictionary guidSource = root.TryGetDictionary("Metadata", out DatDictionary md) ? md : root;
-        DatDictionary data = root.TryGetDictionary("Asset", out DatDictionary a) ? a : root;
+        DatDictionary guidSource = root.TryGetDictionary("Metadata", out var md) ? md : root;
+        DatDictionary data = root.TryGetDictionary("Asset", out var a) ? a : root;
 
         if (!guidSource.TryGetGuid("GUID", out Guid guid))
         {
-            asset = null!;
+            asset = null;
             return false;
         }
 

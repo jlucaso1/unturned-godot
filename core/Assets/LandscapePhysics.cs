@@ -54,8 +54,8 @@ public sealed class LandscapePhysics
                 try { parsed = DatParser.Parse(File.ReadAllText(file)); }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }
 
-                if (!parsed.TryGetDictionary("Metadata", out DatDictionary meta) ||
-                    !parsed.TryGetDictionary("Asset", out DatDictionary data) ||
+                if (!parsed.TryGetDictionary("Metadata", out var meta) ||
+                    !parsed.TryGetDictionary("Asset", out var data) ||
                     !meta.TryGetGuid("GUID", out Guid guid))
                     continue;
                 string type = meta.GetString("Type") ?? string.Empty;

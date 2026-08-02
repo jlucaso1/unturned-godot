@@ -19,13 +19,13 @@ public sealed class MaterialPalette
 
     public static MaterialPalette? Read(DatDictionary root)
     {
-        DatDictionary meta = root.TryGetDictionary("Metadata", out DatDictionary md) ? md : root;
+        DatDictionary meta = root.TryGetDictionary("Metadata", out var md) ? md : root;
         if (!meta.TryGetGuid("GUID", out Guid guid))
             return null;
 
-        DatDictionary data = root.TryGetDictionary("Asset", out DatDictionary a) ? a : root;
+        DatDictionary data = root.TryGetDictionary("Asset", out var a) ? a : root;
         var paths = new List<string>();
-        if (data.TryGetList("Materials", out DatList list))
+        if (data.TryGetList("Materials", out var list))
             foreach (DatNode node in list.Items)
                 if (node is DatDictionary entry && entry.GetString("Path") is { Length: > 0 } path)
                     paths.Add(path);

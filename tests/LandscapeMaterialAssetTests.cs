@@ -37,7 +37,7 @@ public class LandscapeMaterialAssetTests
     public void TryParse_ReadsTheBundleReferenceAndSurface()
     {
         Assert.True(LandscapeMaterialAsset.TryParse(DatParser.Parse(PeiGrass),
-            out LandscapeMaterialAsset asset));
+            out var asset));
 
         Assert.Equal(Guid.Parse("3d7717c2bc074401853b2fdacd9db1ba"), asset.Guid);
         Assert.Equal("core.masterbundle", asset.TextureBundle);
@@ -77,7 +77,7 @@ public class LandscapeMaterialAssetTests
             {
                 ID 0
             }
-            """), out LandscapeMaterialAsset asset));
+            """), out var asset));
 
         Assert.Equal("", asset.TextureBundle);
         Assert.Equal("", asset.TexturePath);
@@ -102,7 +102,7 @@ public class LandscapeMaterialAssetTests
                     ID 0
                 }
             }
-            """), out LandscapeMaterialAsset asset));
+            """), out var asset));
 
         Assert.Equal("", asset.TextureBundle);
         Assert.Equal("", asset.TexturePath);

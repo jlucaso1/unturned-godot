@@ -29,7 +29,7 @@ public class DatDictionaryTests
     public void TryGetList_Hit()
     {
         DatDictionary d = DatParser.Parse("Items\n[\na\nb\n]\n");
-        Assert.True(d.TryGetList("Items", out DatList list));
+        Assert.True(d.TryGetList("Items", out var list));
         Assert.Equal(2, list.Items.Count);
     }
 

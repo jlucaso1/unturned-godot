@@ -199,7 +199,7 @@ public class ContentExtractionTests
                 }
             }
             """);
-        Assert.True(FoliageAsset.TryParse(data, out FoliageAsset foliage));
+        Assert.True(FoliageAsset.TryParse(data, out var foliage));
         return foliage;
     }
 
