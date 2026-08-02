@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 
 namespace UnturnedGodot.Net;
@@ -23,4 +24,24 @@ public static class MalformedPacket
             or IndexOutOfRangeException
             or OverflowException
             or FormatException;
+
+    // Runs one decoder over one payload. False means the bytes did not decode and the caller should drop
+    // the datagram; the caller counts its own drops. Pass a cached delegate — a method group converts to
+    // a fresh one on every call, and these run per received message.
+    //
+    // The point of the seam is its narrowness: only `read` is inside the guard, so a fault in whatever
+    // the caller does with the result still surfaces as the defect it is.
+    public static bool TryDecode<T>(byte[] payload, Func<byte[], T> read, [MaybeNullWhen(false)] out T value)
+    {
+        try
+        {
+            value = read(payload);
+            return true;
+        }
+        catch (Exception e) when (IsDecodeFailure(e))
+        {
+            value = default;
+            return false;
+        }
+    }
 }

@@ -151,6 +151,21 @@ public class MalformedPacketTests
         Assert.Equal(new[] { ReliableChannel.ChannelAck, (byte)3, (byte)0 }, sent[0]);
     }
 
+    // A bare frame is acked but delivers nothing, so it must not consume its sequence number: the peer's
+    // retransmission of the real frame carries the same one, and the dedup set would swallow it.
+    [Fact]
+    public void BareReliableFrame_DoesNotSuppressACompleteFrameWithTheSameSequence()
+    {
+        var channel = new ReliableChannel(_ => { });
+        byte[] bare = { ReliableChannel.ChannelReliable, 9, 0 };
+        byte[] complete = { ReliableChannel.ChannelReliable, 9, 0, (byte)ENetMessage.PlayerLeft, 3 };
+
+        Assert.False(channel.HandleDatagram(bare, out _));
+
+        Assert.True(channel.HandleDatagram(complete, out byte[] payload));
+        Assert.Equal(new byte[] { (byte)ENetMessage.PlayerLeft, 3 }, payload);
+    }
+
     [Fact]
     public void UnknownChannelPrefix_IsDropped()
     {
@@ -210,6 +225,33 @@ public class MalformedPacketTests
 
         Assert.False(client.Joined);
         Assert.Equal(2, client.MalformedPacketsDropped);
+    }
+
+    // The guard is scoped to decoding on purpose. Everything past it is our own code, so a fault there
+    // is a defect: counting it as someone else's bad packet would bury exactly the bug worth seeing.
+    [Fact]
+    public void AFaultInOnPlayerAdmitted_Propagates_AndIsNotCountedAsAMalformedPacket()
+    {
+        (NetServer server, FakeServerTransport transport) = Build();
+        server.OnPlayerAdmitted += (_, _) => throw new ArgumentException("defect in a replicated system");
+        var client = new FakeConnection();
+        transport.Connect(client);
+        transport.Message(client, NetMessages.WriteHello("player"));
+
+        Assert.Throws<ArgumentException>(() => server.Update(0.0));
+        Assert.Equal(0, server.MalformedPacketsDropped);
+    }
+
+    [Fact]
+    public void AFaultInOnUnhandledMessage_Propagates_AndIsNotCountedAsAMalformedPacket()
+    {
+        var transport = new FakeClientTransport();
+        var client = new NetClient(transport, "player");
+        client.OnUnhandledMessage += _ => throw new ArgumentException("defect in a subscriber");
+        transport.Deliver(new[] { (byte)ENetMessage.ZombieList, (byte)0, (byte)0 });
+
+        Assert.Throws<ArgumentException>(() => client.Update(0.0));
+        Assert.Equal(0, client.MalformedPacketsDropped);
     }
 
     private sealed class FakeClientTransport : IClientTransport

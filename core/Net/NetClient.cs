@@ -96,18 +96,7 @@ public sealed class NetClient
         }
 
         while (_transport.TryReceive(out byte[] payload))
-        {
-            // A client trusts its server no further than a server trusts its clients: the bytes still
-            // arrive over UDP from whatever address answered, and this loop is on the frame thread.
-            try
-            {
-                Handle(payload, now);
-            }
-            catch (Exception e) when (MalformedPacket.IsDecodeFailure(e))
-            {
-                MalformedPacketsDropped++;
-            }
-        }
+            Handle(payload, now);
 
         if (Joined && now - _lastStateAt > StateTimeout)
         {
@@ -120,14 +109,30 @@ public sealed class NetClient
 
     private void Handle(byte[] payload, double now)
     {
-        switch (NetMessages.TypeOf(payload))
+        // A client trusts its server no further than a server trusts its clients: the bytes still arrive
+        // over UDP from whatever answered, and this loop is on the frame thread. Only the decodes are
+        // guarded — OnUnhandledMessage runs subscriber code, and a subscriber that reads untrusted bytes
+        // (ZombiesView) guards its own decode rather than hiding behind ours.
+        if (!MalformedPacket.TryDecode(payload, ReadType, out ENetMessage type))
+        {
+            MalformedPacketsDropped++;
+            return;
+        }
+
+        switch (type)
         {
             default:
                 OnUnhandledMessage?.Invoke(payload);
                 break;
             case ENetMessage.Welcome:
                 {
-                    (byte id, _, List<PlayerListing> players) = NetMessages.ReadWelcome(payload);
+                    if (!MalformedPacket.TryDecode(payload, ReadWelcome, out var welcome))
+                    {
+                        MalformedPacketsDropped++;
+                        break;
+                    }
+
+                    (byte id, _, List<PlayerListing> players) = welcome;
                     PlayerId = id;
                     Joined = true;
                     _lastStateAt = now;
@@ -137,17 +142,31 @@ public sealed class NetClient
                 }
             case ENetMessage.PlayerJoined:
                 {
-                    PlayerListing p = NetMessages.ReadPlayerJoined(payload);
+                    if (!MalformedPacket.TryDecode(payload, ReadPlayerJoined, out var p))
+                    {
+                        MalformedPacketsDropped++;
+                        break;
+                    }
+
                     if (p.PlayerId != PlayerId)
                         _remotes[p.PlayerId] = SpawnRemote(p, now);
                     break;
                 }
             case ENetMessage.PlayerLeft:
-                _remotes.Remove(NetMessages.ReadPlayerLeft(payload));
+                if (MalformedPacket.TryDecode(payload, ReadPlayerLeft, out byte left))
+                    _remotes.Remove(left);
+                else
+                    MalformedPacketsDropped++;
                 break;
             case ENetMessage.StateUpdate:
                 {
-                    (_, List<PlayerSnapshotState> states) = NetMessages.ReadStateUpdate(payload);
+                    if (!MalformedPacket.TryDecode(payload, ReadStateUpdate, out var update))
+                    {
+                        MalformedPacketsDropped++;
+                        break;
+                    }
+
+                    (_, List<PlayerSnapshotState> states) = update;
                     _lastStateAt = now;
                     foreach (PlayerSnapshotState s in states)
                     {
@@ -160,6 +179,15 @@ public sealed class NetClient
                 }
         }
     }
+
+    // Cached so a method group does not allocate a delegate on every received message.
+    private static readonly Func<byte[], ENetMessage> ReadType = NetMessages.TypeOf;
+    private static readonly Func<byte[], (byte PlayerId, uint Tick, List<PlayerListing> Players)> ReadWelcome =
+        NetMessages.ReadWelcome;
+    private static readonly Func<byte[], PlayerListing> ReadPlayerJoined = NetMessages.ReadPlayerJoined;
+    private static readonly Func<byte[], byte> ReadPlayerLeft = NetMessages.ReadPlayerLeft;
+    private static readonly Func<byte[], (uint Tick, List<PlayerSnapshotState> States)> ReadStateUpdate =
+        NetMessages.ReadStateUpdate;
 
     private static RemotePlayer SpawnRemote(PlayerListing p, double now)
     {

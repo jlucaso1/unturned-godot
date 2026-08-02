@@ -68,17 +68,7 @@ public sealed class NetServer
                     _sessions[evt.Connection] = new Session();
                     break;
                 case ETransportEvent.Message:
-                    // Update runs inside _PhysicsProcess, so an exception here ends the process. Anyone
-                    // who can reach the port can send bytes that do not decode; that has to cost them a
-                    // dropped datagram, not the server.
-                    try
-                    {
-                        HandleMessage(evt.Connection, evt.Payload);
-                    }
-                    catch (Exception e) when (MalformedPacket.IsDecodeFailure(e))
-                    {
-                        MalformedPacketsDropped++;
-                    }
+                    HandleMessage(evt.Connection, evt.Payload);
                     break;
                 case ETransportEvent.Disconnected:
                     HandleDisconnect(evt.Connection);
@@ -103,11 +93,27 @@ public sealed class NetServer
         if (!_sessions.TryGetValue(connection, out Session? session))
             return;
 
-        switch (NetMessages.TypeOf(payload))
+        // Update runs inside _PhysicsProcess, so an exception escaping here ends the process, and anyone
+        // who can reach the port can send bytes that do not decode. Every decode below therefore goes
+        // through TryDecode — and nothing else does: the simulation, the roster and OnPlayerAdmitted are
+        // our own code, and a fault there is a defect that must surface, not another dropped packet.
+        if (!MalformedPacket.TryDecode(payload, ReadType, out ENetMessage type))
+        {
+            MalformedPacketsDropped++;
+            return;
+        }
+
+        switch (type)
         {
             case ENetMessage.Hello:
                 {
-                    (byte version, string name) = NetMessages.ReadHello(payload);
+                    if (!MalformedPacket.TryDecode(payload, ReadHello, out (byte Version, string Name) hello))
+                    {
+                        MalformedPacketsDropped++;
+                        break;
+                    }
+
+                    (byte version, string name) = hello;
                     if (version != NetMessages.ProtocolVersion)
                     {
                         connection.Close(); // incompatible build: refuse cleanly instead of mis-parsing frames
@@ -131,10 +137,18 @@ public sealed class NetServer
                     break;
                 }
             case ENetMessage.Input when session.Joined:
-                _simulation.QueueInput(session.PlayerId, NetMessages.ReadInput(payload));
+                if (MalformedPacket.TryDecode(payload, ReadInput, out InputCommand input))
+                    _simulation.QueueInput(session.PlayerId, input);
+                else
+                    MalformedPacketsDropped++;
                 break;
         }
     }
+
+    // Cached so a method group does not allocate a delegate on every received message.
+    private static readonly Func<byte[], ENetMessage> ReadType = NetMessages.TypeOf;
+    private static readonly Func<byte[], (byte Version, string Name)> ReadHello = NetMessages.ReadHello;
+    private static readonly Func<byte[], InputCommand> ReadInput = NetMessages.ReadInput;
 
     private void AdmitPlayer(ITransportConnection connection, Session session, string name)
     {

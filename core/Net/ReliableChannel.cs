@@ -75,15 +75,17 @@ public sealed class ReliableChannel
                         return false;
                     ushort seq = (ushort)(datagram[1] | (datagram[2] << 8));
                     _rawSend(new[] { ChannelAck, datagram[1], datagram[2] }); // always ack, even duplicates
+                    // Acked above so the sender stops retrying, but an empty payload carries no message
+                    // type and must not reach a reader. Same rule as the unreliable channel. Checked
+                    // before the dedup set is touched: a bare frame must not burn a sequence number and
+                    // suppress a later, complete frame that carries the same one.
+                    if (datagram.Length < 4)
+                        return false;
                     if (!_seen.Add(seq))
                         return false; // retransmission of something already delivered
                     _seenOrder.Enqueue(seq);
                     if (_seenOrder.Count > DedupWindow)
                         _seen.Remove(_seenOrder.Dequeue());
-                    // Acked above so the sender stops retrying, but an empty payload carries no message
-                    // type and must not reach a reader. Same rule as the unreliable channel.
-                    if (datagram.Length < 4)
-                        return false;
                     payload = datagram[3..];
                     return true;
                 }
