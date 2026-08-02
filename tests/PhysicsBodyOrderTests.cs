@@ -644,15 +644,20 @@ public class PhysicsBodyOrderTests
         Assert.True(guard >= 0 && cache > guard && result > cache);
     }
 
+    // Cache completeness is decided per mesh, so a format that gains a new per-prefab artifact cannot be
+    // detected by a missing file — an absent lower level looks the same as a prefab that never had one.
+    // The magic is the only thing that forces one more extraction pass, and it must never go backwards:
+    // UGM8 predates source-aware texture tags and UGM9 predates the authored LOD levels.
     [Fact]
-    public void SourceAwareTextureTagsInvalidateNameOnlyMeshCaches()
+    public void MeshCacheMagicInvalidatesEveryOlderExtraction()
     {
         if (FindRepositoryFile(Path.Combine("core", "Unity", "MeshCache.cs")) is not { } path)
             return;
 
         string source = File.ReadAllText(path);
-        Assert.Contains("\"UGM9\"", source);
-        Assert.Contains("private const uint Magic = 0x394D4755;", source);
+        Assert.Contains("private const uint Magic = 0x414D4755;", source); // "UGMA"
+        Assert.DoesNotContain("private const uint Magic = 0x394D4755;", source); // UGM9
+        Assert.DoesNotContain("private const uint Magic = 0x384D4755;", source); // UGM8
     }
 
     [Fact]

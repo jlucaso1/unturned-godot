@@ -610,8 +610,10 @@ public static class ModelExtractor
             // authored LOD-0 set and, where the prefab ships one, for its "*_1" siblings, so a distant
             // instance can render the lower level the artist already provided instead of full detail.
             bool BuildLevel(List<MeshPart> levelParts, out List<Vector3> verts, out List<Vector3> normals,
-                out List<Vector2> uvs, out List<CachedSubmesh> submeshes, out bool allNormals)
+                out List<Vector2> uvs, out List<CachedSubmesh> submeshes, out bool allNormals,
+                bool requireEveryPart = false)
             {
+                bool complete = true;
                 verts = new List<Vector3>();
                 normals = new List<Vector3>();
                 uvs = new List<Vector2>();
@@ -622,11 +624,20 @@ public static class ModelExtractor
                                    // local-to-root transform into its vertices and concatenate them into one indexed mesh.
                 foreach (MeshPart part in levelParts)
                 {
+                    // A level is all-or-nothing. Skipping an undecodable part (stream-data geometry, for
+                    // instance) would cache a level that silently drops that piece of the object when it
+                    // activates, and TriangleTotal would read the hole as the level being cheaper.
                     if (!graph.ObjectsByPathId.TryGetValue(part.MeshId, out SerializedObject? meshObj))
+                    {
+                        complete = false;
                         continue;
+                    }
                     UnityMesh mesh = UnityMesh.Read(TypeTreeReader.Read(meshObj.TypeTree, file.ReaderFor(meshObj)));
                     if (!mesh.Usable)
+                    {
+                        complete = false;
                         continue;
+                    }
 
                     int baseVertex = verts.Count;
                     // Normals transform by the inverse-transpose of the part's basis (correct under the
@@ -657,7 +668,7 @@ public static class ModelExtractor
                         submeshes.Add(new CachedSubmesh(indices, color, texKey, blend, metallic, smoothness, cull));
                     }
                 }
-                return submeshes.Count > 0;
+                return submeshes.Count > 0 && (complete || !requireEveryPart);
             }
 
             if (!BuildLevel(parts, out List<Vector3> verts, out List<Vector3> normals,
@@ -678,7 +689,8 @@ public static class ModelExtractor
             File.Delete(lod1Path); // never keep a previous source's level for a colliding GUID
             if (graph.Lod1PartsByKey.TryGetValue(key, out List<MeshPart>? lod1Parts)
                 && BuildLevel(lod1Parts, out List<Vector3> lodVerts, out List<Vector3> lodNormals,
-                    out List<Vector2> lodUvs, out List<CachedSubmesh> lodSubmeshes, out bool lodNormalsOk)
+                    out List<Vector2> lodUvs, out List<CachedSubmesh> lodSubmeshes, out bool lodNormalsOk,
+                    requireEveryPart: true)
                 && TriangleTotal(lodSubmeshes) < TriangleTotal(submeshes))
             {
                 using var lodStream = File.Create(lod1Path);
@@ -908,7 +920,10 @@ public static class ModelExtractor
         if (!Directory.Exists(cacheDir))
             return ids;
 
-        foreach (string path in PlainMeshFiles(cacheDir))
+        // Both levels, not just the plain one: a texture referenced only by an authored lower level would
+        // otherwise never be marked needed, and the synchronous WorldBuilder path relies entirely on this
+        // scan to decide what ExtractTextures decodes.
+        foreach (string path in Directory.GetFiles(cacheDir, "*.mesh"))
         {
             byte[] data;
             try { data = File.ReadAllBytes(path); }

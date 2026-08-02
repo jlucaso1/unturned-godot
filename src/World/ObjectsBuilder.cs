@@ -633,21 +633,26 @@ public static class ObjectsBuilder
 
     // Unturned's prefabs carry their own lower LOD levels; the port used to keep only LOD-0 and draw full
     // detail at every distance. UG_OBJECT_LOD=0 restores that for A/B measurement.
-    private static readonly bool LodEnabled = OS.GetEnvironment("UG_OBJECT_LOD") != "0";
+    // Public so a caller can skip loading the lower-level library altogether: with the flag off the
+    // A/B control must not pay for meshes and materials that ObjectsBuilder would then ignore.
+    public static bool ObjectLodEnabled => LodEnabled;
+
+    private static readonly bool LodEnabled = EnvBool("UG_OBJECT_LOD", true);
 
     // Unity switches level by projected screen height, so the threshold scales with the object: a tree
     // holds its detail much further out than a crate. Approximate that with a multiple of the mesh's
     // bounding radius, tunable because the authored per-prefab thresholds are not extracted yet.
-    private static readonly float LodSwitchRadii =
-        float.TryParse(OS.GetEnvironment("UG_OBJECT_LOD_RADII"), System.Globalization.NumberStyles.Float,
-            System.Globalization.CultureInfo.InvariantCulture, out float radii)
-            ? Mathf.Clamp(radii, 2f, 200f) : 24f;
-    private const float LodFadeMargin = 8f;
+    private static readonly float LodSwitchRadii = EnvFloat("UG_OBJECT_LOD_RADII", 24f, 2f, 200f);
+    // Unity's LODGroup switches level outright unless cross-fade is explicitly authored, so a hard swap
+    // is both the parity behaviour and the cheaper one: inside a fade margin Godot dithers the two levels
+    // together, which draws BOTH. UG_OBJECT_LOD_FADE=1 opts back into the dithered swap.
+    private static readonly bool LodFade = EnvBool("UG_OBJECT_LOD_FADE", false);
+    private static float LodFadeMargin => LodFade ? 8f : 0f;
 
     private static float SwitchDistanceFor(Mesh mesh)
     {
         float radius = mesh.GetAabb().Size.Length() * 0.5f;
-        return Mathf.Max(LodFadeMargin * 2f, radius * LodSwitchRadii);
+        return Mathf.Max(16f, radius * LodSwitchRadii);
     }
 
     // One batch when the prefab has a single level, two sharing the same transforms when it has a lower

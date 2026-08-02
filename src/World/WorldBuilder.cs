@@ -243,7 +243,9 @@ public static class WorldBuilder
         int withMesh = 0;
         // The prefabs' authored lower levels, so this path renders the same as the streamed one: a
         // benchmark or screenshot taken here must submit the geometry a real session submits.
-        var lod1Library = ModelLibrary.Load(cacheDir, registry, neededGuids, ModelExtractor.Lod1Suffix);
+        Dictionary<Guid, ArrayMesh> lod1Library = ObjectsBuilder.ObjectLodEnabled
+            ? ModelLibrary.Load(cacheDir, registry, neededGuids, ModelExtractor.Lod1Suffix)
+            : new Dictionary<Guid, ArrayMesh>();
         Node3D objectsRoot = objects.Count > 0
             ? ObjectsBuilder.Build(objects, db, meshLibrary, colliderLibrary, out withMesh, lod1Library)
             : new Node3D { Name = "Objects" };

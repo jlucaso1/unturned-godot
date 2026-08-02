@@ -54,7 +54,11 @@ public partial class MultiMeshRidRenderer : Node3D
                 RenderingServer.InstanceGeometrySetVisibilityRange(instance, entry.VisibilityBegin,
                     entry.VisibilityEnd, entry.VisibilityBegin > 0f ? entry.VisibilityMargin : 0f,
                     entry.VisibilityMargin,
-                    RenderingServer.VisibilityRangeFadeMode.Self);
+                    // Self fades by dithering, which draws both sides of a swap for the width of the
+                    // margin. With no margin there is nothing to dither, so ask for the hard switch.
+                    entry.VisibilityMargin > 0f
+                        ? RenderingServer.VisibilityRangeFadeMode.Self
+                        : RenderingServer.VisibilityRangeFadeMode.Disabled);
             RenderingServer.InstanceSetScenario(instance, scenario);
             _instances.Add(instance);
             if (compact)
