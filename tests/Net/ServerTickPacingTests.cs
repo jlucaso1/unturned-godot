@@ -160,6 +160,43 @@ public class ServerTickPacingTests
         Assert.True(travelled <= allowed + 0.001f, $"moved {travelled} m in {elapsed} s, budget {allowed} m");
     }
 
+    // The time a stall ate has to be dropped BEFORE the surviving claims are judged, not after. The
+    // steps that resume a five-second stall used to carry the instants the stall began at — a third of
+    // a second of budget between them — so the claims still in the buffer, which describe where the
+    // player got to during those five seconds, were all refused. The avatar then sat at its pre-stall
+    // position until the next frame arrived to be judged against a clock that had finally caught up.
+    [Fact]
+    public void AfterALongStall_TheClaimsStillInTheBufferAreJudgedAgainstTheStall()
+    {
+        var transport = new FakeServerTransport();
+        var server = new NetServer(transport, new ServerSimulation(new HeightfieldMoveSolver(FlatGround)),
+            Vector3.Zero, Level);
+        var conn = new FakeConnection();
+        transport.Connect(conn);
+
+        const double start = 1000.0;
+        transport.Message(conn, NetMessages.WriteHello("A", Level));
+        transport.Message(conn, NetMessages.WriteInput(new InputCommand(0, 0, 0, false, false, 0, 90,
+            EPlayerStance.Stand, Vector3.Zero)));
+        server.Update(start);
+
+        // Five seconds of host stall. The client sprinted straight through it; what reaches the server
+        // is the newest handful of its frames, the last of them five seconds' worth of ground away.
+        const double stall = 5.0;
+        for (uint frame = 1; frame <= ServerSimulation.MaxQueuedInputs; frame++)
+        {
+            float seconds = (float)stall - ((ServerSimulation.MaxQueuedInputs - frame) * ServerSimulation.TickRate);
+            transport.Message(conn, NetMessages.WriteInput(new InputCommand(frame, 0, -1, false, true, 0, 90,
+                EPlayerStance.Sprint, new Vector3(0, 0, -PlayerConfig.SpeedSprint * seconds))));
+        }
+
+        server.Update(start + stall);
+
+        (_, List<PlayerSnapshotState> states) = NetMessages.ReadStateUpdate(
+            conn.Sent.Last(p => NetMessages.TypeOf(p) == ENetMessage.StateUpdate));
+        Assert.Equal(-PlayerConfig.SpeedSprint * (float)stall, states[0].Position.Z, 2);
+    }
+
     // The simulation must not fast-forward through the gap either: a zombie that pathed for a minute of
     // simulated time in one frame arrives somewhere no client ever saw it walk to.
     [Fact]

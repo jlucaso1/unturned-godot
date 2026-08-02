@@ -100,6 +100,17 @@ public sealed class NetServer
 
         if (double.IsNaN(_nextTick))
             _nextTick = now;
+
+        // Time the budget below cannot make up is dropped HERE, before any step runs, so the steps that
+        // do run carry recent instants. Dropping it afterwards instead left them stamped with the
+        // moment the stall began: the claims still in the buffer describe where the player got to
+        // DURING the stall, and judged against a third of a second of budget every one of them was
+        // refused — the avatar sitting at its pre-stall position until the next frame arrived. The gap
+        // is still credited exactly once, to the first step that runs.
+        double unmakeable = now - _nextTick - (MaxCatchUpTicks * ServerSimulation.TickRate);
+        if (unmakeable > 0)
+            _nextTick = now - ((MaxCatchUpTicks - 1) * ServerSimulation.TickRate);
+
         int caughtUp = 0;
         while (now >= _nextTick && caughtUp < MaxCatchUpTicks)
         {
