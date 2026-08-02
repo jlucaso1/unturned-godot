@@ -163,14 +163,17 @@ public sealed class PlayerListing
     public Vector3 Position;
     public byte Pitch;
     public byte Yaw;
-    public EPlayerStance Stance;
+
+    // Spelled out because default(EPlayerStance) is 0 and the enum starts at Sprint = 2 (the game's own
+    // numbering): a listing nobody filled in must read as a standing player, not as no stance at all.
+    public EPlayerStance Stance = EPlayerStance.Stand;
 }
 
 // Encoders/decoders for each message. Little-endian BinaryWriter framing; the first byte is ENetMessage.
 public static class NetMessages
 {
     // Bump whenever a message layout changes; the server refuses mismatched clients at the handshake.
-    public const byte ProtocolVersion = 6;
+    public const byte ProtocolVersion = 7;
 
     // Two level names denote the same world. The name on the wire is the map's FOLDER name — the one
     // identity that survives the trip between two machines (paths and workshop ids do not) — and it
@@ -299,52 +302,74 @@ public static class NetMessages
         return new JoinRejection((EJoinRejection)r.ReadByte(), r.ReadByte(), r.ReadString());
     }
 
-    public static byte[] WriteWelcome(byte playerId, uint tick, IReadOnlyList<PlayerListing> players)
+    // ROSTER VERSION: a counter the server bumps on every membership event — one admission, one
+    // departure, one step of the counter — carried by Welcome, PlayerJoined and PlayerLeft alike.
+    //
+    // It exists because these three race. Reliable delivery retransmits, it does not order, so a client
+    // can see a roster after the join or the leave that supersedes it, and then has to decide which
+    // describes the newer world. The simulation tick cannot answer that: several membership events
+    // happen inside ONE server frame (a joined client re-Hellos while a new player is admitted), so
+    // they share a tick and the tie goes to whichever arrives last. A per-event counter has no ties.
+    public static byte[] WriteWelcome(byte playerId, uint tick, uint rosterVersion,
+        IReadOnlyList<PlayerListing> players)
     {
         using var ms = new MemoryStream();
         using var w = new BinaryWriter(ms);
         w.Write((byte)ENetMessage.Welcome);
         w.Write(playerId);
         w.Write(tick);
+        w.Write(rosterVersion);
         w.Write((byte)players.Count);
         foreach (PlayerListing p in players)
             WriteListing(w, p);
         return ms.ToArray();
     }
 
-    public static (byte PlayerId, uint Tick, List<PlayerListing> Players) ReadWelcome(byte[] payload)
+    public static (byte PlayerId, uint Tick, uint RosterVersion, List<PlayerListing> Players) ReadWelcome(
+        byte[] payload)
     {
         using BinaryReader r = Reader(payload);
         byte id = r.ReadByte();
         uint tick = r.ReadUInt32();
+        uint rosterVersion = r.ReadUInt32();
         int count = r.ReadByte();
         var players = new List<PlayerListing>(count);
         for (int i = 0; i < count; i++)
             players.Add(ReadListing(r));
-        return (id, tick, players);
+        return (id, tick, rosterVersion, players);
     }
 
-    public static byte[] WritePlayerJoined(PlayerListing player)
+    public static byte[] WritePlayerJoined(uint rosterVersion, PlayerListing player)
     {
         using var ms = new MemoryStream();
         using var w = new BinaryWriter(ms);
         w.Write((byte)ENetMessage.PlayerJoined);
+        w.Write(rosterVersion);
         WriteListing(w, player);
         return ms.ToArray();
     }
 
-    public static PlayerListing ReadPlayerJoined(byte[] payload)
+    public static (uint RosterVersion, PlayerListing Player) ReadPlayerJoined(byte[] payload)
     {
         using BinaryReader r = Reader(payload);
-        return ReadListing(r);
+        return (r.ReadUInt32(), ReadListing(r));
     }
 
-    public static byte[] WritePlayerLeft(byte playerId)
+    // The leave is versioned too, so a roster older than it cannot put the player back on the map.
+    public static byte[] WritePlayerLeft(uint rosterVersion, byte playerId)
     {
-        return new[] { (byte)ENetMessage.PlayerLeft, playerId };
+        var payload = new byte[6];
+        payload[0] = (byte)ENetMessage.PlayerLeft;
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(1), rosterVersion);
+        payload[5] = playerId;
+        return payload;
     }
 
-    public static byte ReadPlayerLeft(byte[] payload) => payload[1];
+    public static (uint RosterVersion, byte PlayerId) ReadPlayerLeft(byte[] payload)
+    {
+        using BinaryReader r = Reader(payload);
+        return (r.ReadUInt32(), r.ReadByte());
+    }
 
     public static byte[] WriteInput(in InputCommand input)
     {
