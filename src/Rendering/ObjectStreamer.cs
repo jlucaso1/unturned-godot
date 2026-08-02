@@ -331,8 +331,15 @@ public partial class ObjectStreamer : Node
         Log.Print($"[stream] meshes realised: {phase.ElapsedMilliseconds} ms ({meshLibrary.Count})");
         await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
 
+        // The authored lower levels go through the same staged realise, or half of a map's object
+        // geometry would block the main thread in one frame and freeze the loading animation.
+        Dictionary<Guid, ArrayMesh> lod1Library = ObjectsBuilder.ObjectLodEnabled
+            ? await ModelLibrary.LoadStagedAsync(_cacheDir, _registry, this, _neededGuids,
+                ModelExtractor.Lod1Suffix)
+            : new Dictionary<Guid, ArrayMesh>();
+
         phase.Restart();
-        BuildObjects(meshLibrary);
+        BuildObjects(meshLibrary, lod1Library);
         Log.Print($"[stream] scene built: {phase.ElapsedMilliseconds} ms");
         await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
 
@@ -393,9 +400,13 @@ public partial class ObjectStreamer : Node
         return 0;
     }
 
-    private void BuildObjects() => BuildObjects(ModelLibrary.Load(_cacheDir, _registry, _neededGuids));
+    private void BuildObjects() => BuildObjects(ModelLibrary.Load(_cacheDir, _registry, _neededGuids),
+        ObjectsBuilder.ObjectLodEnabled
+            ? ModelLibrary.Load(_cacheDir, _registry, _neededGuids, ModelExtractor.Lod1Suffix)
+            : new Dictionary<Guid, ArrayMesh>());
 
-    private void BuildObjects(Dictionary<Guid, ArrayMesh> meshLibrary)
+    private void BuildObjects(Dictionary<Guid, ArrayMesh> meshLibrary,
+        Dictionary<Guid, ArrayMesh> lod1Library)
     {
         // The freecam mode never spawns the player, so collision bodies would sit unused — skip the collider
         // library entirely there and build the objects render-only (saves the shape/BVH build + its memory).
@@ -403,7 +414,11 @@ public partial class ObjectStreamer : Node
             ? new Dictionary<Guid, List<CachedCollider>>()
             : ColliderLibrary.Load(_cacheDir, _neededGuids);
         var stage = Stopwatch.StartNew();
-        Node3D root = ObjectsBuilder.Build(_objects, _db, meshLibrary, colliderLibrary, out int withMesh);
+        Node3D root = ObjectsBuilder.Build(_objects, _db, meshLibrary, colliderLibrary, out int withMesh,
+            lod1Library);
+        if (lod1Library.Count > 0)
+            Log.Print($"[stream] object LOD levels: {lod1Library.Count} of {meshLibrary.Count} meshes "
+                + "have an authored lower level");
         double buildMs = stage.Elapsed.TotalMilliseconds;
         stage.Restart();
         AddChild(root);

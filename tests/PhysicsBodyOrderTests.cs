@@ -1,6 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.RegularExpressions;
+using Godot;
+using UnturnedGodot.Unity;
 using Xunit;
 
 namespace UnturnedGodot.Tests;
@@ -201,7 +204,10 @@ public class PhysicsBodyOrderTests
         string objects = File.ReadAllText(objectsPath);
         Assert.Contains("RenderingServer.InstanceCreate()", owner);
         Assert.Contains("RenderingServer.InstanceSetScenario", owner);
-        Assert.Contains("InstanceGeometrySetVisibilityRange(instance, 0f, entry.VisibilityEnd,\n                    0f, entry.VisibilityMargin", owner);
+        // The owner drives both ends of the range from the entry: an end alone fades a batch out with
+        // distance, and a begin is what lets an authored lower LOD take over instead of drawing as well.
+        Assert.Contains("InstanceGeometrySetVisibilityRange(instance, entry.VisibilityBegin,\n                    entry.VisibilityEnd,", owner);
+        Assert.Contains("entry.VisibilityEnd > 0f || entry.VisibilityBegin > 0f", owner);
         Assert.Contains("GlobalTransform * entry.Transform", owner);
         Assert.Contains("RenderingServer.FreeRid(instance)", owner);
         Assert.True(owner.IndexOf("RenderingServer.FreeRid(instance)", System.StringComparison.Ordinal)
@@ -209,7 +215,19 @@ public class PhysicsBodyOrderTests
         Assert.Contains("new MultiMeshRidRenderer { Name = \"Foliage\" }", foliage);
         Assert.Contains("rid.Add(multimesh", foliage);
         Assert.Contains("new MultiMeshRidRenderer { Name = \"ObjectBatches\" }", objects);
-        Assert.Contains("AddRenderBatch(root, render, BuildMultiMesh", objects);
+        // Objects reach the shared RID owner through AddLevels, which emits either one batch or the
+        // LOD-0/LOD-1 pair; either way the batch itself still goes through AddRenderBatch.
+        Assert.Contains("AddLevels(root, render, renderMesh, lodMesh", objects);
+        Assert.Contains("AddRenderBatch(root, renderer, BuildMultiMesh", objects);
+        // Batches carry their cell centre, not identity: Godot measures a visibility range from the
+        // instance origin, so identity would switch every object on its distance from the map origin.
+        Assert.Contains("renderer.Add(multimesh, new Transform3D(Basis.Identity, centre)", objects);
+        Assert.Contains("BuildMultiMesh(mesh, transforms, bounds.Centre)", objects);
+        Assert.Contains("SwitchDistanceFor(mesh, transforms) + bounds.Radius", objects);
+        // The switch distance comes from the batch AddLevels was handed, so it accounts for the largest
+        // scale actually placed there; deriving it from the mesh alone would swap scaled copies too early.
+        Assert.Contains("SwitchDistanceFor(mesh, transforms)", objects);
+        Assert.Contains("radius * maxScale * LodSwitchRadii", objects);
         if (FindRepositoryFile(Path.Combine("src", "Benchmark", "SceneMetrics.cs")) is { } metricsPath)
             Assert.Contains("case MultiMeshRidRenderer", File.ReadAllText(metricsPath));
     }
@@ -637,15 +655,41 @@ public class PhysicsBodyOrderTests
         Assert.True(guard >= 0 && cache > guard && result > cache);
     }
 
+    // Cache completeness is decided per mesh, so a format that gains a new per-prefab artifact cannot be
+    // detected by a missing file — an absent lower level looks the same as a prefab that never had one.
+    // The magic is the only thing that forces one more extraction pass, and it must never go backwards:
+    // UGM8 predates source-aware texture tags, UGM9 predates the authored LOD levels, and UGMA kept
+    // every level a prefab shipped instead of only the ones materially cheaper than the base mesh.
     [Fact]
-    public void SourceAwareTextureTagsInvalidateNameOnlyMeshCaches()
+    public void MeshCacheMagicInvalidatesEveryOlderExtraction()
     {
         if (FindRepositoryFile(Path.Combine("core", "Unity", "MeshCache.cs")) is not { } path)
             return;
 
         string source = File.ReadAllText(path);
-        Assert.Contains("\"UGM9\"", source);
-        Assert.Contains("private const uint Magic = 0x394D4755;", source);
+        Assert.Contains("private const uint Magic = 0x424D4755;", source); // "UGMB"
+    }
+
+    // The source check above pins the constant; this one proves the constant does its job. A cache
+    // written by any earlier format must be rejected, because rejection is the only thing that forces
+    // the extra extraction pass — a per-mesh completeness check cannot tell a missing lower level from
+    // a prefab that never had one.
+    [Fact]
+    public void MeshCacheRejectsEveryEarlierFormatAndAcceptsWhatItWrites()
+    {
+        var written = new MemoryStream();
+        MeshCache.Write(written, new[] { Vector3.Zero, Vector3.Right, Vector3.Up },
+            System.Array.Empty<Vector3>(), new[] { Vector2.Zero, Vector2.Zero, Vector2.Zero },
+            new List<CachedSubmesh> { new(new[] { 0, 1, 2 }, Colors.White, "", UnityMaterial.Blend.Opaque, 0f, 0f, EShaderCull.Back) });
+        byte[] current = written.ToArray();
+        Assert.True(MeshCache.IsCurrent(current));
+
+        foreach (uint stale in new uint[] { 0x414D4755, 0x394D4755, 0x384D4755 }) // UGMA, UGM9, UGM8
+        {
+            byte[] older = (byte[])current.Clone();
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(older, stale);
+            Assert.False(MeshCache.IsCurrent(older), $"a cache written as {stale:X} must be rejected");
+        }
     }
 
     [Fact]

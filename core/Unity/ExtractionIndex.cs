@@ -174,6 +174,10 @@ public static class ExtractionIndex
         foreach (string path in new[]
         {
             Path.Combine(cacheDir, guid.ToString("N") + ".mesh"),
+            // The authored lower level too. Left behind, it stays "current" to every later dependency
+            // scan, so a texture it references that the revised bundle no longer ships is reported
+            // missing forever and forces the extraction pass on every launch.
+            Path.Combine(cacheDir, guid.ToString("N") + MeshCache.Lod1Suffix),
             Path.Combine(cacheDir, guid.ToString("N") + ".collider"),
             OwnerPath(cacheDir, guid),
         })

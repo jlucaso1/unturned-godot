@@ -241,9 +241,17 @@ public static class WorldBuilder
 
         ObjectAssetDatabase db = dbTask.Result; // the scan ran concurrently with ModelLibrary.Load above
         int withMesh = 0;
+        // The prefabs' authored lower levels, so this path renders the same as the streamed one: a
+        // benchmark or screenshot taken here must submit the geometry a real session submits.
+        Dictionary<Guid, ArrayMesh> lod1Library = ObjectsBuilder.ObjectLodEnabled
+            ? ModelLibrary.Load(cacheDir, registry, neededGuids, ModelExtractor.Lod1Suffix)
+            : new Dictionary<Guid, ArrayMesh>();
         Node3D objectsRoot = objects.Count > 0
-            ? ObjectsBuilder.Build(objects, db, meshLibrary, colliderLibrary, out withMesh)
+            ? ObjectsBuilder.Build(objects, db, meshLibrary, colliderLibrary, out withMesh, lod1Library)
             : new Node3D { Name = "Objects" };
+        if (lod1Library.Count > 0)
+            Log.Print($"[world] object LOD levels: {lod1Library.Count} of {meshLibrary.Count} meshes "
+                + "have an authored lower level");
 
         Node3D foliageRoot = foliageIndex != null
             ? FoliageBuilder.Build(foliageIndex, meshLibrary)

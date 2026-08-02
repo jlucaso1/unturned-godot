@@ -25,11 +25,13 @@ public partial class MultiMeshRidRenderer : Node3D
     }
 
     private readonly record struct Entry(MultiMesh Mesh, Transform3D Transform, bool Shadows,
-        float VisibilityEnd, float VisibilityMargin);
+        float VisibilityEnd, float VisibilityMargin, float VisibilityBegin);
 
+    // visibilityBegin hides the batch until the camera is that far away, which is what lets an authored
+    // lower LOD take over from the full-detail one at a distance instead of both drawing at once.
     public void Add(MultiMesh mesh, Transform3D transform, bool shadows = true,
-        float visibilityEnd = 0f, float visibilityMargin = 0f) =>
-        _entries.Add(new Entry(mesh, transform, shadows, visibilityEnd, visibilityMargin));
+        float visibilityEnd = 0f, float visibilityMargin = 0f, float visibilityBegin = 0f) =>
+        _entries.Add(new Entry(mesh, transform, shadows, visibilityEnd, visibilityMargin, visibilityBegin));
 
     public override void _Ready()
     {
@@ -48,10 +50,15 @@ public partial class MultiMeshRidRenderer : Node3D
             RenderingServer.InstanceSetTransform(instance, GlobalTransform * entry.Transform);
             RenderingServer.InstanceGeometrySetCastShadowsSetting(instance, entry.Shadows
                 ? RenderingServer.ShadowCastingSetting.On : RenderingServer.ShadowCastingSetting.Off);
-            if (entry.VisibilityEnd > 0f)
-                RenderingServer.InstanceGeometrySetVisibilityRange(instance, 0f, entry.VisibilityEnd,
-                    0f, entry.VisibilityMargin,
-                    RenderingServer.VisibilityRangeFadeMode.Self);
+            if (entry.VisibilityEnd > 0f || entry.VisibilityBegin > 0f)
+                RenderingServer.InstanceGeometrySetVisibilityRange(instance, entry.VisibilityBegin,
+                    entry.VisibilityEnd, entry.VisibilityBegin > 0f ? entry.VisibilityMargin : 0f,
+                    entry.VisibilityMargin,
+                    // Self fades by dithering, which draws both sides of a swap for the width of the
+                    // margin. With no margin there is nothing to dither, so ask for the hard switch.
+                    entry.VisibilityMargin > 0f
+                        ? RenderingServer.VisibilityRangeFadeMode.Self
+                        : RenderingServer.VisibilityRangeFadeMode.Disabled);
             RenderingServer.InstanceSetScenario(instance, scenario);
             _instances.Add(instance);
             if (compact)

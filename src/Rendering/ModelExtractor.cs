@@ -119,6 +119,7 @@ public static class ModelExtractor
             return 0;
         UnityBundle bundle = UnityBundle.Read(raw, SerializedFileCap(raw)); // SerializedFile only
         var produced = new HashSet<Guid>();
+        var staleLevels = new HashSet<Guid>();
         int extracted = 0;
         int serializedFile = 0;
         foreach (KeyValuePair<string, byte[]> f in bundle.Files)
@@ -130,10 +131,11 @@ public static class ModelExtractor
 
             string fileTag = serializedFile++ == 0 ? bundleTag : $"{bundleTag}-{serializedFile}";
             extracted += ExtractMeshesFromSerializedFile(f.Value, fileTag, objectBundlesDir, treeBundlesDir,
-                assetsDir, neededGuids, cacheDir, db, neededTextures: null, foliageAssets, produced);
+                assetsDir, neededGuids, cacheDir, db, neededTextures: null, foliageAssets, produced,
+                staleLevelGuids: staleLevels);
         }
         if (!cancellationToken.IsCancellationRequested)
-            RecordMisses(bundlePath, cacheDir, neededGuids, foliageAssets, produced);
+            RecordMisses(bundlePath, cacheDir, neededGuids, foliageAssets, produced, staleLevels);
         AppShutdown.PrintUnlessQuitting($"[extract] meshes={extracted}");
         return extracted;
     }
@@ -144,7 +146,8 @@ public static class ModelExtractor
     // adds a prefab heals the entry. Only call this after a pass that ran to completion — recording misses
     // from a half-finished decode would permanently blacklist GUIDs that were simply never reached.
     private static void RecordMisses(string bundlePath, string cacheDir, HashSet<Guid> neededGuids,
-        IReadOnlyList<FoliageAsset>? foliageAssets, HashSet<Guid> produced)
+        IReadOnlyList<FoliageAsset>? foliageAssets, HashSet<Guid> produced,
+        HashSet<Guid>? staleLevels = null)
     {
         string indexPath = Path.Combine(cacheDir, ExtractionIndex.FileNameFor(bundlePath));
         long stamp = ExtractionIndex.StampFor(bundlePath);
@@ -162,7 +165,8 @@ public static class ModelExtractor
         misses.ExceptWith(produced);
 
         foreach (Guid guid in produced)
-            ExtractionIndex.RecordMeshOwner(cacheDir, guid, bundlePath, stamp);
+            if (staleLevels?.Contains(guid) != true) // an unrefreshed lower level must stay cold
+                ExtractionIndex.RecordMeshOwner(cacheDir, guid, bundlePath, stamp);
         foreach (Guid guid in failed)
             ExtractionIndex.RemoveCachedAsset(cacheDir, guid);
 
@@ -228,6 +232,7 @@ public static class ModelExtractor
         var neededTextures = new Dictionary<(string Tag, long Id), UnityTexture>();
         var layerTextures = new Dictionary<string, UnityTexture>(StringComparer.Ordinal);
         var produced = new HashSet<Guid>();
+        var staleLevels = new HashSet<Guid>();
 
         // Strictly physical order, whatever the bundle's layout: the decoder only moves forward, so a node
         // that is skipped rather than read leaves every following one misaligned. A bundle with more than
@@ -262,7 +267,7 @@ public static class ModelExtractor
 
                 ReadSerializedNode(stream, (int)node.Size, bundlePath, fileTag, objectBundlesDir,
                     treeBundlesDir, assetsDir, neededGuids, cacheDir, db, neededTextures, layerTextures,
-                    foliageAssets, isCoreBundle, layerWants, onLayerTexture, produced);
+                    foliageAssets, isCoreBundle, layerWants, onLayerTexture, produced, staleLevels);
 
                 // Settle what needs no stream at all, once per texture: pixels stored inline are in hand
                 // already, and anything extracted on an earlier boot only needs its key handed back. Both
@@ -276,7 +281,7 @@ public static class ModelExtractor
                 {
                     // All serialized files have now been scanned. A miss index written by an earlier
                     // file would permanently hide GUIDs owned by a later file after an interrupted pass.
-                    RecordMisses(bundlePath, cacheDir, neededGuids, foliageAssets, produced);
+                    RecordMisses(bundlePath, cacheDir, neededGuids, foliageAssets, produced, staleLevels);
                     AppShutdown.PrintUnlessQuitting($"[extract] meshes={CachedMeshCountLoose(cacheDir)} "
                         + $"(streamed); {neededTextures.Count + layerTextures.Count} textures referenced");
                     onMeshesReady();
@@ -419,11 +424,12 @@ public static class ModelExtractor
         Dictionary<(string Tag, long Id), UnityTexture> neededTextures, Dictionary<string, UnityTexture> layerTextures,
         IReadOnlyList<FoliageAsset>? foliageAssets, bool isCoreBundle,
         IReadOnlyDictionary<string, Guid[]> layerWants, Action<Guid, CachedTexture>? onLayerTexture,
-        HashSet<Guid> produced)
+        HashSet<Guid> produced, HashSet<Guid> staleLevels)
     {
         SerializedFile file = SerializedFile.Read(stream.Read(size));
         ExtractMeshesFrom(file, bundleTag, objectBundlesDir, treeBundlesDir, assetsDir, neededGuids,
-            cacheDir, db, neededTextures, foliageAssets, produced, isCoreBundle ? bundlePath : null);
+            cacheDir, db, neededTextures, foliageAssets, produced, isCoreBundle ? bundlePath : null,
+            staleLevels);
 
         // Meshes land before the potentially long texture tail. If shutdown interrupted that tail, the
         // next load sees current meshes and ExtractFoliageMeshes/Object extraction correctly skips them;
@@ -515,8 +521,57 @@ public static class ModelExtractor
         return slash >= 0 ? path[(slash + 1)..] : path;
     }
 
+    // The cached lower level sits beside "<guid>.mesh" under a suffix the plain-mesh scan cannot match.
+    // Named in the cache layer because the dependency index has to open both levels of a GUID and cannot
+    // reach into the extractor.
+    public const string Lod1Suffix = MeshCache.Lod1Suffix;
+
+    // A lower level is only worth caching if it is materially cheaper than the base one. Every level kept
+    // costs a second MultiMesh and a second copy of the batch's placement transforms for the whole
+    // session, so a level that is within a tenth of the base triangle count is dropped: measured over the
+    // extracted cache that is 4 of 222 authored levels, and the other 218 median 49% of the base.
+    private const float Lod1MaxTriangleRatio = 0.9f;
+
+    // Writes through a temporary in the same directory and renames into place. A cached mesh is judged
+    // current by its 4-byte header alone, so a process killed part-way through a direct write would leave
+    // a truncated file that every later run accepts and then throws on.
+    private static void WriteMeshAtomically(string path, string tempPath, Vector3[] vertices,
+        Vector3[] normals, Vector2[] uvs, List<CachedSubmesh> submeshes)
+    {
+        try
+        {
+            using (var stream = File.Create(tempPath))
+                MeshCache.Write(stream, vertices, normals, uvs, submeshes);
+            File.Move(tempPath, path, overwrite: true);
+        }
+        catch
+        {
+            File.Delete(tempPath);
+            throw;
+        }
+    }
+
+    private static int TriangleTotal(List<CachedSubmesh> submeshes)
+    {
+        int total = 0;
+        foreach (CachedSubmesh sub in submeshes)
+            total += sub.Indices.Length / 3;
+        return total;
+    }
+
     private static int CachedMeshCountLoose(string cacheDir) =>
-        Directory.Exists(cacheDir) ? Directory.GetFiles(cacheDir, "*.mesh").Length : 0;
+        Directory.Exists(cacheDir) ? PlainMeshFiles(cacheDir).Count : 0;
+
+    // "*.mesh" also matches the cached lower levels, which are not separate objects and must not be
+    // counted as extracted meshes or scanned as if they were one.
+    private static List<string> PlainMeshFiles(string cacheDir)
+    {
+        var plain = new List<string>();
+        foreach (string path in Directory.GetFiles(cacheDir, "*.mesh"))
+            if (!path.EndsWith(Lod1Suffix, StringComparison.Ordinal))
+                plain.Add(path);
+        return plain;
+    }
 
     // Builds the per-GUID meshes from an already-decoded SerializedFile. When neededTextures is supplied,
     // it is filled with the metadata of every referenced texture so a caller can stream in the pixels.
@@ -526,10 +581,10 @@ public static class ModelExtractor
         string objectBundlesDir, string treeBundlesDir, string assetsDir, HashSet<Guid> neededGuids,
         string cacheDir, ObjectAssetDatabase db, Dictionary<(string Tag, long Id), UnityTexture>? neededTextures,
         IReadOnlyList<FoliageAsset>? foliageAssets = null, HashSet<Guid>? producedGuids = null,
-        string? typeTreeCacheFor = null) =>
+        string? typeTreeCacheFor = null, HashSet<Guid>? staleLevelGuids = null) =>
         ExtractMeshesFrom(SerializedFile.Read(sfBytes), bundleTag, objectBundlesDir, treeBundlesDir,
             assetsDir, neededGuids, cacheDir, db, neededTextures, foliageAssets, producedGuids,
-            typeTreeCacheFor);
+            typeTreeCacheFor, staleLevelGuids);
 
     // Same, for a caller that already holds the decoded file (the streaming pass reads it once and then
     // uses it for the meshes, the type trees and the terrain layers alike).
@@ -537,7 +592,7 @@ public static class ModelExtractor
         string treeBundlesDir, string assetsDir, HashSet<Guid> neededGuids, string cacheDir,
         ObjectAssetDatabase db, Dictionary<(string Tag, long Id), UnityTexture>? neededTextures,
         IReadOnlyList<FoliageAsset>? foliageAssets = null, HashSet<Guid>? producedGuids = null,
-        string? typeTreeCacheFor = null)
+        string? typeTreeCacheFor = null, HashSet<Guid>? staleLevelGuids = null)
     {
 
         // The per-class type trees are a by-product of having read this file. Handing them to the cache
@@ -583,61 +638,130 @@ public static class ModelExtractor
                 continue;
 
             MaterialPalette? palette = materials.PaletteFor(asset.MaterialPaletteGuid);
-            var verts = new List<Vector3>();
-            var normals = new List<Vector3>();
-            var uvs = new List<Vector2>();
-            var submeshes = new List<CachedSubmesh>();
-            bool allNormals = true; // authored normals are only usable when every part carries them
 
-            // A prefab's renderable geometry can span several child GameObjects (a tree is a trunk plus a
-            // separate foliage mesh, each with its own material and local pose). Bake each part's
-            // local-to-root transform into its vertices and concatenate them into one indexed mesh.
-            foreach (MeshPart part in parts)
+            // Builds one indexed mesh out of a prefab's parts at a single LOD level. Called for the
+            // authored LOD-0 set and, where the prefab ships one, for its "*_1" siblings, so a distant
+            // instance can render the lower level the artist already provided instead of full detail.
+            bool BuildLevel(List<MeshPart> levelParts, out List<Vector3> verts, out List<Vector3> normals,
+                out List<Vector2> uvs, out List<CachedSubmesh> submeshes, out bool allNormals,
+                bool requireEveryPart = false,
+                Dictionary<(string Tag, long Id), UnityTexture>? textureSink = null)
             {
-                if (!graph.ObjectsByPathId.TryGetValue(part.MeshId, out SerializedObject? meshObj))
-                    continue;
-                UnityMesh mesh = UnityMesh.Read(TypeTreeReader.Read(meshObj.TypeTree, file.ReaderFor(meshObj)));
-                if (!mesh.Usable)
-                    continue;
-
-                int baseVertex = verts.Count;
-                // Normals transform by the inverse-transpose of the part's basis (correct under the
-                // non-uniform scales some prefab children carry), stored in Unity space like the vertices.
-                Basis normalBasis = part.LocalToRoot.Basis.Inverse().Transposed();
-                bool hasNormals = mesh.Normals.Length == mesh.Vertices.Length;
-                allNormals &= hasNormals;
-                for (int i = 0; i < mesh.Vertices.Length; i++)
+                // A candidate level that is later rejected must not leave its textures owed: the streaming
+                // tail would decode and cache an atlas for geometry no one ever writes or draws. Callers
+                // that can reject pass their own sink and merge it once the level is accepted.
+                Dictionary<(string Tag, long Id), UnityTexture>? sink = textureSink ?? neededTextures;
+                bool complete = true;
+                verts = new List<Vector3>();
+                normals = new List<Vector3>();
+                uvs = new List<Vector2>();
+                submeshes = new List<CachedSubmesh>();
+                allNormals = true; // authored normals are only usable when every part carries them
+                                   // A prefab's renderable geometry can span several child GameObjects (a tree is a trunk plus a
+                                   // separate foliage mesh, each with its own material and local pose). Bake each part's
+                                   // local-to-root transform into its vertices and concatenate them into one indexed mesh.
+                foreach (MeshPart part in levelParts)
                 {
-                    verts.Add(part.LocalToRoot * mesh.Vertices[i]);
-                    normals.Add(hasNormals ? (normalBasis * mesh.Normals[i]).Normalized() : Vector3.Up);
-                    uvs.Add(i < mesh.Uvs.Length ? mesh.Uvs[i] : Vector2.Zero);
-                }
+                    // A level is all-or-nothing. Skipping an undecodable part (stream-data geometry, for
+                    // instance) would cache a level that silently drops that piece of the object when it
+                    // activates, and TriangleTotal would read the hole as the level being cheaper.
+                    if (!graph.ObjectsByPathId.TryGetValue(part.MeshId, out SerializedObject? meshObj))
+                    {
+                        complete = false;
+                        continue;
+                    }
+                    UnityMesh mesh = UnityMesh.Read(TypeTreeReader.Read(meshObj.TypeTree, file.ReaderFor(meshObj)));
+                    if (!mesh.Usable)
+                    {
+                        complete = false;
+                        continue;
+                    }
 
-                for (int si = 0; si < mesh.Submeshes.Count; si++)
-                {
-                    (Color color, string texKey, UnityMaterial.Blend blend, long texId,
-                        float metallic, float smoothness, EShaderCull cull) =
-                        materials.Resolve(si, palette, part.Materials);
-                    if (neededTextures != null && texId != 0 && !neededTextures.ContainsKey((bundleTag, texId)) &&
-                        graph.ObjectsByPathId.TryGetValue(texId, out SerializedObject? texObj))
-                        neededTextures[(bundleTag, texId)] = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, file.ReaderFor(texObj)));
+                    int baseVertex = verts.Count;
+                    // Normals transform by the inverse-transpose of the part's basis (correct under the
+                    // non-uniform scales some prefab children carry), stored in Unity space like the vertices.
+                    Basis normalBasis = part.LocalToRoot.Basis.Inverse().Transposed();
+                    bool hasNormals = mesh.Normals.Length == mesh.Vertices.Length;
+                    allNormals &= hasNormals;
+                    for (int i = 0; i < mesh.Vertices.Length; i++)
+                    {
+                        verts.Add(part.LocalToRoot * mesh.Vertices[i]);
+                        normals.Add(hasNormals ? (normalBasis * mesh.Normals[i]).Normalized() : Vector3.Up);
+                        uvs.Add(i < mesh.Uvs.Length ? mesh.Uvs[i] : Vector2.Zero);
+                    }
 
-                    int[] src = mesh.Submeshes[si];
-                    var indices = new int[src.Length];
-                    for (int k = 0; k < src.Length; k++)
-                        indices[k] = src[k] + baseVertex;
-                    submeshes.Add(new CachedSubmesh(indices, color, texKey, blend, metallic, smoothness, cull));
+                    for (int si = 0; si < mesh.Submeshes.Count; si++)
+                    {
+                        (Color color, string texKey, UnityMaterial.Blend blend, long texId,
+                            float metallic, float smoothness, EShaderCull cull) =
+                            materials.Resolve(si, palette, part.Materials);
+                        if (sink != null && texId != 0 && !sink.ContainsKey((bundleTag, texId))
+                            && neededTextures?.ContainsKey((bundleTag, texId)) != true
+                            && graph.ObjectsByPathId.TryGetValue(texId, out SerializedObject? texObj))
+                            sink[(bundleTag, texId)] = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, file.ReaderFor(texObj)));
+
+                        int[] src = mesh.Submeshes[si];
+                        var indices = new int[src.Length];
+                        for (int k = 0; k < src.Length; k++)
+                            indices[k] = src[k] + baseVertex;
+                        submeshes.Add(new CachedSubmesh(indices, color, texKey, blend, metallic, smoothness, cull));
+                    }
                 }
+                return submeshes.Count > 0 && (complete || !requireEveryPart);
             }
 
-            if (submeshes.Count == 0)
+            if (!BuildLevel(parts, out List<Vector3> verts, out List<Vector3> normals,
+                out List<Vector2> uvs, out List<CachedSubmesh> submeshes, out bool allNormals))
                 continue;
 
+            // The prefab's own lower level, cached beside it — and cached BEFORE the base mesh becomes
+            // current. Presence of "<guid>.mesh" in the current format is the whole warm-cache signal, so
+            // a crash between the two writes with the base first would leave an entry that is complete by
+            // its own rules and permanently missing its level. Writing the level first makes the base
+            // mesh the commit point for the pair.
+            string stem = Path.Combine(cacheDir, asset.Guid.ToString("N"));
+            string lod1Path = stem + Lod1Suffix;
+            // Best-effort as a whole, like the type-tree cache: the lower level is an optimisation, and
+            // losing it must not cost this asset its base mesh — let alone unwind through ExtractMeshes
+            // and drop every asset still queued in this bundle to a placeholder box. The stale-file delete
+            // is inside the boundary too, because a read-only or locked file throws there just as readily.
+            try
+            {
+                File.Delete(lod1Path); // never keep a previous source's level for a colliding GUID
+                // Written only when it actually builds and is materially cheaper: a level within
+                // Lod1MaxTriangleRatio of the base saves almost no geometry while its MultiMesh and its
+                // copy of the placement transforms stay resident for the whole session.
+                var lodTextures = neededTextures != null
+                    ? new Dictionary<(string Tag, long Id), UnityTexture>()
+                    : null;
+                if (graph.Lod1PartsByKey.TryGetValue(key, out List<MeshPart>? lod1Parts)
+                    && BuildLevel(lod1Parts, out List<Vector3> lodVerts, out List<Vector3> lodNormals,
+                        out List<Vector2> lodUvs, out List<CachedSubmesh> lodSubmeshes, out bool lodNormalsOk,
+                        requireEveryPart: true, textureSink: lodTextures)
+                    && TriangleTotal(lodSubmeshes) <= TriangleTotal(submeshes) * Lod1MaxTriangleRatio)
+                {
+                    WriteMeshAtomically(lod1Path, stem + ".lod1.tmp", lodVerts.ToArray(),
+                        lodNormalsOk ? lodNormals.ToArray() : Array.Empty<Vector3>(), lodUvs.ToArray(), lodSubmeshes);
+                    // Only now are these textures actually owed by something that will be drawn.
+                    if (lodTextures != null)
+                        foreach (KeyValuePair<(string Tag, long Id), UnityTexture> tex in lodTextures)
+                            neededTextures![tex.Key] = tex.Value;
+                }
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                // Keep the base mesh — a placeholder box at every distance is worse than a stale coarse
+                // shape past the switch distance — but do not let this GUID be stamped as current, or the
+                // stale level would be loaded forever. Left unstamped it reads as cold and is retried.
+                staleLevelGuids?.Add(asset.Guid);
+                AppShutdown.PrintUnlessQuitting($"[extract] lower level not cached for {asset.Guid:N}: {e.Message}");
+            }
+
             // Cache the authored per-vertex normals (Unturned's own hard/soft edges); ModelLibrary falls
-            // back to deriving smooth normals only when a part shipped without them.
-            using (var stream = File.Create(Path.Combine(cacheDir, asset.Guid.ToString("N") + ".mesh")))
-                MeshCache.Write(stream, verts.ToArray(),
-                    allNormals ? normals.ToArray() : Array.Empty<Vector3>(), uvs.ToArray(), submeshes);
+            // back to deriving smooth normals only when a part shipped without them. Written through a
+            // temporary so a kill mid-write cannot leave a truncated file whose header still reads current.
+            WriteMeshAtomically(stem + ".mesh", stem + ".tmp", verts.ToArray(),
+                allNormals ? normals.ToArray() : Array.Empty<Vector3>(), uvs.ToArray(), submeshes);
             extracted++;
             producedGuids?.Add(asset.Guid);
 
@@ -863,6 +987,9 @@ public static class ModelExtractor
         if (!Directory.Exists(cacheDir))
             return ids;
 
+        // Both levels, not just the plain one: a texture referenced only by an authored lower level would
+        // otherwise never be marked needed, and the synchronous WorldBuilder path relies entirely on this
+        // scan to decide what ExtractTextures decodes.
         foreach (string path in Directory.GetFiles(cacheDir, "*.mesh"))
         {
             byte[] data;
@@ -872,12 +999,21 @@ public static class ModelExtractor
             if (!MeshCache.IsCurrent(data)) // stale format; a later extraction pass rewrites it
                 continue;
 
-            (_, _, _, List<CachedSubmesh> submeshes) = MeshCache.Read(data);
-            foreach (CachedSubmesh sm in submeshes)
-                if (TextureKey.TryParse(sm.TextureKey, out string owner, out long id)
-                    && (string.Equals(owner, bundleTag, StringComparison.Ordinal)
-                        || (includeSecondary && IsBundleFileTag(owner, bundleTag))))
-                    ids.Add(id);
+            try
+            {
+                (_, _, _, List<CachedSubmesh> submeshes) = MeshCache.Read(data);
+                foreach (CachedSubmesh sm in submeshes)
+                    if (TextureKey.TryParse(sm.TextureKey, out string owner, out long id)
+                        && (string.Equals(owner, bundleTag, StringComparison.Ordinal)
+                            || (includeSecondary && IsBundleFileTag(owner, bundleTag))))
+                        ids.Add(id);
+            }
+            catch (Exception e) when (e is InvalidDataException or ArgumentOutOfRangeException
+                or IndexOutOfRangeException or OverflowException)
+            {
+                // The magic check reads four bytes, so a file truncated after them still gets here. Such an
+                // entry is already unusable as a mesh; skip it rather than abort the bundle's texture pass.
+            }
         }
         return ids;
     }

@@ -26,13 +26,14 @@ public static class ModelLibrary
     // Staged variant for interactive loads: the same two phases as Load, but the realise phase yields to
     // the render loop on a time budget so the loading screen keeps animating.
     public static async System.Threading.Tasks.Task<Dictionary<Guid, ArrayMesh>> LoadStagedAsync(
-        string cacheDir, TextureRegistry registry, Node yieldOn, IReadOnlySet<Guid>? only = null)
+        string cacheDir, TextureRegistry registry, Node yieldOn, IReadOnlySet<Guid>? only = null,
+        string suffix = ".mesh")
     {
         var library = new Dictionary<Guid, ArrayMesh>();
         if (!Directory.Exists(cacheDir))
             return library;
 
-        var sources = new List<(Guid Item, string Path)>(CachedMeshPaths(cacheDir, only));
+        var sources = new List<(Guid Item, string Path)>(CachedMeshPaths(cacheDir, only, suffix));
         IReadOnlyList<ExactFileGroups.Group<Guid>> groups = ExactFileGroups.Build(sources, DeduplicateGpu);
 
         // Yield on a time budget rather than every N meshes: a fixed count either stalls the frame on
@@ -126,7 +127,8 @@ public static class ModelLibrary
     // places — the cache is addressed by name instead of scanned: a shared cache holding every map ever
     // opened then costs nothing extra, where scanning it built (and kept) hundreds of ArrayMeshes, their
     // materials and their texture registrations for objects this map never places.
-    private static IEnumerable<(Guid Guid, string Path)> CachedMeshPaths(string cacheDir, IReadOnlySet<Guid>? only)
+    private static IEnumerable<(Guid Guid, string Path)> CachedMeshPaths(string cacheDir,
+        IReadOnlySet<Guid>? only, string suffix = ".mesh")
     {
         if (only != null)
         {
@@ -134,23 +136,26 @@ public static class ModelLibrary
             {
                 if (guid == Guid.Empty)
                     continue;
-                string path = Path.Combine(cacheDir, guid.ToString("N") + ".mesh");
+                string path = Path.Combine(cacheDir, guid.ToString("N") + suffix);
                 if (File.Exists(path))
                     yield return (guid, path);
             }
             yield break;
         }
 
-        foreach (string path in Directory.GetFiles(cacheDir, "*.mesh"))
-            if (Guid.TryParseExact(Path.GetFileNameWithoutExtension(path), "N", out Guid guid))
+        foreach (string path in Directory.GetFiles(cacheDir, "*" + suffix))
+        {
+            string name = Path.GetFileName(path);
+            if (Guid.TryParseExact(name[..^suffix.Length], "N", out Guid guid))
                 yield return (guid, path);
+        }
     }
 
     // Builds the meshes and their materials, registering each textured submesh's material under its
     // texture key so the caller can apply textures later (registry.ApplyAllAvailable for a warm cache, or
     // progressively as ExtractTextures streams them in on a cold load).
     public static Dictionary<Guid, ArrayMesh> Load(string cacheDir, TextureRegistry registry,
-        IReadOnlySet<Guid>? only = null)
+        IReadOnlySet<Guid>? only = null, string suffix = ".mesh")
     {
         var library = new Dictionary<Guid, ArrayMesh>();
         if (!Directory.Exists(cacheDir))
@@ -160,7 +165,7 @@ public static class ModelLibrary
         // one StandardMaterial3D (fewer material objects + GPU parameter buffers, fewer render-state
         // changes). Scoped to this load so nothing leaks between calls.
         var materials = new Dictionary<(string, Color, UnityMaterial.Blend, float, float, EShaderCull), Material>();
-        var sources = new List<(Guid Item, string Path)>(CachedMeshPaths(cacheDir, only));
+        var sources = new List<(Guid Item, string Path)>(CachedMeshPaths(cacheDir, only, suffix));
         IReadOnlyList<ExactFileGroups.Group<Guid>> groups = ExactFileGroups.Build(sources, DeduplicateGpu);
         for (int start = 0; start < groups.Count; start += PrepareChunk)
         {

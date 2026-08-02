@@ -51,7 +51,8 @@ public static class ObjectsBuilder
 
     public static Node3D Build(IReadOnlyList<PlacedObject> objects, ObjectAssetDatabase db,
         IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary,
-        IReadOnlyDictionary<Guid, List<CachedCollider>> colliderLibrary, out int withMesh)
+        IReadOnlyDictionary<Guid, List<CachedCollider>> colliderLibrary, out int withMesh,
+        IReadOnlyDictionary<Guid, ArrayMesh>? lod1Library = null)
     {
         var root = new Node3D { Name = "Objects" };
 
@@ -88,12 +89,29 @@ public static class ObjectsBuilder
         {
             // No MaterialOverride: the mesh's per-submesh surface materials carry the textures.
             ArrayMesh renderMesh = meshLibrary[guid];
+            // The prefab's own lower level, if it shipped one. AddLevels derives the distance past which
+            // it takes over from the batch it is actually given, so chunked cells switch on their own
+            // largest placement rather than on the whole map's.
+            ArrayMesh? lodMesh = LodEnabled && lod1Library != null
+                && lod1Library.TryGetValue(guid, out ArrayMesh? candidate) ? candidate : null;
+            // A visibility range is a property of the whole batch, never of the placements inside it: a
+            // batch spanning the map is wholly near or wholly far, so whichever level it picks says
+            // nothing about the objects the camera is actually looking at — and picking the far level for
+            // a batch that reaches the player draws the coarse mesh right in front of them. Groups that
+            // have a lower level are cut into cells small enough for the switch to mean something; groups
+            // without one keep the coarse cells, which are the ones tuned for large-map culling.
+            // LodChunkMetres is an override, so 0 means "no finer cells", not "no cells": dropping to 0
+            // here would leave levelled groups as one map-spanning batch — the opposite of the point, and
+            // the opposite of what UG_OBJECT_CHUNK_METRES=0 means for everything else.
+            float chunkMetres = lodMesh != null && ObjectChunkMetres > 0f && LodChunkMetres > 0f
+                ? Mathf.Min(ObjectChunkMetres, LodChunkMetres)
+                : ObjectChunkMetres;
             long placementTriangles = TriangleCount(renderMesh) * transforms.Count;
-            bool spread = ObjectChunkMetres > 0f && transforms.Count > 1
-                && ExceedsCellSpan(transforms, ObjectChunkMetres);
+            bool spread = chunkMetres > 0f && transforms.Count > 1
+                && ExceedsCellSpan(transforms, chunkMetres);
             bool sparseWide = ChunkSparseObjects && transforms.Count < MinChunkedInstances && spread
                 && placementTriangles >= SparseChunkMinTriangles;
-            if (ObjectChunkMetres > 0f && (transforms.Count >= MinChunkedInstances || sparseWide)
+            if (chunkMetres > 0f && (transforms.Count >= MinChunkedInstances || sparseWide)
                 && placementTriangles >= ObjectChunkMinTriangles
                 && (!ObjectChunkRequireSpread || spread))
             {
@@ -101,8 +119,8 @@ public static class ObjectsBuilder
                 foreach (Transform3D transform in transforms)
                 {
                     var cell = (
-                        Mathf.FloorToInt(transform.Origin.X / ObjectChunkMetres),
-                        Mathf.FloorToInt(transform.Origin.Z / ObjectChunkMetres));
+                        Mathf.FloorToInt(transform.Origin.X / chunkMetres),
+                        Mathf.FloorToInt(transform.Origin.Z / chunkMetres));
                     if (!cells.TryGetValue(cell, out List<Transform3D>? inCell))
                         cells[cell] = inCell = new List<Transform3D>();
                     inCell.Add(transform);
@@ -114,14 +132,12 @@ public static class ObjectsBuilder
                 }
                 foreach (((int x, int z), List<Transform3D> inCell) in cells)
                 {
-                    AddRenderBatch(root, render, BuildMultiMesh(renderMesh, inCell));
-                    renderBatches++;
+                    renderBatches += AddLevels(root, render, renderMesh, lodMesh, inCell);
                 }
             }
             else
             {
-                AddRenderBatch(root, render, BuildMultiMesh(renderMesh, transforms));
-                renderBatches++;
+                renderBatches += AddLevels(root, render, renderMesh, lodMesh, transforms);
             }
             withMesh += transforms.Count;
 
@@ -600,7 +616,22 @@ public static class ObjectsBuilder
         _ => Transform3D.Identity,
     };
 
-    private static MultiMesh BuildMultiMesh(Mesh mesh, List<Transform3D> transforms)
+    // A batch's placement bounds: the centre its transforms are rebased around, and how far the furthest
+    // placement sits from that centre.
+    private readonly record struct BatchBounds(Vector3 Centre, float Radius);
+
+    private static BatchBounds BoundsOf(List<Transform3D> transforms)
+    {
+        Vector3 min = transforms[0].Origin, max = min;
+        foreach (Transform3D t in transforms)
+        {
+            min = new Vector3(Mathf.Min(min.X, t.Origin.X), Mathf.Min(min.Y, t.Origin.Y), Mathf.Min(min.Z, t.Origin.Z));
+            max = new Vector3(Mathf.Max(max.X, t.Origin.X), Mathf.Max(max.Y, t.Origin.Y), Mathf.Max(max.Z, t.Origin.Z));
+        }
+        return new BatchBounds((min + max) * 0.5f, (max - min).Length() * 0.5f);
+    }
+
+    private static MultiMesh BuildMultiMesh(Mesh mesh, List<Transform3D> transforms, Vector3 centre)
     {
         var multimesh = new MultiMesh
         {
@@ -610,26 +641,121 @@ public static class ObjectsBuilder
         };
         // One native buffer upload (12 floats per Transform3D: three basis rows each followed by the
         // origin component) instead of a marshaled SetInstanceTransform call per instance.
+        //
+        // Origins are stored relative to `centre`, which the caller then gives the instance as its
+        // transform: node * local is the identical world placement, but the instance finally has a
+        // spatial origin. Godot measures a visibility range from that origin, so leaving every batch at
+        // (0,0,0) — as this did — made every object switch level on the camera's distance from the map
+        // origin rather than from the objects. FoliageBuilder.PackBuffer rebases for the same reason.
         var buffer = new float[transforms.Count * 12];
         for (int i = 0; i < transforms.Count; i++)
         {
             Transform3D t = transforms[i];
+            Vector3 o3 = t.Origin - centre;
             int o = i * 12;
-            buffer[o + 0] = t.Basis.X.X; buffer[o + 1] = t.Basis.Y.X; buffer[o + 2] = t.Basis.Z.X; buffer[o + 3] = t.Origin.X;
-            buffer[o + 4] = t.Basis.X.Y; buffer[o + 5] = t.Basis.Y.Y; buffer[o + 6] = t.Basis.Z.Y; buffer[o + 7] = t.Origin.Y;
-            buffer[o + 8] = t.Basis.X.Z; buffer[o + 9] = t.Basis.Y.Z; buffer[o + 10] = t.Basis.Z.Z; buffer[o + 11] = t.Origin.Z;
+            buffer[o + 0] = t.Basis.X.X; buffer[o + 1] = t.Basis.Y.X; buffer[o + 2] = t.Basis.Z.X; buffer[o + 3] = o3.X;
+            buffer[o + 4] = t.Basis.X.Y; buffer[o + 5] = t.Basis.Y.Y; buffer[o + 6] = t.Basis.Z.Y; buffer[o + 7] = o3.Y;
+            buffer[o + 8] = t.Basis.X.Z; buffer[o + 9] = t.Basis.Y.Z; buffer[o + 10] = t.Basis.Z.Z; buffer[o + 11] = o3.Z;
         }
         multimesh.Buffer = buffer;
 
         return multimesh;
     }
 
-    private static void AddRenderBatch(Node3D root, MultiMeshRidRenderer? renderer, MultiMesh multimesh)
+    // Unturned's prefabs carry their own lower LOD levels; the port used to keep only LOD-0 and draw full
+    // detail at every distance. UG_OBJECT_LOD=0 restores that for A/B measurement.
+    // Public so a caller can skip loading the lower-level library altogether: with the flag off the
+    // A/B control must not pay for meshes and materials that ObjectsBuilder would then ignore.
+    public static bool ObjectLodEnabled => LodEnabled;
+
+    private static readonly bool LodEnabled = EnvBool("UG_OBJECT_LOD", true);
+
+    // Unity switches level by projected screen height, so the threshold scales with the object: a tree
+    // holds its detail much further out than a crate. Approximate that with a multiple of the mesh's
+    // bounding radius, tunable because the authored per-prefab thresholds are not extracted yet.
+    //
+    // Be aware of how little this does at the shipped cell size. AddLevels adds the batch's placement
+    // radius on top, and a full 1024 m cell carries several hundred metres of that against a few tens of
+    // metres from the mesh, so the batch radius is most of the threshold. Swept 2 / 6 / 24 on PEI: four of
+    // the eight poses are byte-identical at all three, and `ground` moves 0.22% across the whole 12x range.
+    // This knob only starts to matter once cells are small enough for the two terms to be comparable —
+    // UG_OBJECT_LOD_CHUNK_METRES is the lever that actually moves the numbers today.
+    private static readonly float LodSwitchRadii = EnvFloat("UG_OBJECT_LOD_RADII", 6f, 2f, 200f);
+    // Unity's LODGroup switches level outright unless cross-fade is explicitly authored, so a hard swap
+    // is both the parity behaviour and the cheaper one: inside a fade margin Godot dithers the two levels
+    // together, which draws BOTH. UG_OBJECT_LOD_FADE=1 opts back into the dithered swap.
+    private static readonly bool LodFade = EnvBool("UG_OBJECT_LOD_FADE", false);
+
+    // Cell size for groups that have a lower level. Measured on PEI at 4096 m (the shipped cell size for
+    // everything else) the switch is arbitrary enough that two poses get worse; at 1024 m every one of the
+    // eight benchmark poses submits fewer primitives. Smaller still keeps winning on primitives but costs
+    // draw calls fast — 512 m more than doubles them at the aerial poses for another ~5%.
+    private static readonly float LodChunkMetres = EnvFloat("UG_OBJECT_LOD_CHUNK_METRES", 1024f, 0f, 8192f);
+    private static float LodFadeMargin => LodFade ? 8f : 0f;
+
+    // The screen size a placement covers is its mesh radius times the scale it was placed at, and the
+    // batch shares one visibility range, so the largest placement in the batch sets the distance: a
+    // 2x-scaled copy must keep its detail twice as far out or it visibly swaps down while the unscaled
+    // copies beside it do not.
+    private static float SwitchDistanceFor(Mesh mesh, List<Transform3D> transforms)
+    {
+        float radius = mesh.GetAabb().Size.Length() * 0.5f;
+        float maxScale = 0f;
+        foreach (Transform3D transform in transforms)
+        {
+            Vector3 scale = transform.Basis.Scale.Abs();
+            maxScale = Mathf.Max(maxScale, Mathf.Max(scale.X, Mathf.Max(scale.Y, scale.Z)));
+        }
+        return Mathf.Max(16f, radius * maxScale * LodSwitchRadii);
+    }
+
+    // One batch when the prefab has a single level, two sharing the same transforms when it has a lower
+    // one: LOD-0 up to the switch distance, the lower level from there out. Godot's visibility range
+    // keeps exactly one of the pair drawn, with a fade margin so the swap is not a pop.
+    //
+    // The range is measured from the batch's own centre to the camera, and the placements inside it are
+    // spread up to `Radius` around that centre, so the threshold is pushed out by the radius. Without
+    // that a cell whose centre is just past the switch distance would draw the coarse level for the
+    // placement nearest the player as well. It also bounds what this can buy: a batch only ever switches
+    // as a whole, so the win comes from cells that are small next to their own switch distance.
+    private static int AddLevels(Node3D root, MultiMeshRidRenderer? renderer, ArrayMesh mesh,
+        ArrayMesh? lodMesh, List<Transform3D> transforms)
+    {
+        BatchBounds bounds = BoundsOf(transforms);
+        if (lodMesh == null)
+        {
+            AddRenderBatch(root, renderer, BuildMultiMesh(mesh, transforms, bounds.Centre), bounds.Centre);
+            return 1;
+        }
+        float switchDistance = SwitchDistanceFor(mesh, transforms) + bounds.Radius;
+        AddRenderBatch(root, renderer, BuildMultiMesh(mesh, transforms, bounds.Centre), bounds.Centre,
+            visibilityEnd: switchDistance, visibilityMargin: LodFadeMargin);
+        AddRenderBatch(root, renderer, BuildMultiMesh(lodMesh, transforms, bounds.Centre), bounds.Centre,
+            visibilityBegin: switchDistance, visibilityMargin: LodFadeMargin);
+        return 2;
+    }
+
+    private static void AddRenderBatch(Node3D root, MultiMeshRidRenderer? renderer, MultiMesh multimesh,
+        Vector3 centre, float visibilityEnd = 0f, float visibilityMargin = 0f, float visibilityBegin = 0f)
     {
         if (renderer != null)
-            renderer.Add(multimesh, Transform3D.Identity);
+            renderer.Add(multimesh, new Transform3D(Basis.Identity, centre), shadows: true, visibilityEnd,
+                visibilityMargin, visibilityBegin);
         else
-            root.AddChild(new MultiMeshInstance3D { Multimesh = multimesh });
+            root.AddChild(new MultiMeshInstance3D
+            {
+                Multimesh = multimesh,
+                Position = centre,
+                VisibilityRangeBegin = visibilityBegin,
+                VisibilityRangeEnd = visibilityEnd,
+                VisibilityRangeBeginMargin = visibilityBegin > 0f ? visibilityMargin : 0f,
+                VisibilityRangeEndMargin = visibilityEnd > 0f ? visibilityMargin : 0f,
+                // Match the RID path: with no margin there is nothing to dither, and Self would still put
+                // the batch on the transparent pass.
+                VisibilityRangeFadeMode = visibilityMargin > 0f
+                    ? GeometryInstance3D.VisibilityRangeFadeModeEnum.Self
+                    : GeometryInstance3D.VisibilityRangeFadeModeEnum.Disabled,
+            });
     }
 
     private static Node3D BuildFallbackBoxes(List<(Transform3D transform, Color color)> items)

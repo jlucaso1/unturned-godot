@@ -285,6 +285,24 @@ public static class WorldPreview
             return;
         }
 
+        // The prefabs' own lower levels, staged like the base library above. Without these the preview
+        // would draw LOD-0 at every distance and so stop matching the scene a session actually renders —
+        // which is most of what a preview is for. Skipped entirely when the feature is off, so the flag
+        // costs nothing here either.
+        // Objects are their own preview toggle, and only the objects block below reads this: a
+        // foliage-only preview would otherwise realise a whole library it never draws.
+        Dictionary<Guid, ArrayMesh>? lod1Library = null;
+        if (options.Objects && ObjectsBuilder.ObjectLodEnabled)
+            try
+            {
+                lod1Library = await ModelLibrary.LoadStagedAsync(CacheDir, registry, yieldOn,
+                    placements.Needed, ModelExtractor.Lod1Suffix);
+            }
+            catch (Exception e)
+            {
+                report.Add($"  lower levels unavailable: {e.GetType().Name}: {e.Message}");
+            }
+
         onStatus("Objects…");
         await Yield(yieldOn);
 
@@ -294,7 +312,7 @@ public static class WorldPreview
             Try(report, "objects", () =>
             {
                 root.AddChild(ObjectsBuilder.Build(placements.Objects, placements.Db, meshLibrary, noColliders,
-                    out int withMesh));
+                    out int withMesh, lod1Library));
                 int missing = placements.Objects.Count - withMesh;
                 report.Add($"  {withMesh}/{placements.Objects.Count} objects, {meshLibrary.Count} unique meshes" +
                     (missing > 0 ? $" ({missing} as fallback boxes — warm the cache to fill them in)" : ""));
