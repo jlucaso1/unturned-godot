@@ -139,7 +139,19 @@ public sealed class ServerSimulation
     // it, a player who legitimately kept moving through a ten-second stall would be measured against
     // whatever few ticks did run, their real position rejected as too fast, and they would rubber-band
     // until enough ticks accrued to cover the distance they had already travelled.
-    public void SkipTicks(uint count) => Tick += count;
+    // Queued inputs are dropped with the time they belonged to. They describe an interval that no longer
+    // exists, and keeping them is worse than losing them: Step consumes one per tick while a client
+    // produces one per tick, so a backlog left over from a stall never drains — every replicated position
+    // would stay that many ticks stale for the rest of the session.
+    public void SkipTicks(uint count)
+    {
+        Tick += count;
+        foreach (Entry entry in _players.Values)
+        {
+            DroppedInputs += entry.Inputs.Count;
+            entry.Inputs.Clear();
+        }
+    }
 
     public ServerSimulation(IMoveSolver solver) => _solver = solver;
 

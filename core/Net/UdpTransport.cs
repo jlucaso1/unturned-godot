@@ -36,6 +36,10 @@ public sealed class UdpServerTransport : IServerTransport
     // it bounds a flood without shaping normal traffic.
     public const int MaxQueuedEvents = 4096;
 
+    // Datagrams read from the socket per pump, whatever they turn out to be. Bounds the loop even when
+    // nothing being sent produces an event.
+    public const int MaxReadsPerPump = 1024;
+
     private readonly Queue<ServerTransportEvent> _events = new();
     private int _nextId = 1;
     private double _now;
@@ -51,13 +55,19 @@ public sealed class UdpServerTransport : IServerTransport
         return _events.TryDequeue(out evt);
     }
 
-    // Datagrams are drained into _events only while there is room. Past the cap they are left in the
-    // socket's receive buffer for the OS to discard, which is the right backpressure for UDP: an
-    // unauthenticated flood then costs kernel buffer rather than unbounded managed memory. NetServer's
-    // per-Update event budget bounds how much of this queue is *handled*; this bounds how large it gets.
+    // Two separate bounds, because they stop different things.
+    //
+    // The queue cap keeps managed memory finite: past it, datagrams are left in the socket's receive
+    // buffer for the OS to discard, which is the right backpressure for UDP.
+    //
+    // The read cap bounds the loop itself, and it cannot be expressed as the queue cap. Plenty of
+    // datagrams produce no event at all — an ack, a duplicate reliable frame, an unknown channel prefix,
+    // an empty payload — so a sender that only ever sends those leaves _events.Count untouched and the
+    // queue guard never trips. Counting reads is what makes the loop terminate regardless of what arrives.
     private void PumpSocket()
     {
-        while (_events.Count < MaxQueuedEvents && _socket.Available > 0)
+        int reads = MaxReadsPerPump;
+        while (reads-- > 0 && _events.Count < MaxQueuedEvents && _socket.Available > 0)
         {
             IPEndPoint remote = new(IPAddress.Any, 0);
             byte[] datagram;
@@ -161,10 +171,14 @@ public sealed class UdpClientTransport : IClientTransport
         return false;
     }
 
-    // Same bound as the server's, for the same reason — a client's socket is just as reachable.
+    // Same two bounds as the server's, for the same reasons — a client's socket is just as reachable, and
+    // an ack or a duplicate produces no payload here either.
     private void PumpSocket()
     {
-        while (_incoming.Count < UdpServerTransport.MaxQueuedEvents && _socket.Available > 0)
+        int reads = UdpServerTransport.MaxReadsPerPump;
+        while (reads-- > 0
+            && _incoming.Count < UdpServerTransport.MaxQueuedEvents
+            && _socket.Available > 0)
         {
             IPEndPoint remote = new(IPAddress.Any, 0);
             byte[] datagram;

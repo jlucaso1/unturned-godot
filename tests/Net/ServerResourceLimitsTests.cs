@@ -44,6 +44,11 @@ public class ServerResourceLimitsTests
 
     private static InputCommand Forward(uint frame) => new(frame, 0, -1, false, false, 0, 90);
 
+    // Strafing right instead of forward, so which end of the queue survives is observable: Forward moves
+    // along -Z and this along +X. Frame alone is not enough — it is unused for commands without a
+    // position, so a queue of Forward(i) is entirely indistinguishable from itself.
+    private static InputCommand StrafeRight(uint frame) => new(frame, 1, 0, false, false, 0, 90);
+
     // Step consumes one input per tick, so a client sending faster than TickRate grew this queue without
     // limit — a joined client can send Input datagrams at line rate, and nothing else bounded it.
     [Fact]
@@ -77,16 +82,18 @@ public class ServerResourceLimitsTests
         sim.AddPlayer(1, Vector3.Zero);
 
         const uint last = (ServerSimulation.MaxQueuedInputsPerPlayer * 3) - 1;
-        for (uint i = 0; i <= last; i++)
+        for (uint i = 0; i < last; i++)
             sim.QueueInput(1, Forward(i));
+        sim.QueueInput(1, StrafeRight(last)); // the newest, and the only one that moves along +X
 
-        // Drain to the final queued input; it must be the one most recently sent.
-        for (int i = 0; i < ServerSimulation.MaxQueuedInputsPerPlayer - 1; i++)
+        // Drain the whole queue. The last command applied must be the newest sent, not an evicted-from-
+        // the-wrong-end survivor: the surviving window is the tail, so the strafe is the final step.
+        for (int i = 0; i < ServerSimulation.MaxQueuedInputsPerPlayer; i++)
             sim.Step();
-        sim.Step();
 
         Assert.True(sim.TryGetState(1, out PlayerMoveState state));
-        Assert.True(state.Position.Z < 0f, "the player should have moved forward on the surviving inputs");
+        Assert.True(state.Position.X > 0f,
+            $"the newest input (a strafe) should have been the last applied; X = {state.Position.X}");
     }
 
     [Fact]
@@ -188,6 +195,52 @@ public class ServerResourceLimitsTests
         uint advanced = sim.Tick - before;
         Assert.True(advanced >= (uint)(stall / ServerSimulation.TickRate) - 1,
             $"clock advanced only {advanced} ticks over a {stall}s stall");
+    }
+
+    // Advancing the clock without dropping the queue would leave a backlog that never drains: Step
+    // consumes one input per tick while the client produces one per tick, so every replicated position
+    // would stay that many ticks stale for the rest of the session.
+    [Fact]
+    public void SkippingTicksDropsTheInputsThatBelongedToThem()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Vector3.Zero);
+        for (uint i = 0; i < ServerSimulation.MaxQueuedInputsPerPlayer; i++)
+            sim.QueueInput(1, Forward(i));
+
+        sim.SkipTicks(100);
+
+        // Nothing is left to replay: the very next Step starves rather than working through a backlog.
+        Assert.True(sim.TryGetState(1, out PlayerMoveState before));
+        sim.Step();
+        Assert.True(sim.TryGetState(1, out PlayerMoveState after));
+        Assert.Equal(before.Position.Z, after.Position.Z, 3);
+    }
+
+    // A composite transport is how a listen server works: the host's loopback plus a LAN UDP transport.
+    // Restarting at the first child on every TryReceive meant a backlogged host could consume the whole
+    // per-Update budget forever and the LAN side would never be polled.
+    [Fact]
+    public void ACompositeTransportPollsEveryChild_EvenWhenTheFirstIsBacklogged()
+    {
+        var busy = new FakeServerTransport();
+        var quiet = new FakeServerTransport();
+        var composite = new CompositeServerTransport(busy, quiet);
+
+        var noisy = new FakeConnection();
+        for (int i = 0; i < 1000; i++)
+            busy.Message(noisy, NetMessages.WriteInput(Forward(0)));
+
+        var lan = new FakeConnection();
+        quiet.Connect(lan);
+
+        // Drain a handful of events: the second transport's single event must come out among them.
+        bool sawQuiet = false;
+        for (int i = 0; i < 8 && composite.TryReceive(out ServerTransportEvent evt); i++)
+            if (evt.Connection == lan)
+                sawQuiet = true;
+
+        Assert.True(sawQuiet, "the second transport was never polled");
     }
 
     // The receive loop ran until the transport was empty, so a peer decided how long the frame was. The
