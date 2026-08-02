@@ -613,7 +613,22 @@ public static class ObjectsBuilder
         _ => Transform3D.Identity,
     };
 
-    private static MultiMesh BuildMultiMesh(Mesh mesh, List<Transform3D> transforms)
+    // A batch's placement bounds: the centre its transforms are rebased around, and how far the furthest
+    // placement sits from that centre.
+    private readonly record struct BatchBounds(Vector3 Centre, float Radius);
+
+    private static BatchBounds BoundsOf(List<Transform3D> transforms)
+    {
+        Vector3 min = transforms[0].Origin, max = min;
+        foreach (Transform3D t in transforms)
+        {
+            min = new Vector3(Mathf.Min(min.X, t.Origin.X), Mathf.Min(min.Y, t.Origin.Y), Mathf.Min(min.Z, t.Origin.Z));
+            max = new Vector3(Mathf.Max(max.X, t.Origin.X), Mathf.Max(max.Y, t.Origin.Y), Mathf.Max(max.Z, t.Origin.Z));
+        }
+        return new BatchBounds((min + max) * 0.5f, (max - min).Length() * 0.5f);
+    }
+
+    private static MultiMesh BuildMultiMesh(Mesh mesh, List<Transform3D> transforms, Vector3 centre)
     {
         var multimesh = new MultiMesh
         {
@@ -623,14 +638,21 @@ public static class ObjectsBuilder
         };
         // One native buffer upload (12 floats per Transform3D: three basis rows each followed by the
         // origin component) instead of a marshaled SetInstanceTransform call per instance.
+        //
+        // Origins are stored relative to `centre`, which the caller then gives the instance as its
+        // transform: node * local is the identical world placement, but the instance finally has a
+        // spatial origin. Godot measures a visibility range from that origin, so leaving every batch at
+        // (0,0,0) — as this did — made every object switch level on the camera's distance from the map
+        // origin rather than from the objects. FoliageBuilder.PackBuffer rebases for the same reason.
         var buffer = new float[transforms.Count * 12];
         for (int i = 0; i < transforms.Count; i++)
         {
             Transform3D t = transforms[i];
+            Vector3 o3 = t.Origin - centre;
             int o = i * 12;
-            buffer[o + 0] = t.Basis.X.X; buffer[o + 1] = t.Basis.Y.X; buffer[o + 2] = t.Basis.Z.X; buffer[o + 3] = t.Origin.X;
-            buffer[o + 4] = t.Basis.X.Y; buffer[o + 5] = t.Basis.Y.Y; buffer[o + 6] = t.Basis.Z.Y; buffer[o + 7] = t.Origin.Y;
-            buffer[o + 8] = t.Basis.X.Z; buffer[o + 9] = t.Basis.Y.Z; buffer[o + 10] = t.Basis.Z.Z; buffer[o + 11] = t.Origin.Z;
+            buffer[o + 0] = t.Basis.X.X; buffer[o + 1] = t.Basis.Y.X; buffer[o + 2] = t.Basis.Z.X; buffer[o + 3] = o3.X;
+            buffer[o + 4] = t.Basis.X.Y; buffer[o + 5] = t.Basis.Y.Y; buffer[o + 6] = t.Basis.Z.Y; buffer[o + 7] = o3.Y;
+            buffer[o + 8] = t.Basis.X.Z; buffer[o + 9] = t.Basis.Y.Z; buffer[o + 10] = t.Basis.Z.Z; buffer[o + 11] = o3.Z;
         }
         multimesh.Buffer = buffer;
 
@@ -682,32 +704,40 @@ public static class ObjectsBuilder
     // One batch when the prefab has a single level, two sharing the same transforms when it has a lower
     // one: LOD-0 up to the switch distance, the lower level from there out. Godot's visibility range
     // keeps exactly one of the pair drawn, with a fade margin so the swap is not a pop.
+    //
+    // The range is measured from the batch's own centre to the camera, and the placements inside it are
+    // spread up to `Radius` around that centre, so the threshold is pushed out by the radius. Without
+    // that a cell whose centre is just past the switch distance would draw the coarse level for the
+    // placement nearest the player as well. It also bounds what this can buy: a batch only ever switches
+    // as a whole, so the win comes from cells that are small next to their own switch distance.
     private static int AddLevels(Node3D root, MultiMeshRidRenderer? renderer, ArrayMesh mesh,
         ArrayMesh? lodMesh, List<Transform3D> transforms)
     {
+        BatchBounds bounds = BoundsOf(transforms);
         if (lodMesh == null)
         {
-            AddRenderBatch(root, renderer, BuildMultiMesh(mesh, transforms));
+            AddRenderBatch(root, renderer, BuildMultiMesh(mesh, transforms, bounds.Centre), bounds.Centre);
             return 1;
         }
-        float switchDistance = SwitchDistanceFor(mesh, transforms);
-        AddRenderBatch(root, renderer, BuildMultiMesh(mesh, transforms),
+        float switchDistance = SwitchDistanceFor(mesh, transforms) + bounds.Radius;
+        AddRenderBatch(root, renderer, BuildMultiMesh(mesh, transforms, bounds.Centre), bounds.Centre,
             visibilityEnd: switchDistance, visibilityMargin: LodFadeMargin);
-        AddRenderBatch(root, renderer, BuildMultiMesh(lodMesh, transforms),
+        AddRenderBatch(root, renderer, BuildMultiMesh(lodMesh, transforms, bounds.Centre), bounds.Centre,
             visibilityBegin: switchDistance, visibilityMargin: LodFadeMargin);
         return 2;
     }
 
     private static void AddRenderBatch(Node3D root, MultiMeshRidRenderer? renderer, MultiMesh multimesh,
-        float visibilityEnd = 0f, float visibilityMargin = 0f, float visibilityBegin = 0f)
+        Vector3 centre, float visibilityEnd = 0f, float visibilityMargin = 0f, float visibilityBegin = 0f)
     {
         if (renderer != null)
-            renderer.Add(multimesh, Transform3D.Identity, shadows: true, visibilityEnd, visibilityMargin,
-                visibilityBegin);
+            renderer.Add(multimesh, new Transform3D(Basis.Identity, centre), shadows: true, visibilityEnd,
+                visibilityMargin, visibilityBegin);
         else
             root.AddChild(new MultiMeshInstance3D
             {
                 Multimesh = multimesh,
+                Position = centre,
                 VisibilityRangeBegin = visibilityBegin,
                 VisibilityRangeEnd = visibilityEnd,
                 VisibilityRangeBeginMargin = visibilityBegin > 0f ? visibilityMargin : 0f,

@@ -219,7 +219,11 @@ public class PhysicsBodyOrderTests
         // LOD-0/LOD-1 pair; either way the batch itself still goes through AddRenderBatch.
         Assert.Contains("AddLevels(root, render, renderMesh, lodMesh", objects);
         Assert.Contains("AddRenderBatch(root, renderer, BuildMultiMesh", objects);
-        Assert.Contains("renderer.Add(multimesh, Transform3D.Identity", objects);
+        // Batches carry their cell centre, not identity: Godot measures a visibility range from the
+        // instance origin, so identity would switch every object on its distance from the map origin.
+        Assert.Contains("renderer.Add(multimesh, new Transform3D(Basis.Identity, centre)", objects);
+        Assert.Contains("BuildMultiMesh(mesh, transforms, bounds.Centre)", objects);
+        Assert.Contains("SwitchDistanceFor(mesh, transforms) + bounds.Radius", objects);
         // The switch distance comes from the batch AddLevels was handed, so it accounts for the largest
         // scale actually placed there; deriving it from the mesh alone would swap scaled copies too early.
         Assert.Contains("SwitchDistanceFor(mesh, transforms)", objects);
