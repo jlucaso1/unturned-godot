@@ -19,6 +19,12 @@ public partial class BotClient : Node
     private int _zombiesListed;
     private int _zombieStateMessages;
 
+    // Cached so a method group does not allocate a delegate on every received message.
+    private static readonly System.Func<byte[], ENetMessage> ReadType = NetMessages.TypeOf;
+    private static readonly System.Func<byte[],
+        (byte Bound, System.Collections.Generic.List<UnturnedGodot.Zombies.ZombieListing> Listings)> ReadZombieList =
+        UnturnedGodot.Zombies.ZombieNetMessages.ReadZombieList;
+
     public static BotClient Create(string host, ushort port, string name, float lifetime)
     {
         var transport = new UdpClientTransport(host, port);
@@ -31,10 +37,16 @@ public partial class BotClient : Node
         };
         node._client.OnUnhandledMessage += payload =>
         {
-            switch (NetMessages.TypeOf(payload))
+            // A subscriber that reads the wire owns its decode guard — NetClient's is scoped to its own
+            // messages, so a truncated ZombieList reaching here unguarded would end the process.
+            if (!MalformedPacket.TryDecode(payload, ReadType, out ENetMessage type))
+                return;
+
+            switch (type)
             {
                 case ENetMessage.ZombieList:
-                    node._zombiesListed += UnturnedGodot.Zombies.ZombieNetMessages.ReadZombieList(payload).Listings.Count;
+                    if (MalformedPacket.TryDecode(payload, ReadZombieList, out var list))
+                        node._zombiesListed += list.Listings.Count;
                     break;
                 case ENetMessage.ZombieStates:
                     node._zombieStateMessages++;
