@@ -32,6 +32,13 @@ public partial class UnturnedEditorPlugin : EditorPlugin
         if (EditorInterface.Singleton.GetEditedSceneRoot() is { } root)
             WorldPreview.Clear(root);
 
+        // Put the editor's own viewport settings back. These live in EditorSettings, which is editor-wide
+        // rather than project-scoped, so leaving them tuned follows the user into every other Godot
+        // project on the machine — a 400 m/s freelook camera and a 2 km grid, with the backup file
+        // orphaned and the only UI able to read it now gone. The dock's toggle was the sole way back.
+        if (ViewportTuning.HasBackup() && ViewportTuning.Restore())
+            GD.Print("[unturned] editor viewport settings restored on plugin exit.");
+
         RemoveControlFromDocks(_dock);
         _dock.Free();
         _dock = null;
