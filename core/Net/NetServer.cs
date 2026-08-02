@@ -22,10 +22,14 @@ public sealed class NetServer
     private readonly ServerSimulation _simulation;
     private readonly Vector3 _spawnPosition;
     private readonly Dictionary<ITransportConnection, Session> _sessions = new();
-    private byte _nextPlayerId = 1;
+    private readonly PlayerIdPool _playerIds = new();
     private double _nextTick = double.NaN;
 
     public int PlayerCount { get; private set; }
+
+    // How many more players this server can admit. Zero means the next Hello is refused; see PlayerIdPool
+    // for why the ceiling is 254 rather than 256.
+    public int FreePlayerSlots => _playerIds.Available;
 
     // Extension seams for replicated systems (zombies, resources, doors): hook the fixed tick to run
     // server logic and use Broadcast to ship your own ENetMessage; hook OnPlayerAdmitted to send a
@@ -100,7 +104,8 @@ public sealed class NetServer
                     }
                     else if (!session.Joined)
                     {
-                        AdmitPlayer(connection, session, name);
+                        if (!AdmitPlayer(connection, session, name))
+                            connection.Close(); // server full: refuse cleanly, do not invent an id
                     }
                     else
                     {
@@ -122,9 +127,16 @@ public sealed class NetServer
         }
     }
 
-    private void AdmitPlayer(ITransportConnection connection, Session session, string name)
+    // False when there is no id left to give — the caller refuses the join. Ids come from a pool and go
+    // back on disconnect: a bare incrementing byte wrapped after 255 admissions and handed a live
+    // player's id to the next joiner, which overwrote their simulation state and then deleted it when
+    // the newcomer left, so the admission after that threw out of GetState.
+    private bool AdmitPlayer(ITransportConnection connection, Session session, string name)
     {
-        session.PlayerId = _nextPlayerId++;
+        if (!_playerIds.TryRent(out byte playerId))
+            return false;
+
+        session.PlayerId = playerId;
         session.Name = name;
         session.Joined = true;
         PlayerCount++;
@@ -143,6 +155,7 @@ public sealed class NetServer
                 conn.Send(joined, ESendType.Reliable);
 
         OnPlayerAdmitted?.Invoke(session.PlayerId, connection);
+        return true;
     }
 
     private void HandleDisconnect(ITransportConnection connection)
@@ -151,6 +164,7 @@ public sealed class NetServer
             return;
         PlayerCount--;
         _simulation.RemovePlayer(session.PlayerId);
+        _playerIds.Return(session.PlayerId);
         Broadcast(NetMessages.WritePlayerLeft(session.PlayerId), ESendType.Reliable);
     }
 
