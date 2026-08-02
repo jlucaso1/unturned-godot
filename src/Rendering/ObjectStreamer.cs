@@ -70,6 +70,7 @@ public partial class ObjectStreamer : Node
     private volatile bool _cold;
     private bool _meshesExtracted;
     private bool _coldBuildStarted;
+    private Task _coldBuildTask = Task.CompletedTask;
     private bool _readyToBuild;
     private bool _began;
 
@@ -132,6 +133,7 @@ public partial class ObjectStreamer : Node
         _loadCancellation.Cancel();
         await ObserveStopped(_prepTask);
         await ObserveStopped(_streamTask);
+        await ObserveStopped(_coldBuildTask);
         _layerTextures.TrySetResult(_layersProduced);
         _completion.TrySetCanceled(_loadCancellation.Token);
     }
@@ -228,7 +230,10 @@ public partial class ObjectStreamer : Node
         if (_meshesExtracted && !_coldBuildStarted)
         {
             _coldBuildStarted = true;
-            _ = OnMeshesExtractedAsync().ContinueWith(
+            // Held, not fire-and-forget: this build now spans frames, so CancelAsync has to be able to
+            // wait for it before the load state it reads is torn down.
+            _coldBuildTask = OnMeshesExtractedAsync();
+            _ = _coldBuildTask.ContinueWith(
                 t => _completion.TrySetException(t.Exception!.InnerExceptions),
                 System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted);
         }
@@ -341,12 +346,7 @@ public partial class ObjectStreamer : Node
         Log.Print($"[stream] meshes realised: {phase.ElapsedMilliseconds} ms ({meshLibrary.Count})");
         await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
 
-        // The authored lower levels go through the same staged realise, or half of a map's object
-        // geometry would block the main thread in one frame and freeze the loading animation.
-        Dictionary<Guid, ArrayMesh> lod1Library = ObjectsBuilder.ObjectLodEnabled
-            ? await ModelLibrary.LoadStagedAsync(_cacheDir, _registry, this, _neededGuids,
-                ModelExtractor.Lod1Suffix)
-            : new Dictionary<Guid, ArrayMesh>();
+        Dictionary<Guid, ArrayMesh> lod1Library = await LoadLod1LibraryAsync();
 
         phase.Restart();
         BuildObjects(meshLibrary, lod1Library);
@@ -409,6 +409,15 @@ public partial class ObjectStreamer : Node
         catch (Exception) { /* non-Linux or unreadable — diagnostic only */ }
         return 0;
     }
+
+    // The authored lower levels go through the same staged realise as the base library, on both the warm
+    // and the cold path, or half of a map's object geometry blocks the main thread in one frame and
+    // freezes the loading animation.
+    private Task<Dictionary<Guid, ArrayMesh>> LoadLod1LibraryAsync() =>
+        ObjectsBuilder.ObjectLodEnabled
+            ? ModelLibrary.LoadStagedAsync(_cacheDir, _registry, this, _neededGuids,
+                ModelExtractor.Lod1Suffix)
+            : Task.FromResult(new Dictionary<Guid, ArrayMesh>());
 
     private void BuildObjects(Dictionary<Guid, ArrayMesh> meshLibrary,
         Dictionary<Guid, ArrayMesh> lod1Library)
@@ -592,13 +601,12 @@ public partial class ObjectStreamer : Node
     {
         Dictionary<Guid, ArrayMesh> meshLibrary = ModelLibrary.Load(_cacheDir, _registry, _neededGuids);
 
-        // Staged across frames, as the warm path already does. Realising these synchronously here
-        // doubled the main-thread stall this callback already had, and it is the one moment the
-        // loading screen is meant to keep animating.
-        Dictionary<Guid, ArrayMesh> lod1Library = ObjectsBuilder.ObjectLodEnabled
-            ? await ModelLibrary.LoadStagedAsync(_cacheDir, _registry, this, _neededGuids,
-                ModelExtractor.Lod1Suffix)
-            : new Dictionary<Guid, ArrayMesh>();
+        Dictionary<Guid, ArrayMesh> lod1Library = await LoadLod1LibraryAsync();
+
+        // The staged realise above yields, so a cancel can land mid-flight. Returning here leaves the
+        // scene unbuilt rather than attaching it to a node already on its way out.
+        if (_loadCancellation.IsCancellationRequested)
+            return;
 
         BuildObjects(meshLibrary, lod1Library);
         _sceneBuilt = true;

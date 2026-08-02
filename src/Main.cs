@@ -34,6 +34,7 @@ public partial class Main : Node3D
         if (OS.GetEnvironment("UG_MESH_LOD_THRESHOLD") is { Length: > 0 } lodThreshold
             && float.TryParse(lodThreshold, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out float thresholdPixels)
+            && float.IsFinite(thresholdPixels) // TryParse accepts "NaN"/"Infinity", and Clamp keeps NaN
             && GetViewport() is { } viewport)
         {
             viewport.MeshLodThreshold = Mathf.Clamp(thresholdPixels, 0f, 1024f);

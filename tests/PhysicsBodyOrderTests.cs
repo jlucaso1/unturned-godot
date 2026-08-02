@@ -334,9 +334,13 @@ public class PhysicsBodyOrderTests
         Assert.True(start >= 0, "the cold build must keep its single-entry latch");
         int end = source.IndexOf("private ", start + 1, StringComparison.Ordinal);
         string body = source.Substring(start, end - start);
-        Assert.Contains("OnMeshesExtractedAsync().ContinueWith(", body);
+        Assert.Contains("_coldBuildTask = OnMeshesExtractedAsync();", body);
         Assert.Contains("_completion.TrySetException(t.Exception!.InnerExceptions)", body);
         Assert.Contains("TaskContinuationOptions.OnlyOnFaulted", body);
+        // The build spans frames now, so a cancel can land mid-flight: the task has to be reachable from
+        // CancelAsync, and the build itself must not attach a scene to a node already on its way out.
+        Assert.Contains("await ObserveStopped(_coldBuildTask);", source);
+        Assert.Contains("if (_loadCancellation.IsCancellationRequested)\n            return;", source);
     }
 
     [Fact]
