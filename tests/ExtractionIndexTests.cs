@@ -86,6 +86,27 @@ public sealed class ExtractionIndexTests : IDisposable
         Assert.Single(ExtractionIndex.MissingMeshes(_dir, new[] { guid }, new HashSet<Guid>()));
     }
 
+    // The recovery path ColliderLibrary uses when a read fails. Corruption that leaves the file's length
+    // intact passes the header check, so only a read knows the payload is bad — and dropping the entry has
+    // to make the GUID incomplete again, or it would be skipped on every later load with nothing to rewrite
+    // it. Deleting only the collider would not do it: absence reads as "this prefab has none".
+    [Fact]
+    public void RemovingACachedAsset_MakesItsGuidMissingAgain()
+    {
+        Guid guid = Guid.NewGuid();
+        WriteCachedMesh(guid);
+        using (FileStream s = File.Create(Path.Combine(_dir, guid.ToString("N") + ".collider")))
+            ColliderCache.Write(s, new List<CachedCollider>
+            {
+                CachedCollider.Sphere(Godot.Transform3D.Identity, Godot.Vector3.Zero, 1f),
+            });
+        Assert.Empty(ExtractionIndex.MissingMeshes(_dir, new[] { guid }, new HashSet<Guid>()));
+
+        ExtractionIndex.RemoveCachedAsset(_dir, guid);
+
+        Assert.Single(ExtractionIndex.MissingMeshes(_dir, new[] { guid }, new HashSet<Guid>()));
+    }
+
     [Fact]
     public void AMeshWithNoColliderFileAtAllIsStillComplete()
     {
