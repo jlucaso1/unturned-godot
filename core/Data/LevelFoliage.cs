@@ -142,7 +142,8 @@ public sealed class LevelFoliage
         if (version is not (1 or VersionAssetListHeader))
             throw new NotSupportedException($"Unsupported Foliage.blob version {version}");
 
-        int tileCount = reader.ReadInt32();
+        int tileCount = BoundedCount(reader.ReadInt32(), stream.Length - stream.Position,
+            TileHeaderBytes, "tiles");
         var coords = new (int x, int y, long offset)[tileCount];
         for (int i = 0; i < coords.Length; i++)
             coords[i] = (reader.ReadInt32(), reader.ReadInt32(), reader.ReadInt64());
@@ -150,12 +151,14 @@ public sealed class LevelFoliage
         var assetGuids = new List<Guid>();
         if (version >= VersionAssetListHeader)
         {
-            int assetCount = reader.ReadInt32();
+            int assetCount = BoundedCount(reader.ReadInt32(), stream.Length - stream.Position,
+                AssetGuidBytes, "assets");
             for (int i = 0; i < assetCount; i++)
                 assetGuids.Add(new Guid(reader.ReadBytes(16)));
         }
 
         long bodyStart = stream.Position;
+        ValidateOffsets(coords, stream.Length - bodyStart);
         var order = new int[tileCount];
         for (int i = 0; i < tileCount; i++) order[i] = i;
         Array.Sort(order, (a, b) => coords[a].offset.CompareTo(coords[b].offset));
@@ -167,6 +170,17 @@ public sealed class LevelFoliage
             int last = Math.Min(first + tilesPerBatch, tileCount);
             long relativeStart = coords[order[first]].offset;
             long relativeEnd = last < tileCount ? coords[order[last]].offset : stream.Length - bodyStart;
+
+            // Offsets are read from the blob like the counts are. A negative or out-of-order one produces
+            // a negative length, and `new byte[-n]` throws OverflowException — which reads as a bug in the
+            // parser rather than as bad input, and is not what the load path is prepared for.
+            if (relativeStart < 0 || relativeEnd < relativeStart || bodyStart + relativeEnd > stream.Length)
+            {
+                throw new InvalidDataException(
+                    $"Foliage.blob tile offsets are out of order or past the end of the file " +
+                    $"({relativeStart}..{relativeEnd} of {stream.Length - bodyStart}).");
+            }
+
             int length = checked((int)(relativeEnd - relativeStart));
             var batch = new byte[length];
             stream.Position = bodyStart + relativeStart;
@@ -195,7 +209,7 @@ public sealed class LevelFoliage
         if (version is not (1 or VersionAssetListHeader))
             throw new NotSupportedException($"Unsupported Foliage.blob version {version}");
 
-        int tileCount = ReadInt32(data, ref pos);
+        int tileCount = BoundedCount(ReadInt32(data, ref pos), data.Length - pos, TileHeaderBytes, "tiles");
         var coords = new (int x, int y, long offset)[tileCount];
         for (int i = 0; i < tileCount; i++)
             coords[i] = (ReadInt32(data, ref pos), ReadInt32(data, ref pos), ReadInt64(data, ref pos));
@@ -203,12 +217,14 @@ public sealed class LevelFoliage
         var assetGuids = new List<Guid>();
         if (version >= VersionAssetListHeader)
         {
-            int assetCount = ReadInt32(data, ref pos);
+            int assetCount = BoundedCount(ReadInt32(data, ref pos), data.Length - pos, AssetGuidBytes,
+                "assets");
             for (int i = 0; i < assetCount; i++)
                 assetGuids.Add(ReadGuid(data, ref pos));
         }
 
         long tileBlobHeaderOffset = pos;
+        ValidateOffsets(coords, data.Length - tileBlobHeaderOffset);
 
         // Parse each tile from its own independent blob region in parallel — data and assetGuids are only
         // read, and each tile writes to its own result slot, so no synchronization is needed. Tiles is then
@@ -223,6 +239,44 @@ public sealed class LevelFoliage
         });
 
         return Assemble(version, assetGuids, coords, tileInstances);
+    }
+
+
+    // A tile header costs two ints and a long; an asset entry costs a GUID. Counts come out of the blob,
+    // and a workshop map's Foliage.blob is third-party content, so a corrupt or hostile one must not turn
+    // a count straight into an allocation: `new (int, int, long)[int.MaxValue]` is 32 GB, and
+    // OutOfMemoryException is not something the load path catches. The bytes actually present bound how
+    // many entries there can be.
+    private const int TileHeaderBytes = 4 + 4 + 8;
+    private const int AssetGuidBytes = 16;
+
+    private static int BoundedCount(int count, long availableBytes, int bytesPerItem, string what)
+    {
+        if (count < 0)
+            throw new InvalidDataException($"Foliage.blob declares {count} {what}.");
+        if ((long)count * bytesPerItem > availableBytes)
+        {
+            throw new InvalidDataException(
+                $"Foliage.blob declares {count} {what} but carries only {availableBytes} bytes.");
+        }
+        return count;
+    }
+
+    // Every tile's offset has to land inside the body. Checked once here rather than at the point of use:
+    // the parallel tile loop subtracts the batch's base offset inside a `checked` cast, so a wild offset
+    // surfaces as an OverflowException wrapped in an AggregateException from Parallel.For — which reads as
+    // a parser bug rather than as bad input, and is not what the load path catches.
+    private static void ValidateOffsets((int x, int y, long offset)[] coords, long bodyLength)
+    {
+        for (int i = 0; i < coords.Length; i++)
+        {
+            long offset = coords[i].offset;
+            if (offset < 0 || offset > bodyLength)
+            {
+                throw new InvalidDataException(
+                    $"Foliage.blob tile {i} starts at {offset}, outside its {bodyLength}-byte body.");
+            }
+        }
     }
 
     private static LevelFoliage Assemble(int version, IReadOnlyList<Guid> assetGuids,
