@@ -638,8 +638,13 @@ public static class ModelExtractor
             // instance can render the lower level the artist already provided instead of full detail.
             bool BuildLevel(List<MeshPart> levelParts, out List<Vector3> verts, out List<Vector3> normals,
                 out List<Vector2> uvs, out List<CachedSubmesh> submeshes, out bool allNormals,
-                bool requireEveryPart = false)
+                bool requireEveryPart = false,
+                Dictionary<(string Tag, long Id), UnityTexture>? textureSink = null)
             {
+                // A candidate level that is later rejected must not leave its textures owed: the streaming
+                // tail would decode and cache an atlas for geometry no one ever writes or draws. Callers
+                // that can reject pass their own sink and merge it once the level is accepted.
+                Dictionary<(string Tag, long Id), UnityTexture>? sink = textureSink ?? neededTextures;
                 bool complete = true;
                 verts = new List<Vector3>();
                 normals = new List<Vector3>();
@@ -684,9 +689,10 @@ public static class ModelExtractor
                         (Color color, string texKey, UnityMaterial.Blend blend, long texId,
                             float metallic, float smoothness, EShaderCull cull) =
                             materials.Resolve(si, palette, part.Materials);
-                        if (neededTextures != null && texId != 0 && !neededTextures.ContainsKey((bundleTag, texId)) &&
-                            graph.ObjectsByPathId.TryGetValue(texId, out SerializedObject? texObj))
-                            neededTextures[(bundleTag, texId)] = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, file.ReaderFor(texObj)));
+                        if (sink != null && texId != 0 && !sink.ContainsKey((bundleTag, texId))
+                            && neededTextures?.ContainsKey((bundleTag, texId)) != true
+                            && graph.ObjectsByPathId.TryGetValue(texId, out SerializedObject? texObj))
+                            sink[(bundleTag, texId)] = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, file.ReaderFor(texObj)));
 
                         int[] src = mesh.Submeshes[si];
                         var indices = new int[src.Length];
@@ -719,14 +725,21 @@ public static class ModelExtractor
                 // Written only when it actually builds and is materially cheaper: a level within
                 // Lod1MaxTriangleRatio of the base saves almost no geometry while its MultiMesh and its
                 // copy of the placement transforms stay resident for the whole session.
+                var lodTextures = neededTextures != null
+                    ? new Dictionary<(string Tag, long Id), UnityTexture>()
+                    : null;
                 if (graph.Lod1PartsByKey.TryGetValue(key, out List<MeshPart>? lod1Parts)
                     && BuildLevel(lod1Parts, out List<Vector3> lodVerts, out List<Vector3> lodNormals,
                         out List<Vector2> lodUvs, out List<CachedSubmesh> lodSubmeshes, out bool lodNormalsOk,
-                        requireEveryPart: true)
+                        requireEveryPart: true, textureSink: lodTextures)
                     && TriangleTotal(lodSubmeshes) <= TriangleTotal(submeshes) * Lod1MaxTriangleRatio)
                 {
                     WriteMeshAtomically(lod1Path, stem + ".lod1.tmp", lodVerts.ToArray(),
                         lodNormalsOk ? lodNormals.ToArray() : Array.Empty<Vector3>(), lodUvs.ToArray(), lodSubmeshes);
+                    // Only now are these textures actually owed by something that will be drawn.
+                    if (lodTextures != null)
+                        foreach (KeyValuePair<(string Tag, long Id), UnityTexture> tex in lodTextures)
+                            neededTextures![tex.Key] = tex.Value;
                 }
             }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException)
