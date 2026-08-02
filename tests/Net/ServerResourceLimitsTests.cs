@@ -151,11 +151,87 @@ public class ServerResourceLimitsTests
         Assert.DoesNotContain('\uFFFD', clamped);
     }
 
+    // The emoji case above does not actually pin this. U+1F600 is one scalar, so a clamp written over
+    // runes rather than text elements passes it \u2014 valid UTF-8, no replacement character, nothing cut
+    // through a multi-byte sequence. A combining mark is where the two part company: "a" plus U+0301 is
+    // two scalars and one grapheme, and cutting between them leaves a bare "a" where the name had "\u00E1".
+    [Fact]
+    public void ClampNameKeepsACombiningMarkWithItsBase()
+    {
+        const string acute = "a\u0301"; // 1 + 2 = 3 UTF-8 bytes, one text element
+        string name = string.Concat(System.Linq.Enumerable.Repeat(acute, 20));
+        string clamped = NetMessages.ClampName(name);
+
+        // 32 / 3 = 10 whole clusters; an 11th would need 33 bytes, so 30 is the honest ceiling here.
+        Assert.Equal(30, System.Text.Encoding.UTF8.GetByteCount(clamped));
+        Assert.Equal(string.Concat(System.Linq.Enumerable.Repeat(acute, 10)), clamped);
+
+        // Stated as a property too, so the intent survives the arithmetic changing with MaxNameBytes.
+        // The name ends ON the combining mark: a clamp that cut a cluster would leave the bare base
+        // instead, which is the exact failure this test exists for.
+        Assert.Equal('\u0301', clamped[^1]);
+        Assert.Equal(10, new System.Globalization.StringInfo(clamped).LengthInTextElements);
+    }
+
     [Fact]
     public void ClampNameLeavesAnOrdinaryNameAlone()
     {
         Assert.Equal("player", NetMessages.ClampName("player"));
         Assert.Equal(string.Empty, NetMessages.ClampName(""));
+    }
+
+    // Over real sockets, because what changed is how the socket is read: into a fixed buffer one byte
+    // past the cap, rather than letting UdpClient.Receive allocate for whatever arrived. Linux truncates
+    // an over-long datagram into that buffer and Windows raises MessageSize, so this asserts on the
+    // counter rather than on which of the two happened.
+    //
+    // Being straight about its reach: this pins that oversize is still REJECTED, and that the pump
+    // survives one and keeps delivering — the parts the rewrite could plausibly break. It does not pin
+    // the allocation bound that motivated the rewrite, which the old code would also have passed.
+    // Measuring that means asserting on GC bytes across a loopback burst the OS is free to drop, which
+    // is a flaky test dressed up as a strict one.
+    [Fact]
+    public void AnOversizedDatagramIsDroppedAndTheTransportStaysHealthy()
+    {
+        ushort port;
+        using (var probe = new System.Net.Sockets.UdpClient(
+            new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, 0)))
+        {
+            port = (ushort)((System.Net.IPEndPoint)probe.Client.LocalEndPoint!).Port;
+        }
+
+        var transport = new UdpServerTransport(port);
+        try
+        {
+            using var sender = new System.Net.Sockets.UdpClient();
+            sender.Connect("127.0.0.1", port);
+            var oversized = new byte[UdpServerTransport.MaxPayloadBytes + 1024];
+            oversized[0] = (byte)ENetMessage.Input;
+            sender.Send(oversized, oversized.Length);
+
+            // A legitimate datagram behind it must still be seen: the drop skips one read, it does not
+            // abandon the pump or the connection.
+            byte[] good = new byte[] { ReliableChannel.ChannelUnreliable, (byte)ENetMessage.Input, 0 };
+            sender.Send(good, good.Length);
+
+            ServerTransportEvent evt = default;
+            bool sawMessage = false;
+            for (int i = 0; i < 50 && !sawMessage; i++)
+            {
+                transport.Update(i * 0.01);
+                while (transport.TryReceive(out evt))
+                    if (evt.Type == ETransportEvent.Message)
+                        sawMessage = true;
+                System.Threading.Thread.Sleep(10);
+            }
+
+            Assert.True(transport.OversizedDropped > 0, "the oversized datagram was not counted");
+            Assert.True(sawMessage, "the good datagram behind the oversized one never arrived");
+        }
+        finally
+        {
+            transport.Close();
+        }
     }
 
     // A composite transport is how a listen server works: the host's loopback plus a LAN UDP transport.
