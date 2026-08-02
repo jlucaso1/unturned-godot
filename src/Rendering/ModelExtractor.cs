@@ -709,28 +709,32 @@ public static class ModelExtractor
             // mesh the commit point for the pair.
             string stem = Path.Combine(cacheDir, asset.Guid.ToString("N"));
             string lod1Path = stem + Lod1Suffix;
-            File.Delete(lod1Path); // never keep a previous source's level for a colliding GUID
-            // Written only when it actually builds and is materially cheaper: a level within
-            // Lod1MaxTriangleRatio of the base saves almost no geometry while its MultiMesh and its copy
-            // of the placement transforms stay resident for the whole session.
-            if (graph.Lod1PartsByKey.TryGetValue(key, out List<MeshPart>? lod1Parts)
-                && BuildLevel(lod1Parts, out List<Vector3> lodVerts, out List<Vector3> lodNormals,
-                    out List<Vector2> lodUvs, out List<CachedSubmesh> lodSubmeshes, out bool lodNormalsOk,
-                    requireEveryPart: true)
-                && TriangleTotal(lodSubmeshes) <= TriangleTotal(submeshes) * Lod1MaxTriangleRatio)
+            // Best-effort as a whole, like the type-tree cache: the lower level is an optimisation, and
+            // losing it must not cost this asset its base mesh — let alone unwind through ExtractMeshes
+            // and drop every asset still queued in this bundle to a placeholder box. The stale-file delete
+            // is inside the boundary too, because a read-only or locked file throws there just as readily.
+            try
             {
-                // Best-effort, like the type-tree cache: the lower level is an optimisation, and losing it
-                // must not cost this asset its base mesh — let alone unwind through ExtractMeshes and drop
-                // every asset still queued in this bundle to a placeholder box.
-                try
+                File.Delete(lod1Path); // never keep a previous source's level for a colliding GUID
+                // Written only when it actually builds and is materially cheaper: a level within
+                // Lod1MaxTriangleRatio of the base saves almost no geometry while its MultiMesh and its
+                // copy of the placement transforms stay resident for the whole session.
+                if (graph.Lod1PartsByKey.TryGetValue(key, out List<MeshPart>? lod1Parts)
+                    && BuildLevel(lod1Parts, out List<Vector3> lodVerts, out List<Vector3> lodNormals,
+                        out List<Vector2> lodUvs, out List<CachedSubmesh> lodSubmeshes, out bool lodNormalsOk,
+                        requireEveryPart: true)
+                    && TriangleTotal(lodSubmeshes) <= TriangleTotal(submeshes) * Lod1MaxTriangleRatio)
                 {
                     WriteMeshAtomically(lod1Path, stem + ".lod1.tmp", lodVerts.ToArray(),
                         lodNormalsOk ? lodNormals.ToArray() : Array.Empty<Vector3>(), lodUvs.ToArray(), lodSubmeshes);
                 }
-                catch (Exception e) when (e is IOException or UnauthorizedAccessException)
-                {
-                    AppShutdown.PrintUnlessQuitting($"[extract] lower level not cached for {asset.Guid:N}: {e.Message}");
-                }
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                // Deliberate lesser harm: this may leave a previous source's level beside a fresh base
+                // mesh, which shows as the wrong coarse shape past the switch distance. Giving up on the
+                // base mesh instead would put a placeholder box there at every distance.
+                AppShutdown.PrintUnlessQuitting($"[extract] lower level not cached for {asset.Guid:N}: {e.Message}");
             }
 
             // Cache the authored per-vertex normals (Unturned's own hard/soft edges); ModelLibrary falls
