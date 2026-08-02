@@ -25,7 +25,19 @@ public sealed class ReliableChannel
     // It matters most before a peer has authenticated: a flood of ServerInfoRequest — answerable, by
     // design, on a connection that has said nothing else — produces one reliable reply each, and without
     // this the set grows as fast as the requests arrive.
-    public const int MaxPending = 256;
+    //
+    // Sized ABOVE the largest burst the protocol itself can aim at one healthy connection, because
+    // reaching it now ends the connection rather than the message. A server filling in a single Update —
+    // everyone reconnecting after a restart — sends the first-admitted player its Welcome plus a
+    // PlayerJoined for each of the other 253, which is 254 frames before a single ack can come back:
+    // the transport pumps once per Update, so nothing is acked mid-burst. A region entered on that same
+    // tick then adds ceil(zombies / ZombieNetMessages.ListChunkSize) more. At 256 the third of those
+    // chunks would have disconnected a player whose only mistake was joining first.
+    //
+    // 1024 leaves roughly four times that burst. Detecting a peer that has stopped reading is not this
+    // constant's job — GiveUpAfter already does it, on evidence (ten seconds without an ack) rather than
+    // on a queue depth a legitimate roster can reach.
+    public const int MaxPending = 1024;
 
     // Reliable sends refused because MaxPending was already reached.
     public long RefusedSends { get; private set; }

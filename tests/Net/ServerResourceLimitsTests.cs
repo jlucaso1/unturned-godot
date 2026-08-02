@@ -72,6 +72,33 @@ public class ServerResourceLimitsTests
         Assert.True(channel.HasGivenUp, "a full pending set must end the connection, not the message");
     }
 
+    // The burst the protocol itself aims at one healthy connection, which must not be mistaken for a peer
+    // that has stopped reading. A server filling in a single Update sends the first-admitted player a
+    // Welcome plus a PlayerJoined for each of the other 253 — 254 frames with no chance to ack, since the
+    // transport pumps once per Update — and a region entered on that tick adds its chunks on top.
+    //
+    // This is the case the give-up-on-full change made worse: at MaxPending = 256 those chunks ended a
+    // connection whose only distinction was having joined first.
+    [Fact]
+    public void AFullRosterAdmittedInOneUpdateDoesNotEndTheConnection()
+    {
+        var sent = new List<byte[]>();
+        var channel = new ReliableChannel(sent.Add);
+
+        channel.Send(new byte[] { (byte)ENetMessage.Welcome }, ESendType.Reliable, now: 0);
+        for (int i = 1; i < PlayerIdPool.Capacity; i++)
+            channel.Send(new byte[] { (byte)ENetMessage.PlayerJoined, (byte)i }, ESendType.Reliable, now: 0);
+
+        // Plus a region's worth of zombie chunks on the same tick.
+        const int chunks = 6;
+        for (int i = 0; i < chunks; i++)
+            channel.Send(new byte[] { (byte)ENetMessage.StateUpdate }, ESendType.Reliable, now: 0);
+
+        Assert.Equal(PlayerIdPool.Capacity + chunks, sent.Count);
+        Assert.Equal(0, channel.RefusedSends);
+        Assert.False(channel.HasGivenUp, "a full-roster admission is legitimate traffic, not a dead peer");
+    }
+
     [Fact]
     public void APeerThatAcksKeepsItsConnection()
     {
