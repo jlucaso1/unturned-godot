@@ -211,6 +211,16 @@ public static class NetMessages
         return (r.ReadByte(), r.ReadString(), r.ReadString());
     }
 
+    // The version alone, read WITHOUT touching the rest of the message. Everything after it is
+    // versioned — the level field only exists from 6 on — so decoding the whole Hello first turns an
+    // older client's shorter one into a malformed packet, and it never hears the refusal it is owed.
+    // The version byte is the one field the format promises never to move.
+    public static byte ReadHelloVersion(byte[] payload)
+    {
+        using BinaryReader r = Reader(payload);
+        return r.ReadByte();
+    }
+
     public static byte[] WriteServerInfoRequest() => new[] { (byte)ENetMessage.ServerInfoRequest };
 
     public static byte[] WriteServerInfo(string level, int playerCount, int freeSlots)

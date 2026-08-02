@@ -126,6 +126,24 @@ public sealed class NetServer
                 break;
             case ENetMessage.Hello:
                 {
+                    // The version comes first and alone. Reading the whole Hello up front would make
+                    // an older client's shorter one merely "malformed": no refusal, no close, and —
+                    // since the transport acks it anyway — a client free to retry that forever.
+                    if (!MalformedPacket.TryDecode(payload, ReadHelloVersion, out byte version))
+                    {
+                        MalformedPacketsDropped++;
+                        break;
+                    }
+
+                    if (version != NetMessages.ProtocolVersion)
+                    {
+                        // Incompatible build: refuse cleanly instead of mis-parsing its frames. The
+                        // reason is sent anyway — a build that speaks a version we do not know may
+                        // still read this message, and one that cannot is no worse off.
+                        Refuse(connection, EJoinRejection.ProtocolMismatch);
+                        break;
+                    }
+
                     if (!MalformedPacket.TryDecode(payload, ReadHello,
                         out (byte Version, string Name, string Level) hello))
                     {
@@ -133,15 +151,8 @@ public sealed class NetServer
                         break;
                     }
 
-                    (byte version, string name, string level) = hello;
-                    if (version != NetMessages.ProtocolVersion)
-                    {
-                        // Incompatible build: refuse cleanly instead of mis-parsing its frames. The
-                        // reason is sent anyway — a build that speaks a version we do not know may
-                        // still read this message, and one that cannot is no worse off.
-                        Refuse(connection, EJoinRejection.ProtocolMismatch);
-                    }
-                    else if (!NetMessages.LevelsMatch(level, _levelName))
+                    (_, string name, string level) = hello;
+                    if (!NetMessages.LevelsMatch(level, _levelName))
                     {
                         // The reported bug, refused at its source: this client built another world.
                         // The reason carries our level, so the client can say which map to load
@@ -187,6 +198,7 @@ public sealed class NetServer
 
     // Cached so a method group does not allocate a delegate on every received message.
     private static readonly Func<byte[], ENetMessage> ReadType = NetMessages.TypeOf;
+    private static readonly Func<byte[], byte> ReadHelloVersion = NetMessages.ReadHelloVersion;
     private static readonly Func<byte[], (byte Version, string Name, string Level)> ReadHello =
         NetMessages.ReadHello;
     private static readonly Func<byte[], InputCommand> ReadInput = NetMessages.ReadInput;

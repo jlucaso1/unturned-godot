@@ -175,8 +175,16 @@ public class LevelHandshakeTests
 
     // A build from another version cannot be told its map is wrong in words it understands, but the
     // refusal must still carry a reason for builds that do.
-    [Fact]
-    public void MismatchedProtocolVersion_IsRefused_WithAReason()
+    //
+    // Both shapes matter, and the second is the one that bites: everything after the version byte is
+    // versioned, so a Hello from the protocol BEFORE the level field simply ends early. Decoding the
+    // whole message before checking the version turns that into "malformed" — dropped silently, never
+    // refused, never closed — and since the transport acks it regardless, the old client would sit
+    // there re-Helloing forever with no idea why nothing happens.
+    [Theory]
+    [InlineData(true)]  // a build that carries a level field, on another version
+    [InlineData(false)] // a genuine protocol-5 Hello: version + name, and nothing else
+    public void MismatchedProtocolVersion_IsRefused_WithAReason(bool carriesLevel)
     {
         (NetServer server, FakeServerTransport transport) = Build();
         var conn = new FakeConnection();
@@ -188,7 +196,8 @@ public class LevelHandshakeTests
             w.Write((byte)ENetMessage.Hello);
             w.Write((byte)(NetMessages.ProtocolVersion - 1));
             w.Write("Old");
-            w.Write(ServerLevel);
+            if (carriesLevel)
+                w.Write(ServerLevel);
         }
         transport.Message(conn, ms.ToArray());
         server.Update(0);
@@ -198,6 +207,7 @@ public class LevelHandshakeTests
         Assert.Equal(EJoinRejection.ProtocolMismatch, rejection.Reason);
         Assert.Equal(NetMessages.ProtocolVersion, rejection.ServerProtocolVersion);
         Assert.True(conn.Closed);
+        Assert.Equal(0, server.MalformedPacketsDropped); // an old build is not a bad packet
     }
 
     // ---- the client end -------------------------------------------------------------------------

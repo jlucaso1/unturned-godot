@@ -346,6 +346,14 @@ public partial class Main : Node3D
 
     // How this map is named ON THE WIRE: its folder name, the one identity two machines can agree on.
     // A selection key can be a workshop path that exists nowhere else, and a display name is localized.
+    //
+    // Folder names are not globally unique — two workshop items can ship "Ireland" — so this cannot
+    // prove the two ends hold the SAME content, only that they agree on which map they mean. A
+    // stronger identity would have to be a content signature: the workshop item id is not it, since
+    // the same map reached through a subscription on one machine and the game's bundled copy on the
+    // other carries different ids and would refuse a join that is perfectly fine. Unturned itself
+    // keys servers by map name for the same reason. What this does close is the reported failure —
+    // two different maps, silently played at once.
     private static string LevelIdentity(string unturnedPath, string mapName) =>
         MapCatalog.Find(unturnedPath, mapName)?.FolderName ?? mapName;
 
@@ -555,7 +563,20 @@ public partial class Main : Node3D
     {
         if (_joinRefused)
             return;
-        _joinRefused = true;
+        _joinRefused = true; // one screen per session; BackToMenu clears it for the next attempt
+
+        if (_headlessInteractive)
+        {
+            // Same reason FailJoin quits: no display for the screen, no input for its button. A
+            // benchmark would otherwise wait on an overlay nothing can ever dismiss.
+            Log.PrintErr($"[net] the server refused the join: {NetworkManager.Describe(rejection)}");
+            GetTree().Quit(1);
+            return;
+        }
+
+        // The player was walking when this arrived, so the cursor is captured and the button under it
+        // is unclickable. Release it, exactly as the menu and the pause screen do.
+        Input.MouseMode = Input.MouseModeEnum.Visible;
         var screen = new LoadingScreen { Name = "JoinRefused" };
         AddChild(screen);
         screen.Fail(NetworkManager.Describe(rejection), BackToMenu, "The server refused the join:");
@@ -575,6 +596,7 @@ public partial class Main : Node3D
 
         ObjectStreamer? failedStreamer = _activeLoadStreamer;
         _activeLoadStreamer = null;
+        _joinRefused = false; // the next attempt gets its own refusal screen
         if (failedStreamer != null)
             await failedStreamer.CancelAsync();
 
