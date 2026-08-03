@@ -288,6 +288,40 @@ async function bomDecoding() {
         "Ilha",
     );
 
+    // Only the signature is removed: File.ReadAllText strips the BOM it detected the encoding from and
+    // leaves a second one as content. Config.json is where that shows — JsonDocument rejects the stray
+    // mark ("'0xEF' is an invalid start of a value") and the desktop reports no category, so a decoder
+    // that quietly ate it would have the browser advertising a category the game does not see. English
+    // .dat is deliberately not the case here: DatParser skips a leading U+FEFF of its own accord, so
+    // both sides read the name either way.
+    for (const [label, bom, encode] of [
+        ["utf-8", [0xef, 0xbb, 0xbf], (text) => [...text].map((c) => c.charCodeAt(0))],
+        ["utf-16le", [0xff, 0xfe], (text) => [...text].flatMap((c) => [c.charCodeAt(0), 0])],
+    ]) {
+        const config = '{ "Category": "Survival" }';
+        const tree = (marks) => [
+            fileFor("Bundles/core_linux.masterbundle", "Unturned", ""),
+            fileFor("Maps/Bom/Level.dat", "Unturned", ""),
+            fileFor(
+                "Maps/Bom/Config.json",
+                "Unturned",
+                new Uint8Array([...Array(marks).fill(bom).flat(), ...encode(config)]),
+            ),
+        ];
+        equal(
+            `one ${label} BOM still yields the category`,
+            (await probeInstall(new ListingFs(tree(1), { caseInsensitive: false }), { platform: "linux" }))
+                .maps[0]?.category,
+            "Survival",
+        );
+        equal(
+            `a doubled ${label} BOM is kept, so the config is rejected`,
+            (await probeInstall(new ListingFs(tree(2), { caseInsensitive: false }), { platform: "linux" }))
+                .maps[0]?.category,
+            null,
+        );
+    }
+
     // UTF-32LE starts FF FE 00 00, whose first two bytes are the UTF-16LE mark: checked in the wrong
     // order it decodes to NUL-interleaved text. File.ReadAllText reads both orders correctly.
     for (const [label, bom, littleEndian] of [

@@ -10,9 +10,15 @@
 
 // The encodings File.ReadAllText recognises from a byte-order mark. Anything without one is UTF-8,
 // which is what every file the game ships actually is; this is for the hand-edited exceptions.
+//
+// Every decoder below is built with `ignoreBOM: true`, which reads backwards: it means "do not treat a
+// leading U+FEFF as a mark", i.e. keep it. The signature has already been sliced off by then, so this
+// only matters when a file carries *two* — and .NET removes exactly the one it detected the encoding
+// from, leaving the second as content. Without the flag the decoder would silently eat that one too, and
+// a Config.json the desktop rejects as malformed JSON would parse here.
 export function decodeText(bytes) {
     if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
-        return new TextDecoder("utf-8").decode(bytes.subarray(3));
+        return new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes.subarray(3));
     }
     // UTF-32 first: a UTF-32LE file starts FF FE 00 00, whose first two bytes are exactly the UTF-16LE
     // mark. Checking the shorter one first would decode it as UTF-16 and hand back NUL-interleaved text
@@ -36,10 +42,10 @@ export function decodeText(bytes) {
         return decodeUtf32(bytes.subarray(4), false);
     }
     if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
-        return new TextDecoder("utf-16le").decode(bytes.subarray(2));
+        return new TextDecoder("utf-16le", { ignoreBOM: true }).decode(bytes.subarray(2));
     }
     if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
-        return new TextDecoder("utf-16be").decode(bytes.subarray(2));
+        return new TextDecoder("utf-16be", { ignoreBOM: true }).decode(bytes.subarray(2));
     }
     return new TextDecoder("utf-8").decode(bytes);
 }
