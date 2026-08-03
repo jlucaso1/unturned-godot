@@ -739,10 +739,12 @@ public static class ModelExtractor
         // open a second decoder and re-read the streamed buffers of vehicles it already had, for the ~6 s
         // the forward pass costs. With nothing missing to plan for, ReadStreamedVertices never opens the
         // bundle at all.
+        (HashSet<Guid> uncached, HashSet<Guid> cached) = streamedVertexSource == null
+            ? (neededGuids, new HashSet<Guid>())
+            : SplitByCacheState(cacheDir, neededGuids, streamedVertexSource);
         IReadOnlyDictionary<long, byte[]> streamedVertices = streamedVertexSource == null
             ? new Dictionary<long, byte[]>()
-            : ReadStreamedVertices(streamedVertexSource, graph, work,
-                UncachedMeshes(cacheDir, neededGuids, streamedVertexSource), cancellationToken);
+            : ReadStreamedVertices(streamedVertexSource, graph, work, uncached, cancellationToken);
         // A cancelled pass hands back whatever ranges it got to before it stopped, and building from a
         // partial set would cache meshes that are missing their streamed parts AND current by their own
         // magic — permanently, because nothing would ever ask for them again. Write nothing instead: the
@@ -757,6 +759,18 @@ public static class ModelExtractor
             if (!neededGuids.Contains(asset.Guid) || !mappedGuids.Add(asset.Guid) ||
                 !graph.PartsByKey.TryGetValue(key, out List<MeshPart>? parts))
                 continue;
+
+            // Already cached against this bundle: leave it alone. Rebuilding it would produce the same
+            // mesh at best, and at worst a worse one — the streamed pass above is planned for what is
+            // missing, so a cached prefab with a streamed part would rebuild without those bytes and
+            // overwrite a good entry with one that has silently lost them. Counted as produced because
+            // it is: RecordMisses reads that set to decide what this bundle failed to make, and leaving
+            // a cached GUID out of it would mark the entry a miss and then delete it.
+            if (cached.Contains(asset.Guid))
+            {
+                producedGuids?.Add(asset.Guid);
+                continue;
+            }
 
             MaterialPalette? palette = materials.PaletteFor(asset.MaterialPaletteGuid);
 
@@ -921,12 +935,25 @@ public static class ModelExtractor
     // ContentExtraction.Plan applies, asked here because ExtractMeshesFrom is given the needed set rather
     // than the missing one and the streamed-vertex pass is far too expensive to run for meshes that are
     // already cached. Known misses are excluded: a GUID with no prefab in this bundle will not gain one.
-    private static HashSet<Guid> UncachedMeshes(string cacheDir, HashSet<Guid> neededGuids, string bundlePath)
+    // Returns both halves, because the build loop needs the other one: `Cached` is what this bundle
+    // already holds a current mesh for, and rebuilding one of those is not merely wasted work — the
+    // streamed pass was planned for `Uncached` alone, so a cached vehicle rebuilt here would find no
+    // stream bytes, lose its wheels to BuildLevel's partial-level rule, and overwrite the good entry
+    // stamped current. A GUID that is a known miss is in neither set: it has no prefab in this bundle,
+    // so it is neither cached nor worth planning for.
+    private static (HashSet<Guid> Uncached, HashSet<Guid> Cached) SplitByCacheState(
+        string cacheDir, HashSet<Guid> neededGuids, string bundlePath)
     {
         long stamp = ExtractionIndex.StampFor(bundlePath);
         HashSet<Guid> misses = ExtractionIndex.Load(
             Path.Combine(cacheDir, ExtractionIndex.FileNameFor(bundlePath)), stamp);
-        return ExtractionIndex.MissingMeshes(cacheDir, neededGuids, misses, bundlePath, stamp);
+        HashSet<Guid> uncached = ExtractionIndex.MissingMeshes(cacheDir, neededGuids, misses, bundlePath, stamp);
+
+        var cached = new HashSet<Guid>();
+        foreach (Guid guid in neededGuids)
+            if (guid != Guid.Empty && !misses.Contains(guid) && !uncached.Contains(guid))
+                cached.Add(guid);
+        return (uncached, cached);
     }
 
     // Every .resS-backed vertex buffer the prefabs about to be extracted depend on, read in one forward
