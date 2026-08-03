@@ -15,7 +15,12 @@ namespace UnturnedGodot.Data;
 public sealed class BakedNavGraph
 {
     private const uint CacheMagic = 0x43424755; // UGBC
-    private const int CacheVersion = 1;
+    // Bump whenever the TOPOLOGY this builds changes, not just the blob's layout. The fingerprint
+    // covers the map and the reconciliation inputs, so an unchanged map on an upgraded server matches
+    // its old cache and is loaded verbatim — with none of the newer construction ever running.
+    // 2: faces meeting along a line without agreeing where it ends are now joined, which is 1784 extra
+    //    connections on PEI. A v1 cache carries every one of those seams still severed.
+    private const int CacheVersion = 2;
     private const float EndpointSnapMargin = 64f; // Bounds.dat expands authored navigation by this distance
 
     // The body the routes are for. A route is a line for a point, but a zombie is a capsule, and the
@@ -189,6 +194,19 @@ public sealed class BakedNavGraph
     // AROUND, and rounding needs to know it.
     private readonly record struct Portal(Vector3 Left, Vector3 Right, int LeftVertex, int RightVertex);
     private readonly record struct EdgeRecord(int KeyA, int KeyB, int Triangle, int A, int B, int Sequence);
+
+    // How far off the line a vertex may sit and still be treated as ON the join. Recast writes its
+    // vertices on a quantised grid, so a genuine split lands exactly; this is float slack, not a
+    // tolerance for "nearly collinear".
+    private const float JoinPlanarSlack = 1e-3f;
+    // And how far apart in height two faces may be and still be the same floor. This is NOT
+    // quantisation slack: the spanning side of a join is one straight edge in 3D while the split side
+    // bends at its middle vertex, so over uneven ground the two legitimately differ by the chord's sag
+    // — measured on PEI as enough to lose 3 of 60 routes' worth of joins at 0.25 m. It only has to
+    // separate STOREYS, which are metres apart, so it matches the tolerance used for that elsewhere.
+    private const float JoinHeightSlack = 1f;
+    // Shorter overlaps than this are a corner touching a line, not a doorway. Well under the body.
+    private const float JoinShortestOverlap = 0.05f;
     private readonly record struct DirectedConnection(int From, Connection Edge, long Order);
 
     private sealed class FlagGraph
@@ -377,6 +395,224 @@ public sealed class BakedNavGraph
         private readonly float _minZ;
         private readonly int[] _cellStart = Array.Empty<int>();
         private readonly int[] _cellItems = Array.Empty<int>();
+        // Every edge no other face named — walls and mis-joined edges look alike from the index pairs —
+        // paired up wherever two of them describe the same stretch of ground from opposite sides.
+        private static List<DirectedConnection> StitchTJunctions(NavFlag source, List<EdgeRecord> borders,
+            out long scratch)
+        {
+            var stitched = new List<DirectedConnection>();
+            scratch = 0;
+            if (borders.Count < 2)
+                return stitched;
+
+            // One bucket per 2 m cell, entered for every cell the edge's XZ span touches, so two edges
+            // that overlap always meet in at least one bucket.
+            const float Cell = 2f;
+            var grid = new Dictionary<(int, int), List<int>>();
+            for (int i = 0; i < borders.Count; i++)
+            {
+                Vector3 p = source.Vertices[borders[i].A], q = source.Vertices[borders[i].B];
+                // The cells the edge CROSSES, not its bounding rectangle. A long diagonal spans a
+                // rectangle with area quadratic in its length while crossing only a linear number of
+                // cells, so filling the rectangle would let one 2 km edge on a sparse custom mesh
+                // allocate about a million buckets during build.
+                // Column by column: for each cell column the edge spans, only the rows it actually
+                // reaches inside that column. A stepped traversal that visits the exact cells crossed
+                // is not usable here — recast writes seams on round coordinates, so two collinear
+                // edges routinely lie ON a cell boundary and land on opposite sides of it, and the
+                // pair is then never compared. Closed ranges put a boundary edge in both.
+                // Widened by the slack TryJoin itself allows, or stitching would depend on where the
+                // world grid happens to fall: two seams at x = 1.9996 and x = 2.0004 are within
+                // tolerance of each other and would join, but land either side of a 2 m column boundary
+                // and are never compared — while the same geometry translated a metre would work.
+                float minX = MathF.Min(p.X, q.X) - JoinPlanarSlack;
+                float maxX = MathF.Max(p.X, q.X) + JoinPlanarSlack;
+                int firstColumn = (int)MathF.Floor(minX / Cell), lastColumn = (int)MathF.Floor(maxX / Cell);
+                float dx = q.X - p.X, dz = q.Z - p.Z;
+                for (int column = firstColumn; column <= lastColumn; column++)
+                {
+                    float spanFrom = MathF.Max(column * Cell, minX);
+                    float spanTo = MathF.Min((column + 1) * Cell, maxX);
+                    float zFrom, zTo;
+                    if (MathF.Abs(dx) <= 1e-6f)
+                    {
+                        zFrom = MathF.Min(p.Z, q.Z);
+                        zTo = MathF.Max(p.Z, q.Z);
+                    }
+                    else
+                    {
+                        // Clamped to the segment's OWN span, because the column bounds carry the slack
+                        // and therefore reach past both ends. Dividing that overshoot by a tiny dx
+                        // extrapolates: a nearly vertical 2 km edge would report a million metres of Z
+                        // for one column and index half a million rows, which is the quadratic blowup
+                        // this sweep exists to avoid, reintroduced by the slack that fixed the last one.
+                        float from = Math.Clamp((spanFrom - p.X) / dx, 0f, 1f);
+                        float to = Math.Clamp((spanTo - p.X) / dx, 0f, 1f);
+                        zFrom = p.Z + (dz * MathF.Min(from, to));
+                        zTo = p.Z + (dz * MathF.Max(from, to));
+                    }
+                    int firstRow = (int)MathF.Floor((zFrom - JoinPlanarSlack) / Cell);
+                    int lastRow = (int)MathF.Floor((zTo + JoinPlanarSlack) / Cell);
+                    for (int row = firstRow; row <= lastRow; row++)
+                    {
+                        if (!grid.TryGetValue((column, row), out List<int>? bucket))
+                            grid[(column, row)] = bucket = new List<int>();
+                        bucket.Add(i);
+                    }
+                }
+            }
+
+            // Counted rather than estimated where it is cheap to: the grid dominates, and it is the
+            // part that a bad broad phase blows up.
+            long buckets = 0;
+            foreach (List<int> bucket in grid.Values)
+                buckets += bucket.Count;
+            scratch = ((long)borders.Count * 24) + (grid.Count * 48L) + (buckets * 4L);
+
+            var seen = new HashSet<(int, int)>();
+            foreach (List<int> bucket in grid.Values)
+            {
+                for (int m = 0; m < bucket.Count; m++)
+                    for (int n = m + 1; n < bucket.Count; n++)
+                    {
+                        int i = bucket[m], j = bucket[n];
+                        if (i > j) (i, j) = (j, i);
+                        if (!seen.Add((i, j)))
+                            continue; // an edge pair straddling several cells meets more than once
+                        if (!TryJoin(source, borders[i], borders[j], out int portalA, out int portalB))
+                            continue;
+                        long order = ((long)borders[j].Sequence << 32) | (uint)borders[i].Sequence;
+                        // Oriented per DIRECTION, the way index matching already does it: it stores
+                        // (newer.A, newer.B) leaving one face and (prior.A, prior.B) leaving the other,
+                        // which is each triangle's own winding around the edge. That is what gives the
+                        // funnel a consistent left and right. Storing one order for both directions
+                        // hands the funnel a mirrored portal one way round — measured as a 3.10 m route
+                        // across a seam that is 3.00 m the other way.
+                        (int fromI, int toI) = Orient(source, borders[i], portalA, portalB);
+                        (int fromJ, int toJ) = Orient(source, borders[j], portalA, portalB);
+                        stitched.Add(new DirectedConnection(borders[i].Triangle,
+                            new Connection(borders[j].Triangle, fromI, toI), order));
+                        stitched.Add(new DirectedConnection(borders[j].Triangle,
+                            new Connection(borders[i].Triangle, fromJ, toJ), order));
+                    }
+            }
+            scratch += (long)seen.Count * 12L;
+            return stitched;
+        }
+
+        // The portal pair ordered to run the same way as this face's OWN border edge, which is that
+        // face's winding around the join.
+        private static (int From, int To) Orient(NavFlag source, in EdgeRecord edge, int p1, int p2)
+        {
+            Vector3 a = source.Vertices[edge.A], b = source.Vertices[edge.B];
+            Vector3 u = source.Vertices[p1], v = source.Vertices[p2];
+            float along = ((v.X - u.X) * (b.X - a.X)) + ((v.Z - u.Z) * (b.Z - a.Z));
+            return along >= 0f ? (p1, p2) : (p2, p1);
+        }
+
+        // Do two border edges describe the same stretch of ground from opposite sides? Then the portal
+        // between their faces is the part they share.
+        private static bool TryJoin(NavFlag source, in EdgeRecord left, in EdgeRecord right,
+            out int portalA, out int portalB)
+        {
+            portalA = portalB = -1;
+            if (left.Triangle == right.Triangle)
+                return false;
+
+            // The SAME boundary, subdivided — which is what a T-junction IS — and not two different
+            // boundaries that happen to line up in plan at different heights. Sharing an endpoint is
+            // what says so, and no height tolerance can: the spanning side of a real join is a straight
+            // edge in 3D while the split side follows the ground, so the two differ by the chord's sag,
+            // and a sag over rough ground is the same number as a low ledge. A ledge shares no vertex.
+            //
+            // This is why the height test is not sized against the body's step height. It does not need
+            // to be: a join whose ends coincide is one surface, and the ground between them is whatever
+            // the split side already describes.
+            if (left.A != right.A && left.A != right.B && left.B != right.A && left.B != right.B)
+                return false;
+
+            Vector3 p = source.Vertices[left.A], q = source.Vertices[left.B];
+            float ex = q.X - p.X, ez = q.Z - p.Z;
+            float lengthSquared = (ex * ex) + (ez * ez);
+            if (lengthSquared <= 1e-8f)
+                return false;
+            float length = MathF.Sqrt(lengthSquared);
+
+            // Both ends of the other edge must sit ON this one's line. A join is a shared surface, so
+            // anything off the line is a different edge that merely passes nearby.
+            Vector3 r = source.Vertices[right.A], s = source.Vertices[right.B];
+            if (MathF.Abs(((r.X - p.X) * ez) - ((r.Z - p.Z) * ex)) / length > JoinPlanarSlack)
+                return false;
+            if (MathF.Abs(((s.X - p.X) * ez) - ((s.Z - p.Z) * ex)) / length > JoinPlanarSlack)
+                return false;
+
+            float tr = (((r.X - p.X) * ex) + ((r.Z - p.Z) * ez)) / lengthSquared;
+            float ts = (((s.X - p.X) * ex) + ((s.Z - p.Z) * ez)) / lengthSquared;
+            float lo = MathF.Max(0f, MathF.Min(tr, ts));
+            float hi = MathF.Min(1f, MathF.Max(tr, ts));
+            if ((hi - lo) * length < JoinShortestOverlap)
+                return false; // a corner touching the line, not a way through
+
+            // The same floor, not one passing over another — checked at BOTH ends of the overlap. Two
+            // edges with opposite slopes cross somewhere, and a midpoint test alone passes at exactly
+            // the place they meet while their ends are storeys apart, joining faces that share a point
+            // rather than a surface.
+            if (MathF.Abs(ts - tr) <= 1e-6f)
+                return false; // the other edge is a point in this direction: no surface to share
+            foreach (float t in stackalloc[] { lo, hi })
+            {
+                float hereY = p.Y + ((q.Y - p.Y) * t);
+                float thereY = r.Y + ((s.Y - r.Y) * ((t - tr) / (ts - tr)));
+                if (MathF.Abs(hereY - thereY) > JoinHeightSlack)
+                    return false;
+            }
+
+            // And the two faces must lie on OPPOSITE sides of the join. Two on the same side are
+            // stacked or duplicated, and linking them would let a route step off the surface sideways.
+            float here = SideOfEdge(source, left, p, ex, ez);
+            float there = SideOfEdge(source, right, p, ex, ez);
+            if (MathF.Abs(here) <= 1e-6f || MathF.Abs(there) <= 1e-6f)
+                return false;
+            if (here > 0f == there > 0f)
+                return false;
+
+            // The overlap's ends are ends of one edge or the other, so the portal is still a pair of
+            // vertices that already exist.
+            // Matched in METRES, not in a fraction of the edge. A fixed tolerance on the parameter is a
+            // distance that grows with the edge: at 1e-4 of a 2 km edge it is 0.2 m, so an overlap
+            // starting 0.1 m inside the spanning edge would match its endpoint instead and the portal
+            // would be handed ground the other face does not own.
+            float slack = JoinPlanarSlack / length;
+            portalA = VertexAtParameter(lo, left.A, left.B, right.A, right.B, tr, ts, slack);
+            portalB = VertexAtParameter(hi, left.A, left.B, right.A, right.B, tr, ts, slack);
+            return portalA >= 0 && portalB >= 0 && portalA != portalB;
+        }
+
+        private static int VertexAtParameter(float t, int leftA, int leftB, int rightA, int rightB,
+            float tr, float ts, float slack)
+        {
+            if (MathF.Abs(t) <= slack) return leftA;
+            if (MathF.Abs(t - 1f) <= slack) return leftB;
+            if (MathF.Abs(t - tr) <= slack) return rightA;
+            if (MathF.Abs(t - ts) <= slack) return rightB;
+            return -1;
+        }
+
+        // Which side of the join the face's own third vertex falls on.
+        private static float SideOfEdge(NavFlag source, in EdgeRecord edge, Vector3 p, float ex, float ez)
+        {
+            int at = edge.Triangle * 3;
+            for (int i = 0; i < 3; i++)
+            {
+                int v = source.Triangles[at + i];
+                if (v == edge.A || v == edge.B)
+                    continue;
+                Vector3 x = source.Vertices[v];
+                return ((x.X - p.X) * ez) - ((x.Z - p.Z) * ex);
+            }
+            return 0f;
+        }
+
         public int ConnectionCount => _edges.Length;
         public long AdjacencyBytes => ((long)_edges.Length * 12) + ((long)_edgeStart.Length * sizeof(int));
         public long ScratchBytes { get; }
@@ -419,7 +655,11 @@ public sealed class BakedNavGraph
                 return byB != 0 ? byB : x.Sequence.CompareTo(y.Sequence);
             });
 
+            // One walk of the runs answers both questions: how many directed connections index matching
+            // will produce, and which edges no other face named. A run of one is a border — a wall, or
+            // a join whose two sides disagree where it ends, which the stitching below tells apart.
             long directedCountLong = 0;
+            var borders = new List<EdgeRecord>();
             for (int first = 0; first < records.Length;)
             {
                 int last = first + 1;
@@ -427,6 +667,8 @@ public sealed class BakedNavGraph
                     && records[last].KeyB == records[first].KeyB) last++;
                 long sharing = last - first;
                 directedCountLong += sharing * (sharing - 1);
+                if (sharing == 1)
+                    borders.Add(records[first]);
                 first = last;
             }
             var directed = new DirectedConnection[checked((int)directedCountLong)];
@@ -451,6 +693,30 @@ public sealed class BakedNavGraph
                 }
                 first = last;
             }
+            // Faces that MEET but do not agree where the join's endpoints are. Recast emits this
+            // wherever two tiles are subdivided differently: one side spans the join with a single
+            // edge while the other has a vertex partway along it, so no pair of vertex indices matches
+            // and BOTH sides are classified as walls. Nothing above can see it, because the pair is
+            // all the loop compares.
+            //
+            // Measured on PEI: 1784 of 37396 border edges are this shape — 4.8%, present in every one
+            // of the 19 flags — and each is open ground the graph refuses to cross. Reported from play
+            // as a gap between two houses that zombies walk round; routing one metre across it cost a
+            // 163 m detour, and a body one centimetre wide took the same detour, which is what says
+            // adjacency rather than clearance.
+            //
+            // The join is the OVERLAP of the two edges, and its endpoints are always endpoints of one
+            // edge or the other, so the portal is still a pair of existing vertices and Connection does
+            // not change shape.
+            List<DirectedConnection> stitched = StitchTJunctions(source, borders, out long stitchScratch);
+            if (stitched.Count > 0)
+            {
+                int at = directed.Length;
+                Array.Resize(ref directed, at + stitched.Count);
+                foreach (DirectedConnection connection in stitched)
+                    directed[at++] = connection;
+            }
+
             Array.Sort(directed, static (x, y) =>
             {
                 int byTriangle = x.From.CompareTo(y.From);
@@ -467,7 +733,11 @@ public sealed class BakedNavGraph
                 _edges[i] = directed[i].Edge;
             _borderVertex = new bool[source.Vertices.Length];
             RecomputeBorderVertices();
-            ScratchBytes = ((long)records.Length * 24) + ((long)directed.Length * 24);
+            // The stitching broad phase allocates a grid, its buckets, the border list and the pair
+            // set, and on a border-heavy map that is a real share of build memory. Leaving it out made
+            // the figure the perf harness prints understate this pass to the point of being misleading
+            // about capacity on large custom maps.
+            ScratchBytes = ((long)records.Length * 24) + ((long)directed.Length * 24) + stitchScratch;
 
             // One bucket per cell, in CSR form: counts, then offsets, then the triangle ids. A triangle
             // goes in every cell its XZ bounding box touches, so the cell holding a point holds every
