@@ -323,9 +323,14 @@ public sealed class NetClient
                         break;
                     }
 
-                    // Only for players we actually hold: a gesture that arrives before the roster naming
-                    // its player is dropped rather than remembered, because by the time that avatar
-                    // exists the swing it describes is already over.
+                    // Only for players we actually hold. Both messages are reliable, but reliable here
+                    // means retransmitted, not ordered, so a punch thrown immediately after joining can
+                    // genuinely overtake the PlayerJoined that names its thrower — and this drops it.
+                    // Deliberately: holding it until the roster catches up means keeping gestures for
+                    // players who may never arrive, and player IDs are reused, so the buffer would need
+                    // to tell one occupant of an ID from the next before it dared play anything. That is
+                    // a real piece of protocol state to buy back one animation frame on an avatar that
+                    // is still fading in. Revisit it when a gesture costs someone health.
                     if (_remotes.TryGetValue(gesture.PlayerId, out RemotePlayer? gesturing))
                         gesturing.PushGesture(gesture.Tick, gesture.Gesture);
                     break;

@@ -35,6 +35,12 @@ public partial class CharacterSkeleton : Skeleton3D
     private EPlayerStance _lastStateStance;
     private bool _lastStateMoving;
 
+    // The current clip is a FINISHED one-shot, parked on its last key rather than looping. Distinct from
+    // the overlay's IsPlaying, which is already false by then: this covers the frames after a gesture
+    // ends but before a movement clip has taken the rig back — one frame in the ordinary case, and
+    // indefinitely for a character that carries no clip for the stance it should return to.
+    private bool _holdingLastPose;
+
     // A one-shot overlay — a punch, and every hand interaction after it. The arbitration between the
     // gesture and the looping movement state lives in GestureOverlay, where it is unit-tested; this node
     // only owns the clip clock and the bones.
@@ -122,6 +128,7 @@ public partial class CharacterSkeleton : Skeleton3D
             _fromPose = new Dictionary<int, BonePose>(CurrentPose());
             _time = 0f;
             _blend = 0f;
+            _holdingLastPose = false; // restarting it: the clock runs again from the top
             return;
         }
         Play(clip);
@@ -137,6 +144,7 @@ public partial class CharacterSkeleton : Skeleton3D
         _fromPose = _current.Length > 0 ? new Dictionary<int, BonePose>(CurrentPose()) : null;
         _current = clip;
         _poseBuf.Clear(); // the new clip's bone set differs: flush before the overwrite sampling
+        _holdingLastPose = false; // whatever one-shot was being held is gone with the clip
         _time = 0f;
         _blend = _fromPose == null ? 1f : 0f;
         UpdateProcessing();
@@ -196,23 +204,37 @@ public partial class CharacterSkeleton : Skeleton3D
         Apply(pose);
     }
 
-    // Hands the rig back to the movement state after a gesture. A character with no clip for that
-    // stance would otherwise be left with the one-shot as its current clip and no gesture to stop it
-    // looping, so the clock is pinned to the clip's end instead: it holds the final pose, which is the
-    // one thing that is certainly not wrong, until a state it does carry is asked for.
+    // Hands the rig back to the movement state after a gesture.
+    //
+    // The clock is pinned to the one-shot's end FIRST, before anything else reads the pose. The overlay
+    // has already declared the gesture over by now, so CurrentPose would wrap this clip's clock — and a
+    // clock that has just run PAST the end wraps to nearly zero, which is the swing's opening frame.
+    // Both things that happen next read it: SetState's Play snapshots CurrentPose as the pose to
+    // crossfade out of, so every completed punch would blend back through its own wind-up; and a
+    // character with no clip for that stance keeps the one-shot as its current clip, where the wrap
+    // would loop it forever. Holding the final key is the one thing that is certainly not wrong.
     private void Resume((EPlayerStance Stance, bool Moving) state)
     {
-        _stateApplied = false; // force SetState past its dirty check: the gesture displaced the clip
-        if (!SetState(state.Stance, state.Moving) && _clips.TryGetValue(_current, out AnimationClipData? held))
+        if (_clips.TryGetValue(_current, out AnimationClipData? held))
+        {
             _time = held.Length;
+            _holdingLastPose = true;
+        }
+
+        _stateApplied = false; // force SetState past its dirty check: the gesture displaced the clip
+        SetState(state.Stance, state.Moving);
     }
 
     private Dictionary<int, BonePose> CurrentPose()
     {
         AnimationClipData clip = _clips[_current];
         // A gesture holds its final pose instead of looping; the sampler clamps past the last key, so
-        // simply not wrapping the clock is what makes it play exactly once.
-        float t = _gesture.IsPlaying ? _time : clip.Length > 0f ? _time % clip.Length : 0f;
+        // simply not wrapping the clock is what makes it play exactly once. That has to outlast the
+        // gesture itself — the clip is still the one-shot on the frames between the overlay ending and a
+        // movement clip taking over, and wrapping there would show the swing's first frame.
+        float t = _gesture.IsPlaying || _holdingLastPose
+            ? _time
+            : clip.Length > 0f ? _time % clip.Length : 0f;
         // Overwrite in place: the buffer holds exactly this clip's bones (Play clears it on switch),
         // so the per-frame dictionary Clear (bucket zeroing) is skipped entirely.
         AnimationSampler.SampleOverwrite(clip, t, _poseBuf);
