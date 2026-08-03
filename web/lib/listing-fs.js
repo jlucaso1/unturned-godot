@@ -16,6 +16,7 @@
 // The interface is deliberately identical to HandleFs so catalog.js never learns which one it got.
 
 import { baseName, dirName, normalize } from "./paths.js";
+import { isCaseInsensitiveFilesystem } from "./platform.js";
 
 export function supportsDirectoryInput() {
     if (typeof document === "undefined") return false;
@@ -25,13 +26,20 @@ export function supportsDirectoryInput() {
 export class ListingFs {
     #files = new Map(); // normalized path -> File
     #dirs = new Set([""]);
+    // Lowercased path -> the spelling in #files, built only on a case-insensitive host. HandleFs asks
+    // the browser, which asks the OS, so it folds case exactly where the platform does; this backend
+    // resolves out of its own index and would otherwise be the only case-sensitive filesystem on a
+    // Windows machine — dropping a workshop map whose author shipped `level.dat` even though the
+    // desktop's File.Exists finds it there.
+    #folded = null;
     #name;
 
     // `fileList` is the FileList from a webkitdirectory input. Every entry's webkitRelativePath starts
     // with the picked folder's own name, which is stripped so paths are relative to the root exactly as
     // in HandleFs.
-    constructor(fileList, { name = null } = {}) {
+    constructor(fileList, { name = null, caseInsensitive = isCaseInsensitiveFilesystem() } = {}) {
         let rootName = name;
+        if (caseInsensitive) this.#folded = new Map();
         for (const file of fileList) {
             const relative = file.webkitRelativePath || file.name;
             const parts = normalize(relative).split("/");
@@ -41,7 +49,32 @@ export class ListingFs {
             this.#files.set(path, file);
             for (let dir = dirName(path); dir !== ""; dir = dirName(dir)) this.#dirs.add(dir);
         }
+        if (this.#folded !== null) {
+            // Built after the loop so an exact spelling always wins over a folded one, and the first
+            // spelling wins among folded duplicates rather than the last.
+            for (const path of this.#files.keys()) {
+                const key = path.toLowerCase();
+                if (!this.#folded.has(key)) this.#folded.set(key, path);
+            }
+            for (const dir of this.#dirs) {
+                const key = `d:${dir.toLowerCase()}`;
+                if (!this.#folded.has(key)) this.#folded.set(key, dir);
+            }
+        }
         this.#name = rootName ?? "";
+    }
+
+    // The stored spelling of a path, or null. Exact match first; case folding only where the host folds.
+    #resolveFile(path) {
+        const key = normalize(path);
+        if (this.#files.has(key)) return key;
+        return this.#folded?.get(key.toLowerCase()) ?? null;
+    }
+
+    #resolveDir(path) {
+        const key = normalize(path);
+        if (this.#dirs.has(key)) return key;
+        return this.#folded?.get(`d:${key.toLowerCase()}`) ?? null;
     }
 
     get name() {
@@ -53,20 +86,19 @@ export class ListingFs {
     }
 
     async isDirectory(path) {
-        return this.#dirs.has(normalize(path));
+        return this.#resolveDir(path) !== null;
     }
 
     async isFile(path) {
-        return this.#files.has(normalize(path));
+        return this.#resolveFile(path) !== null;
     }
 
     async exists(path) {
-        const key = normalize(path);
-        return this.#files.has(key) || this.#dirs.has(key);
+        return this.#resolveFile(path) !== null || this.#resolveDir(path) !== null;
     }
 
     async listDir(path) {
-        const prefix = normalize(path);
+        const prefix = this.#resolveDir(path) ?? normalize(path);
         const head = prefix === "" ? "" : `${prefix}/`;
         const seen = new Map();
         for (const key of this.#files.keys()) {
@@ -90,13 +122,15 @@ export class ListingFs {
     }
 
     async stat(path) {
-        const file = this.#files.get(normalize(path));
-        if (file === undefined) return null;
-        return { path: normalize(path), size: file.size, lastModified: file.lastModified };
+        const key = this.#resolveFile(path);
+        if (key === null) return null;
+        const file = this.#files.get(key);
+        return { path: key, size: file.size, lastModified: file.lastModified };
     }
 
     async file(path) {
-        return this.#files.get(normalize(path)) ?? null;
+        const key = this.#resolveFile(path);
+        return key === null ? null : this.#files.get(key);
     }
 
     async readFile(path) {
@@ -126,7 +160,7 @@ export class ListingFs {
     // tree to stop descending here, so pruning is answered by testing each of a file's ancestors — the
     // result has to match what a real traversal would have produced, not merely be cheap.
     async walk(path = "", { filter = null, prune = null, maxEntries = Infinity } = {}) {
-        const root = normalize(path);
+        const root = this.#resolveDir(path) ?? normalize(path);
         const head = root === "" ? "" : `${root}/`;
         const found = [];
         for (const key of this.#files.keys()) {

@@ -186,6 +186,7 @@ A dependency-free ES-module layer plus a demo page:
 | `web/lib/handle-fs.js` | Read-only VFS over a `FileSystemDirectoryHandle`: `stat`, `listDir`, `readFile`, `readRange`, `walk`, cached handle resolution |
 | `web/lib/listing-fs.js` | The same interface over a `webkitdirectory` `FileList`, for browsers with no picker |
 | `web/lib/handle-store.js` | Persists the picked handle in IndexedDB; re-requests permission on a gesture |
+| `web/lib/platform.js` | Which OS the folder came off: picks the masterbundle variant to try first, and whether path lookups fold case |
 | `web/lib/dat.js` | Top-level `.dat` reader — menu metadata only; `core/Dat/DatParser.cs` stays the real one |
 | `web/lib/catalog.js` | The install probe: mirrors `UnturnedInstall`, `ContentSource`, `MapCatalog` and `LevelInfo` |
 | `web/index.html`, `web/app.js` | The demo: pick a folder, see the install and its maps with their own artwork |
@@ -213,7 +214,7 @@ the same type `showDirectoryPicker()` returns — so `HandleFs` is exercised on 
 mock. It then drives the demo page end to end with the picker stubbed to hand back that same handle,
 because the one thing no automation can click is the native folder dialog.
 
-85 assertions, covering path handling, the `.dat` subset, install detection (both the install folder and
+94 assertions, covering path handling, the `.dat` subset, install detection (both the install folder and
 the Steam-library layout), map discovery against PEI's real `Level.dat`/`English.dat`/`Config.json` and
 its 16 Landscape tiles, range reads and their clamping, and parity between the two filesystem backends.
 It self-skips when the content or Playwright is missing, like the C# suite's data-backed tests. Files

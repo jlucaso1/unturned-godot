@@ -9,6 +9,9 @@
 
 import { parseDatTopLevel } from "./dat.js";
 import { normalize } from "./paths.js";
+import { currentPlatform } from "./platform.js";
+
+export { currentPlatform };
 
 // core/Data/Landscape.cs
 const TILE_SIZE = 1024;
@@ -76,15 +79,6 @@ function suffixesFor(platform) {
     if (platform === "windows") return ["", "_linux", "_mac"];
     if (platform === "mac") return ["_mac", "", "_linux"];
     return ["_linux", "", "_mac"];
-}
-
-// The player's OS as the bundle naming sees it, from the UA. Only used to order the candidates, so a
-// wrong guess costs one extra lookup and nothing else.
-export function currentPlatform() {
-    const ua = globalThis.navigator?.userAgent ?? "";
-    if (/Windows/i.test(ua)) return "windows";
-    if (/Mac OS X|Macintosh/i.test(ua)) return "mac";
-    return "linux";
 }
 
 // The directories map folders live in, most authoritative first — MapCatalog.SearchDirectories.
@@ -155,7 +149,7 @@ async function readCategory(fs, mapPath) {
     const text = await safe(fs.readText(join(mapPath, "Config.json")), null);
     if (text === null) return null;
     try {
-        const config = JSON.parse(stripJsonComments(text));
+        const config = JSON.parse(relaxJson(text));
         return typeof config?.Category === "string" ? config.Category : null;
     } catch {
         // A map whose config will not parse still loads; the category is cosmetic.
@@ -163,13 +157,16 @@ async function readCategory(fs, mapPath) {
     }
 }
 
-// Config.json is hand-edited by map authors and the game's reader tolerates // comments, so JSON.parse
-// gets the same courtesy MapCatalog gives it via JsonCommentHandling.Skip.
-function stripJsonComments(text) {
-    return text.replace(
+// Config.json is hand-edited by map authors, and MapCatalog.ReadCategory reads it with both
+// CommentHandling.Skip and AllowTrailingCommas. JSON.parse allows neither, so both are taken out first
+// — in two string-preserving passes rather than one, because a trailing comma can be separated from its
+// bracket by the very comment the other pass removes.
+function relaxJson(text) {
+    const withoutComments = text.replace(
         /("(?:\\.|[^"\\])*")|\/\/[^\n\r]*|\/\*[\s\S]*?\*\//g,
         (match, string) => string ?? "",
     );
+    return withoutComments.replace(/("(?:\\.|[^"\\])*")|,(?=\s*[}\]])/g, (match, string) => string ?? "");
 }
 
 // Tile count and the edge of the square they span, in metres — MapCatalog.MeasureLandscape over
@@ -212,7 +209,17 @@ function parseTileCoordinate(digits) {
 export function compareForMenu(a, b) {
     if (a.supported !== b.supported) return a.supported ? -1 : 1;
     if (a.source !== b.source) return a.source === MapSource.Official ? -1 : 1;
-    return a.displayName.localeCompare(b.displayName, "en", { sensitivity: "base" });
+    return compareOrdinalIgnoreCase(a.displayName, b.displayName);
+}
+
+// MapCatalog.CompareForMenu sorts with StringComparison.OrdinalIgnoreCase, which compares code units
+// after an invariant upcase — not by locale collation. The difference is visible the moment a map's name
+// carries an accent: locale rules file "Åland" next to "Aland", ordinal rules file it after "Zeta", and
+// the browser is supposed to be previewing the menu the game will show.
+function compareOrdinalIgnoreCase(a, b) {
+    const left = a.toUpperCase();
+    const right = b.toUpperCase();
+    return left < right ? -1 : left > right ? 1 : 0;
 }
 
 // The whole probe: what was picked, whether it is an install, what content it carries and which maps are

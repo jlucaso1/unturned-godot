@@ -25,6 +25,23 @@ const ui = {
 // Object URLs for map artwork, revoked whenever the listing is replaced.
 let artwork = [];
 
+// Work overlaps: restoring a saved folder starts on load, the player can pick a different one while it
+// is still running, and both paths write the same status line and listing. Without a generation whichever
+// finishes last wins — so a slow restored Steam-library scan could paint over the install the player just
+// chose, and its artwork would be read out of the wrong folder. Every path that will touch the UI claims
+// a token and checks it after each await; only the newest one is allowed to write.
+//
+// Declared above start(), which runs on module evaluation and reaches claim() through restoreSaved().
+let generation = 0;
+
+function claim() {
+    return ++generation;
+}
+
+function isCurrent(token) {
+    return token === generation;
+}
+
 start();
 
 function start() {
@@ -49,12 +66,18 @@ function start() {
 // On load, a previously picked folder may come back with its permission still granted (same session, or
 // a persisted grant), in which case it is used straight away; otherwise the player gets one button.
 async function restoreSaved() {
-    const handle = await loadHandle();
-    if (handle === null) return;
+    // Claimed before the first await: restoring runs unprompted on load, so anything the player does
+    // afterwards is newer intent and this continuation must not write over it.
+    const token = claim();
+    const handle = await loadHandle().catch(() => null);
+    if (handle === null || !isCurrent(token)) return;
+
+    const granted = await ensureReadPermission(handle, { prompt: false });
+    if (!isCurrent(token)) return;
 
     ui.forget.hidden = false;
-    if (await ensureReadPermission(handle, { prompt: false })) {
-        await probe(new HandleFs(handle));
+    if (granted) {
+        await probe(new HandleFs(handle), null, token);
     } else {
         ui.reconnect.hidden = false;
         setStatus(`Previously picked "${handle.name}". Reconnect to read it again.`);
@@ -62,8 +85,11 @@ async function restoreSaved() {
 }
 
 async function onPick() {
+    // Claimed after the dialog, not before: the picker can sit open for a long time, and a restore that
+    // lands while it is open is still worth showing if the player then cancels.
     const handle = await pickDirectory({ id: "unturned-install" });
     if (handle === null) return;
+    const token = claim();
 
     // Remembering the pick is a convenience; being able to read the folder the player just granted is
     // the point. A browser with storage blocked (private windows, enterprise policy) rejects the write,
@@ -74,24 +100,27 @@ async function onPick() {
     } catch {
         remembered = false;
     }
+    if (!isCurrent(token)) return;
     ui.forget.hidden = !remembered;
     ui.reconnect.hidden = true;
-    await probe(new HandleFs(handle), remembered ? null : "This browser will not remember the pick.");
+    await probe(new HandleFs(handle), remembered ? null : "This browser will not remember the pick.", token);
 }
 
 async function onReconnect() {
-    const handle = await loadHandle();
-    if (handle === null || !(await ensureReadPermission(handle, { prompt: true }))) {
+    const handle = await loadHandle().catch(() => null);
+    const granted = handle !== null && (await ensureReadPermission(handle, { prompt: true }));
+    const token = claim();
+    if (!granted) {
         setStatus("Permission denied. Pick the folder again.");
         return;
     }
     ui.reconnect.hidden = true;
-    await probe(new HandleFs(handle));
+    await probe(new HandleFs(handle), null, token);
 }
 
 async function onForget() {
     // Retire any scan still in flight, so it cannot repaint the listing this is about to clear.
-    generation++;
+    claim();
     await forgetHandle().catch(() => {});
     ui.forget.hidden = true;
     ui.reconnect.hidden = true;
@@ -101,20 +130,20 @@ async function onForget() {
 }
 
 async function onFallbackPick(event) {
-    const files = event.target.files;
+    const input = event.target;
+    const files = [...input.files];
+    // A file input does not fire `change` when the same folder is chosen again, so picking it twice —
+    // to retry after a read failure, or to see files that have since changed — would do nothing at all.
+    // The FileList is snapshotted above because clearing the value empties it.
+    input.value = "";
     if (files.length === 0) return;
     setStatus(`Reading a listing of ${files.length.toLocaleString()} files...`);
     await probe(new ListingFs(files));
 }
 
-// Scans overlap: restoring a saved folder starts one on load, and the player can pick a different folder
-// while it is still running. Without a generation, whichever finishes last wins — so a slow restored
-// Steam-library scan could paint over the install the player just chose, and its artwork would be read
-// out of the wrong folder. Only the newest scan is allowed to render.
-let generation = 0;
-
-async function probe(fs, note = null) {
-    const scan = ++generation;
+async function probe(fs, note = null, token = null) {
+    const scan = token ?? claim();
+    if (!isCurrent(scan)) return;
     setStatus("Scanning...");
     const started = performance.now();
     let result;

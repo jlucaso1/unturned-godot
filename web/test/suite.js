@@ -67,9 +67,12 @@ function fileFor(path, rootName, contents) {
 // A hand-built install, for the layouts no real download contains: same-named workshop maps, tiles named
 // the way the engine will not accept, a map folder that cannot be read. ListingFs is a real
 // implementation of the filesystem interface, so the probe runs against it unmodified.
-function syntheticFs(tree, rootName = "Unturned") {
+function syntheticFs(tree, rootName = "Unturned", options = {}) {
     return new ListingFs(
         Object.entries(tree).map(([path, contents]) => fileFor(path, rootName, contents ?? "")),
+        // Case folding is pinned rather than inherited from the user agent, so the suite asserts the
+        // same thing on every runner.
+        { caseInsensitive: false, ...options },
     );
 }
 
@@ -102,6 +105,9 @@ export async function runSuite(manifest) {
     await fallbackParity(manifest);
     await rangeReads(manifest);
     await tileNaming();
+    await relaxedConfigJson();
+    menuOrdering();
+    await caseFolding();
     await blankLocalizedName();
     await handlePersistence();
     await workshopNameCollisions();
@@ -160,6 +166,50 @@ async function tileNaming() {
     equal("out-of-range tile coordinates do not count", overflowing.maps[0]?.tileCount, 1);
 }
 
+// MapCatalog.ReadCategory parses Config.json with CommentHandling.Skip *and* AllowTrailingCommas, both
+// of which JSON.parse rejects. A hand-edited config is the normal case for a workshop map.
+async function relaxedConfigJson() {
+    const result = await probeInstall(
+        syntheticFs({
+            "Bundles/core_linux.masterbundle": "",
+            "Maps/Relaxed/Level.dat": "",
+            "Maps/Relaxed/Config.json": [
+                "{",
+                "    // the category, hand-edited",
+                '    "Category": "Curated",',
+                '    "Use_Legacy_Ground": false,',
+                "}",
+            ].join("\n"),
+        }),
+        { platform: "linux" },
+    );
+    equal("a config with comments and a trailing comma still parses", result.maps[0]?.category, "Curated");
+
+    const stringy = await probeInstall(
+        syntheticFs({
+            "Bundles/core_linux.masterbundle": "",
+            "Maps/Stringy/Level.dat": "",
+            "Maps/Stringy/Config.json": '{ "Category": "a // b, ", "Other": 1 }',
+        }),
+        { platform: "linux" },
+    );
+    equal("relaxing json leaves string contents alone", stringy.maps[0]?.category, "a // b, ");
+}
+
+// CompareForMenu sorts with OrdinalIgnoreCase, not locale collation: "Åland" sorts after "Zeta".
+function menuOrdering() {
+    const order = [
+        { supported: true, source: "Official", displayName: "Åland" },
+        { supported: true, source: "Official", displayName: "Zeta" },
+        { supported: true, source: "Official", displayName: "Alpha" },
+    ].sort(compareForMenu);
+    equal(
+        "maps sort ordinally, not by locale",
+        order.map((map) => map.displayName).join(","),
+        "Alpha,Zeta,Åland",
+    );
+}
+
 // MapCatalog.Read falls back to the folder name on IsNullOrWhiteSpace, so a name of spaces must not
 // leave the card with a blank heading.
 async function blankLocalizedName() {
@@ -172,6 +222,42 @@ async function blankLocalizedName() {
         { platform: "linux" },
     );
     equal("a whitespace-only name falls back to the folder", result.maps[0]?.displayName, "Riverside");
+}
+
+// HandleFs resolves paths by asking the browser, which asks the OS, so it folds case exactly where the
+// platform does. ListingFs resolves out of its own index and has to be told — otherwise it would be the
+// only case-sensitive filesystem on a Windows machine, and a workshop map shipping `level.dat` would
+// vanish from the fallback while the desktop's File.Exists finds it.
+async function caseFolding() {
+    const oddlyCased = {
+        "Bundles/core_linux.masterbundle": "",
+        "Maps/Riverside/level.dat": "",
+        "Maps/Riverside/english.dat": "Name Riverside Rush",
+        "Maps/Riverside/Landscape/heightmaps/Tile_0_0_Source.heightmap": "",
+    };
+
+    const insensitive = await probeInstall(syntheticFs(oddlyCased, "Unturned", { caseInsensitive: true }), {
+        platform: "linux",
+    });
+    equal("a case-insensitive host finds an oddly-cased map", insensitive.maps.length, 1);
+    equal("and reads its metadata", insensitive.maps[0]?.displayName, "Riverside Rush");
+    equal("and its tiles", insensitive.maps[0]?.tileCount, 1);
+
+    const sensitive = await probeInstall(syntheticFs(oddlyCased, "Unturned", { caseInsensitive: false }), {
+        platform: "linux",
+    });
+    equal("a case-sensitive host does not, matching the desktop there", sensitive.maps.length, 0);
+
+    // Folding must never shadow a file that is really there.
+    const both = syntheticFs({ "Maps/M/Level.dat": "exact", "Maps/M/level.dat": "folded" }, "Unturned", {
+        caseInsensitive: true,
+    });
+    equal("an exact spelling wins over a folded one", await both.readText("Maps/M/Level.dat"), "exact");
+    equal(
+        "and the folded one is still reachable by its own name",
+        await both.readText("Maps/M/level.dat"),
+        "folded",
+    );
 }
 
 // IndexedDB reports a request as successful before its transaction commits, so the store has to resolve
@@ -270,7 +356,7 @@ async function unreadableMapIsolation() {
 async function walkParity(manifest) {
     const root = await seed(manifest, "install");
     const handles = new HandleFs(root);
-    const listing = new ListingFs(fileListFrom(manifest, "Unturned"));
+    const listing = new ListingFs(fileListFrom(manifest, "Unturned"), { caseInsensitive: false });
 
     const isDat = (entry) => entry.name.endsWith(".dat");
     const isLandscape = (entry) => entry.name === "Landscape";
@@ -466,7 +552,7 @@ async function steamLibraryLayout(manifest) {
 
 // The fallback for browsers with no directory picker has to see the same install as the real thing.
 async function fallbackParity(manifest) {
-    const listing = new ListingFs(fileListFrom(manifest, "Unturned"));
+    const listing = new ListingFs(fileListFrom(manifest, "Unturned"), { caseInsensitive: false });
     const viaListing = await probeInstall(listing, { platform: "linux" });
 
     const root = await seed(manifest, "install");

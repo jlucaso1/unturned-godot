@@ -15,20 +15,27 @@ import { join, relative, sep } from "node:path";
 
 const MAX_INLINE = 256 * 1024;
 
-export async function buildManifest(root) {
+// `selection` decides what is collected, and it decides it *during* the walk rather than after: an
+// Unturned install is mostly Bundles/, none of which any assertion here touches, and reading it only to
+// throw it away would base64-encode tens of thousands of files for nothing. `keep` selects files and
+// `descend` selects directories, the same split HandleFs.walk uses for the same reason.
+export async function buildManifest(root, selection = {}) {
     const entries = [];
-    await walk(root, root, entries);
+    await walk(root, root, entries, selection);
     entries.sort((a, b) => (a.path < b.path ? -1 : 1));
     return { root, entries };
 }
 
-async function walk(root, directory, entries) {
+async function walk(root, directory, entries, selection) {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
         const absolute = join(directory, entry.name);
         const path = relative(root, absolute).split(sep).join("/");
         if (entry.isDirectory()) {
-            await walk(root, absolute, entries);
+            if (selection.descend === undefined || selection.descend(path)) {
+                await walk(root, absolute, entries, selection);
+            }
         } else if (entry.isFile()) {
+            if (selection.keep !== undefined && !selection.keep(path)) continue;
             const { size } = await stat(absolute);
             entries.push({
                 path,
@@ -40,14 +47,12 @@ async function walk(root, directory, entries) {
 }
 
 // The subset worth shipping to the browser: every map file (the probe walks all of Maps/) plus the
-// Bundles/ entries it looks for. Seeding the rest of Bundles/ would mean tens of thousands of paths that
-// no assertion here touches.
-export function forProbe(manifest) {
-    const wanted = manifest.entries.filter(
-        (entry) =>
-            entry.path.startsWith("Maps/") ||
-            entry.path === "Bundles/MasterBundle.dat" ||
-            /^Bundles\/core(_linux|_mac)?\.masterbundle$/.test(entry.path),
-    );
-    return { root: manifest.root, entries: wanted };
-}
+// Bundles/ entries it looks for.
+export const PROBE_SELECTION = {
+    keep: (path) =>
+        path.startsWith("Maps/") ||
+        path === "Bundles/MasterBundle.dat" ||
+        /^Bundles\/core(_linux|_mac)?\.masterbundle$/.test(path),
+    // Bundles/ itself has to be entered for MasterBundle.dat and the masterbundle, but nothing below it.
+    descend: (path) => path === "Maps" || path.startsWith("Maps/") || path === "Bundles",
+};

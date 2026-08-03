@@ -10,7 +10,7 @@ import { createServer } from "node:http";
 import { createReadStream, existsSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildManifest, forProbe } from "./seed.mjs";
+import { buildManifest, PROBE_SELECTION } from "./seed.mjs";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const webRoot = resolve(here, "..");
@@ -70,7 +70,7 @@ async function importPlaywright() {
     return null;
 }
 
-const manifest = forProbe(await buildManifest(content));
+const manifest = await buildManifest(content, PROBE_SELECTION);
 const inlined = manifest.entries.filter((entry) => entry.data !== null).length;
 console.log(
     `Seeding ${manifest.entries.length} paths from ${content} ` +
