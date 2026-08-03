@@ -78,6 +78,7 @@ public sealed class ZombieHost
                 _playerBounds.Remove(id);
         }
 
+        _system.AuthoritativeTick = tick; // stamps anything recording alongside the simulation
         _system.Tick(_views, ServerSimulation.TickRate);
 
         // Replicate every awake zombie (plus one final snapshot when it settles back to idle so clients

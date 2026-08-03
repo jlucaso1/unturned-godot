@@ -105,26 +105,37 @@ public sealed partial class ReproService : Node
     private static float Radius(string variable, float fallback) =>
         OS.GetEnvironment(variable) is { Length: > 0 } value ? value.ToFloat() : fallback;
 
+    // The key press only ASKS for a capture. Taking one reads the physics space, and with the physics
+    // server on its own thread that space is unavailable outside a physics notification — input is not
+    // one. Captured from here directly, a manual dump would either log engine errors or, worse, come
+    // out with an empty collision slice and look complete. (NetworkManager's navigation reconciliation
+    // waits for a PhysicsFrame for exactly this reason.)
     public override void _Input(InputEvent @event)
     {
         if (@event is InputEventKey { Pressed: true, Echo: false } key && key.Keycode == _key)
-            Capture("manual", Focus(), _note);
+            _requested = "manual";
     }
+
+    private string? _requested;
 
     public override void _PhysicsProcess(double delta)
     {
         _elapsed += delta;
-        if (_recorder != null && _server != null)
-            _recorder.ExternalTick = _server.Tick;
         if (_captureAt >= 0.0 && _elapsed >= _captureAt)
         {
             _captureAt = -1.0;
-            Capture("timer", Focus(), _note);
+            _requested ??= "timer";
         }
         if (_watcher != null
             && _watcher.Poll(_zombies, (float)delta, out string reason, out Vector3 focus))
         {
             Capture(reason, focus, _note);
+            return;
+        }
+        if (_requested is { } pending)
+        {
+            _requested = null;
+            Capture(pending, Focus(), _note);
         }
     }
 
@@ -254,12 +265,30 @@ public sealed partial class ReproService : Node
             }
         }
 
+        // Players go back to where the WINDOW starts, not to where the capture ended. The zombie state
+        // restored above is the window's first tick; standing the reporter at their capture-time
+        // position instead skips the approach the dump exists to show, and the two halves of the
+        // situation would not even be from the same moment.
         Vector3 focus = ReproVector.To(dump.Meta.FocusPoint);
-        foreach (ReproPlayerState player in dump.Session.Players)
+        IReadOnlyList<ReproPlayerSample> atWindowStart =
+            dump.Zombies?.Frames.Count > 0 ? dump.Zombies.Frames[0].Players : Array.Empty<ReproPlayerSample>();
+        if (atWindowStart.Count > 0)
         {
-            Vector3 position = ReproVector.To(player.Position);
-            _server?.Teleport(player.Id, position);
-            focus = position;
+            foreach (ReproPlayerSample player in atWindowStart)
+            {
+                Vector3 position = ReproVector.To(player.Position);
+                _server?.Teleport(player.Id, position);
+                focus = position;
+            }
+        }
+        else
+        {
+            foreach (ReproPlayerState player in dump.Session.Players)
+            {
+                Vector3 position = ReproVector.To(player.Position);
+                _server?.Teleport(player.Id, position);
+                focus = position;
+            }
         }
         if (Find<PlayerController>(GetTree().Root) is { } controller)
             controller.GlobalPosition = focus;

@@ -97,6 +97,13 @@ public sealed partial class ZombieSystem
 
     public IZombieTickObserver? Observer;
 
+    // The server tick this simulation is on, stamped by whoever drives it (ZombieHost) BEFORE the
+    // tick runs. A recorder cannot read it from the host's own frame instead: the node that hosts the
+    // server ticks the whole simulation inside its _PhysicsProcess, and a catch-up update runs several
+    // authoritative ticks inside one of those, so anything reading the tick afterwards stamps the
+    // window with a number that is late, or with the same number several times over.
+    public uint AuthoritativeTick;
+
     public ZombieSystemState CaptureState() => CaptureStateInto(new ZombieSystemState());
 
     // Snapshots into a buffer the caller keeps. Steady-state recording reuses one, so a session that

@@ -287,9 +287,13 @@ public static class ReproGeometryCapture
 
         public void Triangle(Vector3 a, Vector3 b, Vector3 c)
         {
-            // Any corner inside the sphere keeps the triangle whole: clipping would put edges where the
-            // world has none, and a capsule sliding along one would stop for no reason.
-            if (!Inside(a) && !Inside(b) && !Inside(c))
+            // Kept whole whenever the sphere touches it ANYWHERE — corner, edge or face. A corner-only
+            // test drops exactly the triangles that matter most: a building's floor slab is two huge
+            // triangles whose vertices are all outside a 16 m capture taken while standing on it, and
+            // dropping them puts a hole in the replay's world where the reporter was standing.
+            // (Clipping instead would put edges where the world has none, and a capsule sliding along
+            // one would stop for no reason.)
+            if (!Meets(a, b, c))
                 return;
             _triangles.Add(Index(a));
             _triangles.Add(Index(b));
@@ -298,7 +302,9 @@ public static class ReproGeometryCapture
             _owners.Add(_owner);
         }
 
-        private bool Inside(Vector3 point) => (point - Focus).LengthSquared() <= _radiusSquared;
+        private bool Meets(Vector3 a, Vector3 b, Vector3 c) =>
+            (ReproGeometry.ClosestPointOnTriangle(Focus, a, b, c) - Focus).LengthSquared()
+                <= _radiusSquared;
 
         private int Index(Vector3 point)
         {

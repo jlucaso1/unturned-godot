@@ -143,7 +143,7 @@ public class ReproRecorderTests
         recorder.Attach();
         for (int i = 0; i < 8; i++)
         {
-            recorder.ExternalTick = (uint)(1000 + i);
+            system.AuthoritativeTick = (uint)(1000 + i);
             system.Tick(Array.Empty<ZombiePlayerView>(), ReproWorlds.TickRate);
         }
         ReproZombieSection section = recorder.Build(out _, out _);
@@ -190,6 +190,44 @@ public class ReproRecorderTests
     [Fact]
     public void ConstructionRejectsAMissingSystem() =>
         Assert.Throws<ArgumentNullException>(() => new ReproRecorder(null!));
+
+    // A zombie that settles during the window has to be in the frame it settles on. Without that
+    // sample there is no recorded idle to disagree with, and a build that wrongly keeps chasing
+    // replays as an exact reproduction.
+    [Fact]
+    public void TheTickAZombieSettlesOnIsRecorded()
+    {
+        ZombieSystem system = Bare(out _);
+        ZombieInstance zombie = system.Zombies[0];
+        var recorder = new ReproRecorder(system, new ReproRecorderOptions { WindowTicks = 8 });
+        recorder.Attach();
+
+        zombie.State = EZombieState.Chase;
+        zombie.TargetPlayer = 1;
+        for (int i = 0; i < 2; i++)
+            system.Tick(new[] { ReproWorlds.Player(new Vector3(10f, 0f, 10f)) }, ReproWorlds.TickRate);
+        // The target leaves the roster: Hunt gives up and the zombie settles on this tick.
+        system.Tick(Array.Empty<ZombiePlayerView>(), ReproWorlds.TickRate);
+
+        // The frames have to show that happening rather than the zombie simply vanishing from them.
+        ReproZombieSection section = recorder.Build(out _, out _);
+        var states = new List<EZombieState>();
+        foreach (ReproFrame frame in section.Frames)
+            foreach (ReproMotionSample sample in frame.Zombies)
+                states.Add(sample.State);
+        Assert.Contains(EZombieState.Idle, states);
+
+        // ...and once it has settled it stops being sampled every tick again.
+        int settled = section.Frames.Count;
+        for (int i = 0; i < 4; i++)
+            system.Tick(Array.Empty<ZombiePlayerView>(), ReproWorlds.TickRate);
+        ReproZombieSection later = recorder.Build(out _, out _);
+        int empty = 0;
+        foreach (ReproFrame frame in later.Frames)
+            if (frame.Zombies.Count == 0)
+                empty++;
+        Assert.True(empty > 0, $"every one of {settled} frames still carried a settled zombie");
+    }
 
     private sealed class CountingObserver : IZombieTickObserver
     {

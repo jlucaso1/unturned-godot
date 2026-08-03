@@ -28,7 +28,7 @@ public class ReproRoundTripTests
         for (int i = 0; i < ticks; i++)
         {
             var player = new Vector3(16f + (i * 0.1f), 0f, 16f);
-            recorder.ExternalTick = (uint)(100 + i);
+            system.AuthoritativeTick = (uint)(100 + i);
             system.Tick(new[] { ReproWorlds.Player(player) }, ReproWorlds.TickRate);
             live.Add(zombie.Position);
         }

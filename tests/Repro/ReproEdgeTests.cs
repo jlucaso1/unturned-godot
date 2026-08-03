@@ -107,9 +107,13 @@ public class ReproEdgeTests
                 return true;
             },
         });
-        scenario.Run(extraTicks: 5);
+        ReproReplayReport report = scenario.Run(extraTicks: 5);
         Assert.True(asked > 0);
         Assert.True(scenario.GeometryAnswers > 0);
+        // Recomputed routes are called out on their own: they are the one answer a replay cannot
+        // reproduce faithfully when the live map used the engine's pathfinder.
+        Assert.Equal(asked, report.RoutesRecomputed);
+        Assert.Contains("routes           ", report.Describe(), StringComparison.Ordinal);
     }
 
     private static ReproNavBound Box() => new()
@@ -491,5 +495,83 @@ public class ReproEdgeTests
         public void EndTick(ZombieSystem system)
         {
         }
+    }
+
+    // Who a zombie hunts is behaviour, and a build can get it wrong without moving: with two players
+    // in reach, retargeting the other one looks identical in position and state for a short window.
+    [Fact]
+    public void AZombieHuntingTheWrongPlayerIsNotAReproduction()
+    {
+        var dump = new ReproDump
+        {
+            World = new ReproWorldData { Bounds = { Box() } },
+            Zombies = new ReproZombieSection
+            {
+                State = new ReproSystemState
+                {
+                    Zombies =
+                    {
+                        new ReproZombieRecord
+                        {
+                            Id = 5,
+                            Position = new[] { 20f, 0f, 20f },
+                            State = EZombieState.Idle,
+                            Target = byte.MaxValue,
+                        },
+                    },
+                },
+                Frames =
+                {
+                    new ReproFrame
+                    {
+                        Dt = 0.08f,
+                        Zombies =
+                        {
+                            new ReproMotionSample
+                            {
+                                Id = 5,
+                                Position = new[] { 20f, 0f, 20f },
+                                State = EZombieState.Idle,
+                                Target = 7, // the recording says it was hunting player 7
+                            },
+                        },
+                    },
+                },
+            },
+        };
+        ReproReplayReport report = new ReproScenario(dump).Run();
+        Assert.Equal(0f, report.MaxPositionError);
+        Assert.Equal(0, report.StateMismatches);
+        Assert.Equal(1, report.TargetMismatches);
+        Assert.False(report.ReproducesRecording);
+        Assert.Contains("target mismatches 1", report.Describe(), StringComparison.Ordinal);
+    }
+
+    // The first tick counts. Measured from the pose the tick already produced, a zombie that turns
+    // hard on tick one contributes nothing to the summary — and a one-tick window measures nothing
+    // at all, which is exactly when the summary is load-bearing.
+    [Fact]
+    public void MotionIsMeasuredFromTheRestoredPoseNotTheFirstStep()
+    {
+        var geometry = new ReproWorlds.Geometry().Ground();
+        (ZombieSystem system, _, _) = ReproWorlds.Session(geometry);
+        var recorder = new ReproRecorder(system, new ReproRecorderOptions { WindowTicks = 4 });
+        recorder.Attach();
+        for (int i = 0; i < 6; i++)
+            system.Tick(new[] { ReproWorlds.Player(new Vector3(10f, 0f, 10f)) }, ReproWorlds.TickRate);
+        ReproDump dump = ReproCapture.Build(
+            ReproWorlds.Request(geometry, new Vector3(10f, 0f, 10f)), system, recorder,
+            ReproWorlds.FlatGround);
+
+        var scenario = new ReproScenario(dump);
+        Vector3 start = scenario.System.Zombies[0].Position;
+        ReproReplayReport report = scenario.Run();
+
+        ReproMotionSummary summary = Assert.Single(report.Motion);
+        float actual = (scenario.System.Zombies[0].Position - start).Length();
+        // Every tick of the window is in the summary, including the first one.
+        Assert.Equal(actual, summary.NetDisplacementMetres, 3);
+        Assert.True(summary.TravelledMetres >= summary.NetDisplacementMetres);
+        Assert.True(summary.TravelledMetres > 0f);
     }
 }

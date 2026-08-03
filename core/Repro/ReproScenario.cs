@@ -61,6 +61,14 @@ public sealed class ReproScenario
     // these, and a replay with a high count here is not evidence of anything.
     public int UnansweredQueries { get; private set; }
 
+    // Routes recomputed rather than replayed, called out separately because they are the one world
+    // answer a replay cannot reproduce faithfully: a map inside Godot's polygon budget paths through
+    // the engine's NavigationServer, and a replay has no engine, so it paths over the baked graph.
+    // The two agree most of the time and then disagree about which side of a building to pass, after
+    // which the trajectories have nothing left to say to each other. A run with this above zero is
+    // answering "does the body still hit the same walls", not "does this build still do it".
+    public int RoutesRecomputed { get; private set; }
+
     public ReproScenario(ReproDump dump, ReproScenarioOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(dump);
@@ -137,7 +145,13 @@ public sealed class ReproScenario
     public ReproReplayReport Run(int extraTicks = 0)
     {
         var report = new ReproReplayReport();
+        // Tracks start from the state the dump RESTORED, before a single tick has run. Created after
+        // the first Step instead, a zombie's first tick of motion is measured against where that tick
+        // already put it — which is precisely the tick a short window is about.
         var tracks = new Dictionary<int, MotionTrack>();
+        foreach (ZombieInstance zombie in System.Zombies)
+            tracks[zombie.Id] = new MotionTrack(zombie.Position, zombie.Yaw);
+
         int total = WindowTicks + Math.Max(0, extraTicks);
         for (int i = 0; i < total; i++)
         {
@@ -146,11 +160,13 @@ public sealed class ReproScenario
                 Compare(_section.Frames[Tick - 1], report);
             foreach (ZombieInstance zombie in System.Zombies)
             {
-                if (zombie.State == EZombieState.Idle && zombie.TargetPlayer == byte.MaxValue)
-                    continue;
                 if (!tracks.TryGetValue(zombie.Id, out MotionTrack? track))
                     tracks[zombie.Id] = track = new MotionTrack(zombie.Position, zombie.Yaw);
-                track.Add(zombie);
+                bool awake = zombie.State != EZombieState.Idle || zombie.TargetPlayer != byte.MaxValue;
+                // Once a zombie has done something, it keeps being measured: how it SETTLES is part of
+                // what a fix has to get right.
+                if (awake || track.Samples > 0)
+                    track.Add(zombie);
             }
         }
 
@@ -159,8 +175,10 @@ public sealed class ReproScenario
         report.OracleMisses = Oracle?.Misses ?? 0;
         report.GeometryAnswers = GeometryAnswers;
         report.UnansweredQueries = UnansweredQueries;
+        report.RoutesRecomputed = RoutesRecomputed;
         foreach (KeyValuePair<int, MotionTrack> entry in tracks)
-            report.Motion.Add(entry.Value.ToSummary(entry.Key));
+            if (entry.Value.Samples > 0)
+                report.Motion.Add(entry.Value.ToSummary(entry.Key));
         report.Motion.Sort((a, b) => b.YawChurnDegrees.CompareTo(a.YawChurnDegrees));
         return report;
     }
@@ -179,6 +197,11 @@ public sealed class ReproScenario
             report.MaxYawError = MathF.Max(report.MaxYawError, yawError);
             if (live.State != expected.State)
                 report.StateMismatches++;
+            // Who a zombie is hunting is a behaviour a build can get wrong without moving an inch:
+            // with two players in range, retargeting the other one looks identical in position and
+            // state for the length of a short window.
+            if (live.TargetPlayer != expected.Target)
+                report.TargetMismatches++;
         }
     }
 
@@ -228,6 +251,7 @@ public sealed class ReproScenario
         // Installed only alongside a pathfinder, so there is always one to fall through to: routing is
         // the one world question a dump can always answer from its own navmesh slice.
         GeometryAnswers++;
+        RoutesRecomputed++;
         return _pathQuery!(from, to, path, radius);
     }
 
@@ -262,8 +286,11 @@ public sealed class ReproScenario
 
         public float BlockedRouteTime { get; private set; }
 
+        public int Samples { get; private set; }
+
         public void Add(ZombieInstance zombie)
         {
+            Samples++;
             Travelled += (zombie.Position - _previous).Length();
             YawChurn += MathF.Abs(Mathf.Wrap(zombie.Yaw - _previousYaw, -180f, 180f));
             _previous = zombie.Position;
@@ -295,10 +322,12 @@ public sealed class ReproReplayReport
     public float SumPositionError { get; set; }
     public float MaxYawError { get; set; }
     public int StateMismatches { get; set; }
+    public int TargetMismatches { get; set; }
     public int OracleHits { get; set; }
     public int OracleMisses { get; set; }
     public int GeometryAnswers { get; set; }
     public int UnansweredQueries { get; set; }
+    public int RoutesRecomputed { get; set; }
     public List<ReproMotionSummary> Motion { get; } = new();
 
     public float MeanPositionError => ComparedSamples > 0 ? SumPositionError / ComparedSamples : 0f;
@@ -306,7 +335,7 @@ public sealed class ReproReplayReport
     // Did the replay reproduce the RECORDING, rather than merely something plausible? Only meaningful
     // for unmodified code; a millimetre is well inside the rounding a dump stores positions at.
     public bool ReproducesRecording => ComparedSamples > 0 && MaxPositionError <= 0.01f
-        && MaxYawError <= 0.5f && StateMismatches == 0;
+        && MaxYawError <= 0.5f && StateMismatches == 0 && TargetMismatches == 0;
 
     public string Describe()
     {
@@ -316,10 +345,15 @@ public sealed class ReproReplayReport
         text.Append("  position error   max ").Append(Format(MaxPositionError))
             .Append(" m, mean ").Append(Format(MeanPositionError)).Append(" m\n");
         text.Append("  yaw error        max ").Append(Format(MaxYawError)).Append("°\n");
-        text.Append("  state mismatches ").Append(StateMismatches).Append('\n');
+        text.Append("  state mismatches ").Append(StateMismatches)
+            .Append(", target mismatches ").Append(TargetMismatches).Append('\n');
         text.Append("  answers          ").Append(OracleHits).Append(" recorded, ")
             .Append(GeometryAnswers).Append(" from geometry, ")
             .Append(UnansweredQueries).Append(" unanswered\n");
+        if (RoutesRecomputed > 0)
+            text.Append("  routes           ").Append(RoutesRecomputed)
+                .Append(" recomputed over the baked graph rather than replayed; the live map may have "
+                    + "used the engine's pathfinder, so a divergence here is expected\n");
         text.Append("  verdict          ").Append(ReproducesRecording
             ? "reproduces the recording"
             : "diverges from the recording (expected if the code under replay changed)").Append('\n');

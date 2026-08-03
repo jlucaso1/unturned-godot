@@ -418,6 +418,26 @@ public class ServerSimulationTests
         Assert.Equal(0, sim.RejectedPositions);
     }
 
+    // A datagram that was already in flight when the dump was loaded still says where the player used
+    // to be. With the baseline cleared, adopting it outright would put them straight back and undo
+    // the teleport within one tick.
+    [Fact]
+    public void Teleport_DropsInputsThatPredateIt()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, new Vector3(0f, 10f, 0f));
+        sim.QueueInput(1, new InputCommand(_frame++, 0, 0, false, false, 0, 90,
+            EPlayerStance.Stand, new Vector3(1f, 10f, 0f)));
+
+        var somewhereElse = new Vector3(-616.22f, 35.02f, -66.58f);
+        Assert.True(sim.Teleport(1, somewhereElse));
+        sim.Step(); // the queued claim is gone; nothing drags the player back
+        Vector3 after = sim.GetState(1).Position;
+        Assert.Equal(somewhereElse.X, after.X, 3);
+        Assert.Equal(somewhereElse.Z, after.Z, 3);
+        Assert.True(after.Y > 34f, $"the player did not stay where they were put: {after}");
+    }
+
     [Fact]
     public void Teleport_RefusesUnknownPlayersAndNonFinitePositions()
     {

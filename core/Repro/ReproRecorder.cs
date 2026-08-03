@@ -64,9 +64,10 @@ public sealed class ReproRecorder : IZombieTickObserver
             _ring[i] = new TickBuffer();
     }
 
-    // The server tick the host is on, so a dump lines up with the server's own logs. Optional: without
-    // it the recorder's own counter is used, which is still monotonic and still lines up with itself.
-    public uint ExternalTick { get; set; }
+    // Whether each zombie was worth a motion sample last tick, indexed by id. A zombie that SETTLES
+    // during the window has to be sampled the tick it settles, or a replay of changed code that keeps
+    // chasing has nothing to disagree with and reports an exact reproduction.
+    private bool[] _sampled = Array.Empty<bool>();
 
     // World queries dropped by the per-tick ceiling. Nonzero means the window is not complete, and the
     // capture says so out loud instead of shipping a dump that looks whole.
@@ -131,7 +132,7 @@ public sealed class ReproRecorder : IZombieTickObserver
         TickBuffer buffer = _ring[_cursor];
         buffer.Reset();
         buffer.Tick = _tick;
-        buffer.ServerTick = ExternalTick;
+        buffer.ServerTick = system.AuthoritativeTick;
         buffer.Dt = dt;
         for (int i = 0; i < players.Count; i++)
             buffer.Players.Add(players[i]);
@@ -148,11 +149,16 @@ public sealed class ReproRecorder : IZombieTickObserver
             for (int i = 0; i < zombies.Count; i++)
             {
                 ZombieInstance zombie = zombies[i];
+                if (zombie.Id >= _sampled.Length)
+                    Array.Resize(ref _sampled, Math.Max(zombie.Id + 1, _sampled.Length * 2));
                 // Idle zombies without a target do not move, so their positions are already in the
                 // anchor state. Skipping them is what keeps a frame proportional to what is HAPPENING
-                // rather than to how many zombies the map spawned.
-                if (zombie.State == EZombieState.Idle && zombie.TargetPlayer == byte.MaxValue)
+                // rather than to how many zombies the map spawned — but the tick one SETTLES on is
+                // part of what happened, so the first idle frame after activity is kept.
+                bool awake = zombie.State != EZombieState.Idle || zombie.TargetPlayer != byte.MaxValue;
+                if (!awake && !_sampled[zombie.Id])
                     continue;
+                _sampled[zombie.Id] = awake;
                 buffer.Motions.Add(new Motion(zombie.Id, zombie.Position, zombie.Yaw, zombie.State,
                     zombie.TargetPlayer));
             }
@@ -160,6 +166,10 @@ public sealed class ReproRecorder : IZombieTickObserver
         _tick++;
         if (_recorded < _ring.Length)
             _recorded++;
+        // The tick is over: anything the world is asked from here until the next one is somebody
+        // else's question (a probe, a diagnostic, the host's own lookup) and does not belong in the
+        // frame that just closed.
+        _cursor = -1;
         _innerObserver?.EndTick(system);
     }
 
@@ -281,7 +291,7 @@ public sealed class ReproRecorder : IZombieTickObserver
         {
             int anchor = OldestAnchor();
             if (anchor < 0)
-                return ExternalTick;
+                return 0u;
             uint tick = _anchorTicks[anchor];
             return _ring[(int)(tick % (uint)_ring.Length)].ServerTick;
         }

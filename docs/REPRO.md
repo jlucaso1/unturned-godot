@@ -119,17 +119,36 @@ so "it stopped reproducing" can never be a silent consequence of the harness inv
 `verify` run with a non-zero *unanswered* count is not evidence of anything, and says so.
 
 How well each does, measured against a real capture (two zombies closing on a player over PEI's own
-terrain and buildings, 43 ticks, taken from a headless session and replayed with `tools/ReproHarness`):
+terrain and buildings, 44 ticks, taken from a headless session and replayed with `tools/ReproHarness`):
 
 | Source | Max position error | Mean |
 |---|---|---|
-| the recording | 0 m (yaw 0.002°) | 0 m |
-| the geometry alone (`--no-oracle`) | 0.88 m | 0.016 m |
+| the recording | 0 m (yaw 0.004°) | 0 m |
+| the geometry alone (`--no-oracle`) | 10.4 m | 1.5 m |
 
-The recording is exact because there is nothing left to disagree with. The geometry is a physics-free
-port of the host's resolver against tessellated collision shapes, so it tracks the engine closely and
-diverges where a slide or a step resolves a centimetre differently — which is why a replay prefers the
-recording, and why it tells you when it could not.
+The recording is exact because there is nothing left to disagree with.
+
+The geometry number needs its caveat stated, because the two halves of it behave very differently.
+Collision, ground and vision are a port of the host's own resolver and track the engine to
+centimetres. **Routing does not**: a map under Godot's polygon budget paths through the engine's
+NavigationServer, while a replay with no engine paths over the baked graph, and those are two
+different pathfinders. They agree most of the time and then disagree about which side of a building
+to pass — after which the trajectories have nothing left to say to each other, which is what a max of
+ten metres and a yaw error of 177° means. (Measured across two builds of the baked graph on the same
+dump: 0.88 m before a navigation change landed on main, 10.4 m after. The recording reproduced
+exactly under both.)
+
+The replay says so itself rather than leaving you to work it out:
+
+```
+  answers          0 recorded, 94 from geometry, 0 unanswered
+  routes           6 recomputed over the baked graph rather than replayed; the live map may have
+                   used the engine's pathfinder, so a divergence here is expected
+```
+
+So: `verify` — the recorded answers — is the measurement to trust for "does this build still do it".
+`--no-oracle` answers a different and narrower question, "does the body still hit the same walls",
+and is the mode that keeps working once your changes make the brain ask new questions.
 
 The randomness is part of the state, not a wildcard: the simulation draws from a generator whose whole
 state is one 64-bit integer (`ReproRandom`), and the dump carries it, so a replay continues the exact

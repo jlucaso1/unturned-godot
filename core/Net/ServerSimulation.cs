@@ -175,6 +175,11 @@ public sealed class ServerSimulation
         entry.State.Position = position;
         entry.State.Velocity = Vector3.Zero;
         entry.HasVerifiedPosition = false;
+        // Anything already queued was produced before the client was moved and still carries the old
+        // position. With the baseline cleared, the very next Step would adopt one of those outright
+        // and put the player straight back where they were — the teleport undone by a datagram that
+        // predates it. Only a claim made after the move may establish the new baseline.
+        entry.Inputs.Clear();
         return true;
     }
 
