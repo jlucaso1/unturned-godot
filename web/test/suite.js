@@ -415,6 +415,20 @@ async function walkParity(manifest) {
         pruned.length > 0 && !pruned.some((path) => path.includes("/Landscape/")),
         `${pruned.length} results`,
     );
+
+    // maxEntries is a boundary the two backends have to agree on, zero included.
+    for (const limit of [0, 1, 3]) {
+        equal(
+            `walk honours maxEntries ${limit} on handles`,
+            (await handles.walk("Maps", { maxEntries: limit })).length,
+            limit,
+        );
+        equal(
+            `walk honours maxEntries ${limit} on the listing`,
+            (await listing.walk("Maps", { maxEntries: limit })).length,
+            limit,
+        );
+    }
 }
 
 function paths() {
@@ -519,6 +533,18 @@ function dat() {
         parseDatTopLevel('/ he said "hi\nName Kept').get("Name"),
         "Kept",
     );
+
+    // A quote opens a run only where a token starts. Inside an unquoted value it is an ordinary
+    // character, so ReadStringValue still stops at the newline and the next line is still a key.
+    const embedded = parseDatTopLevel('Description About 12" wide\nName Next');
+    equal("a lone quote inside a value stays in it", embedded.get("Description"), 'About 12" wide');
+    equal("and does not swallow the following line", embedded.get("Name"), "Next");
+
+    // ParseDictionaryBody(root: true) tolerates the root dictionary's own opening brace, so a file that
+    // wraps everything in { } still has its keys at the top level.
+    const wrapped = parseDatTopLevel("{\nName Wrapped\nDescription Inside\n}");
+    equal("a root brace does not hide the keys inside it", wrapped.get("Name"), "Wrapped");
+    equal("and the rest of them either", wrapped.get("Description"), "Inside");
 
     // A brace is structural only where the tokenizer would start a token. These three were read off the
     // game's own parser rather than reasoned from its source, and they do not all agree with intuition.

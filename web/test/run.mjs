@@ -76,7 +76,22 @@ async function importPlaywright() {
 }
 
 const manifest = await buildManifest(content, PROBE_SELECTION);
+addArtworkFallbackMap(manifest);
 const inlined = manifest.entries.filter((entry) => entry.data !== null).length;
+
+// One map the download does not contain: its Preview.png is empty, so the browser cannot decode it, and
+// its Chart.png is a real picture borrowed from PEI. MapPicker.cs falls through from preview to chart,
+// and the demo has to as well — which only shows up when the preferred file exists but is not an image.
+function addArtworkFallbackMap(target) {
+    const preview = target.entries.find((entry) => entry.path === "Maps/PEI/Preview.png");
+    if (!preview?.data) return;
+    target.entries.push(
+        { path: "Maps/ArtFallback/Level.dat", size: 0, data: "" },
+        { path: "Maps/ArtFallback/Landscape/Heightmaps/Tile_0_0_Source.heightmap", size: 0, data: "" },
+        { path: "Maps/ArtFallback/Preview.png", size: 0, data: "" },
+        { path: "Maps/ArtFallback/Chart.png", size: preview.size, data: preview.data },
+    );
+}
 console.log(
     `Seeding ${manifest.entries.length} paths from ${content} ` +
         `(${inlined} with contents, the rest as empty placeholders).`,
@@ -123,8 +138,11 @@ page.on("console", (message) => {
 // Every await below can reject — a page-side throw, or a selector that never appears. Without the
 // finally, Node would exit on the unhandled rejection with a raw stack instead of a FAIL line, leaving
 // the Chromium process alive behind it.
-let results;
-let demoResults;
+// Accumulated rather than assigned, so a failure in the demo does not throw away the suite results that
+// were already collected — the same reason runSuite isolates its phases. A timeout here should read as
+// one more FAIL line among the passes, not as the whole run vanishing.
+let results = [];
+let demoResults = [];
 try {
     await page.goto(`${origin}/test/harness.html`);
     await page.waitForFunction(() => typeof globalThis.runSuite === "function");
@@ -135,8 +153,7 @@ try {
     // it would return for real, so everything downstream of the click is the shipping path.
     demoResults = await runDemo();
 } catch (error) {
-    results = [{ name: "the suite ran to completion", ok: false, detail: String(error) }];
-    demoResults = [];
+    demoResults.push({ name: "the browser run completed", ok: false, detail: String(error) });
 } finally {
     if (!keepOpen) {
         await browser.close().catch(() => {});
@@ -166,6 +183,15 @@ async function runDemo() {
     // counting nodes would let "renders map artwork" pass on a page of broken images.
     await demo.waitForFunction(() =>
         [...document.querySelectorAll(".card .art img")].some((img) => img.complete && img.naturalWidth > 0),
+    );
+
+    // The fallback map's preview cannot decode, so its card only gets an image if the chart is tried.
+    await demo.waitForFunction(() =>
+        [...document.querySelectorAll(".card")].some(
+            (card) =>
+                card.querySelector("h3")?.textContent === "ArtFallback" &&
+                card.querySelector(".art img")?.naturalWidth > 0,
+        ),
     );
 
     const observed = await demo.evaluate(() => ({
@@ -199,6 +225,12 @@ async function runDemo() {
             name: "demo renders map artwork",
             ok: observed.artwork > 0,
             detail: `${observed.artwork} decoded images`,
+        },
+        {
+            // Both cards decoded: PEI on its preview, ArtFallback only by falling through to its chart.
+            name: "demo falls through to the chart when the preview will not decode",
+            ok: observed.artwork >= 2 && observed.cards.includes("ArtFallback"),
+            detail: `${observed.artwork} decoded across ${observed.cards.join(", ")}`,
         },
     ];
 }

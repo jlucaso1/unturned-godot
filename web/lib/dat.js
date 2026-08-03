@@ -72,7 +72,12 @@ export function parseDatTopLevel(text) {
         if (first === "/") continue; // comment to end of line
 
         if (first === "{" || first === "[") {
-            if (depth === 0 && pending !== null) values.delete(pending);
+            // A brace at the top with no key in front of it is the *root* dictionary's own opening
+            // brace, which ParseDictionaryBody(root: true) tolerates — the keys inside it are still
+            // top-level. Only a brace that follows a key opens a nested block (and takes that key's
+            // inline value back over).
+            if (depth === 0 && pending === null) continue;
+            if (depth === 0) values.delete(pending);
             depth++;
             pending = null;
             continue;
@@ -114,10 +119,19 @@ export function datString(text, key) {
 // Splitting first and parsing after would read the continuation as another key. Comments are handled
 // here too, because a stray quote inside one ("/ he said "hi") must not open a quoted run — the game's
 // tokenizer consumes a comment to end of line without looking at what is in it.
+// A quote only opens a run where a *token* starts — before the key, or before the value. Inside an
+// already-unquoted token it is an ordinary character: ReadStringValue scans an unquoted value to the
+// newline without caring about quotes, so `Description About 12" wide` ends at that line and the next
+// line is still a key. Treating any quote as an opener would splice the two together.
+const BEFORE_KEY = 0;
+const IN_KEY = 1;
+const BEFORE_VALUE = 2;
+const IN_VALUE = 3;
+
 function* logicalLines(text) {
     let start = 0;
     let quoted = false;
-    let lineHasContent = false;
+    let where = BEFORE_KEY;
 
     for (let i = 0; i < text.length; i++) {
         const c = text[i];
@@ -125,7 +139,11 @@ function* logicalLines(text) {
         if (quoted) {
             if (c === "\\")
                 i++; // an escaped character, including \" , is not a delimiter
-            else if (c === '"') quoted = false;
+            else if (c === '"') {
+                quoted = false;
+                // The run just closed; whatever token it was, the next one starts after it.
+                where = where === BEFORE_KEY ? BEFORE_VALUE : IN_VALUE;
+            }
             continue;
         }
 
@@ -133,20 +151,31 @@ function* logicalLines(text) {
             yield text.slice(start, i);
             if (c === "\r" && text[i + 1] === "\n") i++;
             start = i + 1;
-            lineHasContent = false;
+            where = BEFORE_KEY;
             continue;
         }
 
-        if (c === " " || c === "\t") continue;
+        if (c === " " || c === "\t") {
+            // Whitespace ends the key and puts us in front of the value.
+            if (where === IN_KEY) where = BEFORE_VALUE;
+            continue;
+        }
 
         // A '/' where a token would start opens a comment; the rest of the line is not tokenized.
-        if (c === "/" && !lineHasContent) {
+        if (c === "/" && where === BEFORE_KEY) {
             while (i + 1 < text.length && text[i + 1] !== "\n" && text[i + 1] !== "\r") i++;
             continue;
         }
 
-        lineHasContent = true;
-        if (c === '"') quoted = true;
+        if (c === '"' && (where === BEFORE_KEY || where === BEFORE_VALUE)) {
+            quoted = true;
+            continue;
+        }
+
+        // ReadQuoted swallows one comma right after a closing quote, so it does not start the value.
+        if (c === "," && where === BEFORE_VALUE && text[i - 1] === '"') continue;
+
+        where = where === BEFORE_KEY ? IN_KEY : where === BEFORE_VALUE ? IN_VALUE : where;
     }
 
     if (start < text.length) yield text.slice(start);

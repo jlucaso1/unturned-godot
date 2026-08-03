@@ -42,6 +42,11 @@ function isCurrent(token) {
     return token === generation;
 }
 
+// Lets the browser paint before the caller starts a long synchronous stretch.
+function nextFrame() {
+    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+}
+
 start();
 
 function start() {
@@ -164,6 +169,10 @@ async function onFallbackPick(event) {
     input.value = "";
     if (files.length === 0) return;
     setStatus(`Reading a listing of ${files.length.toLocaleString()} files...`);
+    // Indexing the listing is synchronous and, for a Steam library, can run for seconds. Without a
+    // frame to paint in, that status never appears and probe() replaces it with "Scanning..." before
+    // the browser gets a turn — leaving the page looking frozen under a stale message.
+    await nextFrame();
     await probe(new ListingFs(files));
 }
 
@@ -270,17 +279,33 @@ function mapCard(fs, map) {
 // The map's own artwork, read straight off the player's disk as a blob: URL. The folder is passed in
 // rather than read from module state, so a card always loads its image out of the folder it came from
 // even if another scan has started since.
+//
+// The candidates are tried until one actually decodes, not until one merely exists. MapPicker.cs does
+// `LoadTexture(map.PreviewPath) ?? LoadTexture(map.ChartPath)` for the same reason: a Preview.png that
+// is empty, truncated or in a format the browser will not decode should fall through to the chart, not
+// leave a broken image where the desktop shows a picture.
 async function showArtwork(fs, container, map) {
-    const source = map.previewPath ?? map.chartPath ?? map.iconPath;
-    if (source === null || source === undefined) return;
-    const url = await fs.objectUrl(source).catch(() => null);
-    if (url === null) return;
-    artwork.push(url);
-    const image = document.createElement("img");
-    image.src = url;
-    image.alt = "";
-    image.loading = "lazy";
-    container.append(image);
+    for (const source of [map.previewPath, map.chartPath, map.iconPath]) {
+        if (source === null || source === undefined) continue;
+        const url = await fs.objectUrl(source).catch(() => null);
+        if (url === null) continue;
+        artwork.push(url);
+        const image = await decode(url);
+        if (image === null) continue;
+        image.alt = "";
+        container.append(image);
+        return;
+    }
+}
+
+// Resolves to a loaded <img>, or null if the bytes are not a picture this browser can show.
+function decode(url) {
+    return new Promise((resolve) => {
+        const image = new Image();
+        image.addEventListener("load", () => resolve(image.naturalWidth > 0 ? image : null), { once: true });
+        image.addEventListener("error", () => resolve(null), { once: true });
+        image.src = url;
+    });
 }
 
 function addFact(label, value) {

@@ -148,11 +148,13 @@ export class ListingFs extends ReadOnlyFs {
         const head = root === "" ? "" : `${root}/`;
         const found = [];
         for (const key of this.#files.keys()) {
+            // Checked before appending, not after: HandleFs tests the same limit before it traverses,
+            // so maxEntries: 0 has to mean nothing here too rather than one entry.
+            if (found.length >= maxEntries) break;
             if (!key.startsWith(head)) continue;
             if (prune !== null && this.#isPruned(key, root, prune)) continue;
             if (filter !== null && !filter({ name: baseName(key), kind: "file", path: key })) continue;
             found.push(key);
-            if (found.length >= maxEntries) break;
         }
         return found;
     }
