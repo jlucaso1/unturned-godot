@@ -31,6 +31,10 @@ public class PunchReplicationTests
     private InputCommand Idle(EPlayerStance stance = EPlayerStance.Stand) =>
         new(_frame++, 0, 0, jump: false, sprint: false, yaw: 0, pitch: 90, stance, grounded: true);
 
+    private static InputCommand AttackAt(uint frame) =>
+        new(frame, 0, 0, jump: false, sprint: false, yaw: 0, pitch: 90, EPlayerStance.Stand,
+            grounded: true, attackPrimary: EAttackInputFlags.Start);
+
     [Fact]
     public void Server_TurnsAnAttackInputIntoAGesture()
     {
@@ -120,6 +124,49 @@ public class PunchReplicationTests
         sim.Step();
 
         Assert.Equal(2, sim.Gestures.Count); // one player's swing may not put another's on cooldown
+    }
+
+    // The cooldown is measured in the client's frames, not in server ticks, and the two do not advance
+    // together: a tick with nothing to dequeue still ticks. Counting server ticks would make the rule
+    // depend on how many datagrams survived the trip.
+    [Fact]
+    public void Server_MeasuresTheCooldownInTheClientsFrames()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        // Two clicks six of the player's frames apart — outside the cooldown, so both swing on the
+        // thrower's screen. Every idle frame between them was lost in flight, so what reaches the server
+        // is two attack commands back to back, and it plays them on CONSECUTIVE ticks.
+        sim.QueueInput(1, AttackAt(0));
+        sim.QueueInput(1, AttackAt(6));
+
+        sim.Step();
+        Assert.Single(sim.Gestures);
+        sim.Step();
+
+        // Counting the two server ticks would refuse this one, and the punch the thrower already
+        // animated would reach nobody. Counting the six client frames agrees with them.
+        Assert.Single(sim.Gestures);
+    }
+
+    // The other direction: server ticks piling up must not buy a swing the client's own clock refuses.
+    [Fact]
+    public void Server_StarvedTicksDoNotAgeTheCooldown()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        sim.QueueInput(1, AttackAt(10));
+        sim.Step();
+        Assert.Single(sim.Gestures);
+
+        for (int i = 0; i < 20; i++)
+            sim.Step();
+
+        sim.QueueInput(1, AttackAt(11)); // one client frame later, however long the server waited
+        sim.Step();
+        Assert.Empty(sim.Gestures);
     }
 
     // The jitter buffer drops whole stale inputs when a client bursts past its ceiling. Movement fields

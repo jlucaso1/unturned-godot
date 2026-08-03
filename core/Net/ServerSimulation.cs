@@ -273,9 +273,12 @@ public sealed class ServerSimulation
             // The STANCE carries over too: silence means we did not hear from this player, not that they
             // stood up. Defaulting it snapped a prone or crouched player upright on every late or lost
             // frame — a flicker at 12.5 Hz that the whole session sees, hitbox included.
+            // The FRAME carries over as well, and for the same reason: silence is not the client's clock
+            // advancing. A starved tick must not age the attack cooldown that is measured in that clock.
             InputCommand input = entry.Inputs.TryDequeue(out InputCommand queued)
                 ? queued
-                : new InputCommand(0, 0, 0, false, false, entry.LastInput.Yaw, entry.LastInput.Pitch,
+                : new InputCommand(entry.LastInput.Frame, 0, 0, false, false,
+                    entry.LastInput.Yaw, entry.LastInput.Pitch,
                     entry.State.Stance, entry.State.Grounded);
             entry.LastInput = input;
 
@@ -286,7 +289,18 @@ public sealed class ServerSimulation
 
             // After the move, so the stance the gate reads is this tick's: a player who went prone on the
             // same frame they clicked must not get the punch the pre-move stance would have allowed.
-            EPlayerGesture gesture = entry.Equipment.Simulate(Tick,
+            //
+            // The cooldown is measured in the CLIENT's frame number, not this server's tick. Both are
+            // 12.5 Hz counters, but they do not advance together: input is unreliable, and a tick with
+            // nothing to dequeue still ticks. Two clicks a comfortable six client frames apart can be
+            // consumed two server ticks apart when the idle frames between them were dropped, and this
+            // copy of the rule would then refuse a swing the thrower already animated — the exact desync
+            // running the same rule on both ends is meant to prevent. The frame is the client's own
+            // count of its clicks, so the two copies measure the same quantity. QueueInput has already
+            // rejected anything not strictly newer than the last frame seen, so it only ever moves
+            // forward here. An edge rescued from a trimmed frame is played on a later one and dates the
+            // cooldown from that, which delays the NEXT swing slightly rather than letting one through.
+            EPlayerGesture gesture = entry.Equipment.Simulate(input.Frame,
                 input.AttackPrimary | entry.CarriedPrimary,
                 input.AttackSecondary | entry.CarriedSecondary,
                 new HandState { Stance = entry.State.Stance });

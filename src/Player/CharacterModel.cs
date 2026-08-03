@@ -127,17 +127,35 @@ public static class CharacterModel
     // BuildZombieTemplates imports once for both zombie looks.
     public static (Node3D? Body, Node3D? Viewmodel) BuildPlayerRigs(string unturnedPath)
     {
+        AssetSource source;
+        Node3D? body;
         try
         {
-            if (Open(unturnedPath) is not { } source)
+            if (Open(unturnedPath) is not { } opened)
                 return (null, null);
-            return (BuildFrom(source, PlayerEntity), BuildFrom(source, PlayerViewmodelEntity));
+            source = opened;
+            body = BuildFrom(source, PlayerEntity);
         }
         catch (System.Exception e)
         {
             Log.PrintErr($"[unturned-godot] Character: failed to load real {PlayerEntity.Root} "
                 + $"({e.GetType().Name}: {e.Message}); using placeholder.\n{e.StackTrace}");
             return (null, null);
+        }
+
+        // The arms are caught on their own, because the two rigs fail differently. No body means the
+        // placeholder figure; no viewmodel means first person shows no hands, which is what a prefab
+        // without a Viewmodel subtree already gives. Sharing one catch would let an unsupported mesh in
+        // that subtree throw away a body that imported perfectly and drop the whole player to a capsule.
+        try
+        {
+            return (body, BuildFrom(source, PlayerViewmodelEntity));
+        }
+        catch (System.Exception e)
+        {
+            Log.PrintErr($"[unturned-godot] Character: failed to load the {ViewmodelSubtree} rig "
+                + $"({e.GetType().Name}: {e.Message}); first person will show no hands.");
+            return (body, null);
         }
     }
 

@@ -59,11 +59,17 @@ public partial class PlayerController : CharacterBody3D
     private int _primaryRepeats;
     private int _secondaryRepeats;
 
-    // How many extra input frames an attack edge is repeated on. Input datagrams are unreliable, so a
-    // single dropped one would eat the swing for everyone else while the thrower saw their own — the
-    // one desync a locally-predicted action can produce. Repeating is safe by construction rather than
-    // by care: both ends run the same PlayerEquipment, whose cooldown swallows the repeats, so a click
-    // that arrives twice still punches once. Kept well inside that cooldown for the same reason.
+    // How many input frames a thrown swing is announced on. Input datagrams are unreliable, so a single
+    // dropped one would eat the swing for everyone else while the thrower saw their own — the one desync
+    // a locally-predicted action can produce. Repeating is safe by construction rather than by care: the
+    // server runs the same PlayerEquipment, whose cooldown swallows the repeats, so a swing that arrives
+    // twice still punches once. Kept well inside that cooldown for the same reason.
+    //
+    // The residual, since it is worth naming: if the first frame is lost and a repeat is what lands, the
+    // server dates its cooldown from that later frame and the two ends' baselines part by up to
+    // AttackEdgeRepeats - 1 frames. A click on the exact tick the cooldown expires can then be judged
+    // differently by the two. Closing that needs a stable identity per swing on the wire rather than a
+    // repeated edge, which is more protocol than an animation-only punch earns.
     private const int AttackEdgeRepeats = 2;
 
     private EPlayerStance _stance = EPlayerStance.Stand;
@@ -141,11 +147,10 @@ public partial class PlayerController : CharacterBody3D
         if (@event is InputEventMouseButton { Pressed: true } button
             && Input.MouseMode == Input.MouseModeEnum.Captured)
         {
+            // The repeat counter is NOT armed here: it repeats a swing, and whether this press becomes
+            // one is the next tick's decision.
             if (button.ButtonIndex == _settings.AttackPrimary)
-            {
                 _primaryPending |= EAttackInputFlags.Start;
-                _primaryRepeats = AttackEdgeRepeats;
-            }
             // The secondary button is deliberately not bound yet: with an item equipped it aims rather
             // than punches, and binding it to a right-hand swing now would have to be taken back.
         }
@@ -234,15 +239,27 @@ public partial class PlayerController : CharacterBody3D
         {
             _tickTimer -= UnturnedGodot.Net.ServerSimulation.TickRate;
             _tick++;
+            // The hands run on the fresh press, once. What goes on the wire afterwards is the SWING they
+            // threw, repeated for a few frames; see AttackEdgeRepeats.
             EAttackInputFlags primary = _primaryPending;
             EAttackInputFlags secondary = _secondaryPending;
-            // The edge is consumed here but kept on the wire for a couple more frames; see
-            // AttackEdgeRepeats. The local simulation sees the repeats too, and its own cooldown
-            // discards them exactly as the server's does.
-            _primaryPending = --_primaryRepeats > 0 ? primary : EAttackInputFlags.None;
-            _secondaryPending = --_secondaryRepeats > 0 ? secondary : EAttackInputFlags.None;
+            _primaryPending = EAttackInputFlags.None;
+            _secondaryPending = EAttackInputFlags.None;
 
-            SimulateHands(primary, secondary);
+            EPlayerGesture gesture = SimulateHands(primary, secondary);
+            if (gesture == EPlayerGesture.PunchLeft)
+                _primaryRepeats = AttackEdgeRepeats;
+            else if (gesture == EPlayerGesture.PunchRight)
+                _secondaryRepeats = AttackEdgeRepeats;
+
+            // Only an accepted swing is retransmitted. Repeating the PRESS instead would re-offer a
+            // refusal: a click the cooldown or the prone gate turned down arrives again next tick as a
+            // fresh Start edge, and by then the cooldown may have expired or the player stood up, so a
+            // punch lands with no second click behind it.
+            EAttackInputFlags sendPrimary = EAttackInputFlags.None;
+            EAttackInputFlags sendSecondary = EAttackInputFlags.None;
+            if (_primaryRepeats > 0) { sendPrimary = EAttackInputFlags.Start; _primaryRepeats--; }
+            if (_secondaryRepeats > 0) { sendSecondary = EAttackInputFlags.Start; _secondaryRepeats--; }
 
             if (Net != null)
             {
@@ -255,7 +272,7 @@ public partial class PlayerController : CharacterBody3D
                     (sbyte)input.X, (sbyte)input.Y, jumpHeld, wantSprint,
                     UnturnedGodot.Net.NetAngles.QuantizeYaw(RotationDegrees.Y),
                     UnturnedGodot.Net.NetAngles.QuantizePitch(_pitch + 90f),
-                    _stance, GlobalPosition, isOnFloor, primary, secondary));
+                    _stance, GlobalPosition, isOnFloor, sendPrimary, sendSecondary));
             }
         }
 
@@ -267,20 +284,21 @@ public partial class PlayerController : CharacterBody3D
     // decision immediately rather than waiting for the server to confirm it, exactly as PlayerEquipment
     // does — the swing has to start on the frame the button went down, and the server's copy of the same
     // rule reaches the other players a round trip later.
-    private void SimulateHands(EAttackInputFlags primary, EAttackInputFlags secondary)
+    private EPlayerGesture SimulateHands(EAttackInputFlags primary, EAttackInputFlags secondary)
     {
         if (primary == EAttackInputFlags.None && secondary == EAttackInputFlags.None)
-            return;
+            return EPlayerGesture.None;
 
         EPlayerGesture gesture = _equipment.Simulate(_tick, primary, secondary,
             new HandState { Stance = _stance });
         if (PlayerGestures.ClipFor(gesture) is not { } clip)
-            return;
+            return gesture;
 
         // Only the rig currently on screen. Both carry the same clips, so either shows the same swing —
         // but a hidden rig stops advancing its clock (CharacterSkeleton pauses _Process off screen), and
         // arming one would leave a stale gesture to thaw and replay the next time it is shown.
         (_thirdPerson ? _rig : _viewmodel)?.PlayOnce(clip);
+        return gesture;
     }
 
     private bool UpdateStance(bool moving, bool wantSprint)
