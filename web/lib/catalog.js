@@ -306,8 +306,15 @@ export async function scanMaps(fs, located, { platform = currentPlatform() } = {
     // MapCatalog.IsBundledWorkshopCopy compares this prefix with PathComparison, which folds case on
     // Windows. The fallback backend resolves `bundles/workshop/maps` there, so a case-sensitive test
     // would classify the game's own stale copy as an ordinary workshop map and list it twice.
+    //
+    // Folded with the same invariant upcase as the name slot below, because both model the same
+    // OrdinalIgnoreCase. Only the install path and `Bundles/Workshop/Maps` fall inside this prefix and
+    // those are ASCII, so the two foldings agree today — but leaving one function comparing the one .NET
+    // rule two different ways is how they stop agreeing later.
     const foldPathCase = isCaseInsensitiveFilesystem(platform);
-    const bundledPrefix = foldPathCase ? `${bundledWorkshopRoot}/`.toLowerCase() : `${bundledWorkshopRoot}/`;
+    const bundledPrefix = foldPathCase
+        ? simpleUpperCase(`${bundledWorkshopRoot}/`)
+        : `${bundledWorkshopRoot}/`;
 
     for (const { path, source } of searchDirectories(located)) {
         for (const candidate of await safe(fs.listDirectories(path), [])) {
@@ -338,7 +345,9 @@ export async function scanMaps(fs, located, { platform = currentPlatform() } = {
 
         // An unsupported official folder, and the game's own copy under Bundles/Workshop/Maps, can both
         // be stale stand-ins for a map the player is actually subscribed to.
-        const bundledCopy = (foldPathCase ? entry.path.toLowerCase() : entry.path).startsWith(bundledPrefix);
+        const bundledCopy = (foldPathCase ? simpleUpperCase(entry.path) : entry.path).startsWith(
+            bundledPrefix,
+        );
         const placeholder = bundledCopy || (entry.source === MapSource.Official && !entry.supported);
         // preferredByName is a Dictionary keyed with StringComparer.OrdinalIgnoreCase, which folds by
         // an invariant upcase — not by JavaScript's lowercase. The two disagree wherever a lowercase
