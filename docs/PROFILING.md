@@ -358,6 +358,47 @@ resident chunks, and recorded zero visible-set misses, stale results, and decode
 intentionally not summarized from one pair; use repeated reports because compositor and host scheduling
 noise is larger than the observed difference.
 
+## Material sharing, and why a cold load used to end up with more of them
+
+Materials are shared by complete state: the texture's exact content identity plus colour, blend, metallic,
+smoothness and cull. The texture half is the hash of the cached `.tex` file rather than the cache key that
+names it, so two keys holding byte-identical pixels get one material.
+
+That identity only exists once the texture has been extracted, and a cold load builds its materials before
+that: the mesh phase of a decode pass runs, the scene is built so the map is playable, and the `.resS` tail
+streams in afterwards. Every key therefore stood in for its own identity and the aliases never merged — the
+realise line read `0 exact texture-key aliases` on a cold load where a warm one read `22`, so a first
+session carried more material resources than every session after it, for the same scene.
+
+`ObjectStreamer` closes that at the end of streaming: it re-resolves the provisional identities on a worker
+(hashing the texture cache is not frame work), then re-groups the surfaces it recorded and points the
+aliases at one material. Read it from the log line it prints, against the realise line above it:
+
+```
+[stream] materials realised: 292 resources, 0 exact texture-key aliases
+[stream] material re-dedup: 226 identities settled, 38 surfaces re-pointed, 292 -> 273 material
+         resources, 22 exact texture-key aliases in 24 ms
+```
+
+Measured on PEI (Tier 3, this container), material resources in the built scene:
+
+| Path | Before | After |
+|---|---:|---:|
+| Cold (base + LOD1 libraries) | 292 + 177 = 469 | 273 |
+| Warm (base + LOD1 libraries) | 273 + 165 = 438 | 273 |
+
+Two things move that number, and they are worth keeping apart. Most of it is the lower LOD level: it draws
+with the same materials as the base level, and it used to build its own table, so every material existed
+twice. Sharing one table across both levels is what removes the 177/165, on the cold and warm path alike
+(`WorldBuilder` shares one too, which is why the structural gate's `uniqueMaterials` moved 455 -> 290). The
+re-dedup pass is the rest: 292 -> 273, which is exactly the warm number, so a first session and a second one
+now build the same scene.
+
+**Draw calls do not move**: 780 median on Tier 3 before and after. Surfaces are grouped inside each mesh by
+raw texture key, and a MultiMesh submits one draw per surface whichever material resource that surface
+points at. What this saves is material resources and their GPU parameter buffers, not submissions — measure
+it with the log lines above and `uniqueMaterials`, not with `runtime.drawCalls.median`.
+
 ## Object LOD ideas that were measured and dropped
 
 Recorded because each one looks obviously worth doing until it is measured, and the counts that rule

@@ -46,6 +46,9 @@ public partial class ObjectStreamer : Node
     private LevelInfo _level = null!;
 
     private TextureRegistry _registry = null!;
+    // One table for the whole load, so the base and lower-LOD libraries share their materials, and so the
+    // cold path can re-group them once the textures it built them without have landed.
+    private MaterialTable _materials = new();
     private List<PlacedObject> _objects = new();
     private ObjectAssetDatabase _db = null!;
     private Dictionary<Guid, FoliageAsset.Owned> _foliageAssets = new();
@@ -81,6 +84,12 @@ public partial class ObjectStreamer : Node
     private Task _coldBuildTask = Task.CompletedTask;
     private bool _readyToBuild;
     private bool _began;
+
+    // A warm load resolves every texture identity while it realises, so its materials are shared as far as
+    // they go the moment they are built. The cold path builds them before the textures exist, so it owes
+    // one more pass — this stays false until that pass has run, and the load state it reads is held open.
+    private bool _materialsSettled = true;
+    private Task _rededupTask = Task.CompletedTask;
 
     // The terrain's splat layer textures live in the same bundles as the objects, so this pass produces
     // them too and the terrain build takes them from here instead of decoding everything a second time.
@@ -148,6 +157,7 @@ public partial class ObjectStreamer : Node
         await ObserveStopped(_prepTask);
         await ObserveStopped(_streamTask);
         await ObserveStopped(_coldBuildTask);
+        await ObserveStopped(_rededupTask);
         _layerTextures.TrySetResult(_layersProduced);
         _completion.TrySetCanceled(_loadCancellation.Token);
     }
@@ -245,6 +255,11 @@ public partial class ObjectStreamer : Node
         if (_meshesExtracted && !_coldBuildStarted)
         {
             _coldBuildStarted = true;
+            // Every material this build creates is built against a texture cache that is still being
+            // written, so their identities — and the sharing that follows from them — are provisional
+            // until streaming settles.
+            _materialsSettled = false;
+            _materials.TrackSurfaces();
             // Held, not fire-and-forget: this build now spans frames, so CancelAsync has to be able to
             // wait for it before the load state it reads is torn down.
             _coldBuildTask = OnMeshesExtractedAsync();
@@ -393,7 +408,8 @@ public partial class ObjectStreamer : Node
     private async Task BuildAndFinish()
     {
         var phase = Stopwatch.StartNew();
-        var meshLibrary = await ModelLibrary.LoadStagedAsync(_cacheDir, _registry, this, _neededGuids);
+        var meshLibrary = await ModelLibrary.LoadStagedAsync(_cacheDir, _registry, this, _neededGuids,
+            sharedMaterials: _materials);
         Log.Print($"[stream] meshes realised: {phase.ElapsedMilliseconds} ms ({meshLibrary.Count})");
         await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
 
@@ -431,7 +447,7 @@ public partial class ObjectStreamer : Node
     private Task<Dictionary<Guid, ArrayMesh>> LoadLod1LibraryAsync() =>
         ObjectsBuilder.ObjectLodEnabled
             ? ModelLibrary.LoadStagedAsync(_cacheDir, _registry, this, _neededGuids,
-                ModelExtractor.Lod1Suffix)
+                ModelExtractor.Lod1Suffix, _materials)
             : Task.FromResult(new Dictionary<Guid, ArrayMesh>());
 
     private void BuildObjects(Dictionary<Guid, ArrayMesh> meshLibrary,
@@ -567,18 +583,21 @@ public partial class ObjectStreamer : Node
         }).CallDeferred();
     }
 
-    // Final release is gated by both consumers: Finished says the main-thread scene no longer needs the
-    // preparation graph; _texturesDone says no decoder can still be reading it. This also handles the warm
-    // layer-only path, where Finished may precede the background bundle pass.
+    // Final release is gated by all three consumers: Finished says the main-thread scene no longer needs
+    // the preparation graph; _texturesDone says no decoder can still be reading it; _materialsSettled says
+    // the cold path's material re-grouping has run, which reads the registry's identity map and turns the
+    // duplicate materials into garbage — the reclaim below is worth much less before it. This also handles
+    // the warm layer-only path, where Finished may precede the background bundle pass.
     private void TryFinalizeLoadState()
     {
-        if (_loadStateReleased || !_finished || (_streamStarted && !_texturesDone))
+        if (_loadStateReleased || !_finished || !_materialsSettled || (_streamStarted && !_texturesDone))
             return;
         _loadStateReleased = true;
 
         int retainedItems = _sources.Count + _plans.Count + _neededGuids.Count + _layerWants.Count +
             _layersProduced.Count + _foliageAssets.Count + _readyKeys.Count + _audioWants.Count;
         int registryEntries = _registry.ReleaseLoadingIndexes();
+        _materials.Release();
         _sources = Array.Empty<ContentSource>();
         _plans.Clear();
         _plans = new List<ContentExtraction.BundlePlan>();
@@ -621,7 +640,8 @@ public partial class ObjectStreamer : Node
     // worker; _Process applies them (once this registry exists) as their keys land in the queue.
     private async Task OnMeshesExtractedAsync()
     {
-        Dictionary<Guid, ArrayMesh> meshLibrary = ModelLibrary.Load(_cacheDir, _registry, _neededGuids);
+        Dictionary<Guid, ArrayMesh> meshLibrary = ModelLibrary.Load(_cacheDir, _registry, _neededGuids,
+            sharedMaterials: _materials);
 
         Dictionary<Guid, ArrayMesh> lod1Library = await LoadLod1LibraryAsync();
 
@@ -684,10 +704,65 @@ public partial class ObjectStreamer : Node
             Log.Print($"[stream] fully textured in {_coldWatch.Elapsed.TotalMilliseconds:0} ms " +
                 $"({_appliedTextures}/{_totalTextureKeys} keys)");
             _finished = true;
+            // Deliberately started before, and not awaited by, the finish: the world is already fully
+            // textured, so nothing the player sees waits on it. It only holds the load state open, which
+            // TryFinalizeLoadState checks for.
+            _rededupTask = RededuplicateMaterialsAsync();
             TryFinalizeLoadState();
             EmitFinishedAndReleaseNeededGuids();
             _completion.TrySetResult();
             SetProcess(false);
+        }
+    }
+
+    // Cold-load epilogue: give the materials the sharing a warm load got for free.
+    //
+    // Every material this load built was keyed on a texture identity that did not exist yet — the mesh
+    // phase runs before the texture phase of the same decode pass — so byte-identical textures produced a
+    // material each where a warm load produced one. Now that the textures have landed, resolve the
+    // identities for real and point the aliases at one material.
+    //
+    // The hashing is the whole cost, and it is pure IO+CPU over the texture cache, so it runs on a worker;
+    // only the surface reassignment comes back to the main thread.
+    private async Task RededuplicateMaterialsAsync()
+    {
+        try
+        {
+            var watch = Stopwatch.StartNew();
+            string cacheDir = _registry.TextureCacheDir;
+            var provisional = new List<string>(_registry.ProvisionalIdentityKeys);
+            int before = _materials.Count;
+            if (provisional.Count == 0)
+            {
+                _materials.Release();
+                return;
+            }
+
+            CancellationToken cancellation = _loadCancellation.Token;
+            Dictionary<string, string> resolved = await Task.Run(
+                () => TextureIdentity.ResolveAll(cacheDir, provisional, cancellation), cancellation);
+
+            // Back on the main thread (Godot's synchronisation context): everything below touches
+            // registry state and mesh resources.
+            if (cancellation.IsCancellationRequested)
+                return;
+
+            int settled = _registry.ResolvedIdentities(resolved);
+            (int repointed, int materials) = _materials.Rededuplicate(_registry);
+            _materials.Release();
+            Log.Print($"[stream] material re-dedup: {settled} identities settled, {repointed} surfaces "
+                + $"re-pointed, {before} -> {materials} material resources, "
+                + $"{_registry.MaterialAliasCount} exact texture-key aliases "
+                + $"in {watch.ElapsedMilliseconds} ms");
+        }
+        catch (OperationCanceledException) when (_loadCancellation.IsCancellationRequested)
+        {
+            // Expected when the map is abandoned while streaming.
+        }
+        finally
+        {
+            _materialsSettled = true;
+            TryFinalizeLoadState();
         }
     }
 }
