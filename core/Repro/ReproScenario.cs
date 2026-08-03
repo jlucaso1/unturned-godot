@@ -39,7 +39,7 @@ public sealed class ReproScenario
     private readonly List<ZombiePlayerView> _players = new();
     private readonly Dictionary<int, ZombieInstance> _byId = new();
     private readonly ReproHeightSampler? _heights;
-    private readonly BakedNavGraph? _graph;
+    private readonly ZombiePathQuery? _pathQuery;
 
     public ZombieSystem System { get; }
 
@@ -95,8 +95,8 @@ public sealed class ReproScenario
         {
             // Without a pathfinder handed in, the dump's own navmesh slice becomes one. It routes
             // correctly around the incident and nowhere else, which is the trade a self-contained
-            // bug report makes; pass the real map's flags to lift it.
-            _graph = _options.PathQuery == null ? BakedNavGraph.Build(flags) : null;
+            // bug report makes; pass the real map's flags (or a pathfinder) to lift it.
+            _pathQuery = _options.PathQuery ?? BakedNavGraph.Build(flags).TryPath;
             System.PathQuery = ResolvePath;
             System.PathReady = () => Oracle?.Ready() ?? true;
         }
@@ -225,19 +225,10 @@ public sealed class ReproScenario
     {
         if (Oracle != null && Oracle.TryPath(from, to, radius, path, out bool found))
             return found;
-        if (_options.PathQuery != null)
-        {
-            GeometryAnswers++;
-            return _options.PathQuery(from, to, path, radius);
-        }
-        if (_graph != null)
-        {
-            GeometryAnswers++;
-            return _graph.TryPath(from, to, path, radius);
-        }
-        UnansweredQueries++;
-        path.Clear();
-        return false;
+        // Installed only alongside a pathfinder, so there is always one to fall through to: routing is
+        // the one world question a dump can always answer from its own navmesh slice.
+        GeometryAnswers++;
+        return _pathQuery!(from, to, path, radius);
     }
 
     // The dump's heightfield patch, as the brain's ground sampler. Outside the patch it answers false,

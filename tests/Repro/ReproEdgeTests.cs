@@ -1,0 +1,495 @@
+using System;
+using System.Collections.Generic;
+using Godot;
+using UnturnedGodot.Data;
+using UnturnedGodot.Repro;
+using UnturnedGodot.Zombies;
+using Xunit;
+
+namespace UnturnedGodot.Tests.Repro;
+
+// The edges. A bug-repro harness is used exactly when something has already gone wrong, so the
+// degenerate inputs — a dump with nothing in it, a query where the world has no geometry, a body that
+// starts inside a wall — are not hypothetical: they are the day it gets used.
+public class ReproEdgeTests
+{
+    [Fact]
+    public void ADumpWithNoSimulationSectionStillReplays()
+    {
+        var scenario = new ReproScenario(new ReproDump());
+        ReproReplayReport report = scenario.Run(extraTicks: 3);
+        Assert.Equal(0, scenario.WindowTicks);
+        Assert.Equal(3, report.Ticks);
+        Assert.Equal(0, report.ComparedSamples);
+        Assert.Equal(0f, report.MeanPositionError);
+        Assert.False(report.ReproducesRecording);
+        Assert.Contains("diverges", report.Describe(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ADumpFromAMapWithoutANavmeshReplaysWithoutOne()
+    {
+        var dump = new ReproDump
+        {
+            World = new ReproWorldData { HasNavmesh = false, Bounds = { Box() } },
+            Zombies = new ReproZombieSection(),
+        };
+        Assert.Null(new ReproScenario(dump).System.PathQuery);
+
+        // And with neither source of answers, the world delegates are not installed at all: a resolver
+        // where the session had none is a different simulation, not a less detailed one.
+        var bare = new ReproScenario(dump, new ReproScenarioOptions
+        {
+            UseRecordedAnswers = false,
+            UseGeometry = false,
+        });
+        Assert.Null(bare.System.MoveResolver);
+        Assert.Null(bare.System.GroundSnap);
+        Assert.Null(bare.System.VisionBlocked);
+    }
+
+    // Handing the replay the real map's navmesh (or someone else's pathfinder) is what lifts it out of
+    // the dump's local slice.
+    [Fact]
+    public void AProvidedPathfinderIsUsedInsteadOfTheSlice()
+    {
+        var dump = new ReproDump
+        {
+            World = new ReproWorldData
+            {
+                HasNavmesh = true,
+                Bounds = { Box() },
+                Tables = { new ReproZombieTable { Name = "Test", Damage = 5 } },
+            },
+            Zombies = new ReproZombieSection
+            {
+                State = new ReproSystemState
+                {
+                    Zombies =
+                    {
+                        new ReproZombieRecord
+                        {
+                            Id = 1,
+                            Position = new[] { 10f, 0f, 10f },
+                            State = EZombieState.Chase,
+                            Target = 1,
+                        },
+                    },
+                },
+                Frames =
+                {
+                    new ReproFrame
+                    {
+                        Dt = 0.08f,
+                        Players =
+                        {
+                            new ReproPlayerSample
+                            {
+                                Id = 1,
+                                Position = new[] { 20f, 0f, 20f },
+                                Stance = UnturnedGodot.Player.EPlayerStance.Sprint,
+                            },
+                        },
+                    },
+                },
+            },
+        };
+
+        int asked = 0;
+        var scenario = new ReproScenario(dump, new ReproScenarioOptions
+        {
+            NavFlags = new[] { ReproWorlds.FlatField() },
+            PathQuery = (from, to, path, radius) =>
+            {
+                asked++;
+                path.Clear();
+                path.Add(to);
+                return true;
+            },
+        });
+        scenario.Run(extraTicks: 5);
+        Assert.True(asked > 0);
+        Assert.True(scenario.GeometryAnswers > 0);
+    }
+
+    private static ReproNavBound Box() => new()
+    {
+        Center = new[] { 20f, 0f, 20f },
+        Size = new[] { 200f, 100f, 200f },
+        MaxZombies = 8,
+        SpawnZombies = true,
+    };
+
+    // Every number the report prints, from a report built by hand — the shapes a replay produces on a
+    // bad day, without having to arrange a bad day.
+    [Fact]
+    public void TheReportDescribesDivergenceAndSpinning()
+    {
+        var report = new ReproReplayReport
+        {
+            Ticks = 10,
+            ComparedSamples = 4,
+            MaxPositionError = 2f,
+            SumPositionError = 4f,
+            MaxYawError = 30f,
+            StateMismatches = 1,
+            OracleHits = 5,
+            OracleMisses = 2,
+            GeometryAnswers = 3,
+            UnansweredQueries = 1,
+        };
+        report.Motion.Add(new ReproMotionSummary
+        {
+            Id = 7,
+            TravelledMetres = 20f,
+            NetDisplacementMetres = 0.2f,
+            YawChurnDegrees = 900f,
+            FinalState = EZombieState.Chase,
+        });
+        Assert.Equal(1f, report.MeanPositionError);
+        Assert.False(report.ReproducesRecording);
+        string text = report.Describe();
+        Assert.Contains("spinning in place", text, StringComparison.Ordinal);
+        Assert.Contains("state mismatches 1", text, StringComparison.Ordinal);
+
+        // A clean one reads the other way.
+        var clean = new ReproReplayReport { ComparedSamples = 1, MaxPositionError = 0.001f };
+        Assert.True(clean.ReproducesRecording);
+        Assert.Contains("reproduces the recording", clean.Describe(), StringComparison.Ordinal);
+
+        // Each condition on its own is enough to fail the claim.
+        Assert.False(new ReproReplayReport { ComparedSamples = 1, MaxYawError = 5f }
+            .ReproducesRecording);
+        Assert.False(new ReproReplayReport { ComparedSamples = 1, StateMismatches = 1 }
+            .ReproducesRecording);
+    }
+
+    [Fact]
+    public void AReplayThatEndsInADifferentStateCountsIt()
+    {
+        var dump = new ReproDump
+        {
+            World = new ReproWorldData { Bounds = { Box() } },
+            Zombies = new ReproZombieSection
+            {
+                State = new ReproSystemState
+                {
+                    Zombies = { new ReproZombieRecord { Id = 3, Position = new[] { 1f, 0f, 1f } } },
+                },
+                Frames =
+                {
+                    new ReproFrame
+                    {
+                        Dt = 0.08f,
+                        Zombies =
+                        {
+                            new ReproMotionSample
+                            {
+                                Id = 3,
+                                Position = new[] { 5f, 0f, 5f },
+                                State = EZombieState.Chase,
+                            },
+                        },
+                    },
+                },
+            },
+        };
+        ReproReplayReport report = new ReproScenario(dump).Run();
+        Assert.Equal(1, report.StateMismatches);
+        Assert.True(report.MaxPositionError > 5f);
+    }
+
+    [Fact]
+    public void TheSectionSummaryCountsWhatWasHappening()
+    {
+        var section = new ReproZombieSection
+        {
+            State = new ReproSystemState
+            {
+                RandomIsReproducible = false,
+                Zombies =
+                {
+                    new ReproZombieRecord { Id = 1, State = EZombieState.Chase, Target = 2 },
+                    new ReproZombieRecord { Id = 2, State = EZombieState.Idle, Target = byte.MaxValue },
+                },
+            },
+        };
+        string text = section.Describe();
+        Assert.Contains("2 (1 awake, 1 hunting)", text, StringComparison.Ordinal);
+        Assert.Contains("non-reproducible RNG", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheDumpSummaryShowsTheCameraAndTheWarnings()
+    {
+        var dump = new ReproDump
+        {
+            Meta = new ReproMeta
+            {
+                ShotCam = "-616.22,35.02,-66.58,-24.59,-95.1",
+                Warnings = { "the collision slice hit its ceiling" },
+                FocusPoint = new[] { -616.22f, 35.02f, -66.58f },
+            },
+        };
+        string text = dump.Describe();
+        Assert.Contains("SHOT_CAM=-616.22,35.02,-66.58,-24.59,-95.1", text, StringComparison.Ordinal);
+        Assert.Contains("! the collision slice hit its ceiling", text, StringComparison.Ordinal);
+        Assert.Contains("(-616.22, 35.02, -66.58)", text, StringComparison.Ordinal);
+
+        // The indented form is the same document, just readable.
+        Assert.Contains("\n", dump.ToJson(pretty: true), StringComparison.Ordinal);
+        Assert.NotNull(ReproDump.FromJson(dump.ToJson(pretty: true)));
+    }
+
+    [Fact]
+    public void TwoShortVectorsDescribeAsNothing() =>
+        Assert.Equal("(none)", ReproVector.Describe(new[] { 1f, 2f }));
+
+    [Fact]
+    public void AnOwnerOutsideTheTableIsUnknown()
+    {
+        ReproTriangles triangles = ReproTriangles.From(
+            new ReproWorlds.Geometry().Ground().Build(Vector3.Zero, 512f))!;
+        Assert.Equal("?", triangles.OwnerOf(-1));
+        Assert.Equal("ground", triangles.OwnerOf(0));
+    }
+
+    [Fact]
+    public void TheGridRejectsEveryDirectionOfOutside()
+    {
+        ReproTriangles triangles = ReproTriangles.From(new ReproWorlds.Geometry()
+            .Box("pole", new Vector3(0f, 1.5f, 0f), new Vector3(0.5f, 1.5f, 0.5f))
+            .Build(Vector3.Zero, 512f))!;
+        var found = new List<int>();
+        foreach ((float x, float z) in new[] { (-50f, 0f), (50f, 0f), (0f, -50f), (0f, 50f) })
+        {
+            triangles.Gather(x - 1f, z - 1f, x + 1f, z + 1f, found);
+            Assert.Empty(found);
+        }
+        triangles.Gather(-1f, -1f, 1f, 1f, found);
+        Assert.NotEmpty(found);
+    }
+
+    [Fact]
+    public void ACollisionWorldNeedsGeometryToExist()
+    {
+        Assert.Null(ReproCollisionWorld.From(null));
+        Assert.Null(ReproCollisionWorld.From(new ReproWorldData()));
+        ReproCollisionWorld world = ReproCollisionWorld.From(new ReproWorldData
+        {
+            Geometry = new ReproWorlds.Geometry().Ground().Build(Vector3.Zero, 512f),
+        })!;
+        Assert.Equal(2, world.TriangleCount);
+    }
+
+    // Nothing anywhere near: the sweep finds no candidates at all and delivers the whole step.
+    [Fact]
+    public void AStepWhereThereIsNoGeometryIsFree()
+    {
+        ReproCollisionWorld world = new(ReproTriangles.From(new ReproWorlds.Geometry()
+            .Box("pole", new Vector3(0f, 1.5f, 0f), new Vector3(0.5f, 1.5f, 0.5f))
+            .Build(Vector3.Zero, 512f))!);
+        Vector3 to = new(101f, 0f, 100f);
+        Assert.True(world.Resolve(new Vector3(100f, 0f, 100f), to, 0.4f).IsEqualApprox(to));
+        Assert.False(world.GroundSnap(new Vector3(100f, 0f, 100f), out _));
+    }
+
+    // A body that starts inside geometry stops where it is rather than being pushed out: a single
+    // CastMotion cannot depenetrate either, and inventing a shove would be a difference from the
+    // session, not a fidelity improvement.
+    [Fact]
+    public void ABodyThatStartsInsideAWallDoesNotAdvance()
+    {
+        ReproCollisionWorld world = new(ReproTriangles.From(new ReproWorlds.Geometry().Ground()
+            .Box("wall", new Vector3(10f, 1.5f, 0f), new Vector3(0.1f, 1.5f, 20f))
+            .Build(Vector3.Zero, 512f))!);
+        Vector3 from = new(10f, 0f, 0f);
+        Vector3 result = world.Resolve(from, from + new Vector3(0.5f, 0f, 0f), 0.4f);
+        Assert.True(result.X <= from.X + 0.001f, $"pushed through from inside: {result}");
+    }
+
+    // A wall the body is exactly coplanar with: the closest points coincide, so there is no direction
+    // between them and the surface's own normal is what the slide has to use.
+    [Fact]
+    public void AContactWithNoDirectionFallsBackToTheFaceNormal()
+    {
+        var geometry = new ReproWorlds.Geometry();
+        geometry.Triangle("plane", CollisionLayers.World,
+            new Vector3(10f, 0f, -5f), new Vector3(10f, 4f, -5f), new Vector3(10f, 0f, 5f));
+        ReproCollisionWorld world = new(ReproTriangles.From(geometry.Build(Vector3.Zero, 512f))!);
+        Vector3 result = world.Resolve(new Vector3(10f, 0f, 0f), new Vector3(10f, 0f, 1f), 0.4f);
+        Assert.True(float.IsFinite(result.X) && float.IsFinite(result.Z), result.ToString());
+    }
+
+    [Theory]
+    [InlineData(-1f, 0f)]    // west of the patch
+    [InlineData(0f, -1f)]    // north of it
+    [InlineData(100f, 0f)]   // east
+    [InlineData(0f, 100f)]   // south
+    public void TheHeightPatchRefusesEverythingOutsideIt(float x, float z)
+    {
+        ReproHeightSampler sampler = ReproHeightSampler.From(ReproCapture.SampleGround(
+            ReproWorlds.FlatGround, new Vector3(4f, 0f, 4f), radius: 4f, cell: 1f))!;
+        Assert.False(sampler.Sample(x, z, out _));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void AGapAtAnyCornerStopsTheInterpolation(int corner)
+    {
+        var patch = new ReproHeightPatch
+        {
+            Origin = new[] { 0f, 0f, 0f },
+            Cell = 1f,
+            Width = 2,
+            Depth = 2,
+            Heights = new[] { 1f, 1f, 1f, 1f },
+        };
+        patch.Heights[corner] = float.NaN;
+        Assert.False(ReproHeightSampler.From(patch)!.Sample(0.5f, 0.5f, out _));
+    }
+
+    [Fact]
+    public void ADegenerateHeightPatchIsNoSampler()
+    {
+        Assert.Null(ReproHeightSampler.From(new ReproHeightPatch { Width = 1, Depth = 4, Cell = 1f }));
+        Assert.Null(ReproHeightSampler.From(new ReproHeightPatch { Width = 4, Depth = 1, Cell = 1f }));
+    }
+
+    // Queries the recorder sees outside any tick — a probe, or the host's own lookup — are not part of
+    // the simulation and are left out of the window rather than attributed to whatever ticked last.
+    [Fact]
+    public void QueriesOutsideATickAreNotRecorded()
+    {
+        var geometry = new ReproWorlds.Geometry().Ground();
+        (ZombieSystem system, _, _) = ReproWorlds.Session(geometry);
+        var recorder = new ReproRecorder(system, new ReproRecorderOptions { WindowTicks = 4 });
+        recorder.Attach();
+
+        system.MoveResolver!(Vector3.Zero, Vector3.One, 0.4f);
+        system.GroundSnap!(Vector3.Zero, out _);
+        system.VisionBlocked!(Vector3.Zero, Vector3.One);
+        system.PathQuery!(Vector3.Zero, Vector3.One, new List<Vector3>(), 0.4f);
+        recorder.EndTick(system); // an end with no begin: nothing to attribute it to
+
+        for (int i = 0; i < 4; i++)
+            system.Tick(new[] { ReproWorlds.Player(new Vector3(10f, 0f, 10f)) }, ReproWorlds.TickRate);
+        ReproZombieSection section = recorder.Build(out _, out _);
+        Assert.All(section.Oracle.Move, value => Assert.True(float.IsFinite(value)));
+        Assert.True(section.Oracle.MoveCount > 0);
+    }
+
+    // A query made during a tick but outside any one zombie's turn (the host asking something of its
+    // own) is recorded, with no zombie attributed to it.
+    [Fact]
+    public void AQueryBetweenZombiesIsRecordedWithoutAnOwner()
+    {
+        var geometry = new ReproWorlds.Geometry().Ground();
+        (ZombieSystem system, _, _) = ReproWorlds.Session(geometry);
+        // Chained BEHIND the recorder: it runs inside the tick, after the recorder has opened it.
+        system.Observer = new AsksDuringTheTick(system);
+        var recorder = new ReproRecorder(system, new ReproRecorderOptions { WindowTicks = 4 });
+        recorder.Attach();
+
+        for (int i = 0; i < 4; i++)
+            system.Tick(new[] { ReproWorlds.Player(new Vector3(10f, 0f, 10f)) }, ReproWorlds.TickRate);
+
+        ReproZombieSection section = recorder.Build(out _, out _);
+        var owners = new List<float>();
+        for (int i = 1; i < section.Oracle.Ground.Count; i += ReproOracleData.GroundStride)
+            owners.Add(section.Oracle.Ground[i]);
+        Assert.Contains(-1f, owners);
+    }
+
+    // Nothing is kept when the ceiling is zero, and the drop count says exactly that.
+    [Fact]
+    public void AZeroCeilingRecordsNothing()
+    {
+        var geometry = new ReproWorlds.Geometry().Ground();
+        (ZombieSystem system, _, _) = ReproWorlds.Session(geometry);
+        var recorder = new ReproRecorder(system,
+            new ReproRecorderOptions { WindowTicks = 4, MaxCallsPerTick = 0 });
+        recorder.Attach();
+        for (int i = 0; i < 8; i++)
+            system.Tick(new[] { ReproWorlds.Player(new Vector3(10f, 0f, 10f)) }, ReproWorlds.TickRate);
+
+        ReproZombieSection section = recorder.Build(out _, out _);
+        Assert.Equal(0, section.Oracle.MoveCount);
+        Assert.Equal(0, section.Oracle.GroundCount);
+        Assert.Equal(0, section.Oracle.VisionCount);
+        Assert.Equal(0, section.Oracle.PathCount);
+        Assert.True(recorder.DroppedCalls > 0);
+    }
+
+    // Only the zombies that went away are forgotten.
+    [Fact]
+    public void OnlyVanishedZombiesLoseTheirTrack()
+    {
+        var geometry = new ReproWorlds.Geometry().Ground();
+        (ZombieSystem system, _, _) = ReproWorlds.Session(geometry);
+        ZombieInstance survivor = system.Zombies[0];
+        survivor.State = EZombieState.Chase;
+
+        ZombieSystemState twoOfThem = system.CaptureState();
+        ZombieInstance second = ZombieSystemState.Clone(survivor);
+        second.Id = 99;
+        twoOfThem.Zombies.Add(second);
+        system.RestoreState(twoOfThem);
+
+        var watcher = new ReproWatcher(new ReproWatcherOptions { WindowSeconds = 0.1f });
+        watcher.Poll(system, 0.08f, out _, out _);
+        watcher.Poll(system, 0.08f, out _, out _);
+
+        ZombieSystemState oneOfThem = system.CaptureState();
+        oneOfThem.Zombies.RemoveAt(1);
+        system.RestoreState(oneOfThem);
+        Assert.False(watcher.Poll(system, 0.08f, out _, out _));
+        Assert.False(watcher.Poll(system, 0.08f, out _, out _));
+    }
+
+    // A dump with no frames at all still has to answer "how long is a tick", and a frame that never
+    // recorded its own dt falls back to the server's rate rather than stepping by zero.
+    [Fact]
+    public void AMissingTickRateFallsBackToTheServerRate()
+    {
+        var withoutRate = new ReproDump
+        {
+            Meta = new ReproMeta { TickRate = 0f },
+            Zombies = new ReproZombieSection(),
+        };
+        Assert.Equal(3, new ReproScenario(withoutRate).Run(extraTicks: 3).Ticks);
+
+        var withoutDt = new ReproDump
+        {
+            World = new ReproWorldData { Bounds = { Box() } },
+            Zombies = new ReproZombieSection
+            {
+                State = new ReproSystemState
+                {
+                    Zombies = { new ReproZombieRecord { Id = 1, State = EZombieState.Return } },
+                },
+                Frames = { new ReproFrame { Dt = 0f } },
+            },
+        };
+        var scenario = new ReproScenario(withoutDt);
+        scenario.Run();
+        Assert.Equal(1, scenario.Tick);
+    }
+
+    private sealed class AsksDuringTheTick : IZombieTickObserver
+    {
+        private readonly ZombieSystem _system;
+
+        public AsksDuringTheTick(ZombieSystem system) => _system = system;
+
+        public void BeginTick(ZombieSystem system, IReadOnlyList<ZombiePlayerView> players, float dt) =>
+            _system.GroundSnap!(new Vector3(3f, 0f, 3f), out _);
+
+        public void EndTick(ZombieSystem system)
+        {
+        }
+    }
+}

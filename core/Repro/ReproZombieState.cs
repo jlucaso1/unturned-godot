@@ -120,19 +120,6 @@ public static class ReproZombieState
         return state;
     }
 
-    public static ReproMotionSample ToSample(ZombieInstance zombie)
-    {
-        ArgumentNullException.ThrowIfNull(zombie);
-        return new ReproMotionSample
-        {
-            Id = zombie.Id,
-            Position = ReproVector.From(zombie.Position),
-            Yaw = ReproVector.Round(zombie.Yaw),
-            State = zombie.State,
-            Target = zombie.TargetPlayer,
-        };
-    }
-
     public static ReproPlayerSample ToSample(in ZombiePlayerView player) => new()
     {
         Id = player.Id,

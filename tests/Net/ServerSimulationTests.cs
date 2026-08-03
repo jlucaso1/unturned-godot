@@ -390,4 +390,41 @@ public class ServerSimulationTests
         Assert.False(sim.TryGetState(1, out _));
         Assert.Empty(sim.Step());
     }
+
+    // Standing a player somewhere outright, for loading a bug-repro dump into a running session. The
+    // trusted-position baseline has to go with it: measured against where they used to be, the jump
+    // reads as a cheating client and the speed budget rubber-bands them straight back.
+    [Fact]
+    public void Teleport_MovesThePlayerAndAdoptsTheirNextClaim()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, new Vector3(0f, 10f, 0f));
+        sim.QueueInput(1, new InputCommand(_frame++, 0, 0, false, false, 0, 90,
+            EPlayerStance.Stand, new Vector3(1f, 10f, 0f)));
+        sim.Step();
+        Assert.Equal(new Vector3(1f, 10f, 0f), sim.GetState(1).Position);
+
+        var somewhereElse = new Vector3(-616.22f, 35.02f, -66.58f);
+        Assert.True(sim.Teleport(1, somewhereElse));
+        Assert.Equal(somewhereElse, sim.GetState(1).Position);
+        Assert.Equal(Vector3.Zero, sim.GetState(1).Velocity);
+
+        // The client, now standing there too, is believed rather than rejected as a 600 m sprint.
+        Vector3 clientSide = somewhereElse + new Vector3(0.2f, 0f, 0f);
+        sim.QueueInput(1, new InputCommand(_frame++, 0, 0, false, false, 0, 90,
+            EPlayerStance.Stand, clientSide));
+        sim.Step();
+        Assert.Equal(clientSide, sim.GetState(1).Position);
+        Assert.Equal(0, sim.RejectedPositions);
+    }
+
+    [Fact]
+    public void Teleport_RefusesUnknownPlayersAndNonFinitePositions()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Vector3.Zero);
+        Assert.False(sim.Teleport(9, Vector3.One));
+        Assert.False(sim.Teleport(1, new Vector3(float.NaN, 0f, 0f)));
+        Assert.Equal(Vector3.Zero, sim.GetState(1).Position);
+    }
 }

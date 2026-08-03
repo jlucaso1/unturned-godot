@@ -244,16 +244,15 @@ public sealed class ReproRecorder : IZombieTickObserver
         };
         uint from = _anchorTicks[anchor];
 
-        uint first = _tick > (uint)_recorded ? _tick - (uint)_recorded : 0;
-        if (from < first)
-            from = first;
+        // The ring holds exactly the last _recorded ticks, and an anchor is at most half a window old,
+        // so every tick from here on is still in it — no slot has to be checked for having been
+        // overwritten, and the frame index the oracle is written against cannot develop a gap.
+        uint first = Math.Max(from, _tick - (uint)_recorded);
 
         int index = 0;
-        for (uint t = from; t < _tick; t++, index++)
+        for (uint t = first; t < _tick; t++, index++)
         {
             TickBuffer buffer = _ring[(int)(t % (uint)_ring.Length)];
-            if (buffer.Tick != t)
-                continue; // evicted under us; the frame simply is not in the window
             section.Frames.Add(buffer.ToFrame());
             buffer.WriteOracle(section.Oracle, index);
         }
@@ -284,8 +283,7 @@ public sealed class ReproRecorder : IZombieTickObserver
             if (anchor < 0)
                 return ExternalTick;
             uint tick = _anchorTicks[anchor];
-            TickBuffer buffer = _ring[(int)(tick % (uint)_ring.Length)];
-            return buffer.Tick == tick ? buffer.ServerTick : ExternalTick;
+            return _ring[(int)(tick % (uint)_ring.Length)].ServerTick;
         }
     }
 

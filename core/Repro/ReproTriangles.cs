@@ -145,12 +145,18 @@ public sealed class ReproTriangles
         into.Clear();
         if (_cellItems.Length == 0)
             return;
+        // Entirely off the slice: nothing here, rather than the nearest border cell's contents, which
+        // a clamp would hand back and which is not what is at that spot.
+        int requestedX0 = Cell(minX) - _minCellX, requestedX1 = Cell(maxX) - _minCellX;
+        int requestedZ0 = Cell(minZ) - _minCellZ, requestedZ1 = Cell(maxZ) - _minCellZ;
+        if (requestedX1 < 0 || requestedX0 >= _cellsX || requestedZ1 < 0 || requestedZ0 >= _cellsZ)
+            return;
         _seen ??= new int[TriangleCount];
         _generation++;
-        int x0 = Math.Clamp(Cell(minX) - _minCellX, 0, _cellsX - 1);
-        int x1 = Math.Clamp(Cell(maxX) - _minCellX, 0, _cellsX - 1);
-        int z0 = Math.Clamp(Cell(minZ) - _minCellZ, 0, _cellsZ - 1);
-        int z1 = Math.Clamp(Cell(maxZ) - _minCellZ, 0, _cellsZ - 1);
+        int x0 = Math.Clamp(requestedX0, 0, _cellsX - 1);
+        int x1 = Math.Clamp(requestedX1, 0, _cellsX - 1);
+        int z0 = Math.Clamp(requestedZ0, 0, _cellsZ - 1);
+        int z1 = Math.Clamp(requestedZ1, 0, _cellsZ - 1);
         for (int x = x0; x <= x1; x++)
             for (int z = z0; z <= z1; z++)
             {

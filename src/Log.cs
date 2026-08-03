@@ -24,13 +24,13 @@ public static class Log
     // strings the logger has already formatted: no extra allocation, and a bounded memory cost.
     private const int TailLines = 256;
     private static readonly string[] Ring = new string[TailLines];
-    private static int _written;
+    private static int Written;
 
     private static string Remember(string line)
     {
         lock (Ring)
         {
-            Ring[_written++ % TailLines] = line;
+            Ring[Written++ % TailLines] = line;
         }
         return line;
     }
@@ -40,8 +40,8 @@ public static class Log
         lock (Ring)
         {
             var lines = new List<string>(TailLines);
-            int start = Math.Max(0, _written - TailLines);
-            for (int i = start; i < _written; i++)
+            int start = Math.Max(0, Written - TailLines);
+            for (int i = start; i < Written; i++)
                 if (Ring[i % TailLines] is { } line)
                     lines.Add(line);
             return lines;
