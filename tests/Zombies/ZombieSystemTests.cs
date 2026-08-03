@@ -1012,6 +1012,161 @@ public class ZombieSystemTests
         Assert.Equal(first.Trace, second.Trace);
     }
 
+    // PersistentlyBlockedCompleteRoute covers the case where the REPLACEMENT is rejected — a partial
+    // route with a worse endpoint loses to the stale one, so nothing touches the blocked-route
+    // evidence and the timeout fires. The case that stayed broken is the opposite one: a graph that
+    // has not been reconciled against the collision world answers every query with the same
+    // geometrically perfect line, so the replacement is ACCEPTED. Resetting the evidence on accept
+    // restarted the counter every RepathRate, which is shorter than BlockedRouteTimeout, so the
+    // counter could never reach the timeout and the zombie re-adopted the wall route forever.
+    [Fact]
+    public void AnImpassableRoute_IsInvalidatedEvenWhenEveryRepathReadoptsItVerbatim()
+    {
+        ImpassableRun run = RunAgainstAnImpassableCompleteRoute();
+
+        Assert.True(run.InvalidatedAtTick > 0, "the impassable route was never invalidated");
+        // Derived from the constants, not from observation: the counter must run uninterrupted from
+        // the first blocked tick to the timeout. FirstBlockedTick already carries one tick of
+        // evidence, so the remaining distance is one tick shorter than the whole timeout.
+        int ticksToTimeout = (int)MathF.Ceiling(ZombieSystem.BlockedRouteTimeout / ImpassableDt);
+        Assert.Equal(ticksToTimeout - 1, run.InvalidatedAtTick - run.FirstBlockedTick);
+        // ...and at least one repath happened inside that window, re-adopting the same route. Without
+        // it the run would prove nothing: a window with no repath in it never exercised the reset.
+        Assert.True(ZombieSystem.RepathRate < ZombieSystem.BlockedRouteTimeout);
+        Assert.True(run.QueriesAtInvalidation > run.QueriesAtFirstBlock,
+            $"no repath inside the blocked window: {run.QueriesAtFirstBlock} -> {run.QueriesAtInvalidation}");
+        // Invalidation asks for a replacement immediately, and drops the state that described the
+        // route it just threw away.
+        Assert.Equal(0f, run.RepathTimerAfter);
+        Assert.Equal(0, run.WaypointIndexAfter);
+        Assert.False(run.PartialAfter);
+    }
+
+    [Fact]
+    public void ImpassableRouteInvalidation_IsDeterministicAcrossIndependentSimulations()
+    {
+        ImpassableRun first = RunAgainstAnImpassableCompleteRoute();
+        ImpassableRun second = RunAgainstAnImpassableCompleteRoute();
+
+        Assert.Equal(first, second);
+    }
+
+    // The other side of the same rule: evidence is about DELIVERED motion, so a route that keeps
+    // moving the body must never accumulate any, however many times it is repathed.
+    [Fact]
+    public void ARouteThatKeepsDeliveringMotion_NeverAccumulatesBlockedEvidence()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        int queries = 0;
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            queries++;
+            path.Add(from);
+            path.Add(to);
+            return true;
+        };
+        system.MoveResolver = (from, to, radius) => to; // open ground
+
+        var player = Player(1, new Vector3(10, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
+        float worstEvidence = 0f;
+        int chaseTicks = 0, routelessTicks = 0;
+        for (int tick = 0; tick < 40; tick++)
+        {
+            system.Tick(new[] { player }, ImpassableDt);
+            if (zombie.State != EZombieState.Chase)
+                continue;
+            chaseTicks++;
+            worstEvidence = MathF.Max(worstEvidence, zombie.BlockedRouteTime);
+            if (zombie.PathPoints.Count == 0)
+                routelessTicks++;
+        }
+
+        Assert.True(chaseTicks > (int)MathF.Ceiling(ZombieSystem.RepathRate / ImpassableDt),
+            $"the chase was too short to span a repath: {chaseTicks} ticks");
+        Assert.Equal(0f, worstEvidence);
+        Assert.Equal(0, routelessTicks);
+        Assert.True(queries >= 2, "the run never repathed, so it never exercised the accept path");
+        Assert.True(zombie.Position.X > 3f, $"never made progress: {zombie.Position}");
+    }
+
+    // The boundary from the other direction: stopping one tick short of the timeout must leave the
+    // route intact, and the first tick that delivers motion must wipe the evidence. This is what
+    // stops the stricter rule from turning ordinary crowd jostling into a route discard.
+    [Fact]
+    public void EvidenceOneTickShortOfTheTimeout_IsWipedByTheFirstTickTheBodyMoves()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            path.Add(from);
+            path.Add(to);
+            return true;
+        };
+        bool blocked = true;
+        system.MoveResolver = (from, to, radius) => blocked ? from : to;
+
+        var player = Player(1, new Vector3(10, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
+        // Stop on the last tick from which one more blocked tick would fire the timeout. Driven off
+        // the evidence itself, because the pre-aggro ticks also go through the resolver.
+        int guard = 0;
+        while (zombie.BlockedRouteTime + ImpassableDt + 1e-4f < ZombieSystem.BlockedRouteTimeout)
+        {
+            system.Tick(new[] { player }, ImpassableDt);
+            Assert.True(++guard < 100, "the zombie never started accumulating blocked evidence");
+        }
+
+        Assert.NotEmpty(zombie.PathPoints); // one tick short: still trusted
+        Assert.True(zombie.BlockedRouteTime > 0f, "the near-miss never accumulated anything");
+        blocked = false;
+
+        system.Tick(new[] { player }, ImpassableDt);
+
+        Assert.Equal(0f, zombie.BlockedRouteTime);
+        Assert.NotEmpty(zombie.PathPoints);
+    }
+
+    private const float ImpassableDt = 0.1f;
+
+    private readonly record struct ImpassableRun(int FirstBlockedTick, int InvalidatedAtTick,
+        int QueriesAtFirstBlock, int QueriesAtInvalidation, float RepathTimerAfter,
+        int WaypointIndexAfter, bool PartialAfter);
+
+    private static ImpassableRun RunAgainstAnImpassableCompleteRoute()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        int queries = 0;
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            queries++;
+            path.Add(from);
+            path.Add(to); // ends exactly on the target: always "complete", so always accepted
+            return true;
+        };
+        system.MoveResolver = (from, to, radius) => from; // and always refused by the physics world
+
+        var player = Player(1, new Vector3(10, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
+        int firstBlocked = -1, queriesAtBlock = 0;
+        // Generous enough that a counter reset by even one repath would run out of ticks here.
+        int budget = (int)MathF.Ceiling(ZombieSystem.BlockedRouteTimeout / ImpassableDt) * 6;
+        for (int tick = 1; tick <= budget; tick++)
+        {
+            system.Tick(new[] { player }, ImpassableDt);
+            if (firstBlocked < 0 && zombie.PathPoints.Count > 0 && zombie.BlockedRouteTime > 0f)
+            {
+                firstBlocked = tick;
+                queriesAtBlock = queries;
+            }
+            if (firstBlocked > 0 && zombie.PathPoints.Count == 0)
+                return new ImpassableRun(firstBlocked, tick, queriesAtBlock, queries,
+                    zombie.RepathTimer, zombie.CurrentWaypointIndex, zombie.PathIsPartial);
+        }
+        return new ImpassableRun(firstBlocked, -1, queriesAtBlock, queries,
+            zombie.RepathTimer, zombie.CurrentWaypointIndex, zombie.PathIsPartial);
+    }
+
     private static (List<Vector3> Trace, int Queries, EZombieState State) RunWindowRecovery()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);

@@ -631,7 +631,15 @@ public sealed class ZombieSystem
                     zombie.CurrentWaypointIndex = 0;
                     zombie.TargetReached = false;
                     zombie.PathIsPartial = !complete;
-                    zombie.BlockedRouteTime = 0f;
+                    // The blocked-route evidence deliberately SURVIVES a repath. Accepting a route is
+                    // not evidence that it can be walked; only delivered motion is, and MoveTowards
+                    // already clears the counter on the first tick a route actually moves the body. The
+                    // reset used to live here, and it disarmed BlockedRouteTimeout in exactly the case
+                    // it exists for: a route that is geometrically perfect but physically impassable is
+                    // re-issued verbatim on every repath, so the counter restarted every RepathRate
+                    // (0.5 s, 7 server ticks) and peaked at 0.56 s — short of the 0.75 s the timeout
+                    // needs. A zombie standing in a wall therefore re-adopted the same wall route
+                    // forever instead of invalidating it and letting an executable partial route win.
                 }
             }
         }
