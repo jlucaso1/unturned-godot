@@ -429,7 +429,12 @@ public sealed class BakedNavGraph
                 // is not usable here — recast writes seams on round coordinates, so two collinear
                 // edges routinely lie ON a cell boundary and land on opposite sides of it, and the
                 // pair is then never compared. Closed ranges put a boundary edge in both.
-                float minX = MathF.Min(p.X, q.X), maxX = MathF.Max(p.X, q.X);
+                // Widened by the slack TryJoin itself allows, or stitching would depend on where the
+                // world grid happens to fall: two seams at x = 1.9996 and x = 2.0004 are within
+                // tolerance of each other and would join, but land either side of a 2 m column boundary
+                // and are never compared — while the same geometry translated a metre would work.
+                float minX = MathF.Min(p.X, q.X) - JoinPlanarSlack;
+                float maxX = MathF.Max(p.X, q.X) + JoinPlanarSlack;
                 int firstColumn = (int)MathF.Floor(minX / Cell), lastColumn = (int)MathF.Floor(maxX / Cell);
                 float dx = q.X - p.X, dz = q.Z - p.Z;
                 for (int column = firstColumn; column <= lastColumn; column++)
@@ -448,7 +453,8 @@ public sealed class BakedNavGraph
                         zTo = p.Z + (dz * ((spanTo - p.X) / dx));
                         if (zFrom > zTo) (zFrom, zTo) = (zTo, zFrom);
                     }
-                    int firstRow = (int)MathF.Floor(zFrom / Cell), lastRow = (int)MathF.Floor(zTo / Cell);
+                    int firstRow = (int)MathF.Floor((zFrom - JoinPlanarSlack) / Cell);
+                    int lastRow = (int)MathF.Floor((zTo + JoinPlanarSlack) / Cell);
                     for (int row = firstRow; row <= lastRow; row++)
                     {
                         if (!grid.TryGetValue((column, row), out List<int>? bucket))
@@ -536,18 +542,23 @@ public sealed class BakedNavGraph
 
             // The overlap's ends are ends of one edge or the other, so the portal is still a pair of
             // vertices that already exist.
-            portalA = VertexAtParameter(lo, left.A, left.B, right.A, right.B, tr, ts);
-            portalB = VertexAtParameter(hi, left.A, left.B, right.A, right.B, tr, ts);
+            // Matched in METRES, not in a fraction of the edge. A fixed tolerance on the parameter is a
+            // distance that grows with the edge: at 1e-4 of a 2 km edge it is 0.2 m, so an overlap
+            // starting 0.1 m inside the spanning edge would match its endpoint instead and the portal
+            // would be handed ground the other face does not own.
+            float slack = JoinPlanarSlack / length;
+            portalA = VertexAtParameter(lo, left.A, left.B, right.A, right.B, tr, ts, slack);
+            portalB = VertexAtParameter(hi, left.A, left.B, right.A, right.B, tr, ts, slack);
             return portalA >= 0 && portalB >= 0 && portalA != portalB;
         }
 
         private static int VertexAtParameter(float t, int leftA, int leftB, int rightA, int rightB,
-            float tr, float ts)
+            float tr, float ts, float slack)
         {
-            if (MathF.Abs(t) <= 1e-4f) return leftA;
-            if (MathF.Abs(t - 1f) <= 1e-4f) return leftB;
-            if (MathF.Abs(t - tr) <= 1e-4f) return rightA;
-            if (MathF.Abs(t - ts) <= 1e-4f) return rightB;
+            if (MathF.Abs(t) <= slack) return leftA;
+            if (MathF.Abs(t - 1f) <= slack) return leftB;
+            if (MathF.Abs(t - tr) <= slack) return rightA;
+            if (MathF.Abs(t - ts) <= slack) return rightB;
             return -1;
         }
 
