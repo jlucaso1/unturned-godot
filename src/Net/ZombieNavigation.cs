@@ -25,6 +25,7 @@ public sealed class ZombieNavigation
     private readonly bool _useBakedGraph;
     private BakedNavGraph? _bakedGraph;
     private BakedNavGraph? _progressGraph; // small-map fallback while NavigationServer synchronizes
+    private Task? _wideBodyBuild; // one-shot: the CPU graph a body wider than the default needs
     private bool _synced; // the map's FIRST (async) synchronization pass has completed (map_changed)
     private bool _ready;  // a real route resolved: the map actually answers queries
     private bool _published;
@@ -141,8 +142,12 @@ public sealed class ZombieNavigation
                     return _progressGraph.TryPath(from, to, path, radius);
                 if (!ready)
                     return false;
-                // Nothing built to serve the wider body. The server's route for the default one beats
-                // no route at all, so fall through rather than refuse.
+                // Nothing built to serve the wider body — which is the dedicated-server flow, where the
+                // map is published immediately and collision reconciliation never runs, so nothing ever
+                // creates the CPU graph and the fallback above has nothing to fall back to. Start it,
+                // once, and take the server's default-radius route in the meantime: a route aimed
+                // slightly too close beats no route, and the caller keeps its previous one on false.
+                EnsureWideBodyGraph();
             }
             Vector3[] points = NavigationServer3D.MapGetPath(map, from, to, optimize: true);
             if (points.Length < 2)
@@ -509,6 +514,27 @@ public sealed class ZombieNavigation
             await PersistCheckpointAsync(cachePath, fingerprint, triangleCounts);
         Log.Print($"[nav] collision reconciliation submitted in {total.ElapsedMilliseconds} ms");
         ReleaseReconciliationState();
+    }
+
+    // Built on first demand rather than at startup. A server that never spawns a body wider than the
+    // default pays nothing, and BakedNavGraph.Build over a 100k-face map is far too much to do on the
+    // tick that asked for the route — so it goes to a worker and the query that triggered it falls
+    // through this once.
+    //
+    // Reading _unreachable off the tick is safe HERE specifically: this only runs when _progressGraph
+    // is null, which in turn only happens on the flow that never reconciles, so the dictionary is empty
+    // and nobody is writing to it. The interactive flow builds the graph itself and never reaches this.
+    // The assignment is a reference store, which is atomic, and the reader takes whatever it sees.
+    private void EnsureWideBodyGraph()
+    {
+        if (_wideBodyBuild != null || _disposed)
+            return;
+        _wideBodyBuild = Task.Run(() =>
+        {
+            BakedNavGraph graph = BakedNavGraph.Build(_flags, _unreachable);
+            if (!_disposed && !AppShutdown.IsShuttingDown)
+                _progressGraph = graph;
+        });
     }
 
     private async Task PublishProgressGraphAsync()
