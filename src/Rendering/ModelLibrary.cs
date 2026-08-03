@@ -27,7 +27,7 @@ public static class ModelLibrary
     // the render loop on a time budget so the loading screen keeps animating.
     public static async System.Threading.Tasks.Task<Dictionary<Guid, ArrayMesh>> LoadStagedAsync(
         string cacheDir, TextureRegistry registry, Node yieldOn, IReadOnlySet<Guid>? only = null,
-        string suffix = ".mesh")
+        string suffix = ".mesh", MaterialTable? sharedMaterials = null)
     {
         var library = new Dictionary<Guid, ArrayMesh>();
         if (!Directory.Exists(cacheDir))
@@ -39,7 +39,7 @@ public static class ModelLibrary
         // Yield on a time budget rather than every N meshes: a fixed count either stalls the frame on
         // heavy meshes or, far worse here, spends most of the phase waiting for frames it did not need —
         // a thousand-mesh map was paying fifty frame waits to realise work worth a handful.
-        var materials = new Dictionary<(string, Color, UnityMaterial.Blend, float, float, EShaderCull), Material>();
+        MaterialTable materials = sharedMaterials ?? new MaterialTable();
         long budget = (long)(System.Diagnostics.Stopwatch.Frequency * RealiseSecondsPerFrame);
         long until = System.Diagnostics.Stopwatch.GetTimestamp() + budget;
 
@@ -114,12 +114,15 @@ public static class ModelLibrary
     // Phase 2 — main thread: GetMesh creates the RenderingServer resource, and each surface takes the
     // deduplicated material for its texture key (materials are GPU resources too).
     private static ArrayMesh Realise(in PreparedMesh prepared, TextureRegistry registry,
-        Dictionary<(string, Color, UnityMaterial.Blend, float, float, EShaderCull), Material> materials)
+        MaterialTable materials)
     {
         ArrayMesh mesh = prepared.Importer!.GetMesh();
         int surfaces = mesh.GetSurfaceCount();
         for (int i = 0; i < surfaces && i < prepared.Surfaces.Count; i++)
+        {
             mesh.SurfaceSetMaterial(i, MaterialFor(prepared.Surfaces[i], registry, materials));
+            materials.Track(mesh, i, prepared.Surfaces[i]);
+        }
         return mesh;
     }
 
@@ -155,7 +158,7 @@ public static class ModelLibrary
     // texture key so the caller can apply textures later (registry.ApplyAllAvailable for a warm cache, or
     // progressively as ExtractTextures streams them in on a cold load).
     public static Dictionary<Guid, ArrayMesh> Load(string cacheDir, TextureRegistry registry,
-        IReadOnlySet<Guid>? only = null, string suffix = ".mesh")
+        IReadOnlySet<Guid>? only = null, string suffix = ".mesh", MaterialTable? sharedMaterials = null)
     {
         var library = new Dictionary<Guid, ArrayMesh>();
         if (!Directory.Exists(cacheDir))
@@ -163,8 +166,9 @@ public static class ModelLibrary
 
         // Deduplicate materials across every mesh: submeshes sharing a texture key, color and blend share
         // one StandardMaterial3D (fewer material objects + GPU parameter buffers, fewer render-state
-        // changes). Scoped to this load so nothing leaks between calls.
-        var materials = new Dictionary<(string, Color, UnityMaterial.Blend, float, float, EShaderCull), Material>();
+        // changes). Scoped to this load unless the caller passes its own table — the streamer does, so the
+        // base and lower-LOD libraries of one load share materials instead of building two of each.
+        MaterialTable materials = sharedMaterials ?? new MaterialTable();
         var sources = new List<(Guid Item, string Path)>(CachedMeshPaths(cacheDir, only, suffix));
         IReadOnlyList<ExactFileGroups.Group<Guid>> groups = ExactFileGroups.Build(sources, DeduplicateGpu);
         for (int start = 0; start < groups.Count; start += PrepareChunk)
@@ -362,12 +366,12 @@ public static class ModelLibrary
         return current; // already nearest (or unknown): keep as is
     }
 
-    private static Material MaterialFor(CachedSubmesh sm, TextureRegistry registry,
-        Dictionary<(string, Color, UnityMaterial.Blend, float, float, EShaderCull), Material> cache)
+    private static Material MaterialFor(CachedSubmesh sm, TextureRegistry registry, MaterialTable cache)
     {
         string textureIdentity = registry.MaterialIdentity(sm.TextureKey);
-        var key = (textureIdentity, sm.Color, sm.Blend, sm.Metallic, sm.Smoothness, sm.Cull);
-        if (cache.TryGetValue(key, out Material? shared))
+        var key = new MaterialTable.Key(textureIdentity, sm.Color, sm.Blend, sm.Metallic, sm.Smoothness,
+            sm.Cull);
+        if (cache.TryGet(key, out Material shared))
         {
             registry.Register(sm.TextureKey, shared);
             return shared; // already built and registered under this texture key
@@ -378,7 +382,7 @@ public static class ModelLibrary
             var foliage = new ShaderMaterial { Shader = CutoutVariant(nearest: false, sm.Cull) };
             foliage.SetShaderParameter("tint", sm.Color);
             registry.Register(sm.TextureKey, foliage);
-            cache[key] = foliage;
+            cache.Add(key, foliage);
             return foliage;
         }
 
@@ -410,7 +414,7 @@ public static class ModelLibrary
         registry.Register(sm.TextureKey, material);
         if (sm.Blend == UnityMaterial.Blend.Alpha)
             material.Transparency = BaseMaterial3D.TransparencyEnum.Alpha; // blend (glass)
-        cache[key] = material;
+        cache.Add(key, material);
         return material;
     }
 

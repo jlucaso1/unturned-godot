@@ -25,6 +25,14 @@ public partial class ObjectStreamer : Node
     [Signal] public delegate void ProgressEventHandler(int applied, int total);
     [Signal] public delegate void FinishedEventHandler();
 
+    // The world is finished AND no decode pass is still running. Finished alone does not say the second
+    // half: a warm mesh cache with cold terrain layers builds and finishes the scene while its bundle
+    // pass is still streaming. Anything that would open a bundle of its own — the deferred audio
+    // extraction — has to wait for this one instead, or the two decode the same file at the same time,
+    // recreating the multi-gigabyte peak the passes are serialized to avoid and racing over the same
+    // cache files.
+    [Signal] public delegate void ExtractionFinishedEventHandler();
+
     // GPU upload budget per frame while streaming. The ceiling is what measured well on a fast machine;
     // the live budget is clamped down from it by the frame time actually being achieved, so a machine that
     // drops to 20 fps backs off and hands the frame to the game rather than to texture streaming.
@@ -38,6 +46,9 @@ public partial class ObjectStreamer : Node
     private LevelInfo _level = null!;
 
     private TextureRegistry _registry = null!;
+    // One table for the whole load, so the base and lower-LOD libraries share their materials, and so the
+    // cold path can re-group them once the textures it built them without have landed.
+    private MaterialTable _materials = new();
     private List<PlacedObject> _objects = new();
     private ObjectAssetDatabase _db = null!;
     private Dictionary<Guid, FoliageAsset.Owned> _foliageAssets = new();
@@ -74,6 +85,12 @@ public partial class ObjectStreamer : Node
     private bool _readyToBuild;
     private bool _began;
 
+    // A warm load resolves every texture identity while it realises, so its materials are shared as far as
+    // they go the moment they are built. The cold path builds them before the textures exist, so it owes
+    // one more pass — this stays false until that pass has run, and the load state it reads is held open.
+    private bool _materialsSettled = true;
+    private Task _rededupTask = Task.CompletedTask;
+
     // The terrain's splat layer textures live in the same bundles as the objects, so this pass produces
     // them too and the terrain build takes them from here instead of decoding everything a second time.
     private readonly TaskCompletionSource<IReadOnlyDictionary<Guid, CachedTexture>> _layerTextures =
@@ -81,6 +98,12 @@ public partial class ObjectStreamer : Node
     private readonly ConcurrentDictionary<Guid, CachedTexture> _layersProduced = new();
     private Dictionary<string, TerrainLayerPlan.BundleWants> _layerWants = new();
     private int _layersOutstanding;
+
+    // The movement/zombie audio each bundle owes, by bundle path. Planned here rather than at the player's
+    // spawn so the decode pass can carry the clips out of the same forward read as the textures: they sit
+    // in the .resource node at the end of the blob the pass already walks to. Extracting them afterwards
+    // meant a second whole-bundle LZMA decode and left its transient heap resident for the session.
+    private Dictionary<string, AudioExtractor.Request> _audioWants = new(StringComparer.Ordinal);
 
     // Completes with every layer texture this pass decoded (empty when the cache already had them all, or
     // when nothing was decoded). Always completes: the terrain build waits on it.
@@ -139,6 +162,7 @@ public partial class ObjectStreamer : Node
         await ObserveStopped(_prepTask);
         await ObserveStopped(_streamTask);
         await ObserveStopped(_coldBuildTask);
+        await ObserveStopped(_rededupTask);
         _layerTextures.TrySetResult(_layersProduced);
         _completion.TrySetCanceled(_loadCancellation.Token);
     }
@@ -173,6 +197,7 @@ public partial class ObjectStreamer : Node
         _plans = ContentExtraction.Plan(_sources, _cacheDir, _textureCacheDir, _neededGuids, _db, _foliageAssets,
             new HashSet<string>(_layerWants.Keys, StringComparer.Ordinal));
         _cold = ContentExtraction.TotalMissing(_plans) > 0;
+        _audioWants = PlanAudio(unturnedPath);
 
         // Start decoding here rather than in Begin(): the bundles are the longest pole of a first
         // load, and nothing about them depends on the terrain, the roads or the player. Running them
@@ -235,6 +260,11 @@ public partial class ObjectStreamer : Node
         if (_meshesExtracted && !_coldBuildStarted)
         {
             _coldBuildStarted = true;
+            // Every material this build creates is built against a texture cache that is still being
+            // written, so their identities — and the sharing that follows from them — are provisional
+            // until streaming settles.
+            _materialsSettled = false;
+            _materials.TrackSurfaces();
             // Held, not fire-and-forget: this build now spans frames, so CancelAsync has to be able to
             // wait for it before the load state it reads is torn down.
             _coldBuildTask = OnMeshesExtractedAsync();
@@ -279,6 +309,42 @@ public partial class ObjectStreamer : Node
             // The terrain build resolves them itself if this could not be planned.
             return new Dictionary<string, TerrainLayerPlan.BundleWants>();
         }
+    }
+
+    // Which definitions each bundle still owes the audio cache, keyed by bundle path so the decode pass
+    // can pick up its own. A scan of the physics materials only — the same cheap .dat walk the player's
+    // movement audio does at spawn — so planning it twice costs a directory read, and a request whose
+    // definitions are all cached is dropped here rather than handed to the pass as an empty want.
+    private Dictionary<string, AudioExtractor.Request> PlanAudio(string unturnedPath)
+    {
+        var wants = new Dictionary<string, AudioExtractor.Request>(StringComparer.Ordinal);
+
+        // Nothing plays these when no player spawns. FREECAM and STEP_PROBE are exactly the modes used to
+        // measure the load, so making them read the .resource tail and rebuild clips no session will ever
+        // hear both slows the measurement and taxes the thing being measured. A later ordinary session
+        // fills the cache.
+        if (OS.GetEnvironment("STEP_PROBE").Length > 0
+            || EnvFlag.IsOn(OS.GetEnvironment("FREECAM"), whenUnset: false))
+        {
+            return wants;
+        }
+
+        try
+        {
+            string audioCacheDir = ProjectSettings.GlobalizePath("user://audio_cache");
+            foreach (AudioExtractor.Request request in MovementAudioRequests.For(_sources,
+                MovementAudioRequests.ScanPhysicsMaterials(_sources), unturnedPath, audioCacheDir))
+            {
+                if (request.BundlePath.Length > 0 && !AudioExtractor.IsSatisfied(request))
+                    wants[request.BundlePath] = request;
+            }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // The player's own deferred extraction still runs and reports whatever went wrong there.
+        }
+
+        return wants;
     }
 
     private void LoadPlacements()
@@ -347,7 +413,8 @@ public partial class ObjectStreamer : Node
     private async Task BuildAndFinish()
     {
         var phase = Stopwatch.StartNew();
-        var meshLibrary = await ModelLibrary.LoadStagedAsync(_cacheDir, _registry, this, _neededGuids);
+        var meshLibrary = await ModelLibrary.LoadStagedAsync(_cacheDir, _registry, this, _neededGuids,
+            sharedMaterials: _materials);
         Log.Print($"[stream] meshes realised: {phase.ElapsedMilliseconds} ms ({meshLibrary.Count})");
         await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
 
@@ -379,49 +446,13 @@ public partial class ObjectStreamer : Node
         _neededGuids = new HashSet<Guid>();
     }
 
-    // The one-time load allocates large transient buffers — mesh-cache reads, the foliage transform pool,
-    // native Godot.Collections.Array copies, and on a cold load the ~1.4 GB masterbundle decode. The
-    // workstation GC holds those freed segments rather than returning them to the OS, so steady-state RSS
-    // stays inflated long after load. Force one compacting collection (including the large-object heap) once
-    // load has settled to hand the memory back. One-time cost, off the steady frame loop.
-    private static void ReclaimLoadMemory()
-    {
-        var sw = Stopwatch.StartNew();
-        long before = ProcessRssMib();
-        int passes = int.TryParse(System.Environment.GetEnvironmentVariable("UG_RECLAIM_PASSES"), out int configured)
-            ? Math.Clamp(configured, 1, 2)
-            : 1;
-        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-        GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
-        GC.WaitForPendingFinalizers();
-        if (passes == 2)
-            GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
-        if (before > 0) // Linux only (from /proc); skip the line where RSS is unavailable
-            Log.Print($"[stream] post-load reclaim: RSS {before} -> {ProcessRssMib()} MB " +
-                $"(managed {GC.GetTotalMemory(false) >> 20} MB, {passes} pass(es)) " +
-                $"in {sw.ElapsedMilliseconds} ms");
-    }
-
-    // VmRSS from /proc/self/status in MiB (Linux); 0 elsewhere. Diagnostic only.
-    private static long ProcessRssMib()
-    {
-        try
-        {
-            foreach (string line in File.ReadLines("/proc/self/status"))
-                if (line.StartsWith("VmRSS:", StringComparison.Ordinal))
-                    return long.Parse(line.Split(':')[1].Trim().Split(' ')[0]) / 1024;
-        }
-        catch (Exception) { /* non-Linux or unreadable — diagnostic only */ }
-        return 0;
-    }
-
     // The authored lower levels go through the same staged realise as the base library, on both the warm
     // and the cold path, or half of a map's object geometry blocks the main thread in one frame and
     // freezes the loading animation.
     private Task<Dictionary<Guid, ArrayMesh>> LoadLod1LibraryAsync() =>
         ObjectsBuilder.ObjectLodEnabled
             ? ModelLibrary.LoadStagedAsync(_cacheDir, _registry, this, _neededGuids,
-                ModelExtractor.Lod1Suffix)
+                ModelExtractor.Lod1Suffix, _materials)
             : Task.FromResult(new Dictionary<Guid, ArrayMesh>());
 
     private void BuildObjects(Dictionary<Guid, ArrayMesh> meshLibrary,
@@ -493,9 +524,11 @@ public partial class ObjectStreamer : Node
                     cancellation.ThrowIfCancellationRequested();
                     TerrainLayerPlan.BundleWants layers = LayerWantsFor(plan);
                     long megabytes = new FileInfo(plan.Source.BundlePath).Length >> 20;
+                    AudioExtractor.Request? audio = _audioWants.GetValueOrDefault(plan.Source.BundlePath);
                     AppShutdown.PrintUnlessQuitting($"[stream] decoding {plan.Source.Name} ({megabytes} MB) for "
-                        + $"{plan.Missing.Count} meshes, {plan.MissingTextures.Count} textures and "
-                        + $"{layers.ByContainerPath.Count} terrain layers…");
+                        + $"{plan.Missing.Count} meshes, {plan.MissingTextures.Count} textures, "
+                        + $"{layers.ByContainerPath.Count} terrain layers and "
+                        + $"{audio?.DefPaths.Count ?? 0} audio definitions…");
                     ModelExtractor.StreamExtract(plan.Source.BundlePath, plan.Source.CacheTag,
                         plan.Source.ObjectsDir, plan.Source.TreesDir, plan.Source.AssetsDir,
                         plan.Needed, _cacheDir, _textureCacheDir, _db,
@@ -505,7 +538,7 @@ public partial class ObjectStreamer : Node
                                 DeferUnlessStopped(OnMeshPhaseDone);
                         },
                         onTextureWritten: key => _readyKeys.Enqueue(key),
-                        foliageAssets: plan.Foliage, isCoreBundle: plan.Source.IsCore,
+                        foliageAssets: plan.Foliage, isCoreBundle: plan.Source.IsCore, audio: audio,
                         layerWantsByPath: layers.ByContainerPath,
                         onLayerTexture: (material, texture) =>
                         {
@@ -555,23 +588,28 @@ public partial class ObjectStreamer : Node
         }).CallDeferred();
     }
 
-    // Final release is gated by both consumers: Finished says the main-thread scene no longer needs the
-    // preparation graph; _texturesDone says no decoder can still be reading it. This also handles the warm
-    // layer-only path, where Finished may precede the background bundle pass.
+    // Final release is gated by all three consumers: Finished says the main-thread scene no longer needs
+    // the preparation graph; _texturesDone says no decoder can still be reading it; _materialsSettled says
+    // the cold path's material re-grouping has run, which reads the registry's identity map and turns the
+    // duplicate materials into garbage — the reclaim below is worth much less before it. This also handles
+    // the warm layer-only path, where Finished may precede the background bundle pass.
     private void TryFinalizeLoadState()
     {
-        if (_loadStateReleased || !_finished || (_streamStarted && !_texturesDone))
+        if (_loadStateReleased || !_finished || !_materialsSettled || (_streamStarted && !_texturesDone))
             return;
         _loadStateReleased = true;
 
         int retainedItems = _sources.Count + _plans.Count + _neededGuids.Count + _layerWants.Count +
-            _layersProduced.Count + _foliageAssets.Count + _readyKeys.Count;
+            _layersProduced.Count + _foliageAssets.Count + _readyKeys.Count + _audioWants.Count;
         int registryEntries = _registry.ReleaseLoadingIndexes();
+        _materials.Release();
         _sources = Array.Empty<ContentSource>();
         _plans.Clear();
         _plans = new List<ContentExtraction.BundlePlan>();
         _layerWants.Clear();
         _layerWants = new Dictionary<string, TerrainLayerPlan.BundleWants>();
+        _audioWants.Clear();
+        _audioWants = new Dictionary<string, AudioExtractor.Request>(StringComparer.Ordinal);
         _layersProduced.Clear();
         while (_readyKeys.TryDequeue(out _)) { }
         _foliageAssets.Clear();
@@ -586,7 +624,10 @@ public partial class ObjectStreamer : Node
         _prepTask = Task.CompletedTask;
         Log.Print($"[stream] released loading state: {retainedItems} items + " +
             $"{registryEntries} texture-index entries");
-        ReclaimLoadMemory();
+        LoadMemory.Reclaim("post-load");
+        // After the reclaim: whatever this releases is the one-time work's, and a listener that starts a
+        // decode of its own should not have its first allocations compacted out from under it.
+        EmitSignal(SignalName.ExtractionFinished);
     }
 
     private TerrainLayerPlan.BundleWants LayerWantsFor(ContentExtraction.BundlePlan plan) =>
@@ -604,7 +645,8 @@ public partial class ObjectStreamer : Node
     // worker; _Process applies them (once this registry exists) as their keys land in the queue.
     private async Task OnMeshesExtractedAsync()
     {
-        Dictionary<Guid, ArrayMesh> meshLibrary = ModelLibrary.Load(_cacheDir, _registry, _neededGuids);
+        Dictionary<Guid, ArrayMesh> meshLibrary = ModelLibrary.Load(_cacheDir, _registry, _neededGuids,
+            sharedMaterials: _materials);
 
         Dictionary<Guid, ArrayMesh> lod1Library = await LoadLod1LibraryAsync();
 
@@ -667,10 +709,65 @@ public partial class ObjectStreamer : Node
             Log.Print($"[stream] fully textured in {_coldWatch.Elapsed.TotalMilliseconds:0} ms " +
                 $"({_appliedTextures}/{_totalTextureKeys} keys)");
             _finished = true;
+            // Deliberately started before, and not awaited by, the finish: the world is already fully
+            // textured, so nothing the player sees waits on it. It only holds the load state open, which
+            // TryFinalizeLoadState checks for.
+            _rededupTask = RededuplicateMaterialsAsync();
             TryFinalizeLoadState();
             EmitFinishedAndReleaseNeededGuids();
             _completion.TrySetResult();
             SetProcess(false);
+        }
+    }
+
+    // Cold-load epilogue: give the materials the sharing a warm load got for free.
+    //
+    // Every material this load built was keyed on a texture identity that did not exist yet — the mesh
+    // phase runs before the texture phase of the same decode pass — so byte-identical textures produced a
+    // material each where a warm load produced one. Now that the textures have landed, resolve the
+    // identities for real and point the aliases at one material.
+    //
+    // The hashing is the whole cost, and it is pure IO+CPU over the texture cache, so it runs on a worker;
+    // only the surface reassignment comes back to the main thread.
+    private async Task RededuplicateMaterialsAsync()
+    {
+        try
+        {
+            var watch = Stopwatch.StartNew();
+            string cacheDir = _registry.TextureCacheDir;
+            var provisional = new List<string>(_registry.ProvisionalIdentityKeys);
+            int before = _materials.Count;
+            if (provisional.Count == 0)
+            {
+                _materials.Release();
+                return;
+            }
+
+            CancellationToken cancellation = _loadCancellation.Token;
+            Dictionary<string, string> resolved = await Task.Run(
+                () => TextureIdentity.ResolveAll(cacheDir, provisional, cancellation), cancellation);
+
+            // Back on the main thread (Godot's synchronisation context): everything below touches
+            // registry state and mesh resources.
+            if (cancellation.IsCancellationRequested)
+                return;
+
+            int settled = _registry.ResolvedIdentities(resolved);
+            (int repointed, int materials) = _materials.Rededuplicate(_registry);
+            _materials.Release();
+            Log.Print($"[stream] material re-dedup: {settled} identities settled, {repointed} surfaces "
+                + $"re-pointed, {before} -> {materials} material resources, "
+                + $"{_registry.MaterialAliasCount} exact texture-key aliases "
+                + $"in {watch.ElapsedMilliseconds} ms");
+        }
+        catch (OperationCanceledException) when (_loadCancellation.IsCancellationRequested)
+        {
+            // Expected when the map is abandoned while streaming.
+        }
+        finally
+        {
+            _materialsSettled = true;
+            TryFinalizeLoadState();
         }
     }
 }

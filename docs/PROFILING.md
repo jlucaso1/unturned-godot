@@ -80,10 +80,29 @@ suite skips cleanly when its input is missing, so it runs on any machine with so
   Godot's native quit kills the process before the profiler flushes. Godot's built-in script profiler
   covers GDScript only and does not see C#.
 
-`ObjectStreamer` prints a `post-load reclaim: RSS x -> y MB` line (Linux, from `/proc/self/status`) after
-the one-time load's transient heap is compacted back to the OS: a quick steady-state RSS check.
+Each piece of one-time load work prints a `[mem] <what> reclaim: RSS x -> y MB` line (Linux, from
+`/proc/self/status`) when its transient heap is compacted back to the OS: a quick steady-state RSS check.
+`post-load` is the streamer's, and a cold cache adds one per deferred pass that still had work to do.
 `UG_RECLAIM_PASSES=1|2` reproduces the measured one/two-compaction A/B; one pass is the default because
-California2 returned at least as much RSS in less time in repeated runs.
+California2 returned at least as much RSS in less time in repeated runs. `0` skips the compaction
+entirely, which is the control for pricing it — a reclaim that lands after the player is already moving
+(the deferred audio fallback's) is a stop-the-world pause in the middle of gameplay. Measured on a warm
+mesh cache with a cold audio cache, PEI, 45 s:
+
+| | `UG_RECLAIM_PASSES=0` | default |
+|---|---:|---:|
+| `runtime.frameMs.max` | 48.2 ms | 79.8 ms |
+| `runtime.frameMs.p99` | 7.52 ms | 7.59 ms |
+| `runtime.rssBytes` | 701,833,216 B | 343,724,032 B |
+
+One frame pays ~30 ms once; the session keeps 358 MB. The tail is untouched, and the reclaim is worth it
+at that price — but it is a real pause, so anything that would run a compaction on a schedule rather than
+once, or on a path the player can trigger repeatedly, needs this A/B again before it ships.
+
+`UG_MEM_TRACE=<seconds>` prints a line per interval with RSS, the managed heap's committed/live sizes and
+fragmentation, how much was allocated since the previous line, and the per-generation collection counts.
+The reclaim lines describe one instant each; the shape between them is what tells a one-time transient
+apart from a steady leak, and it is what identified both memory findings below. Off unless set.
 
 ## Running without a GPU
 
@@ -314,6 +333,44 @@ a path (`UG_OBJECT_CHUNK_METRES`, `SCREENSHOT_PATH`, `TIME_OF_DAY`, …) are una
   the data loads, so the renderer's share of RSS can be differenced. See
   [Running without a GPU](#running-without-a-gpu) for the measured split.
 
+### Why a cold cache used to cost RAM for the whole session
+
+A session that built its caches held several hundred megabytes more than one that found them, for as long
+as it ran — the map, the view and the simulation being identical. `UG_MEM_TRACE=2` on a GPU-less
+container, PEI, 60 s of Tier 3 after the load, found two causes and no leak: every figure below is
+uncollected transient or native churn, with live managed objects at ~12 MB throughout.
+
+**The one-time work that ran after the load's reclaim.** The audio extraction was deferred behind the
+world streamer, so it started *after* `post-load reclaim` had already compacted the heap. It decoded the
+whole 1.4 GB masterbundle a second time — for the 20 MB `.resource` node at the end of the blob — and
+nothing ever compacted what that left: a 400 MB heap holding 12 MB of live objects, and RSS 390 MB above
+the warm session's for the rest of the game. The clips are byte ranges in a stream node exactly like
+texture pixels are, so they are now planned into the streamer's own pass (`AudioExtractor.Plan` →
+`ModelExtractor.StreamExtract`), which was already reading to within 3 MB of that node. The definition
+cache the pass writes is byte-identical to the standalone extractor's, which is how the two are compared.
+The fallback remains for what the pass cannot cover — an unstreamable bundle, a cancelled pass, or a warm
+mesh cache with a cold audio cache — and it, like every other piece of one-time work, now reclaims when
+it finishes rather than relying on a reclaim that ran before it started.
+
+**Navigation reconciliation's per-probe dictionaries.** `IntersectRay` returns a fresh native Variant
+dictionary behind a finalizable wrapper, and reconciliation runs seven per navmesh triangle. Left to the
+collector, that churn grew RSS by ~1.6 MB/s for as long as the pass ran (`NAV_SKIP_RECONCILE=1` is the
+control: RSS goes flat). Disposing each result ends the growth without changing a single reachability
+decision.
+
+| Tier 3, PEI, 60 s, headless-interactive | before | after |
+|---|---:|---:|
+| `runtime.rssBytes`, cold cache | 791,678,976 B | 348,733,440 B |
+| `runtime.rssBytes`, warm cache | 400,257,024 B | 340,238,336 B |
+| cold − warm | 391,421,952 B | 8,495,104 B |
+| `runtime.managedBytes`, cold cache | 305,394,912 B | 37,933,656 B |
+| cold: time to playable | 6,410 ms | 6,284 ms |
+| cold: last one-time work finished | 26.2 s | 14.6 s |
+
+`interactive.loadMs` covers the streamer up to its last texture, so folding the audio into that pass moves
+~1.9 s *into* the number it used to sit after (12.3 s → 14.2 s on this container) while the whole cold
+load finishes ~11.6 s sooner and time-to-playable is unchanged. Read the two together.
+
 ### Foliage residency reference A/B
 
 On 2026-08-01, one paired California2 Release run on the profiling machine above measured:
@@ -331,6 +388,47 @@ interactive spawn. The deterministic far-pose run retired 704 chunks before repo
 resident chunks, and recorded zero visible-set misses, stale results, and decode failures. Frame timing is
 intentionally not summarized from one pair; use repeated reports because compositor and host scheduling
 noise is larger than the observed difference.
+
+## Material sharing, and why a cold load used to end up with more of them
+
+Materials are shared by complete state: the texture's exact content identity plus colour, blend, metallic,
+smoothness and cull. The texture half is the hash of the cached `.tex` file rather than the cache key that
+names it, so two keys holding byte-identical pixels get one material.
+
+That identity only exists once the texture has been extracted, and a cold load builds its materials before
+that: the mesh phase of a decode pass runs, the scene is built so the map is playable, and the `.resS` tail
+streams in afterwards. Every key therefore stood in for its own identity and the aliases never merged — the
+realise line read `0 exact texture-key aliases` on a cold load where a warm one read `22`, so a first
+session carried more material resources than every session after it, for the same scene.
+
+`ObjectStreamer` closes that at the end of streaming: it re-resolves the provisional identities on a worker
+(hashing the texture cache is not frame work), then re-groups the surfaces it recorded and points the
+aliases at one material. Read it from the log line it prints, against the realise line above it:
+
+```
+[stream] materials realised: 292 resources, 0 exact texture-key aliases
+[stream] material re-dedup: 226 identities settled, 38 surfaces re-pointed, 292 -> 273 material
+         resources, 22 exact texture-key aliases in 24 ms
+```
+
+Measured on PEI (Tier 3, this container), material resources in the built scene:
+
+| Path | Before | After |
+|---|---:|---:|
+| Cold (base + LOD1 libraries) | 292 + 177 = 469 | 273 |
+| Warm (base + LOD1 libraries) | 273 + 165 = 438 | 273 |
+
+Two things move that number, and they are worth keeping apart. Most of it is the lower LOD level: it draws
+with the same materials as the base level, and it used to build its own table, so every material existed
+twice. Sharing one table across both levels is what removes the 177/165, on the cold and warm path alike
+(`WorldBuilder` shares one too, which is why the structural gate's `uniqueMaterials` moved 455 -> 290). The
+re-dedup pass is the rest: 292 -> 273, which is exactly the warm number, so a first session and a second one
+now build the same scene.
+
+**Draw calls do not move**: 780 median on Tier 3 before and after. Surfaces are grouped inside each mesh by
+raw texture key, and a MultiMesh submits one draw per surface whichever material resource that surface
+points at. What this saves is material resources and their GPU parameter buffers, not submissions — measure
+it with the log lines above and `uniqueMaterials`, not with `runtime.drawCalls.median`.
 
 ## Object LOD ideas that were measured and dropped
 
