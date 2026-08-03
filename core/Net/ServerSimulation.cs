@@ -121,6 +121,11 @@ public sealed class ServerSimulation
         // here — same rule, same cooldown, run on the server's tick.
         public readonly Player.PlayerEquipment Equipment = new();
 
+        // Attack edges rescued from input frames the jitter buffer had to drop, handed to the next
+        // frame that plays. See the trim in QueueInput.
+        public Player.EAttackInputFlags CarriedPrimary;
+        public Player.EAttackInputFlags CarriedSecondary;
+
         // Trusted-position bookkeeping: the budget rate-limits CONSECUTIVE client claims, so it needs the
         // last claim we accepted and when. Before any claim exists there is nothing to rate-limit against —
         // the server-invented spawn is not a position the client ever occupied (a host who opens to LAN
@@ -238,7 +243,15 @@ public sealed class ServerSimulation
         // Bursts are ordinary — the client drains its send timer once per frame, so any hitch is
         // followed by a flurry — and a hostile client can simply send as fast as it likes.
         while (entry.Inputs.Count > MaxQueuedInputs)
-            entry.Inputs.Dequeue();
+        {
+            // Movement survives a dropped frame because a later one restates it — an attack edge does
+            // not. Simulate reads the tick a button went DOWN, so the discarded frame was the only
+            // carrier of that swing, and losing it means a punch only its own thrower ever saw. Carry
+            // the edges forward instead; the cooldown then decides the swing exactly as it would have.
+            InputCommand stale = entry.Inputs.Dequeue();
+            entry.CarriedPrimary |= stale.AttackPrimary;
+            entry.CarriedSecondary |= stale.AttackSecondary;
+        }
     }
 
     // Advances one 0.08 s step on the nominal clock: each call is one tick of simulated time. What the
@@ -273,8 +286,12 @@ public sealed class ServerSimulation
 
             // After the move, so the stance the gate reads is this tick's: a player who went prone on the
             // same frame they clicked must not get the punch the pre-move stance would have allowed.
-            EPlayerGesture gesture = entry.Equipment.Simulate(Tick, input.AttackPrimary,
-                input.AttackSecondary, new HandState { Stance = entry.State.Stance });
+            EPlayerGesture gesture = entry.Equipment.Simulate(Tick,
+                input.AttackPrimary | entry.CarriedPrimary,
+                input.AttackSecondary | entry.CarriedSecondary,
+                new HandState { Stance = entry.State.Stance });
+            entry.CarriedPrimary = EAttackInputFlags.None;
+            entry.CarriedSecondary = EAttackInputFlags.None;
             if (gesture != EPlayerGesture.None)
                 _gestures.Add(new PlayerGestureEvent(id, gesture));
 

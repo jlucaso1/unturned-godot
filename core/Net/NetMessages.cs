@@ -25,13 +25,19 @@ public enum ENetMessage : byte
     StateUpdate,  // server -> all, unreliable: every player's position, view angles and stance
     ZombieList,   // server -> client, reliable: a chunk of the zombie population (sent on admission)
     ZombieStates, // server -> all, unreliable: the zombies that moved or changed state this tick
-    PlayerGesture, // server -> all but the owner, reliable: a one-shot hand animation (a punch today)
 
     // Pre-join, before the client has built anything: "what are you running?". This is what lets a
     // client load the server's level instead of guessing — see ServerQuery.
     ServerInfoRequest, // client -> server, reliable
     ServerInfo,        // server -> client, reliable: protocol version, level, population
     Reject,            // server -> client, reliable: why this Hello will never be admitted
+
+    // NEW MESSAGE TYPES GO HERE, at the end. The three above run BEFORE the protocol handshake gates
+    // anything — ServerQuery asks an unknown server what it is running — so their byte values are the
+    // one part of this enum two different builds must still agree on. Inserting a type above them
+    // renumbers them, and a version query between mismatched builds then decodes as some other message
+    // and times out instead of reporting the mismatch it exists to report.
+    PlayerGesture, // server -> all but the owner, reliable: a one-shot hand animation (a punch today)
 }
 
 // Why a Hello was refused. Sent before the connection is closed so the player is told what happened
@@ -440,13 +446,25 @@ public static class NetMessages
     // A one-shot hand animation somebody else performed. Reliable and event-shaped rather than a bit in
     // the state stream: a punch is a moment, and the 12.5 Hz snapshot that carried it as a flag would
     // either be missed by a client that dropped that datagram or be replayed by one that got it twice.
-    public static byte[] WritePlayerGesture(byte playerId, EPlayerGesture gesture) =>
-        new[] { (byte)ENetMessage.PlayerGesture, playerId, (byte)gesture };
+    //
+    // The server tick rides along because reliable delivery here retransmits but does not ORDER: a lost
+    // datagram can be re-sent late enough to arrive behind a gesture that came after it, and without a
+    // sequence the older swing would replace the newer one on the avatar. Same reasoning as the roster
+    // version above, and the same shape.
+    public static byte[] WritePlayerGesture(byte playerId, uint tick, EPlayerGesture gesture)
+    {
+        var payload = new byte[7];
+        payload[0] = (byte)ENetMessage.PlayerGesture;
+        payload[1] = playerId;
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(2), tick);
+        payload[6] = (byte)gesture;
+        return payload;
+    }
 
-    public static (byte PlayerId, EPlayerGesture Gesture) ReadPlayerGesture(byte[] payload)
+    public static (byte PlayerId, uint Tick, EPlayerGesture Gesture) ReadPlayerGesture(byte[] payload)
     {
         using BinaryReader r = Reader(payload);
-        return (r.ReadByte(), (EPlayerGesture)r.ReadByte());
+        return (r.ReadByte(), r.ReadUInt32(), (EPlayerGesture)r.ReadByte());
     }
 
     private const int SnapshotBytes = 16; // id 1 + position 12 + pitch 1 + yaw 1 + stance/flags 1

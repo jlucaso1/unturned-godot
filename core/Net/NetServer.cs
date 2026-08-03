@@ -138,7 +138,7 @@ public sealed class NetServer
             // button went down, and playing this too would restart the swing a round-trip later.
             foreach (PlayerGestureEvent gesture in _simulation.Gestures)
                 BroadcastExcept(gesture.PlayerId,
-                    NetMessages.WritePlayerGesture(gesture.PlayerId, gesture.Gesture), ESendType.Reliable);
+                    NetMessages.WritePlayerGesture(gesture.PlayerId, _simulation.Tick, gesture.Gesture), ESendType.Reliable);
             OnTick?.Invoke(_simulation.Tick);
             caughtUp++;
         }

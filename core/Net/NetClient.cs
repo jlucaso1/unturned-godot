@@ -54,7 +54,20 @@ public sealed class RemotePlayer
     // the one worth showing — replaying the older one late would only put the avatar behind.
     public UnturnedGodot.Player.EPlayerGesture PendingGesture { get; private set; }
 
-    public void PushGesture(UnturnedGodot.Player.EPlayerGesture gesture) => PendingGesture = gesture;
+    private uint _lastGestureTick;
+    private bool _hasGestureTick;
+
+    // Accepts a gesture only if it is newer than the last one heard. Reliable delivery retransmits but
+    // does not order, so an early swing re-sent late can arrive behind a later one; wrap-safe signed
+    // comparison, the same rule the server's own input freshness guard uses.
+    public void PushGesture(uint tick, UnturnedGodot.Player.EPlayerGesture gesture)
+    {
+        if (_hasGestureTick && unchecked((int)(tick - _lastGestureTick)) <= 0)
+            return;
+        _hasGestureTick = true;
+        _lastGestureTick = tick;
+        PendingGesture = gesture;
+    }
 
     // Hands the pending gesture over and clears it, so a renderer plays each one exactly once.
     public UnturnedGodot.Player.EPlayerGesture TakeGesture()
@@ -314,7 +327,7 @@ public sealed class NetClient
                     // its player is dropped rather than remembered, because by the time that avatar
                     // exists the swing it describes is already over.
                     if (_remotes.TryGetValue(gesture.PlayerId, out RemotePlayer? gesturing))
-                        gesturing.PushGesture(gesture.Gesture);
+                        gesturing.PushGesture(gesture.Tick, gesture.Gesture);
                     break;
                 }
         }
@@ -322,8 +335,9 @@ public sealed class NetClient
 
     // Cached so a method group does not allocate a delegate on every received message.
     private static readonly Func<byte[], ENetMessage> ReadType = NetMessages.TypeOf;
-    private static readonly Func<byte[], (byte PlayerId, UnturnedGodot.Player.EPlayerGesture Gesture)>
-        ReadPlayerGesture = NetMessages.ReadPlayerGesture;
+    private static readonly
+        Func<byte[], (byte PlayerId, uint Tick, UnturnedGodot.Player.EPlayerGesture Gesture)>
+            ReadPlayerGesture = NetMessages.ReadPlayerGesture;
     private static readonly
         Func<byte[], (byte PlayerId, uint Tick, uint RosterVersion, List<PlayerListing> Players)> ReadWelcome =
             NetMessages.ReadWelcome;

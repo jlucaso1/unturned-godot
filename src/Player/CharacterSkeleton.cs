@@ -73,22 +73,25 @@ public partial class CharacterSkeleton : Skeleton3D
     // Picks and crossfades to the clip for a stance (Unturned's PlayerAnimator.updateState mapping).
     // Keep the discrete state dirty: local and remote callers commonly invoke this from their render or
     // physics loop, but the clip name cannot change while stance/movement are unchanged.
-    public void SetState(EPlayerStance stance, bool moving)
+    // Returns false when the request could not be applied — a gesture still owns the rig, or the
+    // character carries no clip for that stance.
+    public bool SetState(EPlayerStance stance, bool moving)
     {
         // A gesture owns the rig until it finishes; the overlay remembers this request for then.
         if (!_gesture.Request(stance, moving))
-            return;
+            return false;
 
         if (_stateApplied && _lastStateStance == stance && _lastStateMoving == moving)
-            return;
+            return true;
 
         string clip = ClipFor(stance, moving);
         if (!_clips.ContainsKey(clip))
-            return;
+            return false;
         Play(clip);
         _stateApplied = true;
         _lastStateStance = stance;
         _lastStateMoving = moving;
+        return true;
     }
 
     // Plays a clip once over the movement state, then lets the state resume. Returns false when the
@@ -152,7 +155,20 @@ public partial class CharacterSkeleton : Skeleton3D
     // notifications instead of an engine IsVisibleInTree call every frame. In first person the whole body
     // is hidden, so the ~48 marshaled bone writes stop entirely; the pose (and the animation clock, which
     // also froze before) resumes on the first visible frame.
-    private void UpdateProcessing() => SetProcess(_current.Length > 0 && IsVisibleInTree());
+    private void UpdateProcessing()
+    {
+        bool active = _current.Length > 0 && IsVisibleInTree();
+        // A rig that stops being drawn stops advancing its clock, so a gesture caught mid-swing would
+        // freeze and then thaw — replaying a stale punch from where it stopped the next time the rig is
+        // shown. Hand it back to the movement state instead: a swing nobody can see need not finish.
+        // Ends the gesture by advancing past any length, which is also what restores the pending state.
+        if (!active && _gesture.Advance(float.MaxValue) is { } resume)
+        {
+            Resume(resume);
+            active = _current.Length > 0 && IsVisibleInTree(); // the resume may have changed the clip
+        }
+        SetProcess(active);
+    }
 
     public override void _Notification(int what)
     {
@@ -168,10 +184,7 @@ public partial class CharacterSkeleton : Skeleton3D
         // the gesture ends on already shows the state clip crossfading in, rather than one more frame
         // frozen on the gesture's last key.
         if (_gesture.Advance((float)delta) is { } resume)
-        {
-            _stateApplied = false; // force SetState past its dirty check: the gesture displaced the clip
-            SetState(resume.Stance, resume.Moving);
-        }
+            Resume(resume);
 
         Dictionary<int, BonePose> pose = CurrentPose();
         if (_blend < 1f && _fromPose != null)
@@ -181,6 +194,17 @@ public partial class CharacterSkeleton : Skeleton3D
             pose = _blendBuf;
         }
         Apply(pose);
+    }
+
+    // Hands the rig back to the movement state after a gesture. A character with no clip for that
+    // stance would otherwise be left with the one-shot as its current clip and no gesture to stop it
+    // looping, so the clock is pinned to the clip's end instead: it holds the final pose, which is the
+    // one thing that is certainly not wrong, until a state it does carry is asked for.
+    private void Resume((EPlayerStance Stance, bool Moving) state)
+    {
+        _stateApplied = false; // force SetState past its dirty check: the gesture displaced the clip
+        if (!SetState(state.Stance, state.Moving) && _clips.TryGetValue(_current, out AnimationClipData? held))
+            _time = held.Length;
     }
 
     private Dictionary<int, BonePose> CurrentPose()

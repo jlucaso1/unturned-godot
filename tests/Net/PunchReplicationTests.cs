@@ -122,6 +122,66 @@ public class PunchReplicationTests
         Assert.Equal(2, sim.Gestures.Count); // one player's swing may not put another's on cooldown
     }
 
+    // The jitter buffer drops whole stale inputs when a client bursts past its ceiling. Movement fields
+    // survive that because a later frame restates them; an attack EDGE does not, and the discarded frame
+    // was the only carrier of that swing.
+    [Fact]
+    public void Server_KeepsAnAttackEdgeTheJitterBufferHadToDrop()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        sim.QueueInput(1, Attack()); // this is the one that will fall off the stale end
+        for (int i = 0; i < ServerSimulation.MaxQueuedInputs; i++)
+            sim.QueueInput(1, Idle());
+
+        // The punch frame is gone from the queue, but its edge is not lost.
+        int swings = 0;
+        for (int i = 0; i < ServerSimulation.MaxQueuedInputs; i++)
+        {
+            sim.Step();
+            swings += sim.Gestures.Count;
+        }
+
+        Assert.Equal(1, swings);
+    }
+
+    [Fact]
+    public void Server_ARescuedEdgeStillSwingsOnlyOnce()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+        sim.QueueInput(1, Attack());
+        for (int i = 0; i < ServerSimulation.MaxQueuedInputs; i++)
+            sim.QueueInput(1, Idle());
+
+        int swings = 0;
+        for (int i = 0; i < 12; i++)
+        {
+            sim.Step();
+            swings += sim.Gestures.Count;
+        }
+
+        // Carried forward, not carried forever: the edge is consumed by the first tick that plays it.
+        Assert.Equal(1, swings);
+    }
+
+    // Reliable delivery retransmits but does not order, so a lost early gesture can be re-sent late
+    // enough to arrive behind a newer one.
+    [Fact]
+    public void ARetransmittedGestureCannotReplaceANewerOne()
+    {
+        var remote = new RemotePlayer("A", new PoseSnapshot(Spawn, 90f, 0f), 0);
+
+        remote.PushGesture(20, EPlayerGesture.PunchLeft);
+        remote.PushGesture(10, EPlayerGesture.PunchRight); // the late retransmission of an older swing
+        Assert.Equal(EPlayerGesture.PunchLeft, remote.PendingGesture);
+
+        // A genuinely newer one still lands.
+        remote.PushGesture(30, EPlayerGesture.PunchRight);
+        Assert.Equal(EPlayerGesture.PunchRight, remote.TakeGesture());
+    }
+
     [Fact]
     public void OtherPlayersSeeTheSwing_ButNotTheOneWhoThrewIt()
     {

@@ -33,7 +33,6 @@ public partial class PlayerController : CharacterBody3D
 
     // Multiplayer session, when hosting or joined: the controller forwards inputs at the 12.5 Hz cadence.
     public UnturnedGodot.Net.NetClient? Net { get; set; }
-    private uint _netFrame;
 
     // The camera this controller drives, for screen-space passes that must render in front of it.
     public Camera3D Camera => _camera;
@@ -49,10 +48,23 @@ public partial class PlayerController : CharacterBody3D
     // The hands. Everything the player does with them — punching today, a swung machete or a fired gun
     // later — is decided here, on the same 12.5 Hz tick the server re-runs it on.
     private readonly UnturnedGodot.Player.PlayerEquipment _equipment = new();
-    private uint _attackTick;
-    private double _attackTimer;
+
+    // The 12.5 Hz simulation counter. ONE counter, not one for the hands and another for the wire: it is
+    // both the frame number the server orders our inputs by and the tick PlayerEquipment measures its
+    // cooldown in, and two of them would part company the moment a session attached mid-run.
+    private uint _tick;
+    private double _tickTimer;
     private EAttackInputFlags _primaryPending;
     private EAttackInputFlags _secondaryPending;
+    private int _primaryRepeats;
+    private int _secondaryRepeats;
+
+    // How many extra input frames an attack edge is repeated on. Input datagrams are unreliable, so a
+    // single dropped one would eat the swing for everyone else while the thrower saw their own — the
+    // one desync a locally-predicted action can produce. Repeating is safe by construction rather than
+    // by care: both ends run the same PlayerEquipment, whose cooldown swallows the repeats, so a click
+    // that arrives twice still punches once. Kept well inside that cooldown for the same reason.
+    private const int AttackEdgeRepeats = 2;
 
     private EPlayerStance _stance = EPlayerStance.Stand;
     private bool _wantCrouch;
@@ -130,7 +142,10 @@ public partial class PlayerController : CharacterBody3D
             && Input.MouseMode == Input.MouseModeEnum.Captured)
         {
             if (button.ButtonIndex == _settings.AttackPrimary)
+            {
                 _primaryPending |= EAttackInputFlags.Start;
+                _primaryRepeats = AttackEdgeRepeats;
+            }
             // The secondary button is deliberately not bound yet: with an item equipped it aims rather
             // than punches, and binding it to a right-hand swing now would have to be taken back.
         }
@@ -214,14 +229,18 @@ public partial class PlayerController : CharacterBody3D
         // because the hands are simulated on it too — a punch has to work the same in a local world as in
         // a joined one. Idle frames still flow to the server so it keeps simulating (gravity) and other
         // players see us stop.
-        _attackTimer += dt;
-        if (_attackTimer >= UnturnedGodot.Net.ServerSimulation.TickRate)
+        _tickTimer += dt;
+        if (_tickTimer >= UnturnedGodot.Net.ServerSimulation.TickRate)
         {
-            _attackTimer -= UnturnedGodot.Net.ServerSimulation.TickRate;
+            _tickTimer -= UnturnedGodot.Net.ServerSimulation.TickRate;
+            _tick++;
             EAttackInputFlags primary = _primaryPending;
             EAttackInputFlags secondary = _secondaryPending;
-            _primaryPending = EAttackInputFlags.None;
-            _secondaryPending = EAttackInputFlags.None;
+            // The edge is consumed here but kept on the wire for a couple more frames; see
+            // AttackEdgeRepeats. The local simulation sees the repeats too, and its own cooldown
+            // discards them exactly as the server's does.
+            _primaryPending = --_primaryRepeats > 0 ? primary : EAttackInputFlags.None;
+            _secondaryPending = --_secondaryRepeats > 0 ? secondary : EAttackInputFlags.None;
 
             SimulateHands(primary, secondary);
 
@@ -232,7 +251,7 @@ public partial class PlayerController : CharacterBody3D
                 // (objects, buildings) that the server's heightfield solver doesn't know about. The
                 // attack flags are NOT trusted the same way — the server re-runs the same rule on them
                 // and is what tells everyone else a punch happened.
-                Net.SendInput(new UnturnedGodot.Net.InputCommand(_netFrame++,
+                Net.SendInput(new UnturnedGodot.Net.InputCommand(_tick,
                     (sbyte)input.X, (sbyte)input.Y, jumpHeld, wantSprint,
                     UnturnedGodot.Net.NetAngles.QuantizeYaw(RotationDegrees.Y),
                     UnturnedGodot.Net.NetAngles.QuantizePitch(_pitch + 90f),
@@ -250,19 +269,18 @@ public partial class PlayerController : CharacterBody3D
     // rule reaches the other players a round trip later.
     private void SimulateHands(EAttackInputFlags primary, EAttackInputFlags secondary)
     {
-        _attackTick++;
         if (primary == EAttackInputFlags.None && secondary == EAttackInputFlags.None)
             return;
 
-        EPlayerGesture gesture = _equipment.Simulate(_attackTick, primary, secondary,
+        EPlayerGesture gesture = _equipment.Simulate(_tick, primary, secondary,
             new HandState { Stance = _stance });
         if (PlayerGestures.ClipFor(gesture) is not { } clip)
             return;
 
-        // Both rigs: the body other players would see, and the arms this player sees. They carry the
-        // same clips, so the swing is the same animation from either side of the camera.
-        _rig?.PlayOnce(clip);
-        _viewmodel?.PlayOnce(clip);
+        // Only the rig currently on screen. Both carry the same clips, so either shows the same swing —
+        // but a hidden rig stops advancing its clock (CharacterSkeleton pauses _Process off screen), and
+        // arming one would leave a stale gesture to thaw and replay the next time it is shown.
+        (_thirdPerson ? _rig : _viewmodel)?.PlayOnce(clip);
     }
 
     private bool UpdateStance(bool moving, bool wantSprint)
@@ -356,6 +374,8 @@ public partial class PlayerController : CharacterBody3D
                 System.Globalization.CultureInfo.InvariantCulture, out float y)
             && float.TryParse(parts[2], System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out float z)
+            // TryParse accepts "NaN"/"Infinity", and either would put the rig on an invalid transform.
+            && float.IsFinite(x) && float.IsFinite(y) && float.IsFinite(z)
             ? new Vector3(x, y, z)
             : Vector3.Zero;
     }

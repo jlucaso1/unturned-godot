@@ -93,8 +93,11 @@ public sealed class PlayerEquipment
     // The tick a punch was last thrown on, for callers that resume or replicate this state.
     public uint LastPunchTick => _lastPunch;
 
-    // Returns the gesture this tick produced, or None. `tick` is the simulation counter both ends already
-    // agree on (the server's, and the client's own input frame, which advance together at 12.5 Hz).
+    // Returns the gesture this tick produced, or None. `tick` is the caller's own monotonic 12.5 Hz
+    // counter — the server's simulation tick on one end, the client's input frame number on the other.
+    // The two need not agree on a value, only on a rate: every rule here measures an ELAPSED number of
+    // ticks against this instance's own last swing, so a constant offset between the ends changes
+    // nothing. A rule that ever compares one end's tick to the other's would need more than this.
     public EPlayerGesture Simulate(uint tick, EAttackInputFlags primary, EAttackInputFlags secondary,
         in HandState hands)
     {

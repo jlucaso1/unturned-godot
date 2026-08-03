@@ -209,10 +209,24 @@ public class NetMessagesTests
     [Fact]
     public void PlayerGesture_RoundTrips()
     {
-        (byte id, EPlayerGesture gesture) =
-            NetMessages.ReadPlayerGesture(NetMessages.WritePlayerGesture(7, EPlayerGesture.PunchRight));
+        byte[] p = NetMessages.WritePlayerGesture(7, 4321, EPlayerGesture.PunchRight);
+        Assert.Equal(ENetMessage.PlayerGesture, NetMessages.TypeOf(p));
+
+        (byte id, uint tick, EPlayerGesture gesture) = NetMessages.ReadPlayerGesture(p);
         Assert.Equal(7, id);
+        Assert.Equal(4321u, tick); // so a retransmission arriving late cannot replace a newer swing
         Assert.Equal(EPlayerGesture.PunchRight, gesture);
+    }
+
+    // The pre-join query runs BEFORE the protocol handshake can refuse a mismatched build, so these two
+    // byte values are the one part of the enum two different builds still have to agree on. Pinning them
+    // is what makes a version mismatch report itself instead of timing out as an unreadable message.
+    [Fact]
+    public void PreflightMessageTypes_KeepTheirWireValues()
+    {
+        Assert.Equal(8, (byte)ENetMessage.ServerInfoRequest);
+        Assert.Equal(9, (byte)ENetMessage.ServerInfo);
+        Assert.Equal(10, (byte)ENetMessage.Reject);
     }
 
     [Fact]

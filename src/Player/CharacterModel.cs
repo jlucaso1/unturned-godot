@@ -117,11 +117,29 @@ public static class CharacterModel
     // (the caller then falls back to the placeholder figure).
     public static Node3D? Build(string unturnedPath) => BuildEntity(unturnedPath, PlayerEntity);
 
-    // The first-person arms: the same character rigged into the prefab's Viewmodel subtree, carrying the
-    // same clips, so a swing plays identically in both perspectives. Null when the prefab has no such
-    // subtree — the caller then simply has no first-person model, as it did before.
-    public static Node3D? BuildViewmodel(string unturnedPath) =>
-        BuildEntity(unturnedPath, PlayerViewmodelEntity);
+    // The player's two rigs from ONE read of resources.assets: the third-person body, and the first-person
+    // arms rigged into the prefab's Viewmodel subtree with the same clips, so a swing plays identically
+    // from either side of the camera. Either may be null — no game data at all, or a prefab that carries
+    // no Viewmodel subtree, in which case first person simply shows no hands.
+    //
+    // One entry point rather than two calls because opening that file is the expensive part (~100 ms and
+    // tens of MB of transient heap), and it happens inside the load's character stage. Same reason
+    // BuildZombieTemplates imports once for both zombie looks.
+    public static (Node3D? Body, Node3D? Viewmodel) BuildPlayerRigs(string unturnedPath)
+    {
+        try
+        {
+            if (Open(unturnedPath) is not { } source)
+                return (null, null);
+            return (BuildFrom(source, PlayerEntity), BuildFrom(source, PlayerViewmodelEntity));
+        }
+        catch (System.Exception e)
+        {
+            Log.PrintErr($"[unturned-godot] Character: failed to load real {PlayerEntity.Root} "
+                + $"({e.GetType().Name}: {e.Message}); using placeholder.\n{e.StackTrace}");
+            return (null, null);
+        }
+    }
 
     // Builds the skinned Zombie_Client character with the real zombie skin tone and face.
     public static Node3D? BuildZombie(string unturnedPath, bool isMega) =>
@@ -196,7 +214,7 @@ public static class CharacterModel
     {
         try
         {
-            return BuildInternal(unturnedPath, entity);
+            return Open(unturnedPath) is { } source ? BuildFrom(source, entity) : null;
         }
         catch (System.Exception e)
         {
@@ -205,7 +223,12 @@ public static class CharacterModel
         }
     }
 
-    private static Node3D? BuildInternal(string unturnedPath, EntityConfig entity)
+    // resources.assets, decoded, plus the bundle its textures come from. Reading it costs ~100 ms and
+    // tens of MB of transient heap, so anything that needs more than one rig out of it opens it once.
+    private readonly record struct AssetSource(SerializedFile File,
+        Dictionary<long, SerializedObject> ById, string BundlePath);
+
+    private static AssetSource? Open(string unturnedPath)
     {
         string assetsPath = Path.Combine(unturnedPath, "Unturned_Data", "resources.assets");
         string? bundlePath = UnturnedInstall.FindMasterBundle(unturnedPath);
@@ -219,6 +242,14 @@ public static class CharacterModel
         var byId = new Dictionary<long, SerializedObject>();
         foreach (SerializedObject o in file.Objects)
             byId[o.PathId] = o;
+        return new AssetSource(file, byId, bundlePath);
+    }
+
+    private static Node3D? BuildFrom(in AssetSource source, EntityConfig entity)
+    {
+        SerializedFile file = source.File;
+        Dictionary<long, SerializedObject> byId = source.ById;
+        string bundlePath = source.BundlePath;
 
         // The character prefabs carry two LOD renderers (Model_0/Model_1). Import the first one whose
         // mesh actually decodes with full per-vertex skinning — Model_1, the in-game blocky character;
@@ -231,11 +262,11 @@ public static class CharacterModel
             if (o.ClassId != ClassSkinnedMeshRenderer)
                 continue;
             Dictionary<string, object> smr = Read(file, byId, o.PathId);
-            long rendererGo = Id(smr["m_GameObject"]);
-            if (RootName(file, byId, rendererGo) != entity.Root)
-                continue;
+            // One walk up the father chain answers both questions, and every step of it is a decode.
             // The body import must not pick up the first-person arms, and vice versa.
-            if (HasAncestorNamed(file, byId, rendererGo, ViewmodelSubtree) != entity.FirstPerson)
+            (string root, bool inViewmodel) =
+                Ancestry(file, byId, Id(smr["m_GameObject"]), ViewmodelSubtree);
+            if (root != entity.Root || inViewmodel != entity.FirstPerson)
                 continue;
             if (!byId.TryGetValue(Id(smr["m_Mesh"]), out SerializedObject? meshObj))
                 continue;
@@ -504,35 +535,25 @@ public static class CharacterModel
         return null;
     }
 
-    // Walks the mesh's GameObject up to its prefab root and returns the root GameObject's name.
-    // True when any ancestor GameObject of `goId` carries this name. Unturned keeps the first-person arms
-    // in a "Viewmodel" subtree of the same prefab (PlayerAnimator finds it under the main camera), so this
-    // is what tells the two rigs apart: both are skinned renderers rooted at Player_Client.
-    private static bool HasAncestorNamed(SerializedFile file, Dictionary<long, SerializedObject> byId,
-        long goId, string name)
-    {
-        long transformId = TransformOf(file, byId, goId);
-        while (transformId != 0)
-        {
-            Dictionary<string, object> t = Read(file, byId, transformId);
-            if ((string)Read(file, byId, Id(t["m_GameObject"]))["m_Name"] == name)
-                return true;
-            transformId = Id(t["m_Father"]);
-        }
-        return false;
-    }
-
-    private static string RootName(SerializedFile file, Dictionary<long, SerializedObject> byId, long goId)
+    // Walks the mesh's GameObject up to its prefab root, returning the root GameObject's name and
+    // whether `subtree` was passed on the way. Unturned keeps the first-person arms in a "Viewmodel"
+    // subtree of the same prefab (PlayerAnimator finds it under the main camera), so both rigs are rooted
+    // at Player_Client and only the ancestry tells them apart — one walk answers both questions.
+    private static (string Root, bool InSubtree) Ancestry(SerializedFile file,
+        Dictionary<long, SerializedObject> byId, long goId, string subtree)
     {
         long transformId = TransformOf(file, byId, goId);
         if (transformId == 0)
-            return string.Empty;
+            return (string.Empty, false);
+        bool inSubtree = false;
         while (true)
         {
             Dictionary<string, object> t = Read(file, byId, transformId);
+            var name = (string)Read(file, byId, Id(t["m_GameObject"]))["m_Name"];
+            inSubtree |= name == subtree;
             long father = Id(t["m_Father"]);
             if (father == 0)
-                return (string)Read(file, byId, Id(t["m_GameObject"]))["m_Name"];
+                return (name, inSubtree);
             transformId = father;
         }
     }

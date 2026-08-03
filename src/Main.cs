@@ -762,16 +762,18 @@ public partial class Main : Node3D
             network.Configure(heights, spawnPosition);
         AddChild(network);
 
+        (Node3D? Body, Node3D? Viewmodel) rigs = CharacterModel.BuildPlayerRigs(unturnedPath);
         var player = new PlayerController
         {
             Name = "Player",
             Position = spawnPosition,
             RotationDegrees = new Vector3(0, spawnYaw, 0),
             StartThirdPerson = thirdPerson,
-            BodyModel = CharacterModel.Build(unturnedPath), // real Unturned body, or null -> placeholder
-            // The prefab's first-person arms, so a swing is visible from inside the head too. Null when
-            // the character carries no Viewmodel rig, and first person then simply shows no hands.
-            ViewmodelModel = CharacterModel.BuildViewmodel(unturnedPath),
+            // Both rigs out of one read of resources.assets: the body other players see, and the
+            // first-person arms, so a swing is visible from inside the head too. Either may be null —
+            // no game data means the placeholder figure, no Viewmodel rig means no hands in first person.
+            BodyModel = rigs.Body,
+            ViewmodelModel = rigs.Viewmodel,
         };
         (player.Footsteps, _movementAudioFactory) = BuildMovementAudio(unturnedPath);
         AddChild(player);
