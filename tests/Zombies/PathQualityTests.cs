@@ -351,6 +351,111 @@ public class PathQualityTests
         Assert.Contains(path, point => point.X >= 12f);
     }
 
+    // The same building, with a LANDING: one more metre of upper floor past the head of the ramp,
+    // before it folds back over the ground floor. Every real staircase has one.
+    //
+    //   Y=3          +---------------------+--+   upper floor x in [3, 13], landing x in [13, 14]
+    //                                     /
+    //   Y=0  +--------------------------+       ground floor x in [0, 10], ramp x in [10, 13]
+    //
+    // It matters because without it the upper floor turns back AT the ramp's top column, and a fold
+    // is not "floor across" that column — both faces lie on the same side of it in plan — so the
+    // graph calls it a wall and nothing can spread past it. The landing makes ramp -> landing and
+    // landing -> upper floor ordinary shared edges, which is what a real building has and what lets
+    // a spread over shared mesh reach the storey above.
+    private static BakedNavGraph TwoStoreysWithALanding()
+    {
+        var vertices = new List<Vector3>();
+        var triangles = new List<int>();
+        const int Rows = 5;
+
+        int Column(float x, float y)
+        {
+            int first = vertices.Count;
+            for (int z = 0; z < Rows; z++)
+                vertices.Add(new Vector3(x, y, z));
+            return first;
+        }
+
+        void Quads(int left, int right)
+        {
+            for (int z = 0; z < Rows - 1; z++)
+            {
+                int a = left + z, b = a + 1, c = right + z, d = c + 1;
+                triangles.AddRange(new[] { a, b, c, b, d, c });
+            }
+        }
+
+        int previous = Column(0f, 0f);
+        for (int x = 1; x <= 13; x++)
+        {
+            int current = Column(x, MathF.Max(0f, x - 10f));
+            Quads(previous, current);
+            previous = current;
+        }
+        int head = previous;
+        Quads(head, Column(14f, 3f));   // the landing, past the head of the ramp
+        previous = head;
+        for (int x = 12; x >= 3; x--)   // and the upper floor, back over the ground floor
+        {
+            int current = Column(x, 3f);
+            Quads(previous, current);
+            previous = current;
+        }
+
+        var flag = new NavFlag
+        {
+            Center = new Vector3(7f, 0, 2),
+            Size = new Vector3(40, 200, 40),
+            Vertices = vertices.ToArray(),
+            Triangles = triangles.ToArray(),
+        };
+        return BakedNavGraph.Build(new[] { flag });
+    }
+
+    // The clearance reach spreads over shared mesh, which was supposed to be what stopped it leaving
+    // the floor the segment is on: a body can only get to the next storey by a way it could walk. It
+    // can walk up a ramp — and the floor folded back OVER the one it started on is then ordinary
+    // shared mesh, sitting directly above the segment and so nought metres from it in PLAN, which is
+    // the only distance the reach was measuring.
+    //
+    // The segment below is the flat run and the ramp in one leg, which the funnel's own route takes
+    // (AShortcut_DoesNotJumpBetweenStoreysThatOverlapInPlan says so: "collapsing the flat run AND the
+    // ramp into one leg is fine and does happen"). Measured on this fixture:
+    //
+    //     one-ring reach        (1, 0, 2) -> (13, 3, 2)   CLEAR
+    //     distance-bounded      (1, 0, 2) -> (13, 3, 2)   REFUSED
+    //
+    // and what it was refused for is the upper floor's own far edge at x = 3, which is 3 m above the
+    // start of the segment. Rejecting that leg costs the shortcut the whole climb and leaves the
+    // funnel's wandering corners, which is the symptom the shortcut pass exists to remove.
+    //
+    // Two-sided, on the SAME edge: from the upper floor, x = 3 is still a wall and a line 0.2 m off
+    // it is still refused. The reach did not stop seeing the wall — it stopped mistaking it for one
+    // a body three metres below could walk into.
+    [Fact]
+    public void TheClearanceReach_DoesNotClimbAStoreyToFindAWall()
+    {
+        BakedNavGraph graph = TwoStoreysWithALanding();
+
+        Assert.True(graph.HasClearLine(0, new Vector3(1, 0, 2), new Vector3(13, 3, 2)),
+            "the flat run and the ramp is one leg a body walks, and nothing is in its way");
+
+        // The same wall, from the storey it belongs to.
+        Assert.True(graph.HasClearLine(0, new Vector3(6, 3, 2), new Vector3(11, 3, 2)),
+            "a line down the middle of the upper floor is clear");
+        Assert.False(graph.HasClearLine(0, new Vector3(3.2f, 3, 2), new Vector3(11, 3, 2)),
+            "0.2 m from the upper floor's own far edge is not clearance for a 0.4 m body");
+
+        // And the ground floor's own walls are still walls.
+        Assert.False(graph.HasClearLine(0, new Vector3(1, 0, 0.2f), new Vector3(9, 0, 0.2f)),
+            "0.2 m from the ground floor's own edge is not clearance for a 0.4 m body");
+        // The storey guard is a guard on the CLEARANCE test, not on the walk: a line from downstairs
+        // to a waypoint upstairs is still refused, by the face test that has always refused it.
+        Assert.False(graph.HasClearLine(0, new Vector3(1, 0, 2), new Vector3(4, 3, 2)),
+            "the ground floor does not carry an upstairs waypoint just because it is under it");
+    }
+
     // A wide floor with `count` THIN strips welded along its far edge, so the outermost boundary is a
     // wall count * `sliver` metres beyond a shared edge that is not one. Baked tiles produce slivers
     // like this along walls, and more than one of them where the tiles themselves meet.

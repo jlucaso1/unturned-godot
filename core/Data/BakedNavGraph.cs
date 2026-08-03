@@ -225,6 +225,15 @@ public sealed class BakedNavGraph
             private int _generation;
             private int _head;
 
+            // The GROUND under the segment, as the walk measures it: the height at each point where
+            // the walk crossed into a new face, keyed by how far along the segment that was. The
+            // spread is bounded by a distance measured in XZ alone, and XZ has no idea which STOREY
+            // a face is; this is what tells it, and it is the walk's own numbers rather than the
+            // straight line's, because a body ground-snaps and the line over a rise does not.
+            private readonly List<float> _along = new();
+            private readonly List<float> _height = new();
+            private bool _level;
+
             public ClearanceReach(int count) => _generationByTriangle = new int[count];
 
             // Past the ceiling. Tested once per face taken OFF the queue rather than on the way in,
@@ -232,9 +241,51 @@ public sealed class BakedNavGraph
             // overshoot that allows is at most one face's worth of neighbours.
             public bool Exhausted => _pending.Count > ClearanceLimit;
 
+            // Where the walk stood, in the order it stood there. `along` only ever increases.
+            public void Mark(float along, float height)
+            {
+                if (_along.Count == 0)
+                    _level = true;
+                else if (MathF.Abs(height - _height[0]) > 1e-4f)
+                    _level = false;
+                _along.Add(along);
+                _height.Add(height);
+            }
+
+            // The ground the body walks at `along`, held flat outside the part the walk has measured
+            // so far. Flat ground — which is nearly all ground, and every fixture with one storey —
+            // answers from the first sample without touching the list.
+            public float HeightAt(float along)
+            {
+                if (_along.Count == 0)
+                    return 0f;
+                if (_level)
+                    return _height[0];
+                if (along <= _along[0])
+                    return _height[0];
+                int last = _along.Count - 1;
+                if (along >= _along[last])
+                    return _height[last];
+                int low = 0, high = last;
+                while (low + 1 < high)
+                {
+                    int middle = low + ((high - low) / 2);
+                    if (_along[middle] <= along)
+                        low = middle;
+                    else
+                        high = middle;
+                }
+                float span = _along[high] - _along[low];
+                float t = span <= 1e-9f ? 0f : (along - _along[low]) / span;
+                return _height[low] + ((_height[high] - _height[low]) * t);
+            }
+
             public void Begin()
             {
                 _pending.Clear();
+                _along.Clear();
+                _height.Clear();
+                _level = true;
                 _head = 0;
                 if (++_generation == int.MaxValue)
                 {
@@ -1408,6 +1459,7 @@ public sealed class BakedNavGraph
             // ground-snaps, so what it actually covers is the surface under the line, not the line.
             float markX = ax, markZ = az;
             float markY = TryHeightOn(startTriangle, ax, az, out float seed) ? seed : from.Y;
+            reach.Mark(0f, markY);
 
             while (true)
             {
@@ -1481,6 +1533,7 @@ public sealed class BakedNavGraph
                 markX = crossX;
                 markZ = crossZ;
                 markY = crossY;
+                reach.Mark(exit, crossY);
 
                 // `exit` is only ever set together with the pair, so past here a crossing was found.
                 //
@@ -1617,6 +1670,21 @@ public sealed class BakedNavGraph
         // The visited set spans the whole segment rather than one step of the walk, so a face on the
         // fringe is cleared once however many steps pass it — where the one-deep ring retested every
         // neighbour up to four times.
+        //
+        // The width is measured in XZ, and XZ cannot tell one storey from another. Adjacency alone
+        // was supposed to: a spread over shared edges can only leave the floor it starts on by a way
+        // a body could walk. It can — up a ramp — and then a floor folded back OVER that one is
+        // ordinary shared mesh, every edge of it directly above the segment and so nought metres
+        // from it in plan. Its outer boundary is then a wall "in reach", several metres up. Measured
+        // on a two-storey mesh with a landing at the head of a ramp (so ramp -> landing -> upper
+        // floor are all genuine shared edges rather than a fold): the flat run and the ramp, a
+        // segment a body walks in one go, came back CLEAR before the distance bound and REFUSED
+        // after, on the strength of the upper floor's far edge 3 m above its start.
+        //
+        // So an edge is only in reach when it is within the body's width in plan AND on the same
+        // storey as the ground under the segment there — the walk's own heights, not the straight
+        // line's, since the body ground-snaps and the line over a rise does not follow it. On level
+        // ground every height is the same height and this changes nothing at all.
         private bool ClearOfWalls(int triangle, Vector3 from, Vector3 to, float radius,
             ClearanceReach reach)
         {
@@ -1634,9 +1702,11 @@ public sealed class BakedNavGraph
                 {
                     int va = e == 0 ? i0 : e == 1 ? i1 : i2;
                     int vb = e == 0 ? i1 : e == 1 ? i2 : i0;
-                    if (SegmentsDistanceSquaredXZ(from, to, Source.Vertices[va], Source.Vertices[vb])
-                        >= squared)
+                    if (SegmentsDistanceSquaredXZ(from, to, Source.Vertices[va], Source.Vertices[vb],
+                        out float along, out float height) >= squared)
                         continue; // out of the body's width: not a wall in reach, nor the way to one
+                    if (MathF.Abs(height - reach.HeightAt(along)) > StoreyTolerance)
+                        continue; // another storey: neither a wall the body can meet, nor a way to one
 
                     // One pass over the adjacency answers both questions, the way WallsAt does it:
                     // whether an enabled face still sits ACROSS this edge — a duplicate alongside is
@@ -1675,32 +1745,78 @@ public sealed class BakedNavGraph
                 if (!_borderVertex[vertex])
                     return false;
                 Vector3 v = Source.Vertices[vertex];
-                return PointSegmentDistanceSquaredXZ(v.X, v.Z, from.X, from.Z, to.X, to.Z) < squared;
+                return PointSegmentDistanceSquaredXZ(v.X, v.Z, from.X, from.Z, to.X, to.Z,
+                        out float along) < squared
+                    && MathF.Abs(v.Y - reach.HeightAt(along)) <= StoreyTolerance;
             }
         }
 
         private static float PointSegmentDistanceSquaredXZ(float px, float pz,
-            float ax, float az, float bx, float bz)
+            float ax, float az, float bx, float bz) =>
+            PointSegmentDistanceSquaredXZ(px, pz, ax, az, bx, bz, out _);
+
+        private static float PointSegmentDistanceSquaredXZ(float px, float pz,
+            float ax, float az, float bx, float bz, out float along)
         {
             float dx = bx - ax, dz = bz - az;
             float lengthSquared = (dx * dx) + (dz * dz);
-            float t = lengthSquared <= 1e-12f
+            along = lengthSquared <= 1e-12f
                 ? 0f
                 : Math.Clamp((((px - ax) * dx) + ((pz - az) * dz)) / lengthSquared, 0f, 1f);
-            float cx = px - (ax + (dx * t)), cz = pz - (az + (dz * t));
+            float cx = px - (ax + (dx * along)), cz = pz - (az + (dz * along));
             return (cx * cx) + (cz * cz);
         }
 
         // Crossing segments are zero apart; otherwise the minimum is attained at one of the four ends.
-        private static float SegmentsDistanceSquaredXZ(Vector3 a, Vector3 b, Vector3 c, Vector3 d)
+        //
+        // `along` is how far down ab the two came closest, and `height` how high cd was there — what
+        // the storey test needs, and it falls out of the same four candidates rather than costing a
+        // second pass.
+        private static float SegmentsDistanceSquaredXZ(Vector3 a, Vector3 b, Vector3 c, Vector3 d,
+            out float along, out float height)
         {
             if (Area2(a, b, c) > 0f != Area2(a, b, d) > 0f
                 && Area2(c, d, a) > 0f != Area2(c, d, b) > 0f)
+            {
+                // They cross: the meeting point is on both, so it is both answers at once.
+                float denominator = ((b.X - a.X) * (d.Z - c.Z)) - ((b.Z - a.Z) * (d.X - c.X));
+                if (MathF.Abs(denominator) > 1e-12f)
+                {
+                    along = Math.Clamp(
+                        (((c.X - a.X) * (d.Z - c.Z)) - ((c.Z - a.Z) * (d.X - c.X))) / denominator,
+                        0f, 1f);
+                    float across = Math.Clamp(
+                        (((c.X - a.X) * (b.Z - a.Z)) - ((c.Z - a.Z) * (b.X - a.X))) / denominator,
+                        0f, 1f);
+                    height = c.Y + ((d.Y - c.Y) * across);
+                    return 0f;
+                }
+                along = 0f;
+                height = (c.Y + d.Y) * 0.5f;
                 return 0f;
-            float best = PointSegmentDistanceSquaredXZ(a.X, a.Z, c.X, c.Z, d.X, d.Z);
-            best = MathF.Min(best, PointSegmentDistanceSquaredXZ(b.X, b.Z, c.X, c.Z, d.X, d.Z));
-            best = MathF.Min(best, PointSegmentDistanceSquaredXZ(c.X, c.Z, a.X, a.Z, b.X, b.Z));
-            return MathF.Min(best, PointSegmentDistanceSquaredXZ(d.X, d.Z, a.X, a.Z, b.X, b.Z));
+            }
+
+            float best = PointSegmentDistanceSquaredXZ(c.X, c.Z, a.X, a.Z, b.X, b.Z, out float bestAlong);
+            float bestHeight = c.Y;
+            Consider(PointSegmentDistanceSquaredXZ(d.X, d.Z, a.X, a.Z, b.X, b.Z, out float toD),
+                toD, d.Y, ref best, ref bestAlong, ref bestHeight);
+            Consider(PointSegmentDistanceSquaredXZ(a.X, a.Z, c.X, c.Z, d.X, d.Z, out float onA),
+                0f, c.Y + ((d.Y - c.Y) * onA), ref best, ref bestAlong, ref bestHeight);
+            Consider(PointSegmentDistanceSquaredXZ(b.X, b.Z, c.X, c.Z, d.X, d.Z, out float onB),
+                1f, c.Y + ((d.Y - c.Y) * onB), ref best, ref bestAlong, ref bestHeight);
+            along = bestAlong;
+            height = bestHeight;
+            return best;
+        }
+
+        private static void Consider(float candidate, float candidateAlong, float candidateHeight,
+            ref float best, ref float bestAlong, ref float bestHeight)
+        {
+            if (candidate >= best)
+                return;
+            best = candidate;
+            bestAlong = candidateAlong;
+            bestHeight = candidateHeight;
         }
 
         private static void AppendFunnel(List<Vector3> output, List<Portal> portals, Vector3 destination)
