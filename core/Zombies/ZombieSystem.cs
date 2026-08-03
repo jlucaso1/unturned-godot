@@ -755,9 +755,21 @@ public sealed class ZombieSystem
             return destination;
         a.Y = p.Y;
         b.Y = p.Y;
-        // A degenerate active segment cannot occur: consecutive duplicate waypoints are skipped
-        // together by the advance loop, and the final segment short-circuits to the destination.
+        // A degenerate active segment DOES occur, and dividing by its length below put NaN into Yaw and
+        // Position. The advance loop skips consecutive duplicates together, and the short-circuit above
+        // covers the final segment — but only when the route's end is within 4 m of the destination.
+        // A route whose end sits on the body outlives a retarget on purpose (routes survive a target
+        // change so a horde does not freeze mid-chase), and Leave falls back to the current position
+        // when neither retreat direction navigates, so a query from a point to itself answers with that
+        // point. Retarget to a player 30 m off and this is reached with a == b.
+        //
+        // Aiming at b is the whole answer: there is no segment to interpolate along, and b is where the
+        // route says to be. The caller then measures a zero-length direction on the last waypoint and
+        // takes its TargetReached branch, which is the honest reading of a route that ends underfoot —
+        // it stops, and the next repath or the partial-route fallback moves the body on.
         float magnitude = (a - b).Length();
+        if (magnitude <= 1e-6f)
+            return b;
         float dx = b.X - a.X, dz = b.Z - a.Z;
         float factor = Mathf.Clamp(
             (((p.X - a.X) * dx) + ((p.Z - a.Z) * dz)) / (magnitude * magnitude), 0f, 1f);

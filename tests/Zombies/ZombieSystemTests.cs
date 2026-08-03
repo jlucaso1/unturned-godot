@@ -1255,6 +1255,47 @@ public class ZombieSystemTests
         Assert.Equal(3f, zombie.PathPoints[^1].X, 1);
     }
 
+    // CalculateTargetPoint divides by the active segment's length, and the comment above it claimed a
+    // degenerate segment could not reach it because "the final segment short-circuits to the
+    // destination". That short-circuit is conditional: it only fires when the route's end is within 4 m
+    // of the destination. A stale route whose end sits ON the body — Leave falls back to the current
+    // position when neither retreat direction navigates, and a query from a point to itself answers with
+    // that point — outlives the retarget deliberately (routes survive a target change so a horde does
+    // not freeze mid-chase), and the new target is nowhere near it. Then a == b, the divisor is zero,
+    // and the NaN reaches Yaw and Position through SteerDirection and the step.
+    [Fact]
+    public void ARouteThatEndsOnTheBody_DoesNotPoisonItWithNaN()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        system.MoveResolver = (from, to, radius) => to;
+        system.PathQuery = (from, to, path, radius) => false; // no route of its own to interfere
+
+        var near = Player(1, new Vector3(10f, 5f, 0f), UnturnedGodot.Player.EPlayerStance.Sprint);
+        int guard = 0;
+        while (zombie.State != EZombieState.Chase)
+        {
+            system.Tick(new[] { near }, 0.1f);
+            Assert.True(++guard < 100, "never entered Chase");
+        }
+
+        // Still well inside MaxChaseDistanceSquared, so the chase holds, but far past the 4 m the
+        // direct-to-destination short-circuit needs.
+        var player = Player(1, new Vector3(30f, 5f, 0f), UnturnedGodot.Player.EPlayerStance.Sprint);
+
+        // The stale route: one waypoint, exactly where the body stands, with the target 30 m off.
+        zombie.PathPoints.Clear();
+        zombie.PathPoints.Add(zombie.Position);
+        zombie.CurrentWaypointIndex = 0;
+        zombie.TargetReached = false;
+        zombie.RepathTimer = 1f; // and this tick is not one it may repath on
+
+        system.Tick(new[] { player }, 0.05f);
+
+        Assert.False(float.IsNaN(zombie.Position.X) || float.IsNaN(zombie.Position.Y)
+            || float.IsNaN(zombie.Position.Z), $"position went NaN: {zombie.Position}");
+        Assert.False(float.IsNaN(zombie.Yaw), "yaw went NaN");
+    }
+
     private const float ImpassableDt = 0.1f;
 
     private readonly record struct ImpassableRun(int FirstBlockedTick, int InvalidatedAtTick,
