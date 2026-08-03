@@ -25,6 +25,7 @@ public enum ENetMessage : byte
     StateUpdate,  // server -> all, unreliable: every player's position, view angles and stance
     ZombieList,   // server -> client, reliable: a chunk of the zombie population (sent on admission)
     ZombieStates, // server -> all, unreliable: the zombies that moved or changed state this tick
+    PlayerGesture, // server -> all but the owner, reliable: a one-shot hand animation (a punch today)
 
     // Pre-join, before the client has built anything: "what are you running?". This is what lets a
     // client load the server's level instead of guessing — see ServerQuery.
@@ -102,8 +103,15 @@ public readonly struct InputCommand
     public readonly bool HasPosition;
     public readonly Vector3 Position;
 
+    // What the attack buttons did on this frame, replicated so the server decides the swing rather than
+    // trusting the client's word for it. Edges, not held state: see EAttackInputFlags.
+    public readonly EAttackInputFlags AttackPrimary;
+    public readonly EAttackInputFlags AttackSecondary;
+
     public InputCommand(uint frame, sbyte inputX, sbyte inputY, bool jump, bool sprint, byte yaw, byte pitch,
-        EPlayerStance stance = EPlayerStance.Stand, bool grounded = true)
+        EPlayerStance stance = EPlayerStance.Stand, bool grounded = true,
+        EAttackInputFlags attackPrimary = EAttackInputFlags.None,
+        EAttackInputFlags attackSecondary = EAttackInputFlags.None)
     {
         Frame = frame;
         InputX = inputX;
@@ -116,11 +124,16 @@ public readonly struct InputCommand
         Grounded = grounded;
         HasPosition = false;
         Position = Vector3.Zero;
+        AttackPrimary = attackPrimary;
+        AttackSecondary = attackSecondary;
     }
 
     public InputCommand(uint frame, sbyte inputX, sbyte inputY, bool jump, bool sprint, byte yaw, byte pitch,
-        EPlayerStance stance, Vector3 position, bool grounded = true)
-        : this(frame, inputX, inputY, jump, sprint, yaw, pitch, stance, grounded)
+        EPlayerStance stance, Vector3 position, bool grounded = true,
+        EAttackInputFlags attackPrimary = EAttackInputFlags.None,
+        EAttackInputFlags attackSecondary = EAttackInputFlags.None)
+        : this(frame, inputX, inputY, jump, sprint, yaw, pitch, stance, grounded, attackPrimary,
+            attackSecondary)
     {
         HasPosition = true;
         Position = position;
@@ -173,7 +186,7 @@ public sealed class PlayerListing
 public static class NetMessages
 {
     // Bump whenever a message layout changes; the server refuses mismatched clients at the handshake.
-    public const byte ProtocolVersion = 7;
+    public const byte ProtocolVersion = 8;
 
     // Two level names denote the same world. The name on the wire is the map's FOLDER name — the one
     // identity that survives the trip between two machines (paths and workshop ids do not) — and it
@@ -384,8 +397,11 @@ public static class NetMessages
         w.Write(input.Frame);
         w.Write(input.InputX);
         w.Write(input.InputY);
+        // The two attack fields are two bits each (None/Start/Stop), which is what lets them ride in the
+        // existing flags byte rather than widening every input datagram by another byte.
         w.Write((byte)((input.Jump ? 1 : 0) | (input.Sprint ? 2 : 0) | (input.HasPosition ? 4 : 0)
-            | (input.Grounded ? 8 : 0)));
+            | (input.Grounded ? 8 : 0)
+            | (((byte)input.AttackPrimary & 3) << 4) | (((byte)input.AttackSecondary & 3) << 6)));
         w.Write(input.Yaw);
         w.Write(input.Pitch);
         w.Write((byte)input.Stance);
@@ -411,10 +427,26 @@ public static class NetMessages
         bool jump = (flags & 1) != 0;
         bool sprint = (flags & 2) != 0;
         bool grounded = (flags & 8) != 0;
+        var primary = (EAttackInputFlags)((flags >> 4) & 3);
+        var secondary = (EAttackInputFlags)((flags >> 6) & 3);
         if ((flags & 4) == 0)
-            return new InputCommand(frame, x, y, jump, sprint, yaw, pitch, stance, grounded);
+            return new InputCommand(frame, x, y, jump, sprint, yaw, pitch, stance, grounded, primary,
+                secondary);
         var position = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
-        return new InputCommand(frame, x, y, jump, sprint, yaw, pitch, stance, position, grounded);
+        return new InputCommand(frame, x, y, jump, sprint, yaw, pitch, stance, position, grounded, primary,
+            secondary);
+    }
+
+    // A one-shot hand animation somebody else performed. Reliable and event-shaped rather than a bit in
+    // the state stream: a punch is a moment, and the 12.5 Hz snapshot that carried it as a flag would
+    // either be missed by a client that dropped that datagram or be replayed by one that got it twice.
+    public static byte[] WritePlayerGesture(byte playerId, EPlayerGesture gesture) =>
+        new[] { (byte)ENetMessage.PlayerGesture, playerId, (byte)gesture };
+
+    public static (byte PlayerId, EPlayerGesture Gesture) ReadPlayerGesture(byte[] payload)
+    {
+        using BinaryReader r = Reader(payload);
+        return (r.ReadByte(), (EPlayerGesture)r.ReadByte());
     }
 
     private const int SnapshotBytes = 16; // id 1 + position 12 + pitch 1 + yaw 1 + stance/flags 1

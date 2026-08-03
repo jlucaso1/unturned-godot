@@ -47,6 +47,22 @@ public sealed class RemotePlayer
     }
 
     public PoseSnapshot Sample(double now) => _buffer.GetCurrentSnapshot(now);
+
+    // A one-shot hand animation this player performed, waiting to be played on their avatar. Held as a
+    // single pending gesture rather than a queue: two punches cannot land inside one render frame at the
+    // cooldown the simulation enforces, and if the network ever delivered a burst, the newest swing is
+    // the one worth showing — replaying the older one late would only put the avatar behind.
+    public UnturnedGodot.Player.EPlayerGesture PendingGesture { get; private set; }
+
+    public void PushGesture(UnturnedGodot.Player.EPlayerGesture gesture) => PendingGesture = gesture;
+
+    // Hands the pending gesture over and clears it, so a renderer plays each one exactly once.
+    public UnturnedGodot.Player.EPlayerGesture TakeGesture()
+    {
+        UnturnedGodot.Player.EPlayerGesture gesture = PendingGesture;
+        PendingGesture = UnturnedGodot.Player.EPlayerGesture.None;
+        return gesture;
+    }
 }
 
 // The client-side session over any IClientTransport: sends the Hello handshake and 12.5 Hz inputs,
@@ -286,11 +302,28 @@ public sealed class NetClient
                     }
                     break;
                 }
+            case ENetMessage.PlayerGesture:
+                {
+                    if (!MalformedPacket.TryDecode(payload, ReadPlayerGesture, out var gesture))
+                    {
+                        MalformedPacketsDropped++;
+                        break;
+                    }
+
+                    // Only for players we actually hold: a gesture that arrives before the roster naming
+                    // its player is dropped rather than remembered, because by the time that avatar
+                    // exists the swing it describes is already over.
+                    if (_remotes.TryGetValue(gesture.PlayerId, out RemotePlayer? gesturing))
+                        gesturing.PushGesture(gesture.Gesture);
+                    break;
+                }
         }
     }
 
     // Cached so a method group does not allocate a delegate on every received message.
     private static readonly Func<byte[], ENetMessage> ReadType = NetMessages.TypeOf;
+    private static readonly Func<byte[], (byte PlayerId, UnturnedGodot.Player.EPlayerGesture Gesture)>
+        ReadPlayerGesture = NetMessages.ReadPlayerGesture;
     private static readonly
         Func<byte[], (byte PlayerId, uint Tick, uint RosterVersion, List<PlayerListing> Players)> ReadWelcome =
             NetMessages.ReadWelcome;

@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using Godot;
 using UnturnedGodot.Net;
+using UnturnedGodot.Player;
 using Xunit;
 
 namespace UnturnedGodot.Tests.Net;
@@ -173,6 +174,45 @@ public class NetMessagesTests
         Assert.Equal(new Vector3(300.5f, 34.25f, -84f), read.Position);
         Assert.Equal(UnturnedGodot.Player.EPlayerStance.Prone, read.Stance);
         Assert.False(read.Grounded);
+    }
+
+    [Theory]
+    [InlineData(EAttackInputFlags.None, EAttackInputFlags.None)]
+    [InlineData(EAttackInputFlags.Start, EAttackInputFlags.None)]
+    [InlineData(EAttackInputFlags.None, EAttackInputFlags.Start)]
+    [InlineData(EAttackInputFlags.Stop, EAttackInputFlags.Stop)]
+    [InlineData(EAttackInputFlags.Start | EAttackInputFlags.Stop, EAttackInputFlags.Start)]
+    public void Input_RoundTripsAttackFlags(EAttackInputFlags primary, EAttackInputFlags secondary)
+    {
+        // Both with and without a trusted position: the flags ride in the shared flags byte, above the
+        // bit that says whether the position follows.
+        var bare = new InputCommand(9, 0, 0, false, false, 1, 2,
+            UnturnedGodot.Player.EPlayerStance.Stand, grounded: true,
+            attackPrimary: primary, attackSecondary: secondary);
+        InputCommand readBare = NetMessages.ReadInput(NetMessages.WriteInput(bare));
+        Assert.Equal(primary, readBare.AttackPrimary);
+        Assert.Equal(secondary, readBare.AttackSecondary);
+
+        var placed = new InputCommand(9, 0, 0, true, true, 1, 2,
+            UnturnedGodot.Player.EPlayerStance.Stand, new Vector3(1, 2, 3), grounded: false,
+            attackPrimary: primary, attackSecondary: secondary);
+        InputCommand readPlaced = NetMessages.ReadInput(NetMessages.WriteInput(placed));
+        Assert.Equal(primary, readPlaced.AttackPrimary);
+        Assert.Equal(secondary, readPlaced.AttackSecondary);
+        Assert.True(readPlaced.HasPosition);
+        Assert.Equal(new Vector3(1, 2, 3), readPlaced.Position);
+        Assert.True(readPlaced.Jump);
+        Assert.True(readPlaced.Sprint);
+        Assert.False(readPlaced.Grounded);
+    }
+
+    [Fact]
+    public void PlayerGesture_RoundTrips()
+    {
+        (byte id, EPlayerGesture gesture) =
+            NetMessages.ReadPlayerGesture(NetMessages.WritePlayerGesture(7, EPlayerGesture.PunchRight));
+        Assert.Equal(7, id);
+        Assert.Equal(EPlayerGesture.PunchRight, gesture);
     }
 
     [Fact]

@@ -5,6 +5,9 @@ using UnturnedGodot.Player;
 
 namespace UnturnedGodot.Net;
 
+// One hand animation a player performed on a tick, for the server to replicate.
+public readonly record struct PlayerGestureEvent(byte PlayerId, EPlayerGesture Gesture);
+
 // One player's authoritative state on the server.
 public struct PlayerMoveState
 {
@@ -113,6 +116,11 @@ public sealed class ServerSimulation
         public readonly Queue<InputCommand> Inputs = new();
         public InputCommand LastInput;
 
+        // The authoritative copy of this player's hand state. The owner predicts its own swing so the
+        // animation starts on the frame the button went down, but what everybody ELSE sees comes from
+        // here — same rule, same cooldown, run on the server's tick.
+        public readonly Player.PlayerEquipment Equipment = new();
+
         // Trusted-position bookkeeping: the budget rate-limits CONSECUTIVE client claims, so it needs the
         // last claim we accepted and when. Before any claim exists there is nothing to rate-limit against —
         // the server-invented spawn is not a position the client ever occupied (a host who opens to LAN
@@ -133,6 +141,12 @@ public sealed class ServerSimulation
     private double _clock;
 
     public uint Tick { get; private set; }
+
+    // The gestures this tick produced, in player order — refilled by every Step, so the caller
+    // broadcasts them before stepping again. A list rather than a callback so the pure simulation stays
+    // free of the transport, exactly as the snapshot list already is.
+    public IReadOnlyList<PlayerGestureEvent> Gestures => _gestures;
+    private readonly List<PlayerGestureEvent> _gestures = new();
 
     // Trusted positions refused for not being finite. Non-zero means a client sent NaN or an infinity —
     // a physics glitch on its end, or a deliberate attempt to wedge its own slot.
@@ -237,6 +251,7 @@ public sealed class ServerSimulation
     {
         _clock = now;
         Tick++;
+        _gestures.Clear();
         var states = new List<PlayerSnapshotState>(_players.Count);
         foreach ((byte id, Entry entry) in _players)
         {
@@ -255,6 +270,13 @@ public sealed class ServerSimulation
                 ApplyTrustedPosition(entry, input);
             else
                 entry.State = _solver.Step(entry.State, input, TickRate);
+
+            // After the move, so the stance the gate reads is this tick's: a player who went prone on the
+            // same frame they clicked must not get the punch the pre-move stance would have allowed.
+            EPlayerGesture gesture = entry.Equipment.Simulate(Tick, input.AttackPrimary,
+                input.AttackSecondary, new HandState { Stance = entry.State.Stance });
+            if (gesture != EPlayerGesture.None)
+                _gestures.Add(new PlayerGestureEvent(id, gesture));
 
             states.Add(new PlayerSnapshotState(id, entry.State.Position,
                 NetAngles.QuantizePitch(entry.State.Pitch), NetAngles.QuantizeYaw(entry.State.Yaw),

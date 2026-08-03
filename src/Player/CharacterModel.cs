@@ -28,17 +28,42 @@ public static class CharacterModel
         public required string PrimaryIdle;  // resting clip; falls back to the component's default clip
         public required Color Skin;          // flat colour the skin UV regions are filled with
         public required int FaceIndex;       // Items/Faces/<n> overlay composited by UV
+
+        // Which of the prefab's two skinned rigs to take. Unturned keeps the first-person arms in a
+        // "Viewmodel" subtree beside the third-person body; both are rooted at the same GameObject, so
+        // the subtree is the only thing that separates them.
+        public bool FirstPerson;
     }
+
+    // The prefab subtree holding the first-person arms, as PlayerAnimator names it.
+    private const string ViewmodelSubtree = "Viewmodel";
 
     // Customization.SKINS[0] — the default light skin tone — and Items/Faces/0, the default face.
     private static readonly EntityConfig PlayerEntity = new()
     {
         Root = "Player_Client",
+        // Idle/move per stance, plus the bare-handed swings PlayerEquipment.punch plays. A clip the
+        // character does not carry is simply skipped, so listing one costs nothing when it is absent.
         Clips = new[]
-            { "Idle_Stand", "Idle_Crouch", "Idle_Prone", "Move_Walk", "Move_Run", "Move_Crouch", "Move_Prone" },
+        {
+            "Idle_Stand", "Idle_Crouch", "Idle_Prone", "Move_Walk", "Move_Run", "Move_Crouch", "Move_Prone",
+            "Punch_Left", "Punch_Right",
+        },
         PrimaryIdle = "Idle_Stand",
         Skin = new Color(244f / 255f, 230f / 255f, 210f / 255f),
         FaceIndex = 0,
+    };
+
+    // The same player, taken from the prefab's first-person arms rig. Same skin and clips: it is the same
+    // character, drawn from inside its own head.
+    private static readonly EntityConfig PlayerViewmodelEntity = new()
+    {
+        Root = PlayerEntity.Root,
+        Clips = PlayerEntity.Clips,
+        PrimaryIdle = PlayerEntity.PrimaryIdle,
+        Skin = PlayerEntity.Skin,
+        FaceIndex = PlayerEntity.FaceIndex,
+        FirstPerson = true,
     };
 
     // ZombieClothing.paint: the greenish zombie skin tones and the fixed zombie face (Items/Faces/19).
@@ -91,6 +116,12 @@ public static class CharacterModel
     // Builds the skinned Player_Client character, or null when the game data is absent or can't be parsed
     // (the caller then falls back to the placeholder figure).
     public static Node3D? Build(string unturnedPath) => BuildEntity(unturnedPath, PlayerEntity);
+
+    // The first-person arms: the same character rigged into the prefab's Viewmodel subtree, carrying the
+    // same clips, so a swing plays identically in both perspectives. Null when the prefab has no such
+    // subtree — the caller then simply has no first-person model, as it did before.
+    public static Node3D? BuildViewmodel(string unturnedPath) =>
+        BuildEntity(unturnedPath, PlayerViewmodelEntity);
 
     // Builds the skinned Zombie_Client character with the real zombie skin tone and face.
     public static Node3D? BuildZombie(string unturnedPath, bool isMega) =>
@@ -200,7 +231,11 @@ public static class CharacterModel
             if (o.ClassId != ClassSkinnedMeshRenderer)
                 continue;
             Dictionary<string, object> smr = Read(file, byId, o.PathId);
-            if (RootName(file, byId, Id(smr["m_GameObject"])) != entity.Root)
+            long rendererGo = Id(smr["m_GameObject"]);
+            if (RootName(file, byId, rendererGo) != entity.Root)
+                continue;
+            // The body import must not pick up the first-person arms, and vice versa.
+            if (HasAncestorNamed(file, byId, rendererGo, ViewmodelSubtree) != entity.FirstPerson)
                 continue;
             if (!byId.TryGetValue(Id(smr["m_Mesh"]), out SerializedObject? meshObj))
                 continue;
@@ -470,6 +505,23 @@ public static class CharacterModel
     }
 
     // Walks the mesh's GameObject up to its prefab root and returns the root GameObject's name.
+    // True when any ancestor GameObject of `goId` carries this name. Unturned keeps the first-person arms
+    // in a "Viewmodel" subtree of the same prefab (PlayerAnimator finds it under the main camera), so this
+    // is what tells the two rigs apart: both are skinned renderers rooted at Player_Client.
+    private static bool HasAncestorNamed(SerializedFile file, Dictionary<long, SerializedObject> byId,
+        long goId, string name)
+    {
+        long transformId = TransformOf(file, byId, goId);
+        while (transformId != 0)
+        {
+            Dictionary<string, object> t = Read(file, byId, transformId);
+            if ((string)Read(file, byId, Id(t["m_GameObject"]))["m_Name"] == name)
+                return true;
+            transformId = Id(t["m_Father"]);
+        }
+        return false;
+    }
+
     private static string RootName(SerializedFile file, Dictionary<long, SerializedObject> byId, long goId)
     {
         long transformId = TransformOf(file, byId, goId);

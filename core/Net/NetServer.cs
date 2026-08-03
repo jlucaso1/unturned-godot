@@ -134,6 +134,11 @@ public sealed class NetServer
             List<PlayerSnapshotState> states = _simulation.Step(stepAt);
             if (states.Count > 0)
                 Broadcast(NetMessages.WriteStateUpdate(_simulation.Tick, states), ESendType.Unreliable);
+            // Everyone but the player who threw it: the owner started its own animation on the frame the
+            // button went down, and playing this too would restart the swing a round-trip later.
+            foreach (PlayerGestureEvent gesture in _simulation.Gestures)
+                BroadcastExcept(gesture.PlayerId,
+                    NetMessages.WritePlayerGesture(gesture.PlayerId, gesture.Gesture), ESendType.Reliable);
             OnTick?.Invoke(_simulation.Tick);
             caughtUp++;
         }
@@ -318,6 +323,15 @@ public sealed class NetServer
     {
         foreach ((ITransportConnection conn, Session session) in _sessions)
             if (session.Joined)
+                conn.Send(payload, sendType);
+    }
+
+    // Every joined player except one. Used for what a player already knows because they caused it —
+    // GatherRemoteClientConnectionsExcludingOwner, in the original's terms.
+    public void BroadcastExcept(byte playerId, byte[] payload, ESendType sendType)
+    {
+        foreach ((ITransportConnection conn, Session session) in _sessions)
+            if (session.Joined && session.PlayerId != playerId)
                 conn.Send(payload, sendType);
     }
 

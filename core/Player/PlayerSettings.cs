@@ -27,5 +27,10 @@ public sealed class PlayerSettings
     public Key Sprint { get; init; } = Key.Shift;
     public Key Perspective { get; init; } = Key.H;
 
+    // The attack buttons. Unturned's primary throws the left fist (and fires an equipped weapon), the
+    // secondary the right (and aims one). Only the primary is bound so far — see PlayerController.
+    public MouseButton AttackPrimary { get; init; } = MouseButton.Left;
+    public MouseButton AttackSecondary { get; init; } = MouseButton.Right;
+
     public static PlayerSettings Default { get; } = new();
 }

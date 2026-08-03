@@ -98,6 +98,15 @@ public partial class RemotePlayersView : Node3D
                 avatar.LastPitch = pitch;
             }
 
+            // One-shot hand animations the server said this player performed. Taken (not peeked) so each
+            // swing plays exactly once, and applied after the movement state above so it wins the frame
+            // it arrives on — SetState defers to a gesture that already owns the rig.
+            if (remote.PendingGesture != EPlayerGesture.None
+                && PlayerGestures.ClipFor(remote.TakeGesture()) is { } clip)
+            {
+                avatar.Rig?.PlayOnce(clip);
+            }
+
             avatar.Audio?.Tick(remote.Stance, remote.Moving, remote.Grounded, pose.Position, (float)delta);
         }
 

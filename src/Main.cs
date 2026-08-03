@@ -769,6 +769,9 @@ public partial class Main : Node3D
             RotationDegrees = new Vector3(0, spawnYaw, 0),
             StartThirdPerson = thirdPerson,
             BodyModel = CharacterModel.Build(unturnedPath), // real Unturned body, or null -> placeholder
+            // The prefab's first-person arms, so a swing is visible from inside the head too. Null when
+            // the character carries no Viewmodel rig, and first person then simply shows no hands.
+            ViewmodelModel = CharacterModel.BuildViewmodel(unturnedPath),
         };
         (player.Footsteps, _movementAudioFactory) = BuildMovementAudio(unturnedPath);
         AddChild(player);

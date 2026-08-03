@@ -35,6 +35,11 @@ public partial class CharacterSkeleton : Skeleton3D
     private EPlayerStance _lastStateStance;
     private bool _lastStateMoving;
 
+    // A one-shot overlay — a punch, and every hand interaction after it. The arbitration between the
+    // gesture and the looping movement state lives in GestureOverlay, where it is unit-tested; this node
+    // only owns the clip clock and the bones.
+    private readonly GestureOverlay _gesture = new();
+
     // C#-side rest cache + written-channel tracking: bones the previous frame animated and this frame
     // doesn't fall back to these rests, everything else is left untouched (it already rests).
     private const byte ChanRot = 1, ChanPos = 2, ChanScale = 4;
@@ -70,6 +75,10 @@ public partial class CharacterSkeleton : Skeleton3D
     // physics loop, but the clip name cannot change while stance/movement are unchanged.
     public void SetState(EPlayerStance stance, bool moving)
     {
+        // A gesture owns the rig until it finishes; the overlay remembers this request for then.
+        if (!_gesture.Request(stance, moving))
+            return;
+
         if (_stateApplied && _lastStateStance == stance && _lastStateMoving == moving)
             return;
 
@@ -81,6 +90,25 @@ public partial class CharacterSkeleton : Skeleton3D
         _lastStateStance = stance;
         _lastStateMoving = moving;
     }
+
+    // Plays a clip once over the movement state, then lets the state resume. Returns false when the
+    // character carries no such clip, which is how a gesture the entity cannot perform is skipped rather
+    // than freezing it on a missing animation.
+    public bool PlayOnce(string clip)
+    {
+        if (!_clips.TryGetValue(clip, out AnimationClipData? data) || data.Length <= 0f)
+            return false;
+
+        // The state to come back to is captured BEFORE the clip takes over. Without it a swing thrown
+        // while the stance had not changed since the last SetState would return to nothing: the dirty
+        // check would see the same stance it last applied and never reissue it.
+        Replay(clip);
+        _gesture.Begin(data.Length, _lastStateStance, _lastStateMoving);
+        return true;
+    }
+
+    // True while a one-shot gesture owns the rig.
+    public bool IsPlayingOnce => _gesture.IsPlaying;
 
     // Restarts a clip from its beginning even when it is already the current one — an attack swing
     // re-triggering, where Play's already-playing early-out would swallow the restart.
@@ -100,6 +128,7 @@ public partial class CharacterSkeleton : Skeleton3D
     {
         if (clip == _current || !_clips.ContainsKey(clip))
             return; // already playing, or the clip isn't present -> keep going
+        _gesture.Cancel(); // a deliberate clip change drops any gesture (PlayOnce re-arms it after)
         _stateApplied = false;
         // Snapshot to blend out of — an owned copy, since CurrentPose refills the shared buffer every frame.
         _fromPose = _current.Length > 0 ? new Dictionary<int, BonePose>(CurrentPose()) : null;
@@ -135,6 +164,15 @@ public partial class CharacterSkeleton : Skeleton3D
     {
         _time += (float)delta;
 
+        // The swing is over: hand the rig back to the movement state. Done before posing so the frame
+        // the gesture ends on already shows the state clip crossfading in, rather than one more frame
+        // frozen on the gesture's last key.
+        if (_gesture.Advance((float)delta) is { } resume)
+        {
+            _stateApplied = false; // force SetState past its dirty check: the gesture displaced the clip
+            SetState(resume.Stance, resume.Moving);
+        }
+
         Dictionary<int, BonePose> pose = CurrentPose();
         if (_blend < 1f && _fromPose != null)
         {
@@ -148,7 +186,9 @@ public partial class CharacterSkeleton : Skeleton3D
     private Dictionary<int, BonePose> CurrentPose()
     {
         AnimationClipData clip = _clips[_current];
-        float t = clip.Length > 0f ? _time % clip.Length : 0f; // loop
+        // A gesture holds its final pose instead of looping; the sampler clamps past the last key, so
+        // simply not wrapping the clock is what makes it play exactly once.
+        float t = _gesture.IsPlaying ? _time : clip.Length > 0f ? _time % clip.Length : 0f;
         // Overwrite in place: the buffer holds exactly this clip's bones (Play clears it on switch),
         // so the per-frame dictionary Clear (bucket zeroing) is skipped entirely.
         AnimationSampler.SampleOverwrite(clip, t, _poseBuf);
