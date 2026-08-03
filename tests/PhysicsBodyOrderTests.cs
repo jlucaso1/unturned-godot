@@ -413,13 +413,29 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void PostLoadReclaimHasMeasuredOneAndTwoPassControls()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } path)
+        if (FindRepositoryFile(Path.Combine("src", "LoadMemory.cs")) is not { } path)
             return;
         string source = File.ReadAllText(path);
         Assert.Contains("UG_RECLAIM_PASSES", source);
-        Assert.Contains("Math.Clamp(configured, 1, 2)", source);
+        Assert.Contains("Math.Clamp(configured, 0, 2)", source); // 0 is the "no compaction" A/B control
         Assert.Contains("if (passes == 2)", source);
         Assert.Contains("{passes} pass(es)", source);
+    }
+
+    // Every piece of one-time load work compacts when IT finishes. The loader's reclaim used to be the
+    // only one, and it ran before the deferred audio extraction: on a cold cache that left a whole
+    // bundle decode's transient committed for the rest of the session (~390 MB of RSS on PEI).
+    [Fact]
+    public void OneTimeWorkAfterTheLoadReclaimsItsOwnTransient()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } streamerPath
+            || FindRepositoryFile(Path.Combine("src", "Main.cs")) is not { } mainPath)
+        {
+            return;
+        }
+
+        Assert.Contains("LoadMemory.Reclaim(\"post-load\")", File.ReadAllText(streamerPath));
+        Assert.Contains("LoadMemory.Reclaim(\"audio extraction\")", File.ReadAllText(mainPath));
     }
 
     [Fact]
@@ -722,9 +738,87 @@ public class PhysicsBodyOrderTests
         Assert.Contains("Dictionary<string, byte[]> Resources", source);
         Assert.Contains("serialized.Add(stream.Read((int)node.Size))", source);
         Assert.Contains("foreach (byte[] bytes in nodes.SerializedFiles)", source);
-        Assert.Contains("ResourceFor(res, nodes.Resources)", source);
+        Assert.Contains("ResourceFor(clip.StreamFile, nodes.Resources)", source);
         Assert.DoesNotContain("sf = stream.Read((int)node.Size)", source);
         Assert.DoesNotContain("resource = stream.Read((int)node.Size)", source);
+        // Off disk, never through a byte[] of the whole file: the fallback holds what it decompresses
+        // and used to hold the compressed bundle on top of it.
+        Assert.Contains("MasterBundleStream.OpenFile(bundlePath)", source);
+    }
+
+    // A cold load decodes the masterbundle once. The audio clips are byte ranges in the .resource node at
+    // the end of the same blob the texture pass already walks to, so they are planned into that pass:
+    // extracting them separately cost a second whole-bundle LZMA decode for 20 MB of clips, and it ran
+    // after the load had compacted its heap, so its transient stayed resident for the whole session.
+    [Fact]
+    public void AudioClipsRideTheSameBundlePassAsTheTextures()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ModelExtractor.cs")) is not { } extractorPath
+            || FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } streamerPath)
+        {
+            return;
+        }
+
+        // Normalized: the literals below span lines, and a checkout that materializes CRLF would make
+        // every one of them miss on source that is perfectly correct.
+        string extractor = File.ReadAllText(extractorPath).Replace("\r\n", "\n");
+        // One plan across the bundle's serialized files, and only the clips a file added are owed: a raw
+        // clip group is resolved a container at a time, so a per-file plan completed it from the first
+        // file that held any of its clips and left the rest of them unextracted.
+        Assert.Contains("AudioExtractor.Plan(file, audio, audioPlan)", extractor);
+        Assert.Contains("audioOwed = OweAudioClips(audioPlan, audioOwed, i, ordered, owedByFile, written)",
+            extractor);
+        // A range in a node the decoder has already passed can never be served, and marking its
+        // definition complete would cache it permanently without a clip the bundle does hold.
+        Assert.Contains("plan.MarkUnservable(clip.Definition)", extractor);
+        Assert.Contains("AudioExtractor.WriteClip(owed.AudioPlan, owed.AudioClip, bytes)", extractor);
+
+        // def.bin is the cache's only completeness marker, so it is written on the pass's normal exits
+        // only: a cancelled pass must leave the definition looking absent rather than half-extracted.
+        int earlyExit = extractor.IndexOf("CompleteAudio(audioPlan);\n                return;",
+            StringComparison.Ordinal);
+        Assert.True(earlyExit > 0);
+        int cancelled = extractor.IndexOf("if (cancellationToken.IsCancellationRequested)\n                return;",
+            StringComparison.Ordinal);
+        Assert.True(cancelled > 0);
+        Assert.DoesNotContain("CompleteAudio", extractor.Substring(cancelled,
+            extractor.IndexOf("owedByFile.Remove(fileName);", cancelled, StringComparison.Ordinal) - cancelled));
+
+        // Planned before the pass starts: a forward-only decoder cannot go back for a range named after
+        // it has gone past, and the .resource node is the last one in the blob.
+        string streamer = File.ReadAllText(streamerPath);
+        int planned = streamer.IndexOf("_audioWants = PlanAudio(unturnedPath);", StringComparison.Ordinal);
+        int started = streamer.IndexOf("StartStreaming();", StringComparison.Ordinal);
+        Assert.True(planned > 0 && started > planned);
+        Assert.Contains("audio: audio,", streamer);
+    }
+
+    // Whatever may open a bundle of its own waits for the pass that is already reading one. Finished says
+    // the scene is built, which is not the same thing: a warm mesh cache with cold terrain layers streams
+    // a bundle while the scene finishes without it, and hanging the audio fallback off Finished let the
+    // two decode the same file at once — the multi-gigabyte peak the passes are serialized to avoid, plus
+    // two writers over one set of cache files.
+    [Fact]
+    public void TheAudioFallbackWaitsForTheBundlePassRatherThanTheBuiltScene()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } streamerPath
+            || FindRepositoryFile(Path.Combine("src", "Main.cs")) is not { } mainPath)
+        {
+            return;
+        }
+
+        string streamer = File.ReadAllText(streamerPath);
+        string main = File.ReadAllText(mainPath);
+        Assert.Contains("streamer.ExtractionFinished += RunPendingAudioExtraction;", main);
+        Assert.DoesNotContain("streamer.Finished += RunPendingAudioExtraction;", main);
+
+        // Emitted from the one place that knows both halves: the scene is finished and no decoder can
+        // still be reading (TryFinalizeLoadState's own guard).
+        int guard = streamer.IndexOf("if (_loadStateReleased || !_finished || (_streamStarted && !_texturesDone))",
+            StringComparison.Ordinal);
+        int emitted = streamer.IndexOf("EmitSignal(SignalName.ExtractionFinished);", guard,
+            StringComparison.Ordinal);
+        Assert.True(guard > 0 && emitted > guard);
     }
 
     [Fact]
@@ -815,9 +909,11 @@ public class PhysicsBodyOrderTests
         string source = File.ReadAllText(path);
         Assert.Contains("TextureKey.Discriminate(prefix, assetPath)", source);
         Assert.DoesNotContain("bundleTag + \"_\" + DefNameOf(assetPath)", source);
-        Assert.Equal(2, CountOccurrences(source,
-            "SafeCachePath.UniqueFileName(name, \"clip\", clipId, \".ogg\")"));
-        Assert.Equal(2, CountOccurrences(source, "SafeCachePath.TryResolveChild"));
+        // Definitions and raw clip groups write their clips through ONE path, so the sanitized file name
+        // and the containment check cannot drift apart between them — they did when each loop had its own.
+        Assert.Equal(1, CountOccurrences(source,
+            "SafeCachePath.UniqueFileName(clip.Name, \"clip\", clip.ClipId, \".ogg\")"));
+        Assert.Equal(1, CountOccurrences(source, "SafeCachePath.TryResolveChild"));
     }
 
     [Fact]
@@ -832,10 +928,15 @@ public class PhysicsBodyOrderTests
         Assert.True(start >= 0 && end > start);
         string block = source.Substring(start, end - start);
         int task = block.IndexOf("AppShutdown.Track(System.Threading.Tasks.Task.Run", StringComparison.Ordinal);
-        int loop = block.IndexOf("foreach ((string bundle", StringComparison.Ordinal);
+        int loop = block.IndexOf("foreach (AudioExtractor.Request request in audioRequests)",
+            StringComparison.Ordinal);
         Assert.True(task >= 0 && loop > task);
         Assert.Equal(1, CountOccurrences(block, "Task.Run"));
-        Assert.Contains("AudioExtractor.Extract(bundle, tag, paths, audioCacheDir, groups);", block);
+        Assert.Contains("AudioExtractor.Extract(request.BundlePath, request.BundleTag, request.DefPaths,",
+            block);
+        // The cold load already extracted these inside its bundle pass, so this fallback must ask before
+        // it decodes: without the check it opened a 1.4 GB bundle to discover it had nothing to do.
+        Assert.Contains("AudioExtractor.IsSatisfied(request)", block);
     }
 
     [Fact]
