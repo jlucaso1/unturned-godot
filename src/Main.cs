@@ -103,6 +103,7 @@ public partial class Main : Node3D
         }
 
         string[] userArgs = OS.GetCmdlineUserArgs();
+        UncapFramesForMeasurement(userArgs);
 
         // Dedicated server: godot --headless -- --server [--port=27015] [--map=Washington]. Movement-sim
         // only, raw UDP.
@@ -957,6 +958,26 @@ public partial class Main : Node3D
     // The day/night cycle owns the sun-shaft pass, which has to render in front of whichever camera is
     // live; both camera paths hand theirs over here.
     private DayNightController? _dayNight;
+
+    // Measurement runs need frames as fast as the machine can produce them; players do not. project.godot
+    // used to ship vsync OFF so the benchmarks would be uncapped, which meant every player also got an
+    // uncapped renderer — a menu spinning the GPU at several hundred FPS, and tearing, as the default.
+    //
+    // The requirement belongs to the benchmark, so the benchmark asks for it. Turning it off here rather
+    // than in the config keeps the shipped default honest without making the numbers in bench/ and
+    // docs/PROFILING.md quietly refresh-rate-limited instead — which is the failure that would have made
+    // this change worse than leaving it alone: not a crash, just numbers that stop meaning anything.
+    //
+    // Headless has no window to set a mode on, and no frames to pace either, so it is left alone.
+    private static void UncapFramesForMeasurement(string[] userArgs)
+    {
+        bool measuring = System.Array.IndexOf(userArgs, "--benchmark") >= 0
+            || OS.GetEnvironment("UG_RUNTIME_BENCH_SECS") is { Length: > 0 };
+        if (!measuring || DisplayServer.GetName() == "headless")
+            return;
+
+        DisplayServer.WindowSetVsyncMode(DisplayServer.VSyncMode.Disabled);
+    }
 
     private void AddFreeCamera()
     {
