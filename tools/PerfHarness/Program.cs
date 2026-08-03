@@ -237,11 +237,10 @@ public static class Program
         }, warmup: 1, iters: 5);
 
         int confirm = 0, uncertain = 0, unknown = 0;
-        foreach (NavFlag flag in flags)
+        for (int i = 0; i < flags.Count; i++)
         {
-            NavmeshSurfaceSampling.FlagSurfaces sampled =
-                NavmeshSurfaceSampling.Sample(flag, world, StepOffset);
-            confirm += NavmeshReachability.NeedsConfirmation(flag, StepOffset, sampled.Surface,
+            NavmeshSurfaceSampling.FlagSurfaces sampled = sampledFlags[i];
+            confirm += NavmeshReachability.NeedsConfirmation(flags[i], StepOffset, sampled.Surface,
                 sampled.Known, sampled.Slack, sampled.Uncertain, margin: 0.05f).Count;
             uncertain += sampled.UncertainSamples;
             for (int t = 0; t < sampled.Known.Length; t++)

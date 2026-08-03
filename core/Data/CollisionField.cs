@@ -596,13 +596,13 @@ public sealed class CollisionField
             // Deliberately NOT tracked separately: whether the face is turned toward the ray or away from
             // it. ObjectsBuilder leaves BackfaceCollision off on its ConcavePolygonShape3Ds, so in
             // principle the server culls a back-facing crossing and this should escalate rather than
-            // claim one. Measured on PEI, it does not: escalating them turned 1,225 uncertain probes into
-            // 99,525 — a third of every probe on the map, and the confirmation set from 20% of faces to
-            // 50% — while the audit's disagreement count barely moved (129 to 90 of 42,642 faces, and
-            // none of the difference attributable to this rather than to the edge band beside it). A
-            // third of mesh crossings being back-facing while the server reports the same surfaces the
-            // two-sided test does says the server is not culling them here. So the cost was the whole
-            // saving and the correction was noise, and this stays two-sided.
+            // claim one. Measured on PEI's 42,642 faces, it does not. Escalating them took the uncertain
+            // probes from 842 to 99,525 — a third of every probe on the map — and the confirmation set
+            // from 8,054 faces to 21,488 (19% to 50%), while the audit's disagreement count did not move
+            // at all (90 either way) and the verdict differences went 19 to 15. A third of mesh crossings
+            // being back-facing while the server reports the same surfaces the two-sided test does says
+            // the server is not culling them here: the cost was the whole saving and the correction was
+            // noise, so this stays two-sided.
             //
             // If that changes — a Godot release that culls, or a collider set wound the other way — the
             // audit is what would show it, as a jump in "the CPU field invented" rather than in timing.

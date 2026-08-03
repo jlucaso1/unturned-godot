@@ -396,6 +396,7 @@ public sealed class ZombieNavigation
         // them under the ordinary fingerprint would have the next normal run restore them instead of
         // running the hybrid it is supposed to. A diagnostic measures; it does not leave results behind.
         bool audit = EnvFlag.IsOn(OS.GetEnvironment("UG_NAV_PROBE_AUDIT"), whenUnset: false);
+        _auditing = audit; // read once for the whole pass rather than per flag and per face
         bool cpuField = collision != null && EnvFlag.IsOn(OS.GetEnvironment("UG_NAV_CPU_PROBE"),
             whenUnset: true);
         int[] triangleCounts = new int[_flags.Count];
@@ -531,7 +532,18 @@ public sealed class ZombieNavigation
         await PublishAsync(fingerprint, cachePath == null ? null : cachePath + ".csr");
         if (cachePath != null && fingerprint != null)
             QueueCheckpoint(cachePath, fingerprint, triangleCounts);
-        await _checkpoints;
+        try
+        {
+            await _checkpoints;
+        }
+        catch (Exception e)
+        {
+            // Publication has already happened, so a checkpoint that failed for a reason WriteCheckpoint
+            // did not expect costs only the resume optimisation. Letting it escape here would skip the
+            // state release below and leave the rejected-triangle sets — hundreds of thousands of entries
+            // on a large map — resident for the whole session over a file that did not get written.
+            AppShutdown.WarnUnlessQuitting($"[nav] reconciliation checkpoint failed ({e.Message})");
+        }
         Log.Print($"[nav] collision reconciliation submitted in {total.ElapsedMilliseconds} ms"
             + (field == null ? " (physics-server probes only)" : $" ({DescribeProbes()})"));
         ReleaseReconciliationState();
@@ -559,6 +571,7 @@ public sealed class ZombieNavigation
     }
 
     private ProbeTally _probeTally;
+    private bool _auditing;
 
     private struct ProbeTally
     {
@@ -614,12 +627,11 @@ public sealed class ZombieNavigation
         NavmeshSurfaceSampling.FlagSurfaces sampled = plan.Sampled;
         float[] surface = sampled.Surface;
         bool[] known = sampled.Known;
-        bool audit = EnvFlag.IsOn(OS.GetEnvironment("UG_NAV_PROBE_AUDIT"), whenUnset: false);
-        HashSet<int> confirm = audit ? AllTriangles(count) : plan.Confirm;
+        HashSet<int> confirm = _auditing ? AllTriangles(count) : plan.Confirm;
 
 
-        float[] before = audit ? (float[])surface.Clone() : System.Array.Empty<float>();
-        bool[] knownBefore = audit ? (bool[])known.Clone() : System.Array.Empty<bool>();
+        float[] before = _auditing ? (float[])surface.Clone() : System.Array.Empty<float>();
+        bool[] knownBefore = _auditing ? (bool[])known.Clone() : System.Array.Empty<bool>();
 
         _probeTally.CpuSamples += sampled.Samples;
         _probeTally.CpuUncertain += sampled.UncertainSamples;
@@ -649,7 +661,7 @@ public sealed class ZombieNavigation
         // Judged against the planned set: audit mode confirms every face in round one, so the real pass's
         // later rounds cannot be observed here. ReportAudit replays them itself, against the server
         // answers it now has for every face, so what it compares is the state a normal run would publish.
-        if (audit)
+        if (_auditing)
             ReportAudit(flag, before, knownBefore, surface, known, sampled, plan.Confirm, stepOffset);
 
         phase.Restart();
@@ -688,6 +700,7 @@ public sealed class ZombieNavigation
         // real pass keeps confirming until nothing droppable rests on an unmeasured height, and an audit
         // that stopped at the planned set would warn about a state no normal run ever publishes.
         int count = serverSurface.Length;
+        float margin = ConfirmationMargin; // an environment read and a parse; not once per face
         var hybridSurface = (float[])cpuSurface.Clone();
         var hybridKnown = (bool[])cpuKnown.Clone();
         var replayed = new HashSet<int>();
@@ -738,7 +751,7 @@ public sealed class ZombieNavigation
             else
             {
                 float delta = MathF.Abs(cpuSurface[t] - serverSurface[t]);
-                differs = delta > ConfirmationMargin + sampled.Slack[t];
+                differs = delta > margin + sampled.Slack[t];
                 if (differs && delta > worst)
                 {
                     worst = delta;

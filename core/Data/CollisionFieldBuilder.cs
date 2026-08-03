@@ -81,8 +81,24 @@ public sealed class CollisionFieldBuilder
         }
     }
 
+    // A placement must be RIGID — rotation and translation only. CollisionField transforms the probe into
+    // the shape's frame and reads the resulting ray parameter straight back as a world distance, so a
+    // scaled placement would return heights in the shape's units and report them as metres, with nothing
+    // to mark them uncertain. Scale belongs baked into the shape, which is what ObjectsBuilder does.
+    //
+    // The tolerance is the caller's, not this code's: ObjectsBuilder treats an instance as unscaled when
+    // every axis is within 0.001 of 1, so anything it lets through has to be accepted here. At that size
+    // the error is a couple of millimetres over the probe's own length — an order under the graze band.
     public void AddInstance(int shape, Transform3D transform)
     {
+        Vector3 scale = transform.Basis.Scale.Abs();
+        if (MathF.Abs(scale.X - 1f) > 0.002f || MathF.Abs(scale.Y - 1f) > 0.002f
+            || MathF.Abs(scale.Z - 1f) > 0.002f)
+        {
+            throw new ArgumentException(
+                $"Instance placements must be rigid; bake the scale {scale} into the shape.",
+                nameof(transform));
+        }
         lock (_gate)
         {
             if ((uint)shape >= (uint)_shapes.Count)
@@ -94,6 +110,10 @@ public sealed class CollisionFieldBuilder
     // A terrain tile's collision heightfield, in HeightMapShape3D's own layout and placed by the transform
     // that shape is given. The placement is an axis-aligned scale plus a translation (see
     // TerrainHeightfield.CollisionTransform); a rotated one is refused rather than silently mis-sampled.
+    //
+    // `data` is kept by reference, like AddMeshShape's faces, and the field is immutable once built — so
+    // the caller must not write to it afterwards. Doing so would leave the precomputed height bounds
+    // describing terrain that is no longer there. TerrainBuilder allocates a fresh array per tile.
     public void AddHeightfield(Transform3D placement, int width, int depth, float[] data)
     {
         if (width < 2 || depth < 2)

@@ -292,12 +292,13 @@ public class CollisionFieldTests
     public void AFaceTurnedAwayFromTheProbeIsStillASurface()
     {
         // ObjectsBuilder leaves BackfaceCollision off, so in principle the server culls a crossing of a
-        // face turned away from the ray and this should escalate rather than report one. Measured on PEI
-        // it does not: escalating back-facing crossings took the uncertain probes from 1,225 to 99,525 —
-        // a third of every probe on the map — and the confirmation set from 20% of faces to 50%, while
-        // the audit's disagreement count barely moved. A third of crossings being back-facing while the
-        // server reports the same surfaces says the server is not culling them here. The audit is what
-        // would catch it if that ever changed; see the note in CollisionField.Intersect.
+        // face turned away from the ray and this should escalate rather than report one. Measured on
+        // PEI's 42,642 faces it does not: escalating back-facing crossings took the uncertain probes from
+        // 842 to 99,525 — a third of every probe on the map — and the confirmation set from 8,054 faces
+        // to 21,488 (19% to 50%), while the disagreement count stayed at 90 and the verdict differences
+        // went 19 to 15. A third of crossings being back-facing while the server reports the same
+        // surfaces says the server is not culling them here. The audit is what would catch it if that
+        // ever changed; see the note in CollisionField.Intersect.
         var builder = new CollisionFieldBuilder();
         AddFlatGround(builder, cells: 20, cell: 1f, height: 0f);
         Vector3[] facingUp = Quad(5f);
@@ -547,6 +548,9 @@ public class CollisionFieldTests
         // crossing to compute at all), one whose crossing is outside the segment, and one small enough
         // that the graze band swallows the whole face.
         var builder = new CollisionFieldBuilder();
+        // Ground under all of it, well below: an uncovered column is uncertain on its own, which would
+        // let every assertion below hold without the triangles having said anything.
+        AddFlatGround(builder, cells: 40, cell: 1f, height: -5f);
         int mesh = builder.AddMeshShape(new[]
         {
             // Edge-on: a vertical wall, parallel to the probe.
@@ -559,9 +563,12 @@ public class CollisionFieldTests
         builder.AddInstance(mesh, Transform3D.Identity);
         CollisionField field = builder.Build();
 
-        Assert.False(field.Probe(0f, 2f, 6f, 0f).Hit);     // along the wall
-        Assert.False(field.Probe(0f, -1f, 30f, 0f).Hit);   // under the high triangle, out of its reach
-        Assert.True(field.Probe(10.001f, 10.001f, 8f, 0f).Uncertain); // all graze, no solid
+        // Segments stop above the ground, so a miss is the triangles' answer and not the terrain's.
+        SurfaceSample alongWall = field.Probe(0.5f, 2f, topY: 6f, bottomY: 0f);
+        Assert.False(alongWall.Hit);
+        Assert.False(alongWall.Uncertain); // modelled ground below, nothing in range: an answer
+        Assert.False(field.Probe(4f, 4f, topY: 30f, bottomY: 0f).Hit); // the high triangle is out of reach
+        Assert.True(field.Probe(10.001f, 10.001f, topY: 8f, bottomY: 0f).Uncertain); // all graze, no solid
     }
 
     [Fact]
