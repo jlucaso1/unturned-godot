@@ -3,7 +3,7 @@
 Two questions, and they have very different answers:
 
 1. **Can the game be exported to the web today?** No, and not because of anything in this repository.
-   Godot 4 refuses to export a C#/.NET project to the web at all.
+   Godot 4.7 refuses to export a C#/.NET project to the web at all.
 2. **Can a browser read the player's own Unturned install, so a web build would never have to ship the
    game's content?** Yes. That part is built, tested against real game data, and lives in [`web/`](../web).
 
@@ -225,7 +225,7 @@ the same type `showDirectoryPicker()` returns — so `HandleFs` is exercised on 
 mock. It then drives the demo page end to end with the picker stubbed to hand back that same handle,
 because the one thing no automation can click is the native folder dialog.
 
-170 assertions, covering path handling, the `.dat` reader, install detection (both the install folder and
+178 assertions, covering path handling, the `.dat` reader, install detection (both the install folder and
 the Steam-library layout), map discovery against PEI's real `Level.dat`/`English.dat`/`Config.json` and
 its 16 Landscape tiles, range reads and their clamping, and parity between the two filesystem backends.
 It self-skips when the content or Playwright is missing, like the C# suite's data-backed tests. Files

@@ -153,11 +153,28 @@ async function readCategory(fs, mapPath) {
     if (text === null) return null;
     try {
         const config = JSON.parse(relaxJson(text));
-        return typeof config?.Category === "string" ? config.Category : null;
+        if (typeof config?.Category !== "string") return null;
+        // JsonElement.GetString() refuses a value holding an unpaired surrogate — `\uD800` with no low
+        // half — where JSON.parse hands it back happily. The desktop therefore has no category for such
+        // a config, so neither does this.
+        return hasUnpairedSurrogate(config.Category) ? null : config.Category;
     } catch {
         // A map whose config will not parse still loads; the category is cosmetic.
         return null;
     }
+}
+
+// A string that cannot be encoded as UTF-8, because a surrogate is missing its partner.
+function hasUnpairedSurrogate(text) {
+    for (let i = 0; i < text.length; i++) {
+        const code = text.charCodeAt(i);
+        if (code >= 0xdc00 && code <= 0xdfff) return true; // a low half with nothing before it
+        if (code < 0xd800 || code > 0xdbff) continue;
+        const low = text.charCodeAt(i + 1);
+        if (!(low >= 0xdc00 && low <= 0xdfff)) return true;
+        i++; // a complete pair
+    }
+    return false;
 }
 
 // Config.json is hand-edited by map authors, and MapCatalog.ReadCategory reads it with both

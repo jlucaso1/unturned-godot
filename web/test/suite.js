@@ -248,6 +248,28 @@ async function relaxedConfigJson() {
         { platform: "linux" },
     );
     equal("a comment between tokens does not merge them into valid json", merged.maps[0]?.category, null);
+
+    // JSON.parse hands back a lone surrogate happily; JsonElement.GetString() refuses one, so the
+    // desktop has no category for such a config. (It refuses it by throwing InvalidOperationException
+    // rather than JsonException, which is why core/ needed a second catch to keep listing the map at
+    // all.) A complete pair is an ordinary category on both sides and must still come through.
+    for (const [label, escaped, expected] of [
+        ["a lone high surrogate", "\\uD800", null],
+        ["a lone low surrogate", "\\uDC00", null],
+        ["a high surrogate before text", "\\uD800x", null],
+        ["a complete surrogate pair", "\\uD800\\uDC00", "\u{10000}"],
+    ]) {
+        const result = await probeInstall(
+            syntheticFs({
+                "Bundles/core_linux.masterbundle": "",
+                "Maps/Surrogate/Level.dat": "",
+                "Maps/Surrogate/Config.json": `{ "Category": "${escaped}" }`,
+            }),
+            { platform: "linux" },
+        );
+        equal(`${label} in a category reads as the desktop reads it`, result.maps[0]?.category, expected);
+        equal(`${label} still leaves the map listed`, result.maps[0]?.folderName, "Surrogate");
+    }
 }
 
 // File.ReadAllText picks the encoding from a byte-order mark; File.text() is UTF-8 whatever the bytes

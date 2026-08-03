@@ -125,7 +125,7 @@ That build runs on the .NET runtime shipped with the export template and drops e
 
 Export secrets, if you ever add any, land in `export_credentials.cfg`, which is git-ignored, so never commit it.
 
-There is no Web preset, because Godot 4 refuses to export a C#/.NET project to the web at all
+There is no Web preset, because Godot 4.7 refuses to export a C#/.NET project to the web at all
 (`Exporting to Web is currently not supported in Godot 4 when using C#/.NET`). The half that does not
 depend on the engine is built and tested though: `web/` reads a real Unturned install straight off the
 player's disk through the browser's directory picker, so a web build would ship no game content either.

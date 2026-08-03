@@ -102,6 +102,36 @@ public class MapCatalogTests
         Assert.Null(MapCatalog.Read(number, MapSource.Official)!.Category);
     }
 
+    // A \uD800 escape with no low half is JSON the parser accepts and GetString refuses: it throws
+    // InvalidOperationException, not JsonException, so the obvious catch misses it. That is not one map
+    // losing a cosmetic label — the throw leaves Read and leaves Scan, so a single hand-edited workshop
+    // config took the whole map list down with it.
+    [Fact]
+    public void Read_ConfigWithAnUnpairedSurrogate_LosesOnlyTheCategory()
+    {
+        using var dir = new TempDir();
+
+        string high = WriteMap(dir, Path.Combine("Maps", "LoneHigh"), config: "{ \"Category\": \"\\uD800\" }",
+            tiles: new[] { (0, 0) });
+        MapEntry? map = MapCatalog.Read(high, MapSource.Official);
+        Assert.NotNull(map);
+        Assert.Null(map!.Category);
+        Assert.True(map.IsSupported); // still a listable, loadable map
+
+        string low = WriteMap(dir, Path.Combine("Maps", "LoneLow"), config: "{ \"Category\": \"\\uDC00\" }");
+        Assert.Null(MapCatalog.Read(low, MapSource.Official)!.Category);
+
+        // A complete pair is a perfectly good category and must survive.
+        string pair = WriteMap(dir, Path.Combine("Maps", "Astral"), config: "{ \"Category\": \"\\uD800\\uDC00\" }");
+        Assert.Equal("\U00010000", MapCatalog.Read(pair, MapSource.Official)!.Category);
+
+        // And the scan as a whole keeps listing every map, including the two broken ones.
+        List<string> names = MapCatalog.Scan(dir.Path).Select(entry => entry.FolderName).ToList();
+        Assert.Contains("LoneHigh", names);
+        Assert.Contains("LoneLow", names);
+        Assert.Contains("Astral", names);
+    }
+
     [Fact]
     public void Read_TrailingSeparatorStillYieldsTheFolderName()
     {

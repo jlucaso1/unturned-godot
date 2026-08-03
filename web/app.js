@@ -152,6 +152,9 @@ async function onForget() {
     try {
         await forgetHandle();
     } catch (error) {
+        // The same recency rule as the success path below: a newer scan owns the status line, and its
+        // result is worth more to the player than a message about a control they have moved on from.
+        if (generation !== before) return;
         // "Forget" is the privacy-facing control on this page: reporting success while the handle is
         // still in IndexedDB, and still restorable on the next load, is the one lie it must not tell.
         setStatus(`Could not forget the saved folder: ${error?.message ?? error}. It is still stored.`);

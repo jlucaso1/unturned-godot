@@ -244,6 +244,13 @@ public static class MapCatalog
         {
             // A map we cannot read the config of still loads; the category is cosmetic.
         }
+        catch (InvalidOperationException)
+        {
+            // GetString() throws this, not JsonException, when the value holds an unpaired surrogate
+            // ("Cannot read incomplete UTF-16 JSON text as string"). Parse accepts the escape, so the
+            // throw lands here rather than above -- and without this catch it left ReadCategory, left
+            // Read, and left Scan, so one hand-edited workshop config took the whole map list down.
+        }
 
         return null;
     }
