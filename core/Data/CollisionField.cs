@@ -579,7 +579,15 @@ public sealed class CollisionField
         // lets the caller tell that apart from a probe brushing the edge of a real sill.
         public Crossing Intersect(Vector3 origin, Vector3 direction, float length)
         {
-            float nearest = float.MaxValue, solid = float.MaxValue, graze = float.MaxValue;
+            float nearest = float.MaxValue, solid = float.MaxValue;
+            // The nearest cluster of edge crossings, and how many triangles are in it. A shell's INTERNAL
+            // edges are shared by two faces, so a probe in the band around one crosses both at the same
+            // height — and a surface two faces agree on is not a silhouette, whatever the band says. Only
+            // the nearest cluster is tracked because only it can outrank the answer; anything below the
+            // highest solid surface cannot change which surface that is.
+            float edgeAt = float.MaxValue;
+            int edgeFaces = 0;
+            bool edgeInside = false;
             Span<int> stack = stackalloc int[128];
             int depth = 0;
             stack[depth++] = 0;
@@ -606,16 +614,40 @@ public sealed class CollisionField
                         nearest = t;
                     if (inside && !edge && t < solid)
                         solid = t;
-                    if (edge && t < graze)
-                        graze = t;
+                    if (!edge)
+                        continue;
+                    if (t < edgeAt - GrazeEpsilon)
+                    {
+                        edgeAt = t; // a nearer cluster supersedes whatever was found below it
+                        edgeFaces = 1;
+                        edgeInside = inside;
+                    }
+                    else if (t <= edgeAt + GrazeEpsilon)
+                    {
+                        edgeAt = MathF.Min(edgeAt, t);
+                        edgeFaces++;
+                        edgeInside |= inside;
+                    }
                 }
             }
 
+            // Two faces crossed at the same height with the probe inside one of them: the shared edge of a
+            // tessellated surface, corroborated by the neighbour rather than in doubt. Two faces crossed
+            // with the probe inside NEITHER is the same edge seen from outside the shell, which is exactly
+            // the silhouette this band exists to catch — so the inside test is what separates them.
+            bool corroborated = edgeFaces >= 2 && edgeInside;
+            if (corroborated && edgeAt < solid)
+                solid = edgeAt;
+            bool graze = edgeFaces > 0 && !corroborated;
+
             return new Crossing(nearest < float.MaxValue, nearest < float.MaxValue ? nearest : 0f,
                 solid < float.MaxValue, solid < float.MaxValue ? solid : 0f,
-                graze < float.MaxValue, graze < float.MaxValue ? graze : 0f);
+                graze, graze ? edgeAt : 0f);
         }
 
+        // Widened by the graze band, like the instance bounds are and for the same reason: a probe a
+        // millimetre outside a face is exactly the one the band exists to catch, and node bounds trimmed
+        // to the geometry would cull it before any triangle got the chance to report it.
         private static bool SlabOverlap(Vector3 min, Vector3 max, Vector3 origin, Vector3 direction,
             float length)
         {
@@ -625,13 +657,13 @@ public sealed class CollisionField
                 float o = origin[axis], d = direction[axis];
                 if (MathF.Abs(d) < 1e-9f)
                 {
-                    if (o < min[axis] || o > max[axis])
+                    if (o < min[axis] - GrazeEpsilon || o > max[axis] + GrazeEpsilon)
                         return false;
                     continue;
                 }
                 float inverse = 1f / d;
-                float t0 = (min[axis] - o) * inverse;
-                float t1 = (max[axis] - o) * inverse;
+                float t0 = (min[axis] - GrazeEpsilon - o) * inverse;
+                float t1 = (max[axis] + GrazeEpsilon - o) * inverse;
                 if (t0 > t1)
                     (t0, t1) = (t1, t0);
                 near = MathF.Max(near, t0);
@@ -665,20 +697,30 @@ public sealed class CollisionField
             float v = direction.Dot(q) * inverse;
             float w = 1f - u - v;
 
-            // A barycentric coordinate is a fraction of the triangle, so the metric tolerance has to be
-            // converted into one: GrazeEpsilon over the triangle's own size.
-            float size = MathF.Max(ab.Length(), MathF.Max(ac.Length(), (c - b).Length()));
-            float tolerance = size > 1e-6f ? GrazeEpsilon / size : 1f;
-            float least = MathF.Min(u, MathF.Min(v, w));
-            if (least < -tolerance)
+            // A barycentric coordinate is a fraction of the triangle, so the metric band has to be
+            // converted into one — and the conversion is per coordinate, not per triangle. The distance
+            // from a point to the edge opposite a vertex is that vertex's coordinate times the ALTITUDE
+            // to that edge, so the band in barycentric terms is GrazeEpsilon over that altitude, which is
+            // |opposite edge| / twice the area. Dividing by one length for all three (the longest side,
+            // say) is only right for an equilateral triangle: on a long sliver — which is most of what a
+            // collision mesh is made of — it understates the band along the long edge by the aspect ratio,
+            // and a probe a millimetre off that edge would be called a certain miss.
+            float twiceArea = ab.Cross(ac).Length();
+            if (twiceArea < 1e-9f)
+                return; // no area: nothing to stand on, and no altitude to measure a band against
+            float scale = GrazeEpsilon / twiceArea;
+            float tolerateU = scale * (a - c).Length(); // u weights B, whose opposite edge is CA
+            float tolerateV = scale * ab.Length();      // v weights C, opposite AB
+            float tolerateW = scale * (c - b).Length(); // w weights A, opposite BC
+            if (u < -tolerateU || v < -tolerateV || w < -tolerateW)
                 return;
 
             float hit = ac.Dot(q) * inverse;
             if (hit < 0f || hit > length)
                 return;
             t = hit;
-            inside = least >= 0f;
-            edge = least < tolerance;
+            inside = u >= 0f && v >= 0f && w >= 0f;
+            edge = u < tolerateU || v < tolerateV || w < tolerateW;
         }
     }
 }

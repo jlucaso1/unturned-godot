@@ -393,6 +393,8 @@ public sealed class ZombieNavigation
         // returns before any of that happens, and the common run is a warm one — so an audit that
         // honoured the cache would silently report nothing on exactly the runs someone would use it on.
         bool audit = EnvFlag.IsOn(OS.GetEnvironment("UG_NAV_PROBE_AUDIT"), whenUnset: false);
+        bool cpuField = collision != null && EnvFlag.IsOn(OS.GetEnvironment("UG_NAV_CPU_PROBE"),
+            whenUnset: true);
         int[] triangleCounts = new int[_flags.Count];
         for (int i = 0; i < _flags.Count; i++)
             triangleCounts[i] = _flags[i].Triangles.Length / 3;
@@ -406,6 +408,7 @@ public sealed class ZombieNavigation
                 {
                     string fp = NavReconcileCache.Fingerprint(_levelDir, modelCache, colliderGuids);
                     fp = NavReconcileCache.WithStepOffset(fp, stepOffset);
+                    fp = NavReconcileCache.WithProbeSettings(fp, cpuField, ConfirmationMargin);
                     return (fp, System.IO.Path.Combine(reconcileCache,
                         NavReconcileCache.MapKey(_levelDir) + ".cache"));
                 });
@@ -454,7 +457,7 @@ public sealed class ZombieNavigation
         // per-collider BVHs) so it goes to a worker; a map that did not record one — free-cam, a headless
         // server, an old save path — simply keeps the server-only probing below.
         CollisionField? field = null;
-        if (collision != null && EnvFlag.IsOn(OS.GetEnvironment("UG_NAV_CPU_PROBE"), whenUnset: true))
+        if (cpuField && collision != null)
         {
             var fieldWatch = Stopwatch.StartNew();
             CollisionFieldBuilder source = collision;

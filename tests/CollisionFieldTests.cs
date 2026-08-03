@@ -221,6 +221,53 @@ public class CollisionFieldTests
     }
 
     [Fact]
+    public void TheBandAroundAnInternalEdgeIsCorroborated_NotEscalated()
+    {
+        // The diagonal is not a special case — every shared edge of a tessellated collider has a band
+        // around it, and on a triangle-heavy mesh that band is a large share of the surface. A probe
+        // inside it crosses BOTH faces at the same height, and a surface two faces agree on is not a
+        // silhouette; escalating those would push ordinary samples down the slow path in bulk.
+        var builder = new CollisionFieldBuilder();
+        int quad = builder.AddMeshShape(Quad(5f));
+        builder.AddInstance(quad, Transform3D.Identity);
+        CollisionField field = builder.Build();
+
+        foreach (float offset in new[] { 0f, 0.001f, -0.001f, 0.01f, -0.01f })
+        {
+            SurfaceSample sample = field.Probe(5f + offset, 5f, topY: 10f, bottomY: 0f);
+            Assert.True(sample.Hit);
+            Assert.Equal(5f, sample.Y, 0.0001f);
+            Assert.False(sample.Uncertain, $"the shared diagonal is not a silhouette (offset {offset})");
+        }
+    }
+
+    [Fact]
+    public void ASliverTriangleStillGetsAMetricEdgeBand()
+    {
+        // The band is metric — 2 cm — and a barycentric coordinate is a fraction of the triangle, so the
+        // conversion is per edge, by that edge's altitude. Scaling all three by the longest side instead
+        // understates the band along the long edge of a sliver by its aspect ratio, and a collision mesh
+        // is mostly slivers: a probe a millimetre off the edge would come back a certain miss.
+        var builder = new CollisionFieldBuilder();
+        AddFlatGround(builder, cells: 40, cell: 1f, height: 0f); // so a clean miss is an answer, not a gap
+        int sliver = builder.AddMeshShape(new[]
+        {
+            new Vector3(0f, 5f, 0f), new Vector3(20f, 5f, 0f), new Vector3(20f, 5f, 0.05f),
+        });
+        // Placed well inside the ground, so a miss beside it still lands on modelled terrain.
+        builder.AddInstance(sliver, new Transform3D(Basis.Identity, new Vector3(0f, 0f, 5f)));
+        CollisionField field = builder.Build();
+
+        // A centimetre beyond the long edge: inside the band, so the answer is the server's to give.
+        Assert.True(field.Probe(10f, 4.99f, topY: 10f, bottomY: -1f).Uncertain);
+        // A whole metre away is not a near miss by anyone's measure — that is the ground, and only the
+        // ground.
+        SurfaceSample clear = field.Probe(10f, 4f, topY: 10f, bottomY: -1f);
+        Assert.False(clear.Uncertain);
+        Assert.Equal(0f, clear.Y, 0.0001f);
+    }
+
+    [Fact]
     public void ProbeOnTheOuterEdgeOfAMesh_IsEscalated()
     {
         var builder = new CollisionFieldBuilder();

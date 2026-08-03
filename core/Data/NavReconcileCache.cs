@@ -49,6 +49,16 @@ public static class NavReconcileCache
     public static string WithStepOffset(string fingerprint, float stepOffset) =>
         $"{fingerprint}:step={BitConverter.SingleToInt32Bits(stepOffset):x8}";
 
+    // How the surfaces behind a cached verdict were measured. Neither of these is an input to the
+    // geometry, but both decide which faces the physics server settled and which the CPU field did, so a
+    // cache written under one and read under the other describes a measurement that was never taken.
+    // Widening the margin to check a suspicion, or turning the field off to compare against it, has to
+    // recompute rather than hand back the answer from the other setting.
+    public static string WithProbeSettings(string fingerprint, bool cpuField, float confirmMargin) =>
+        cpuField
+            ? $"{fingerprint}:margin={BitConverter.SingleToInt32Bits(confirmMargin):x8}"
+            : $"{fingerprint}:server-only";
+
     private static void AppendTree(StringBuilder manifest, string label, string root, string pattern)
     {
         if (!Directory.Exists(root))
