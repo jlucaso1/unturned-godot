@@ -955,7 +955,11 @@ public sealed class BakedNavGraph
             // was once given 0.299, leaving the capsule on the vertex it was supposed to clear.
             float budget = length - 1e-3f;
             float total = leftInset + rightInset;
-            if (total > budget && total > 0f)
+            // Whether the portal could pay what its ends asked for. A shared end is NOT on the
+            // `radius + Clearance` circle around its vertex, which is what decides below whether the
+            // corner rounding may use that vertex at all.
+            bool paid = !(total > budget && total > 0f);
+            if (!paid)
             {
                 float share = budget / total;
                 leftInset *= share;
@@ -964,9 +968,25 @@ public sealed class BakedNavGraph
             if (leftInset <= 0f && rightInset <= 0f)
                 return new Portal(left, right, -1, -1);
 
+            // The vertices carried out of here are the corner rounding's whole input, and it uses them
+            // as centres of `radius + Clearance` circles it pushes legs out onto. That is only sound
+            // where the inset actually DELIVERED that distance: the chord being repaired is a chord of
+            // the circle the two corners already sit on, and a shared portal puts them somewhere else
+            // entirely — so the "circle" is no longer anchored to the corridor, or to the mesh.
+            //
+            // A body far wider than the corridor shares every portal, names no vertices, and keeps the
+            // funnel's raw route, which is what it had before rounding existed. Without this a radius
+            // of 1e6 m on a 20 m field pushed waypoints out to (-768211, -640177) — 768 km off the
+            // navmesh, the same point re-inserted 47 times until the repair budget ran out — and a
+            // radius of float.MaxValue overflowed that to NaN. Radius 5 and 100 did it too, in the
+            // field rather than outside it: 50 waypoints, 47 of them identical.
+            //
+            // Reported rather than re-derived from the geometry, because the two are not the same test.
+            // An end can sit at `radius + Clearance` from its OWN vertex and still have been scaled back
+            // on the other end's behalf, and a scaled end can land at that distance by coincidence.
             Vector3 unit = along / length;
             return new Portal(left + (unit * leftInset), right - (unit * rightInset),
-                leftInset > 0f ? leftVertex : -1, rightInset > 0f ? rightVertex : -1);
+                paid && leftInset > 0f ? leftVertex : -1, paid && rightInset > 0f ? rightVertex : -1);
         }
 
         // How far along the portal an end must move for the body to clear the walls that MEET it.
