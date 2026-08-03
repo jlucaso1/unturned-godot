@@ -1087,24 +1087,29 @@ public class PhysicsBodyOrderTests
             return;
 
         string source = File.ReadAllText(path);
-        // Both jobs read the tree through the same verifier, so both have to leave behind cache entries
-        // that predate a change to what "whole" means -- the structural job included. Three references
-        // per job: the restore key, its restore-keys prefix, and the run-scoped save key.
-        Assert.Equal(6, CountOccurrences(source,
+        // Every job that reads the tree reads it through the same verifier, so every one of them has to
+        // stop reusing cache entries that predate a change to what "whole" means. The count is derived
+        // from the restore steps rather than written down, so adding a job that consumes the content is
+        // not a tripwire -- but leaving out that job's save, or its verify, still is.
+        int jobs = CountOccurrences(source, "- name: Restore the game content");
+        Assert.True(jobs >= 2, $"expected at least the test and structural jobs to restore content, found {jobs}");
+
+        // Three references per job: the restore key, its restore-keys prefix, and the run-scoped save key.
+        Assert.Equal(jobs * 3, CountOccurrences(source,
             "unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}"));
 
         // Cache entries are immutable for a given key: trusting the hit flag would wedge every run behind
         // one bad entry until the depot manifest moves. Verify what came back, and re-fetch when it fails.
         Assert.DoesNotContain("steps.content-cache.outputs.cache-hit", source);
-        Assert.Equal(2, CountOccurrences(source, "if ./scripts/fetch-game-data.sh --verify 2> /dev/null; then"));
+        Assert.Equal(jobs, CountOccurrences(source, "if ./scripts/fetch-game-data.sh --verify 2> /dev/null; then"));
 
         // A repair has to outlive the run that made it. actions/cache skips its teardown save after an
         // exact-key hit, so a combined restore+save would fix the working directory and discard the fix,
         // leaving every later run to restore the same bad entry and download again.
         Assert.DoesNotContain("uses: actions/cache@v6\n        with:\n          path: build/game-data", source);
-        Assert.Equal(2, CountOccurrences(source, "uses: actions/cache/restore@v6"));
-        Assert.Equal(2, CountOccurrences(source, "uses: actions/cache/save@v6"));
-        Assert.Equal(2, CountOccurrences(source,
+        Assert.Equal(jobs, CountOccurrences(source, "uses: actions/cache/restore@v6"));
+        Assert.Equal(jobs, CountOccurrences(source, "uses: actions/cache/save@v6"));
+        Assert.Equal(jobs, CountOccurrences(source,
             "key: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-${{ github.run_id }}-${{ github.job }}"));
     }
 
