@@ -26,12 +26,53 @@ public sealed class UnityMesh
     // False when the mesh uses compression or external stream data we don't decode (caller falls back).
     public bool Usable { get; private set; }
 
+    // Where a mesh keeps its vertex buffer when it is not inline: a byte range in one of the bundle's
+    // .resS nodes. Unity moves a mesh's buffer out there on its own schedule, so this is not a property of
+    // the model — a vehicle's Wheel_LOD0 is streamed while the Wheel_LOD1 beside it is inline. A caller
+    // that can read the range hands the bytes back to Read; one that cannot gets an unusable mesh, which
+    // is what this reader did for every streamed mesh before.
+    public readonly record struct StreamRef(string Path, long Offset, int Size)
+    {
+        // `Path` is null on a default instance, which is what ReadStreamRef hands back for a mesh that is
+        // not streamed at all — the pattern rather than a .Length keeps that from faulting here.
+        public bool IsStreamed => Path is { Length: > 0 } && Size > 0;
+
+        // The last segment of "archive:/CAB-x/CAB-x.resS" is the bundle node's file name, which is how
+        // BundlePass addresses it. Same rule UnityTexture.StreamFileName follows.
+        public string FileName
+        {
+            get
+            {
+                string path = Path ?? string.Empty;
+                int slash = path.LastIndexOf('/');
+                return slash >= 0 ? path[(slash + 1)..] : path;
+            }
+        }
+    }
+
+    // The mesh's external vertex buffer, without decoding anything: this is what a caller plans its
+    // .resS pass from, before it has the bytes to call Read with.
+    public static StreamRef ReadStreamRef(Dictionary<string, object> mesh)
+    {
+        if (ToInt(mesh["m_MeshCompression"]) != 0)
+            return default; // a compressed mesh carries its geometry inline, whatever m_StreamData says
+        if (mesh["m_StreamData"] is not Dictionary<string, object> stream)
+            return default;
+        return new StreamRef((string)stream["path"], Convert.ToInt64(stream["offset"]),
+            Convert.ToInt32(stream["size"]));
+    }
+
     private static readonly int[] FormatSize =
     {
         4, 2, 1, 1, 2, 2, 1, 1, 2, 2, 4, 4, // 0..11: Float32,Float16,UNorm8,SNorm8,UNorm16,SNorm16,UInt8,SInt8,UInt16,SInt16,UInt32,SInt32
     };
 
-    public static UnityMesh Read(Dictionary<string, object> mesh)
+    public static UnityMesh Read(Dictionary<string, object> mesh) => Read(mesh, null);
+
+    // `streamVertexData` is the mesh's external vertex buffer, when the caller was able to read the range
+    // ReadStreamRef named. The layout inside it is identical to the inline one — the channels, strides and
+    // stream offsets all still apply — so it simply takes the place of m_VertexData's own bytes.
+    public static UnityMesh Read(Dictionary<string, object> mesh, byte[]? streamVertexData)
     {
         var result = new UnityMesh { Name = mesh.TryGetValue("m_Name", out object? n) ? (string)n : string.Empty };
 
@@ -41,15 +82,23 @@ public sealed class UnityMesh
             return ReadCompressed(mesh, result);
 
         var streamData = (Dictionary<string, object>)mesh["m_StreamData"];
-        if (((string)streamData["path"]).Length != 0)
-            return result; // vertex data lives in an external .resS
+        bool streamed = ((string)streamData["path"]).Length != 0;
+        if (streamed && streamVertexData == null)
+            return result; // vertex data lives in an external .resS the caller could not read
 
         var vertexData = (Dictionary<string, object>)mesh["m_VertexData"];
         int vertexCount = ToInt(vertexData["m_VertexCount"]);
         var channels = (List<object>)vertexData["m_Channels"];
-        byte[] buffer = (byte[])vertexData["m_DataSize"];
+        // A streamed mesh writes an empty m_DataSize; the buffer is the range out of the .resS instead.
+        byte[] buffer = streamed ? streamVertexData! : (byte[])vertexData["m_DataSize"];
 
         int[] strides = ComputeStreamStrides(channels, out int[] streamOffsets, vertexCount);
+        // The channel readers index the buffer straight from the strides, so a buffer shorter than the
+        // header describes would fault rather than decode. That was unreachable while the bytes always
+        // came from the same object; a range read out of a .resS can fall short (a truncated stream node,
+        // a mismatched offset), and a mesh nobody can decode is exactly what Usable already means.
+        if (!FitsChannels(buffer, vertexCount, strides, streamOffsets))
+            return result;
 
         result.Vertices = ReadChannel(channels, 0, buffer, vertexCount, strides, streamOffsets);
         result.Normals = ReadChannel(channels, 1, buffer, vertexCount, strides, streamOffsets);
@@ -125,13 +174,32 @@ public sealed class UnityMesh
         return result;
     }
 
+    // A channel's component count. Unity packs it into the low nibble of `dimension` and keeps the high
+    // one for flags, so the field is not the number it looks like: a normals channel written as 52 is four
+    // Float16 components with 0x3 set above them. Read whole, that channel claimed 52 components and
+    // pushed the stream's stride from 32 bytes to 116 — every vertex then read from the wrong offset, and
+    // the vertex buffer looked far too short for the vertex count, which is what made the mesh unusable.
+    private static int Dimension(Dictionary<string, object> channel) => ToInt(channel["dimension"]) & 0x0F;
+
+    // Whether the buffer holds every vertex of every stream the header declares.
+    private static bool FitsChannels(byte[] buffer, int vertexCount, int[] strides, int[] streamOffsets)
+    {
+        for (int s = 0; s < strides.Length; s++)
+        {
+            long end = (long)streamOffsets[s] + (long)vertexCount * strides[s];
+            if (end > buffer.Length)
+                return false;
+        }
+        return true;
+    }
+
     private static int[] ComputeStreamStrides(List<object> channels, out int[] streamOffsets, int vertexCount)
     {
         int streamCount = 1;
         foreach (object c in channels)
         {
             var ch = (Dictionary<string, object>)c;
-            if (ToInt(ch["dimension"]) > 0)
+            if (Dimension(ch) > 0)
                 streamCount = Math.Max(streamCount, ToInt(ch["stream"]) + 1);
         }
 
@@ -139,7 +207,7 @@ public sealed class UnityMesh
         foreach (object c in channels)
         {
             var ch = (Dictionary<string, object>)c;
-            int dim = ToInt(ch["dimension"]);
+            int dim = Dimension(ch);
             if (dim == 0)
                 continue;
             int stream = ToInt(ch["stream"]);
@@ -163,7 +231,7 @@ public sealed class UnityMesh
             return Array.Empty<Vector3>();
 
         var ch = (Dictionary<string, object>)channels[index];
-        int dim = ToInt(ch["dimension"]);
+        int dim = Dimension(ch);
         if (dim < 3)
             return Array.Empty<Vector3>();
 
@@ -192,7 +260,7 @@ public sealed class UnityMesh
             return Array.Empty<Vector2>();
 
         var ch = (Dictionary<string, object>)channels[index];
-        int dim = ToInt(ch["dimension"]);
+        int dim = Dimension(ch);
         if (dim < 2)
             return Array.Empty<Vector2>();
 
@@ -218,7 +286,7 @@ public sealed class UnityMesh
         if (index >= channels.Count)
             return Array.Empty<float>();
         var ch = (Dictionary<string, object>)channels[index];
-        if (ToInt(ch["dimension"]) < 4)
+        if (Dimension(ch) < 4)
             return Array.Empty<float>();
 
         int stream = ToInt(ch["stream"]);
@@ -244,7 +312,7 @@ public sealed class UnityMesh
         if (index >= channels.Count)
             return Array.Empty<int>();
         var ch = (Dictionary<string, object>)channels[index];
-        if (ToInt(ch["dimension"]) < 4)
+        if (Dimension(ch) < 4)
             return Array.Empty<int>();
 
         int stream = ToInt(ch["stream"]);
