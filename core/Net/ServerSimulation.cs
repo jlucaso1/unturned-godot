@@ -164,6 +164,20 @@ public sealed class ServerSimulation
 
     public void RemovePlayer(byte id) => _players.Remove(id);
 
+    // Puts a player somewhere outright, and forgets the trusted-position baseline so the client's own
+    // next claim is adopted instead of being measured against where it used to be. Used by the bug-repro
+    // harness to stand the reporter back where the dump was taken: without clearing the baseline the
+    // speed budget would treat the jump as a cheat and rubber-band them back within a tick.
+    public bool Teleport(byte id, Vector3 position)
+    {
+        if (!_players.TryGetValue(id, out Entry? entry) || !IsFinite(position))
+            return false;
+        entry.State.Position = position;
+        entry.State.Velocity = Vector3.Zero;
+        entry.HasVerifiedPosition = false;
+        return true;
+    }
+
     // For callers that hold the joined-player invariant (NetServer); throws on a violated invariant.
     public PlayerMoveState GetState(byte id) => _players[id].State;
 

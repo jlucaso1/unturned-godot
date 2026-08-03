@@ -1,0 +1,364 @@
+using System;
+using System.Collections.Generic;
+using Godot;
+using UnturnedGodot.Data;
+using UnturnedGodot.Net;
+using UnturnedGodot.Zombies;
+
+namespace UnturnedGodot.Repro;
+
+public sealed class ReproScenarioOptions
+{
+    // Serve the session's own recorded answers where the replay asks the same questions. Turning this
+    // off replays the window against the dump's geometry alone, which is the honest way to ask "is the
+    // recorded outcome a property of the world, or of the engine's exact answers that day".
+    public bool UseRecordedAnswers { get; init; } = true;
+
+    // Answer whatever the recording does not cover from the dump's collision slice.
+    public bool UseGeometry { get; init; } = true;
+
+    // The generator a replay rolls from when the dump could not carry the session's own state.
+    public ulong RandomSeed { get; init; }
+
+    // The full navmesh, when the replay has the real map available. Without it the dump's local slice
+    // is used, which routes correctly near the incident and nowhere else.
+    public IReadOnlyList<NavFlag>? NavFlags { get; init; }
+
+    // A pathfinder to use instead of the one built from the flags above (the Godot host's, say).
+    public ZombiePathQuery? PathQuery { get; init; }
+}
+
+// Rebuilds the zombie simulation from a dump and steps it. This is what "reproducible" means here: the
+// same brain, the same population, the same routes and timers, the same player movement, and the same
+// world answers — in a plain unit test, in the standalone harness, or inside the running game.
+public sealed class ReproScenario
+{
+    private readonly ReproDump _dump;
+    private readonly ReproZombieSection _section;
+    private readonly ReproScenarioOptions _options;
+    private readonly List<ZombiePlayerView> _players = new();
+    private readonly Dictionary<int, ZombieInstance> _byId = new();
+    private readonly ReproHeightSampler? _heights;
+    private readonly BakedNavGraph? _graph;
+
+    public ZombieSystem System { get; }
+
+    public ReproOracle? Oracle { get; }
+
+    public ReproCollisionWorld? Collision { get; }
+
+    // Index into the window's frames — 0 is the state the dump was anchored at.
+    public int Tick { get; private set; }
+
+    public int WindowTicks => _section.Frames.Count;
+
+    // Queries the dump's geometry answered because the recording had nothing matching. In a replay of
+    // unmodified code this stays at zero; once it moves, the replay has left the recorded world and is
+    // being simulated, which is a different (and still useful) claim.
+    public int GeometryAnswers { get; private set; }
+
+    // Queries nothing could answer: no recording, no geometry. The world was treated as empty for
+    // these, and a replay with a high count here is not evidence of anything.
+    public int UnansweredQueries { get; private set; }
+
+    public ReproScenario(ReproDump dump, ReproScenarioOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(dump);
+        _dump = dump;
+        _options = options ?? new ReproScenarioOptions();
+        _section = dump.Zombies ?? new ReproZombieSection();
+
+        List<NavBound> bounds = ReproZombieState.ToBounds(dump.World);
+        List<ZombieTable> tables = ReproZombieState.ToTables(dump.World);
+        IReadOnlyList<NavFlag>? flags = _options.NavFlags
+            ?? (dump.World.HasNavmesh ? ReproZombieState.ToNavFlags(dump.World) : null);
+
+        _heights = ReproHeightSampler.From(dump.World.Ground);
+        Collision = _options.UseGeometry ? ReproCollisionWorld.From(dump.World) : null;
+        Oracle = _options.UseRecordedAnswers
+            ? new ReproOracle(_section.Oracle, Math.Max(1, _section.Frames.Count))
+            : null;
+
+        System = new ZombieSystem(tables, bounds, SampleGround, flags);
+        System.RestoreState(ReproZombieState.FromRecord(_section.State), _options.RandomSeed);
+
+        // Only install what the session actually had. A world delegate that exists where the original
+        // had none is not a more complete replay, it is a different simulation: ZombieSystem branches
+        // on each of these being null.
+        if (Oracle != null || Collision != null)
+        {
+            System.MoveResolver = ResolveMove;
+            System.GroundSnap = ResolveGround;
+            System.VisionBlocked = ResolveVision;
+        }
+        if (flags != null)
+        {
+            // Without a pathfinder handed in, the dump's own navmesh slice becomes one. It routes
+            // correctly around the incident and nowhere else, which is the trade a self-contained
+            // bug report makes; pass the real map's flags to lift it.
+            _graph = _options.PathQuery == null ? BakedNavGraph.Build(flags) : null;
+            System.PathQuery = ResolvePath;
+            System.PathReady = () => Oracle?.Ready() ?? true;
+        }
+        foreach (ZombieInstance zombie in System.Zombies)
+            _byId[zombie.Id] = zombie;
+    }
+
+    // The player views this tick feeds the brain. Past the recorded window the last frame's players are
+    // held: a bug that needs the reporter to keep moving is not one you can extrapolate your way into.
+    private IReadOnlyList<ZombiePlayerView> PlayersAt(int tick)
+    {
+        _players.Clear();
+        if (_section.Frames.Count == 0)
+            return _players;
+        ReproFrame frame = _section.Frames[Math.Min(tick, _section.Frames.Count - 1)];
+        foreach (ReproPlayerSample sample in frame.Players)
+            _players.Add(ReproZombieState.FromSample(sample));
+        return _players;
+    }
+
+    private float DtAt(int tick)
+    {
+        if (_section.Frames.Count == 0)
+            return _dump.Meta.TickRate > 0f ? _dump.Meta.TickRate : ServerSimulation.TickRate;
+        float dt = _section.Frames[Math.Min(tick, _section.Frames.Count - 1)].Dt;
+        return dt > 0f ? dt : ServerSimulation.TickRate;
+    }
+
+    public void Step()
+    {
+        Oracle?.SeekTick(Tick);
+        System.Tick(PlayersAt(Tick), DtAt(Tick));
+        Tick++;
+    }
+
+    // Replays the recorded window and then, optionally, keeps going. The extra ticks are where a fix is
+    // judged: the window shows the bug, the tail shows whether it ends.
+    public ReproReplayReport Run(int extraTicks = 0)
+    {
+        var report = new ReproReplayReport();
+        var tracks = new Dictionary<int, MotionTrack>();
+        int total = WindowTicks + Math.Max(0, extraTicks);
+        for (int i = 0; i < total; i++)
+        {
+            Step();
+            if (Tick - 1 < WindowTicks)
+                Compare(_section.Frames[Tick - 1], report);
+            foreach (ZombieInstance zombie in System.Zombies)
+            {
+                if (zombie.State == EZombieState.Idle && zombie.TargetPlayer == byte.MaxValue)
+                    continue;
+                if (!tracks.TryGetValue(zombie.Id, out MotionTrack? track))
+                    tracks[zombie.Id] = track = new MotionTrack(zombie.Position, zombie.Yaw);
+                track.Add(zombie);
+            }
+        }
+
+        report.Ticks = Tick;
+        report.OracleHits = Oracle?.Hits ?? 0;
+        report.OracleMisses = Oracle?.Misses ?? 0;
+        report.GeometryAnswers = GeometryAnswers;
+        report.UnansweredQueries = UnansweredQueries;
+        foreach (KeyValuePair<int, MotionTrack> entry in tracks)
+            report.Motion.Add(entry.Value.ToSummary(entry.Key));
+        report.Motion.Sort((a, b) => b.YawChurnDegrees.CompareTo(a.YawChurnDegrees));
+        return report;
+    }
+
+    private void Compare(ReproFrame frame, ReproReplayReport report)
+    {
+        foreach (ReproMotionSample expected in frame.Zombies)
+        {
+            if (!_byId.TryGetValue(expected.Id, out ZombieInstance? live))
+                continue;
+            float error = (live.Position - ReproVector.To(expected.Position)).Length();
+            float yawError = MathF.Abs(Mathf.Wrap(live.Yaw - expected.Yaw, -180f, 180f));
+            report.ComparedSamples++;
+            report.SumPositionError += error;
+            report.MaxPositionError = MathF.Max(report.MaxPositionError, error);
+            report.MaxYawError = MathF.Max(report.MaxYawError, yawError);
+            if (live.State != expected.State)
+                report.StateMismatches++;
+        }
+    }
+
+    private Vector3 ResolveMove(Vector3 from, Vector3 to, float radius)
+    {
+        if (Oracle != null && Oracle.TryMove(from, to, radius, out Vector3 recorded))
+            return recorded;
+        if (Collision != null)
+        {
+            GeometryAnswers++;
+            return Collision.Resolve(from, to, radius);
+        }
+        UnansweredQueries++;
+        return to;
+    }
+
+    private bool ResolveGround(Vector3 position, out float y)
+    {
+        if (Oracle != null && Oracle.TryGround(position, out bool hit, out y))
+            return hit;
+        if (Collision != null)
+        {
+            GeometryAnswers++;
+            return Collision.GroundSnap(position, out y);
+        }
+        UnansweredQueries++;
+        return SampleGround(position.X, position.Z, out y);
+    }
+
+    private bool ResolveVision(Vector3 from, Vector3 to)
+    {
+        if (Oracle != null && Oracle.TryVision(from, to, out bool blocked))
+            return blocked;
+        if (Collision != null)
+        {
+            GeometryAnswers++;
+            return Collision.VisionBlocked(from, to);
+        }
+        UnansweredQueries++;
+        return false;
+    }
+
+    private bool ResolvePath(Vector3 from, Vector3 to, List<Vector3> path, float radius)
+    {
+        if (Oracle != null && Oracle.TryPath(from, to, radius, path, out bool found))
+            return found;
+        if (_options.PathQuery != null)
+        {
+            GeometryAnswers++;
+            return _options.PathQuery(from, to, path, radius);
+        }
+        if (_graph != null)
+        {
+            GeometryAnswers++;
+            return _graph.TryPath(from, to, path, radius);
+        }
+        UnansweredQueries++;
+        path.Clear();
+        return false;
+    }
+
+    // The dump's heightfield patch, as the brain's ground sampler. Outside the patch it answers false,
+    // which is what the real sampler does off the edge of the map.
+    private bool SampleGround(float x, float z, out float y)
+    {
+        y = 0f;
+        return _heights != null && _heights.Sample(x, z, out y);
+    }
+
+    private sealed class MotionTrack
+    {
+        private Vector3 _first;
+        private Vector3 _previous;
+        private float _previousYaw;
+
+        public MotionTrack(Vector3 position, float yaw)
+        {
+            _first = position;
+            _previous = position;
+            _previousYaw = yaw;
+        }
+
+        public float Travelled { get; private set; }
+
+        public float YawChurn { get; private set; }
+
+        public Vector3 Last { get; private set; }
+
+        public EZombieState State { get; private set; }
+
+        public float BlockedRouteTime { get; private set; }
+
+        public void Add(ZombieInstance zombie)
+        {
+            Travelled += (zombie.Position - _previous).Length();
+            YawChurn += MathF.Abs(Mathf.Wrap(zombie.Yaw - _previousYaw, -180f, 180f));
+            _previous = zombie.Position;
+            _previousYaw = zombie.Yaw;
+            Last = zombie.Position;
+            State = zombie.State;
+            BlockedRouteTime = MathF.Max(BlockedRouteTime, zombie.BlockedRouteTime);
+        }
+
+        public ReproMotionSummary ToSummary(int id) => new()
+        {
+            Id = id,
+            TravelledMetres = Travelled,
+            NetDisplacementMetres = (Last - _first).Length(),
+            YawChurnDegrees = YawChurn,
+            FinalState = State,
+            WorstBlockedRouteTime = BlockedRouteTime,
+        };
+    }
+}
+
+// What a replay is worth, in numbers. Everything here is a claim someone can check rather than a
+// verdict the harness hands down.
+public sealed class ReproReplayReport
+{
+    public int Ticks { get; set; }
+    public int ComparedSamples { get; set; }
+    public float MaxPositionError { get; set; }
+    public float SumPositionError { get; set; }
+    public float MaxYawError { get; set; }
+    public int StateMismatches { get; set; }
+    public int OracleHits { get; set; }
+    public int OracleMisses { get; set; }
+    public int GeometryAnswers { get; set; }
+    public int UnansweredQueries { get; set; }
+    public List<ReproMotionSummary> Motion { get; } = new();
+
+    public float MeanPositionError => ComparedSamples > 0 ? SumPositionError / ComparedSamples : 0f;
+
+    // Did the replay reproduce the RECORDING, rather than merely something plausible? Only meaningful
+    // for unmodified code; a millimetre is well inside the rounding a dump stores positions at.
+    public bool ReproducesRecording => ComparedSamples > 0 && MaxPositionError <= 0.01f
+        && MaxYawError <= 0.5f && StateMismatches == 0;
+
+    public string Describe()
+    {
+        var text = new System.Text.StringBuilder();
+        text.Append("replayed ").Append(Ticks).Append(" ticks; ")
+            .Append(ComparedSamples).Append(" samples compared\n");
+        text.Append("  position error   max ").Append(Format(MaxPositionError))
+            .Append(" m, mean ").Append(Format(MeanPositionError)).Append(" m\n");
+        text.Append("  yaw error        max ").Append(Format(MaxYawError)).Append("°\n");
+        text.Append("  state mismatches ").Append(StateMismatches).Append('\n');
+        text.Append("  answers          ").Append(OracleHits).Append(" recorded, ")
+            .Append(GeometryAnswers).Append(" from geometry, ")
+            .Append(UnansweredQueries).Append(" unanswered\n");
+        text.Append("  verdict          ").Append(ReproducesRecording
+            ? "reproduces the recording"
+            : "diverges from the recording (expected if the code under replay changed)").Append('\n');
+        foreach (ReproMotionSummary summary in Motion)
+            text.Append("  zombie ").Append(summary.Id).Append("  travelled ")
+                .Append(Format(summary.TravelledMetres)).Append(" m, net ")
+                .Append(Format(summary.NetDisplacementMetres)).Append(" m, turned ")
+                .Append(Format(summary.YawChurnDegrees)).Append("°, ")
+                .Append(summary.FinalState)
+                .Append(summary.IsSpinningInPlace ? "  <- spinning in place" : "")
+                .Append('\n');
+        return text.ToString();
+    }
+
+    private static string Format(float value) =>
+        value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+}
+
+// Per-zombie motion over a replay. Distance travelled against distance actually covered is the number
+// that tells a stuck zombie from a walking one, whatever the cause turns out to be.
+public sealed record ReproMotionSummary
+{
+    public int Id { get; init; }
+    public float TravelledMetres { get; init; }
+    public float NetDisplacementMetres { get; init; }
+    public float YawChurnDegrees { get; init; }
+    public float WorstBlockedRouteTime { get; init; }
+    public EZombieState FinalState { get; init; }
+
+    // Turned more than a full circle while getting nowhere: the shape of the report this harness was
+    // built for, and a useful default for "did my fix work".
+    public bool IsSpinningInPlace => YawChurnDegrees > 360f && NetDisplacementMetres < 1f;
+}

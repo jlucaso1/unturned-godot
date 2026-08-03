@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using Godot;
 
 namespace UnturnedGodot;
@@ -17,13 +19,42 @@ namespace UnturnedGodot;
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class Log
 {
+    // The last few hundred lines, for whoever needs the run-up to something rather than the moment of
+    // it — today that is the bug-repro capture, which carries this tail into every dump. A fixed ring of
+    // strings the logger has already formatted: no extra allocation, and a bounded memory cost.
+    private const int TailLines = 256;
+    private static readonly string[] Ring = new string[TailLines];
+    private static int _written;
+
+    private static string Remember(string line)
+    {
+        lock (Ring)
+        {
+            Ring[_written++ % TailLines] = line;
+        }
+        return line;
+    }
+
+    public static List<string> Tail()
+    {
+        lock (Ring)
+        {
+            var lines = new List<string>(TailLines);
+            int start = Math.Max(0, _written - TailLines);
+            for (int i = start; i < _written; i++)
+                if (Ring[i % TailLines] is { } line)
+                    lines.Add(line);
+            return lines;
+        }
+    }
+
     // Seconds since the engine started. Time.GetTicksMsec is a plain counter, so this is safe to call
     // from the worker threads that report extraction progress.
     private static string Stamp() => $"[{Time.GetTicksMsec() / 1000.0,8:0.000}] ";
 
-    public static void Print(string message) => GD.Print(Stamp(), message);
+    public static void Print(string message) => GD.Print(Remember(Stamp() + message));
 
-    public static void PrintErr(string message) => GD.PrintErr(Stamp(), message);
+    public static void PrintErr(string message) => GD.PrintErr(Remember(Stamp() + message));
 
-    public static void PushWarning(string message) => GD.PushWarning(Stamp() + message);
+    public static void PushWarning(string message) => GD.PushWarning(Remember(Stamp() + message));
 }

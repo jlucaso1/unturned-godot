@@ -446,6 +446,16 @@ public partial class NetworkManager : Node
         }
 
         _ = new UnturnedGodot.Zombies.ZombieHost(zombies, _server);
+
+        // The bug-report key (F7): keeps the last few seconds of the simulation in memory so a session
+        // that just did something wrong can be written out and replayed. Off with REPRO=0.
+        if (ReproService.Create(zombies, _server, _ground) is { } repro)
+        {
+            repro.LevelName = LevelName;
+            repro.Map = System.IO.Path.GetFileName(levelDir.TrimEnd('/', '\\'));
+            AddChild(repro);
+        }
+
         Log.Print($"[zombies] {zombies.Zombies.Count} zombies spawned from the level's spawnpoints");
     }
 

@@ -143,7 +143,7 @@ public delegate bool ZombieGroundSnap(Vector3 position, out float y);
 // Unturned's NonPathfindingZombieMovementComponent — straight-line seek, 720°/s turning, and the
 // CharacterController collision that makes crowds queue instead of stacking — so no navmesh is
 // required, matching the game's own fallback movement model.
-public sealed class ZombieSystem
+public sealed partial class ZombieSystem
 {
     // ZombiesConfigData NORMAL difficulty.
     public const float SpawnChance = 0.25f;
@@ -320,6 +320,9 @@ public sealed class ZombieSystem
 
     public void Tick(IReadOnlyList<ZombiePlayerView> players, float dt)
     {
+        // The bug-repro recorder brackets the tick here (ZombieSystemState.cs): everything below is
+        // what a dump has to be able to put back, and the state it must be put back to is this one.
+        Observer?.BeginTick(this, players, dt);
         // Poll an engine-backed pathfinder once per authoritative tick, not once per hunter. During a
         // small map's async publication this probe can cross into NavigationServer; a horde must not turn
         // one readiness check into hundreds of identical engine calls.
@@ -367,7 +370,12 @@ public sealed class ZombieSystem
         }
 
         for (int i = 0; i < count; i++)
+        {
+            CurrentZombie = _zombies[i];
             Behave(_zombies[i], players, dt);
+        }
+        CurrentZombie = null;
+        Observer?.EndTick(this);
     }
 
     private int _repathCursor;
@@ -390,6 +398,7 @@ public sealed class ZombieSystem
 
             foreach (ZombieInstance zombie in _byBound[bound])
             {
+                CurrentZombie = zombie; // so a recorder can attribute this zombie's vision raycast
                 if (zombie.TargetPlayer == player.Id)
                     continue; // Zombie.checkAlert: already hunting this player
                 Vector3 playerToZombie = zombie.Position - player.Position;

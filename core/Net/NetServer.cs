@@ -73,6 +73,14 @@ public sealed class NetServer
     // world, and a handshake that cannot name it is how two players ended up walking different maps.
     public string LevelName => _levelName;
 
+    // The authoritative tick the simulation is on, so anything recording alongside it (the bug-repro
+    // harness) can stamp its window with the same numbers the server's own logs carry.
+    public uint Tick => _simulation.Tick;
+
+    // Stands a player somewhere outright — see ServerSimulation.Teleport. Loading a repro dump into a
+    // running session is the only caller: it puts the reporter back where the dump was taken.
+    public bool Teleport(byte id, Vector3 position) => _simulation.Teleport(id, position);
+
     public NetServer(IServerTransport transport, ServerSimulation simulation, Vector3 spawnPosition,
         string levelName)
     {

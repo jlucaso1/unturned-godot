@@ -47,6 +47,10 @@ public partial class DayNightController : Node
     private StandardMaterial3D? _water; // sea plane material, tinted with the blended SEA color
     private float _azimuth = DefaultAzimuth;
     private float _time;
+
+    // Where the cycle currently stands, 0..1. Read by the bug-repro capture: lighting is part of what a
+    // session looked like, and "it only happens at night" is a real bug report.
+    public float TimeOfDay => _time;
     private float _speed = 1f;
     private bool _frozen;
     private int _moonPhase;
