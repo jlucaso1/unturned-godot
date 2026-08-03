@@ -232,13 +232,18 @@ public static class NetMessages
 
     // The level travels with the join request, not as an afterthought: the server admits a player onto
     // its world only if that is the world the client actually built.
+    // Clamped HERE rather than only on admission. The server already shortens the name it stores, but a
+    // Hello carrying an unclamped one has to survive the trip first: past MaxPayloadBytes the transport
+    // drops the datagram before any of that runs, so a player with a very long PLAYER_NAME retried a
+    // Hello that could never be read and timed out instead of joining under a 32-byte name. Clamping at
+    // the point the bytes are produced makes the two ends agree by construction.
     public static byte[] WriteHello(string name, string level)
     {
         using var ms = new MemoryStream();
         using var w = new BinaryWriter(ms);
         w.Write((byte)ENetMessage.Hello);
         w.Write(ProtocolVersion);
-        w.Write(name);
+        w.Write(ClampName(name));
         w.Write(level);
         return ms.ToArray();
     }

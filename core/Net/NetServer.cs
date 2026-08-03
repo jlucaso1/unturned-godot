@@ -167,10 +167,21 @@ public sealed class NetServer
         {
             // Answerable before (and without) joining: this is the pre-flight a client runs to learn
             // which level to build, so it must work on a connection that has said nothing else.
+            //
+            // And answered UNRELIABLY, precisely because it is answerable by anyone. A reliable reply is
+            // retained per connection until acked or GiveUpAfter, and Update retransmits the whole set
+            // every ResendInterval — so an unauthenticated sender that asks and never acks makes the
+            // server hold and re-send on its behalf. Across the 256 connections the transport now allows,
+            // stopping just short of the pending cap held a quarter of a million frames and turned each
+            // 0.25 s into roughly a million sends: the server attacking whatever address it was aimed at.
+            //
+            // Nothing is lost by dropping it. ServerQuery re-asks on its own RetryInterval until it is
+            // answered or times out, which is what a query does — the reliability belonged to the asker
+            // all along, and it is the asker who pays for it.
             case ENetMessage.ServerInfoRequest:
                 connection.Send(
                     NetMessages.WriteServerInfo(_levelName, PlayerCount, FreePlayerSlotsAt(now)),
-                    ESendType.Reliable);
+                    ESendType.Unreliable);
                 break;
             case ENetMessage.Hello:
                 {
