@@ -221,13 +221,16 @@ public class PathQualityTests
         Assert.True(worst > 0f,
             $"the route enters a wall at ({worstAt.X:0.00}, {worstAt.Z:0.00})");
 
-        // The residual, which this pass neither causes nor cures — measured at 0.318 m either way, at
-        // the same point, (9.78, 7.78). It is the known limit of insetting a portal end ALONG its own
-        // portal: that buys full clearance AT the corner but not on the segment ARRIVING at it, which
-        // can still cut across the jamb behind it. Closing it means offsetting against the wall edges
-        // incident to the vertex, which a per-vertex flag cannot express. Pinned rather than described
-        // so that the change which does close it has a number to move.
-        Assert.InRange(worst, 0.30f, 0.33f);
+        // Insetting a portal end ALONG its own portal by the radius buys the full width AT the corner
+        // but not on the segment ARRIVING at it, which can still cut across the jamb behind: this route
+        // came 0.318 m from a wall at (9.78, 7.78) while the corner itself was clear. The inset is now
+        // asked of the WALL rather than of the portal, and the same route measures 0.447.
+        //
+        // 0.447 m measured, against a body of 0.400 — the full radius plus almost all of the steering
+        // skin, the shortfall being the portal's own 1 mm margin against inverting. The assertion is the
+        // requirement rather than the measurement: the body never touches a wall.
+        Assert.True(worst >= BakedNavGraph.AgentRadius,
+            $"the route passes {worst:0.000} m from a wall at ({worstAt.X:0.00}, {worstAt.Z:0.00})");
     }
 
     // Distance in XZ from a point to one of the two wall slabs; zero when the point is inside it.

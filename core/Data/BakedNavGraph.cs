@@ -814,7 +814,7 @@ public sealed class BakedNavGraph
                             (int leftVertex, int rightVertex) = side >= 0f
                                 ? (edge.VertexB, edge.VertexA)
                                 : (edge.VertexA, edge.VertexB);
-                            portals.Add(Inset(left, right,
+                            portals.Add(Inset(current, left, right, leftVertex, rightVertex,
                                 _borderVertex[leftVertex], _borderVertex[rightVertex]));
                             break;
                         }
@@ -854,7 +854,8 @@ public sealed class BakedNavGraph
         // Each end is clamped to just under half the portal so the two insets can never cross and invert
         // it; a gap narrower than the body degrades to its midpoint, which is the best a body can aim at
         // anyway — whether it physically fits is the collision resolver's call, not the graph's.
-        private static Portal Inset(Vector3 left, Vector3 right, bool insetLeft, bool insetRight)
+        private Portal Inset(int triangle, Vector3 left, Vector3 right,
+            int leftVertex, int rightVertex, bool insetLeft, bool insetRight)
         {
             if (!insetLeft && !insetRight)
                 return new Portal(left, right);
@@ -865,17 +866,132 @@ public sealed class BakedNavGraph
             if (length <= 1e-4f)
                 return new Portal(left, right);
 
-            // Half the portal only when BOTH ends move and could cross each other. A single moving end
-            // has the whole portal to travel, and halving it there under-insets: a 0.6 m portal with one
-            // wall end has room for the full 0.45 and was being given 0.299, leaving the capsule on the
-            // vertex it was supposed to clear.
-            float budget = (insetLeft && insetRight ? length * 0.5f : length) - 1e-3f;
-            float inset = MathF.Min(AgentRadius + Clearance, budget);
-            if (inset <= 0f)
+            float leftInset = insetLeft ? InsetFor(triangle, leftVertex, along, length) : 0f;
+            float rightInset = insetRight ? InsetFor(triangle, rightVertex, along, length) : 0f;
+
+            // Share the portal when the two ends want more of it than there is, rather than halving
+            // both unconditionally. Equal demands still get half each, and a single moving end still
+            // gets the whole portal — a 0.6 m portal with one wall end has room for the full 0.45 and
+            // was once given 0.299, leaving the capsule on the vertex it was supposed to clear.
+            float budget = length - 1e-3f;
+            float total = leftInset + rightInset;
+            if (total > budget && total > 0f)
+            {
+                float share = budget / total;
+                leftInset *= share;
+                rightInset *= share;
+            }
+            if (leftInset <= 0f && rightInset <= 0f)
                 return new Portal(left, right);
 
-            Vector3 step = along / length * inset;
-            return new Portal(insetLeft ? left + step : left, insetRight ? right - step : right);
+            Vector3 unit = along / length;
+            return new Portal(left + (unit * leftInset), right - (unit * rightInset));
+        }
+
+        // How far along the portal an end must move for the body to clear the walls that MEET it.
+        //
+        // Moving d along the portal puts the point d*|sin(angle)| away from a wall that crosses it at
+        // that angle, so a portal leaving a wall at a shallow angle has to move much further than the
+        // radius. Applying the radius flat, as this used to, is only right at 90 degrees: at 10 degrees
+        // it leaves 0.078 m and a 0.40 m body is still inside the wall. Measured on a plain 1 m doorway
+        // with an angled approach, the flat inset left the route 0.318 m from a jamb.
+        private float InsetFor(int triangle, int vertex, Vector3 along, float length)
+        {
+            Span<Vector2> walls = stackalloc Vector2[MaxWallsPerVertex];
+            int count = WallsAt(triangle, vertex, walls);
+            float wanted = AgentRadius + Clearance;
+            if (count == 0)
+                return wanted; // a border with no wall edge in reach of the fan: the flat inset is all there is
+
+            float portalX = along.X / length, portalZ = along.Z / length;
+            float needed = wanted;
+            for (int i = 0; i < count; i++)
+            {
+                Vector2 wall = walls[i];
+                float wallLength = wall.Length();
+                if (wallLength <= 1e-4f)
+                    continue;
+                float sine = MathF.Abs(((portalX * wall.Y) - (portalZ * wall.X)) / wallLength);
+                // Parallel: no distance along THIS portal gains any clearance from THAT wall. Ask for
+                // the whole portal and let the share above decide; the line walk's own clearance test
+                // is what still refuses a shortcut aimed down a wall it cannot get away from.
+                if (sine <= 1e-3f)
+                    return length;
+                needed = MathF.Max(needed, wanted / sine);
+            }
+            return needed;
+        }
+
+        // Faces the wall search may visit around one vertex, and wall directions it may collect. Both
+        // are ceilings on pathological input: a fan of a dozen faces around a single vertex, or four
+        // walls meeting at one, is already past anything this data contains.
+        private const int FanLimit = 12;
+        private const int MaxWallsPerVertex = 4;
+
+        // Every wall edge touching `vertex`, as an XZ direction, found by spreading over the enabled
+        // faces around it. A flood rather than a rotation through the fan: it needs no winding
+        // convention, it copes with the non-manifold fans the builder allows, and it is bounded by
+        // construction rather than by trusting the topology to close.
+        //
+        // It has to reach past the face the portal is on. At a doorway the portal IS the opening, and
+        // the jamb's wall runs along the face beside the one the route crosses into — so a look at just
+        // the two faces either side of the portal finds no wall at all.
+        private int WallsAt(int triangle, int vertex, Span<Vector2> walls)
+        {
+            Span<int> seen = stackalloc int[FanLimit];
+            int seenCount = 0, head = 0, found = 0;
+            seen[seenCount++] = triangle;
+
+            while (head < seenCount)
+            {
+                int at = seen[head++];
+                for (int e = 0; e < 3; e++)
+                {
+                    int va = Source.Triangles[(at * 3) + e];
+                    int vb = Source.Triangles[(at * 3) + ((e + 1) % 3)];
+                    if (va != vertex && vb != vertex)
+                        continue; // not one of the fan's edges around this vertex
+
+                    // One pass over the adjacency answers both questions this needs — whether anything
+                    // enabled still shares the edge, and where to spread next. Asking StillShared first
+                    // and then scanning again to step walks the same list twice, which measured at
+                    // roughly double the cost of the whole search.
+                    bool shared = false;
+                    int mine = OppositeVertex(at, va, vb);
+                    float here = mine >= 0 ? SideOfEdge(va, vb, mine) : 0f;
+                    for (int i = _edgeStart[at]; i < _edgeStart[at + 1]; i++)
+                    {
+                        Connection c = _edges[i];
+                        if (!_enabled[c.To])
+                            continue;
+                        if ((c.VertexA != va || c.VertexB != vb)
+                            && (c.VertexA != vb || c.VertexB != va))
+                            continue;
+                        // Across, not merely alongside — the same rule StillShared applies. A face
+                        // duplicated on this side would otherwise hide a real wall from the inset.
+                        int theirs = OppositeVertex(c.To, va, vb);
+                        if (theirs < 0 || here * SideOfEdge(va, vb, theirs) >= 0f)
+                            continue;
+                        shared = true;
+                        if (seenCount < FanLimit && !Seen(seen, seenCount, c.To))
+                            seen[seenCount++] = c.To;
+                    }
+                    if (!shared && found < walls.Length)
+                    {
+                        Vector3 p = Source.Vertices[va], q = Source.Vertices[vb];
+                        walls[found++] = new Vector2(q.X - p.X, q.Z - p.Z);
+                    }
+                }
+            }
+            return found;
+        }
+
+        private static bool Seen(ReadOnlySpan<int> visited, int count, int triangle)
+        {
+            for (int i = 0; i < count; i++)
+                if (visited[i] == triangle)
+                    return true;
+            return false;
         }
 
         // Triangles the shortcut pass may walk over one route. It is a ceiling on pathological input, not
