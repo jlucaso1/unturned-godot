@@ -1074,9 +1074,9 @@ public class PhysicsBodyOrderTests
         // A repair has to outlive the run that made it. actions/cache skips its teardown save after an
         // exact-key hit, so a combined restore+save would fix the working directory and discard the fix,
         // leaving every later run to restore the same bad entry and download again.
-        Assert.DoesNotContain("uses: actions/cache@v4\n        with:\n          path: build/game-data", source);
-        Assert.Equal(2, CountOccurrences(source, "uses: actions/cache/restore@v4"));
-        Assert.Equal(2, CountOccurrences(source, "uses: actions/cache/save@v4"));
+        Assert.DoesNotContain("uses: actions/cache@v6\n        with:\n          path: build/game-data", source);
+        Assert.Equal(2, CountOccurrences(source, "uses: actions/cache/restore@v6"));
+        Assert.Equal(2, CountOccurrences(source, "uses: actions/cache/save@v6"));
         Assert.Equal(2, CountOccurrences(source,
             "key: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-${{ github.run_id }}-${{ github.job }}"));
     }
