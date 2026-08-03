@@ -154,6 +154,35 @@ public class ZombieNavmeshTests : IDisposable
         Assert.Equal(30.5f, snapped.Y, 2); // someone actually IN the basement snaps down there
     }
 
+    // Every other SnapXZ test uses FLAT triangles, where the centroid height and the surface under the
+    // point are the same number — which is why none of them could see this. A baked face can be tens of
+    // metres across and carry the whole rise of a ramp or hillside, and there the centroid is the ground
+    // nowhere except the middle.
+    //
+    // 40 m across, rising 8 m. Before interpolating, every point on this face snapped to 2.67: 2.5 m too
+    // high at the bottom edge, 5.1 m too low at the top corner — a 7.8 m spread collapsed to one number.
+    [Fact]
+    public void SnapXZ_OnASlope_TakesTheSurfaceUnderThePoint_NotTheFaceAverage()
+    {
+        var flags = new List<NavFlag>
+        {
+            Flag(new Vector3(0, 0, 0), new Vector3(200, 100, 200), new[]
+            {
+                new Vector3(-20, 0, -20), new Vector3(20, 0, -20), new Vector3(0, 8, 20),
+            }, new[] { 0, 1, 2 }),
+        };
+
+        Assert.True(LevelNavmesh.SnapXZ(flags, new Vector3(0, 0, -19), out Vector3 low));
+        Assert.Equal(0.2f, low.Y, 2); // the centroid would have said 2.67
+
+        Assert.True(LevelNavmesh.SnapXZ(flags, new Vector3(0, 8, 19), out Vector3 high));
+        Assert.Equal(7.8f, high.Y, 2); // and 2.67 here too, 5.1 m below the ground
+
+        // XZ is still preserved: this projects onto the face, it does not move the point.
+        Assert.Equal(0f, low.X, 3);
+        Assert.Equal(-19f, low.Z, 3);
+    }
+
     [Fact]
     public void SnapXZ_OffMesh_TakesTheSameLevelEdge_WithVerticalPenalty()
     {
