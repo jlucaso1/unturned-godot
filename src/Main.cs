@@ -51,6 +51,9 @@ public partial class Main : Node3D
         if (GetViewport() is { } viewport)
             viewport.MeshLodThreshold = Mathf.Clamp(thresholdPixels, 0f, 1024f);
 
+        if (Benchmark.MemoryTrace.Create() is { } memoryTrace)
+            AddChild(memoryTrace);
+
         if (OS.GetEnvironment("MAP") is { Length: > 0 } mapOverride)
             _mapName = mapOverride;
         else if (LoadLastMap() is { Length: > 0 } remembered)
@@ -830,8 +833,7 @@ public partial class Main : Node3D
         foreach (ContentSource source in sources)
             assetRoots.Add(source.AssetsDir);
 
-        PhysicsMaterialBank bank = PhysicsMaterialBank.ScanDirectories(
-            assetRoots.ConvertAll(r => System.IO.Path.Combine(r, "PhysicsMaterials")));
+        PhysicsMaterialBank bank = MovementAudioRequests.ScanPhysicsMaterials(sources);
         LandscapePhysics landscape = LandscapePhysics.ScanDirectories(
             assetRoots.ConvertAll(r => System.IO.Path.Combine(r, "Landscapes")));
         string bundlesAssets = System.IO.Path.Combine(unturnedPath, "Bundles", "Assets");
@@ -852,73 +854,36 @@ public partial class Main : Node3D
         string audioCacheDir = ProjectSettings.GlobalizePath("user://audio_cache");
         string bundlePath = UnturnedInstall.MasterBundlePath(unturnedPath);
 
-        // Grouped by the bundle that carries them: a workshop map can define its own surfaces, and their
-        // definitions are packaged in the mod's bundle. Asking only the game's bundle for those left the
-        // new surfaces silent — a material that falls back to a core one still resolves to the core
-        // bundle, because the fallback asset is the one that defines the event.
-        var defPathsByBundle =
-            new System.Collections.Generic.Dictionary<string, System.Collections.Generic.HashSet<string>>(
-                System.StringComparer.Ordinal);
-        // Every name the bank knows, not the game's ten base surfaces: a workshop landscape can name its
-        // own material, and one the extraction never visited was resolvable at runtime but absent from
-        // the audio cache, so that ground was silent. Definitions are shared between materials, so the
-        // set of paths this produces is barely larger than the built-in one.
-        foreach (string key in new[] { "FootstepWalk", "FootstepRun", "BipedLand" })
-            foreach (string name in bank.Names)
-            {
-                if (bank.FindAudioDef(name, key) is not { } def)
-                    continue;
+        // What each bundle owes the audio cache, planned exactly as the object streamer plans it for its
+        // decode pass — the cold load extracts these while it is already walking the bundle, so on that
+        // path this fallback finds every definition cached and opens nothing.
+        System.Collections.Generic.List<AudioExtractor.Request> audioRequests =
+            MovementAudioRequests.For(sources, bank, unturnedPath, audioCacheDir);
 
-                string owner = SourceForAssetDirectory(sources, def.Owner.Directory)?.BundlePath
-                    ?? bundlePath;
-                if (owner.Length == 0)
-                    continue;
-
-                if (!defPathsByBundle.TryGetValue(owner,
-                    out System.Collections.Generic.HashSet<string>? paths))
-                {
-                    defPathsByBundle[owner] = paths = new System.Collections.Generic.HashSet<string>();
-                }
-
-                paths.Add(def.Path);
-            }
-
-        if (!defPathsByBundle.ContainsKey(bundlePath))
-            defPathsByBundle[bundlePath] = new System.Collections.Generic.HashSet<string>();
-        // ZombieManager's raw clip arrays (played directly, not via OneShotAudioDefinitions): the 16
-        // roars and 5 groans, packaged as synthetic definitions with Zombie.PlayOneShot's envelope
-        // (pitch 0.9-1.1 for a normal zombie; megas override at play time).
-        var roarPaths = new string[16];
-        for (int i = 0; i < roarPaths.Length; i++)
-            roarPaths[i] = $"Sounds/Zombies/Roars/Roar_{i}.mp3";
-        var groanPaths = new string[5];
-        for (int i = 0; i < groanPaths.Length; i++)
-            groanPaths[i] = $"Sounds/Zombies/Groans/Groan_{i}.mp3";
-        var clipGroups = new System.Collections.Generic.List<AudioExtractor.RawClipGroup>
-        {
-            new("ZombieRoars", roarPaths, Volume: 1f, MinPitch: 0.9f, MaxPitch: 1.1f),
-            new("ZombieGroans", groanPaths, Volume: 1f, MinPitch: 0.9f, MaxPitch: 1.1f),
-        };
-        // Deferred until the world streamer finishes: a cold load already runs one full 1.4 GB bundle
-        // decode, and racing a second one for audio doubles peak CPU/memory and can stall weak machines.
-        // Each bundle's definitions are cached under that bundle's tag, so two bundles naming one the same
-        // thing stay apart. The zombie clip groups only exist in the game's own bundle, so they ride along
-        // with its pass. Whole-bundle passes remain serial: each retains its compressed file plus decoded
-        // audio nodes, and overlapping core/workshop passes can otherwise create a multi-gigabyte peak.
-        string TagOf(string bundle) => BundleTagOf(sources, bundle)
-            ?? UnturnedGodot.Unity.TextureKey.TagFor(System.IO.Path.GetFileNameWithoutExtension(bundle));
-
+        // Deferred until the world streamer finishes: what the pass did not cover (an unstreamable bundle,
+        // a pass that was cancelled, or a load whose meshes were already cached and therefore ran no pass)
+        // still has to be fetched, and racing a second whole-bundle decode against the first doubles peak
+        // CPU/memory and can stall weak machines. Whole-bundle passes remain serial for the same reason.
         _pendingAudioExtraction = () => AppShutdown.Track(System.Threading.Tasks.Task.Run(() =>
         {
-            foreach ((string bundle, System.Collections.Generic.HashSet<string> paths) in defPathsByBundle)
+            bool decoded = false;
+            foreach (AudioExtractor.Request request in audioRequests)
             {
                 if (AppShutdown.IsShuttingDown)
                     break;
-                System.Collections.Generic.List<AudioExtractor.RawClipGroup>? groups =
-                    bundle == bundlePath ? clipGroups : null;
-                string tag = TagOf(bundle);
-                AudioExtractor.Extract(bundle, tag, paths, audioCacheDir, groups);
+                if (request.BundlePath.Length == 0 || AudioExtractor.IsSatisfied(request))
+                    continue;
+                decoded = true;
+                AudioExtractor.Extract(request.BundlePath, request.BundleTag, request.DefPaths,
+                    request.AudioCacheDir, request.ClipGroups);
             }
+
+            // A whole-bundle decode here lands AFTER the streamer has already compacted the load's heap,
+            // so nothing else ever gives its transient back: the collector keeps the segments it grew for
+            // it, and RSS stays hundreds of megabytes above a warm session's for the rest of the game.
+            // Compact once when this one-time work is done, off the frame loop, like the loader does.
+            if (decoded && !AppShutdown.IsShuttingDown)
+                LoadMemory.Reclaim("audio extraction");
         }));
 
         Log.Print($"[audio] footsteps ready: {bank.Count} physics materials, {landscape.Count} landscape " +
@@ -936,34 +901,12 @@ public partial class Main : Node3D
         return (Factory(startGrounded: false), () => Factory(startGrounded: true));
     }
 
-    // The masterbundle of the content source whose assets folder holds `directory`, falling back to the
-    // game's own bundle for anything unattributed. A source that ships no bundle has nothing to extract
-    // from, and returning "" drops those definitions rather than looking for them in the wrong file.
-    // The discovered source's complete cache tag includes both the name from MasterBundle.dat and, for a
-    // workshop source, its item identity. The FILE name still only serves as a fallback because it carries
-    // a platform suffix and would key the same content differently per platform.
-    private static string? BundleTagOf(
-        System.Collections.Generic.IReadOnlyList<ContentSource> sources, string bundlePath)
-    {
-        foreach (ContentSource source in sources)
-            if (string.Equals(source.BundlePath, bundlePath, System.StringComparison.Ordinal))
-                return source.CacheTag;
-
-        return null;
-    }
-
+    // The content source whose assets folder holds `directory`, which is how a scanned asset is traced
+    // back to the bundle its content lives in. Shared with the audio planning, so a definition and the
+    // clips extracted for it are always attributed to the same bundle.
     private static ContentSource? SourceForAssetDirectory(
         System.Collections.Generic.IReadOnlyList<ContentSource> sources, string directory)
-    {
-        if (directory.Length == 0)
-            return null;
-
-        foreach (ContentSource source in sources)
-            if (source.Owns(directory))
-                return source;
-
-        return null;
-    }
+        => MovementAudioPlan.SourceForAssetDirectory(sources, directory);
 
     // The day/night cycle owns the sun-shaft pass, which has to render in front of whichever camera is
     // live; both camera paths hand theirs over here.

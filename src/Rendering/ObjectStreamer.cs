@@ -82,6 +82,12 @@ public partial class ObjectStreamer : Node
     private Dictionary<string, TerrainLayerPlan.BundleWants> _layerWants = new();
     private int _layersOutstanding;
 
+    // The movement/zombie audio each bundle owes, by bundle path. Planned here rather than at the player's
+    // spawn so the decode pass can carry the clips out of the same forward read as the textures: they sit
+    // in the .resource node at the end of the blob the pass already walks to. Extracting them afterwards
+    // meant a second whole-bundle LZMA decode and left its transient heap resident for the session.
+    private Dictionary<string, AudioExtractor.Request> _audioWants = new(StringComparer.Ordinal);
+
     // Completes with every layer texture this pass decoded (empty when the cache already had them all, or
     // when nothing was decoded). Always completes: the terrain build waits on it.
     public Task<IReadOnlyDictionary<Guid, CachedTexture>> LayerTextures => _layerTextures.Task;
@@ -168,6 +174,7 @@ public partial class ObjectStreamer : Node
         _plans = ContentExtraction.Plan(_sources, _cacheDir, _textureCacheDir, _neededGuids, _db, _foliageAssets,
             new HashSet<string>(_layerWants.Keys, StringComparer.Ordinal));
         _cold = ContentExtraction.TotalMissing(_plans) > 0;
+        _audioWants = PlanAudio(unturnedPath);
 
         // Start decoding here rather than in Begin(): the bundles are the longest pole of a first
         // load, and nothing about them depends on the terrain, the roads or the player. Running them
@@ -276,6 +283,31 @@ public partial class ObjectStreamer : Node
         }
     }
 
+    // Which definitions each bundle still owes the audio cache, keyed by bundle path so the decode pass
+    // can pick up its own. A scan of the physics materials only — the same cheap .dat walk the player's
+    // movement audio does at spawn — so planning it twice costs a directory read, and a request whose
+    // definitions are all cached is dropped here rather than handed to the pass as an empty want.
+    private Dictionary<string, AudioExtractor.Request> PlanAudio(string unturnedPath)
+    {
+        var wants = new Dictionary<string, AudioExtractor.Request>(StringComparer.Ordinal);
+        try
+        {
+            string audioCacheDir = ProjectSettings.GlobalizePath("user://audio_cache");
+            foreach (AudioExtractor.Request request in MovementAudioRequests.For(_sources,
+                MovementAudioRequests.ScanPhysicsMaterials(_sources), unturnedPath, audioCacheDir))
+            {
+                if (request.BundlePath.Length > 0 && !AudioExtractor.IsSatisfied(request))
+                    wants[request.BundlePath] = request;
+            }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // The player's own deferred extraction still runs and reports whatever went wrong there.
+        }
+
+        return wants;
+    }
+
     private void LoadPlacements()
     {
         // Three independent reads, and the bundle decode cannot start until all of them are in: the
@@ -374,42 +406,6 @@ public partial class ObjectStreamer : Node
         _neededGuids = new HashSet<Guid>();
     }
 
-    // The one-time load allocates large transient buffers — mesh-cache reads, the foliage transform pool,
-    // native Godot.Collections.Array copies, and on a cold load the ~1.4 GB masterbundle decode. The
-    // workstation GC holds those freed segments rather than returning them to the OS, so steady-state RSS
-    // stays inflated long after load. Force one compacting collection (including the large-object heap) once
-    // load has settled to hand the memory back. One-time cost, off the steady frame loop.
-    private static void ReclaimLoadMemory()
-    {
-        var sw = Stopwatch.StartNew();
-        long before = ProcessRssMib();
-        int passes = int.TryParse(System.Environment.GetEnvironmentVariable("UG_RECLAIM_PASSES"), out int configured)
-            ? Math.Clamp(configured, 1, 2)
-            : 1;
-        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-        GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
-        GC.WaitForPendingFinalizers();
-        if (passes == 2)
-            GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
-        if (before > 0) // Linux only (from /proc); skip the line where RSS is unavailable
-            Log.Print($"[stream] post-load reclaim: RSS {before} -> {ProcessRssMib()} MB " +
-                $"(managed {GC.GetTotalMemory(false) >> 20} MB, {passes} pass(es)) " +
-                $"in {sw.ElapsedMilliseconds} ms");
-    }
-
-    // VmRSS from /proc/self/status in MiB (Linux); 0 elsewhere. Diagnostic only.
-    private static long ProcessRssMib()
-    {
-        try
-        {
-            foreach (string line in File.ReadLines("/proc/self/status"))
-                if (line.StartsWith("VmRSS:", StringComparison.Ordinal))
-                    return long.Parse(line.Split(':')[1].Trim().Split(' ')[0]) / 1024;
-        }
-        catch (Exception) { /* non-Linux or unreadable — diagnostic only */ }
-        return 0;
-    }
-
     // The authored lower levels go through the same staged realise as the base library, on both the warm
     // and the cold path, or half of a map's object geometry blocks the main thread in one frame and
     // freezes the loading animation.
@@ -488,9 +484,11 @@ public partial class ObjectStreamer : Node
                     cancellation.ThrowIfCancellationRequested();
                     TerrainLayerPlan.BundleWants layers = LayerWantsFor(plan);
                     long megabytes = new FileInfo(plan.Source.BundlePath).Length >> 20;
+                    AudioExtractor.Request? audio = _audioWants.GetValueOrDefault(plan.Source.BundlePath);
                     AppShutdown.PrintUnlessQuitting($"[stream] decoding {plan.Source.Name} ({megabytes} MB) for "
-                        + $"{plan.Missing.Count} meshes, {plan.MissingTextures.Count} textures and "
-                        + $"{layers.ByContainerPath.Count} terrain layers…");
+                        + $"{plan.Missing.Count} meshes, {plan.MissingTextures.Count} textures, "
+                        + $"{layers.ByContainerPath.Count} terrain layers and "
+                        + $"{audio?.DefPaths.Count ?? 0} audio definitions…");
                     ModelExtractor.StreamExtract(plan.Source.BundlePath, plan.Source.CacheTag,
                         plan.Source.ObjectsDir, plan.Source.TreesDir, plan.Source.AssetsDir,
                         plan.Needed, _cacheDir, _textureCacheDir, _db,
@@ -500,7 +498,7 @@ public partial class ObjectStreamer : Node
                                 DeferUnlessStopped(OnMeshPhaseDone);
                         },
                         onTextureWritten: key => _readyKeys.Enqueue(key),
-                        foliageAssets: plan.Foliage, isCoreBundle: plan.Source.IsCore,
+                        foliageAssets: plan.Foliage, isCoreBundle: plan.Source.IsCore, audio: audio,
                         layerWantsByPath: layers.ByContainerPath,
                         onLayerTexture: (material, texture) =>
                         {
@@ -560,13 +558,15 @@ public partial class ObjectStreamer : Node
         _loadStateReleased = true;
 
         int retainedItems = _sources.Count + _plans.Count + _neededGuids.Count + _layerWants.Count +
-            _layersProduced.Count + _foliageAssets.Count + _readyKeys.Count;
+            _layersProduced.Count + _foliageAssets.Count + _readyKeys.Count + _audioWants.Count;
         int registryEntries = _registry.ReleaseLoadingIndexes();
         _sources = Array.Empty<ContentSource>();
         _plans.Clear();
         _plans = new List<ContentExtraction.BundlePlan>();
         _layerWants.Clear();
         _layerWants = new Dictionary<string, TerrainLayerPlan.BundleWants>();
+        _audioWants.Clear();
+        _audioWants = new Dictionary<string, AudioExtractor.Request>(StringComparer.Ordinal);
         _layersProduced.Clear();
         while (_readyKeys.TryDequeue(out _)) { }
         _foliageAssets.Clear();
@@ -581,7 +581,7 @@ public partial class ObjectStreamer : Node
         _prepTask = Task.CompletedTask;
         Log.Print($"[stream] released loading state: {retainedItems} items + " +
             $"{registryEntries} texture-index entries");
-        ReclaimLoadMemory();
+        LoadMemory.Reclaim("post-load");
     }
 
     private TerrainLayerPlan.BundleWants LayerWantsFor(ContentExtraction.BundlePlan plan) =>
