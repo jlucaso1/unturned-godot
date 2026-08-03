@@ -203,6 +203,66 @@ public sealed class BakedNavGraph
         private int _workspaceCount;
         public int WorkspaceCount => Volatile.Read(ref _workspaceCount);
 
+        // Faces the clearance test may hold in reach of ONE segment. It is a ceiling on pathological
+        // input rather than a working budget: the reach is confined to the band of mesh within one
+        // body width of the segment, so it is a small multiple of the faces the walk itself crosses
+        // — about six per metre on the 1 m tessellation this data has, against the 2048 faces a whole
+        // route's walking is allowed. Filling it takes a mesh finer than the body is wide, and there
+        // refusing the shortcut is the safe way to be wrong: the route keeps the funnel's own
+        // waypoints, exactly as an exhausted walk budget leaves it.
+        private const int ClearanceLimit = 2048;
+
+        private readonly ConcurrentBag<ClearanceReach> _clearance = new();
+
+        // The faces already cleared for the segment being walked, so the fringe around it is tested
+        // once per segment instead of once per step that passes it. Generation-stamped for the same
+        // reason SearchWorkspace is: a route walks hundreds of segments, and clearing an array as
+        // long as the face count for each of them would cost more than the walks do.
+        private sealed class ClearanceReach
+        {
+            private readonly int[] _generationByTriangle;
+            private readonly List<int> _pending = new();
+            private int _generation;
+            private int _head;
+
+            public ClearanceReach(int count) => _generationByTriangle = new int[count];
+
+            // Past the ceiling. Tested once per face taken OFF the queue rather than on the way in,
+            // so it is one decision rather than one at every place a face can be reached from; the
+            // overshoot that allows is at most one face's worth of neighbours.
+            public bool Exhausted => _pending.Count > ClearanceLimit;
+
+            public void Begin()
+            {
+                _pending.Clear();
+                _head = 0;
+                if (++_generation == int.MaxValue)
+                {
+                    Array.Clear(_generationByTriangle);
+                    _generation = 1;
+                }
+            }
+
+            public void Take(int triangle)
+            {
+                if (_generationByTriangle[triangle] == _generation)
+                    return; // already in reach, and already tested or queued to be
+                _generationByTriangle[triangle] = _generation;
+                _pending.Add(triangle);
+            }
+
+            public bool TryTakeNext(out int triangle)
+            {
+                if (_head >= _pending.Count)
+                {
+                    triangle = -1;
+                    return false;
+                }
+                triangle = _pending[_head++];
+                return true;
+            }
+        }
+
         private sealed class SearchWorkspace
         {
             private readonly int[] _generationByTriangle;
@@ -1057,6 +1117,15 @@ public sealed class BakedNavGraph
         // one. Consecutive portals of a corridor share their ends, so a glance back over the tail of the
         // list removes nearly every repeat; a full membership test would be quadratic in the corridor
         // and a repeat that slips through only costs one more distance test.
+        //
+        // Not ClearanceReach, which the clearance test uses to find walls near a segment. That reach
+        // answers a different question and answers it as a BOOLEAN: it spreads from a face the walk is
+        // standing on and reports whether anything is too close, never which vertex — and rounding needs
+        // the vertex to push off. It would also have to be re-entered per leg, from a face these legs do
+        // not carry, since half of them were inserted by this pass. And its band holds every border
+        // vertex within a body's width, including ones behind a wall the corridor never turned at, while
+        // a chord can only cut a corner the funnel itself turned around. The portal ends are exactly
+        // those, and they are already computed.
         private const int WallLookback = 8;
 
         private static void CollectWalls(List<Portal> portals, List<int> walls)
@@ -1201,6 +1270,9 @@ public sealed class BakedNavGraph
             scratch.Add(output[begin]);
             int anchor = begin;
             int anchorTriangle = startTriangle;
+            // One reach for the whole route: every walk resets it, so the cost is a generation bump
+            // per segment rather than an allocation.
+            ClearanceReach clearance = TakeClearanceReach();
 
             // A body ground-snaps, so what it actually covers is the SURFACE under the line, not the
             // line. Over a rise that can be longer than the detour it replaces — A* costs its corridor
@@ -1216,7 +1288,7 @@ public sealed class BakedNavGraph
             {
                 end = -1;
                 if (!TryLine(anchorTriangle, output[anchor], output[probe], radius, ref budget,
-                    out int reached, out float surface))
+                    clearance, out int reached, out float surface))
                     return false;
                 float replaced = 0f;
                 for (int i = anchor + 1; i <= probe; i++)
@@ -1227,57 +1299,65 @@ public sealed class BakedNavGraph
                 return true;
             }
 
-            while (anchor < output.Count - 1)
+            try
             {
-                int last = output.Count - 1;
-                int furthest = anchor + 1;
-                int reached = -1;
-
-                // Double the reach while it keeps working, then bisect what is left. Trying the
-                // destination first and counting back would find the same answer, but it costs a walk
-                // per waypoint on the routes that have no shortcut at all — and those are exactly the
-                // routes where the funnel is already the answer, because a corner it emitted is by
-                // definition something the corridor forced. Here that case costs ONE failed walk per
-                // waypoint, which stops at the first wall.
-                int reach = 2;
-                int limit = last;
-                while (anchor + reach <= last)
+                while (anchor < output.Count - 1)
                 {
-                    if (!Reaches(anchor + reach, out int end))
+                    int last = output.Count - 1;
+                    int furthest = anchor + 1;
+                    int reached = -1;
+
+                    // Double the reach while it keeps working, then bisect what is left. Trying the
+                    // destination first and counting back would find the same answer, but it costs a
+                    // walk per waypoint on the routes that have no shortcut at all — and those are
+                    // exactly the routes where the funnel is already the answer, because a corner it
+                    // emitted is by definition something the corridor forced. Here that case costs ONE
+                    // failed walk per waypoint, which stops at the first wall.
+                    int reach = 2;
+                    int limit = last;
+                    while (anchor + reach <= last)
                     {
-                        limit = anchor + reach - 1;
+                        if (!Reaches(anchor + reach, out int end))
+                        {
+                            limit = anchor + reach - 1;
+                            break;
+                        }
+                        furthest = anchor + reach;
+                        reached = end;
+                        reach *= 2;
+                    }
+                    for (int low = furthest + 1, high = limit; low <= high;)
+                    {
+                        int middle = low + ((high - low) / 2);
+                        if (Reaches(middle, out int end))
+                        {
+                            furthest = middle;
+                            reached = end;
+                            low = middle + 1;
+                        }
+                        else
+                        {
+                            high = middle - 1;
+                        }
+                    }
+
+                    scratch.Add(output[furthest]);
+                    anchor = furthest;
+                    // A kept waypoint that no walk reached is a funnel corner, which sits on the mesh;
+                    // the grid lookup is the same one the endpoints use and only runs when a shortcut
+                    // failed.
+                    anchorTriangle = reached >= 0 ? reached : ClosestTriangle(output[anchor], out _);
+                    if (anchorTriangle < 0 || budget <= 0)
+                    {
+                        for (int i = anchor + 1; i < output.Count; i++)
+                            scratch.Add(output[i]);
                         break;
                     }
-                    furthest = anchor + reach;
-                    reached = end;
-                    reach *= 2;
                 }
-                for (int low = furthest + 1, high = limit; low <= high;)
-                {
-                    int middle = low + ((high - low) / 2);
-                    if (Reaches(middle, out int end))
-                    {
-                        furthest = middle;
-                        reached = end;
-                        low = middle + 1;
-                    }
-                    else
-                    {
-                        high = middle - 1;
-                    }
-                }
-
-                scratch.Add(output[furthest]);
-                anchor = furthest;
-                // A kept waypoint that no walk reached is a funnel corner, which sits on the mesh; the
-                // grid lookup is the same one the endpoints use and only runs when a shortcut failed.
-                anchorTriangle = reached >= 0 ? reached : ClosestTriangle(output[anchor], out _);
-                if (anchorTriangle < 0 || budget <= 0)
-                {
-                    for (int i = anchor + 1; i < output.Count; i++)
-                        scratch.Add(output[i]);
-                    break;
-                }
+            }
+            finally
+            {
+                _clearance.Add(clearance);
             }
 
             output.RemoveRange(begin, output.Count - begin);
@@ -1293,12 +1373,13 @@ public sealed class BakedNavGraph
         // yields only radius * sin(angle) away from the wall the portal meets, while this measures the
         // real distance from the segment to the wall.
         private bool TryLine(int startTriangle, Vector3 from, Vector3 to, float radius, ref int budget,
-            out int endTriangle, out float surface)
+            ClearanceReach reach, out int endTriangle, out float surface)
         {
             endTriangle = startTriangle;
             surface = 0f;
             if (startTriangle < 0)
                 return false;
+            reach.Begin();
 
             float ax = from.X, az = from.Z;
             float dx = to.X - ax, dz = to.Z - az;
@@ -1316,7 +1397,7 @@ public sealed class BakedNavGraph
                 int i0 = Source.Triangles[current * 3];
                 int i1 = Source.Triangles[(current * 3) + 1];
                 int i2 = Source.Triangles[(current * 3) + 2];
-                if (!ClearOfWalls(current, i0, i1, i2, from, to, radius))
+                if (!ClearOfWalls(current, from, to, radius, reach))
                     return false;
 
                 // The edge to leave by is one the direction points OUT through — decided against the
@@ -1417,8 +1498,21 @@ public sealed class BakedNavGraph
             }
         }
 
-        public bool HasClearLine(int start, Vector3 from, Vector3 to, float radius, ref int budget) =>
-            TryLine(start, from, to, radius, ref budget, out _, out _);
+        public bool HasClearLine(int start, Vector3 from, Vector3 to, float radius, ref int budget)
+        {
+            ClearanceReach reach = TakeClearanceReach();
+            try
+            {
+                return TryLine(start, from, to, radius, ref budget, reach, out _, out _);
+            }
+            finally
+            {
+                _clearance.Add(reach);
+            }
+        }
+
+        private ClearanceReach TakeClearanceReach() =>
+            _clearance.TryTake(out ClearanceReach? reach) ? reach : new ClearanceReach(_centres.Length);
 
         private static float Rise(float ax, float az, float ay, float bx, float bz, float by)
         {
@@ -1472,49 +1566,89 @@ public sealed class BakedNavGraph
             return true;
         }
 
-        // Is a straight segment far enough from every wall around this face? A wall does not have to
-        // belong to a face the line enters: a sliver welded along a wall — which baked tiles produce —
-        // puts the boundary a fraction of a metre beyond a shared edge that is NOT one, and neither
-        // that edge nor the vertices on it are borders. Measured on a 0.1 m sliver, a line 0.2 m from
-        // its outer wall was accepted for a body needing 0.45.
+        // Is a straight segment far enough from every wall in reach of it?
         //
-        // So the test reaches one face further out. The ring is one deep, so a CHAIN of slivers each
-        // thinner than the radius still hides its far wall; catching that needs a query against
-        // boundary geometry near the segment rather than a walk, which is a different structure. One
-        // ring covers a sliver welded to the floor the line is on, which is the shape this data has.
-        private bool ClearOfWalls(int triangle, int i0, int i1, int i2, Vector3 from, Vector3 to,
-            float radius)
+        // A wall does not have to belong to a face the line enters: a sliver welded along a wall —
+        // which baked tiles produce — puts the boundary a fraction of a metre beyond a shared edge
+        // that is NOT one, and neither that edge nor the vertices on it are borders. Measured on a
+        // 0.1 m sliver, a line 0.2 m from its outer wall was accepted for a body needing 0.45.
+        //
+        // Reaching one face further out covered that, and nothing beyond it. Measured on a CHAIN of
+        // 0.1 m slivers welded along a 20 m floor, sweeping the line towards the outermost wall:
+        //
+        //     1 sliver     tightest accepted 0.450 m   correct
+        //     2 slivers    accepted at       0.201 m   <- the outer wall is two rings away
+        //     3 slivers    accepted at       0.301 m
+        //     4 slivers    accepted at       0.401 m
+        //
+        // So the reach is bounded by DISTANCE instead of by a ring count. Spread outward from the
+        // face over the walkable mesh, crossing a shared edge only where that edge itself comes
+        // within the body's width of the segment.
+        //
+        // That cut is exactly right, not merely deeper. Take any wall point W within the width of the
+        // segment, and P the nearest point of the segment to it. Every edge the straight line P -> W
+        // crosses is met at a point no further from the segment than W is, so it is inside the width
+        // too and this spread crosses it — unless that line leaves the walkable region first, and
+        // then it has crossed a wall at least as close, which refuses just the same. An edge FURTHER
+        // than the width away cannot be on the way to a wall that matters, so skipping it loses
+        // nothing. The reach therefore has no depth limit and is still confined to the band of mesh
+        // within one body width of the segment.
+        //
+        // The visited set spans the whole segment rather than one step of the walk, so a face on the
+        // fringe is cleared once however many steps pass it — where the one-deep ring retested every
+        // neighbour up to four times.
+        private bool ClearOfWalls(int triangle, Vector3 from, Vector3 to, float radius,
+            ClearanceReach reach)
         {
-            if (!FaceClearOfWalls(triangle, i0, i1, i2, from, to, radius))
-                return false;
-            for (int at = _edgeStart[triangle]; at < _edgeStart[triangle + 1]; at++)
+            float squared = (radius + Clearance) * (radius + Clearance);
+            reach.Take(triangle);
+
+            while (reach.TryTakeNext(out int at))
             {
-                Connection c = _edges[at];
-                if (!_enabled[c.To])
-                    continue;
-                if (!FaceClearOfWalls(c.To, Source.Triangles[c.To * 3],
-                    Source.Triangles[(c.To * 3) + 1], Source.Triangles[(c.To * 3) + 2], from, to, radius))
+                if (reach.Exhausted)
+                    return false;
+                int i0 = Source.Triangles[at * 3];
+                int i1 = Source.Triangles[(at * 3) + 1];
+                int i2 = Source.Triangles[(at * 3) + 2];
+                for (int e = 0; e < 3; e++)
+                {
+                    int va = e == 0 ? i0 : e == 1 ? i1 : i2;
+                    int vb = e == 0 ? i1 : e == 1 ? i2 : i0;
+                    if (SegmentsDistanceSquaredXZ(from, to, Source.Vertices[va], Source.Vertices[vb])
+                        >= squared)
+                        continue; // out of the body's width: not a wall in reach, nor the way to one
+
+                    // One pass over the adjacency answers both questions, the way WallsAt does it:
+                    // whether an enabled face still sits ACROSS this edge — a duplicate alongside is
+                    // not floor across it — and where to spread next.
+                    bool shared = false;
+                    int mine = OppositeVertex(at, va, vb);
+                    float here = mine >= 0 ? SideOfEdge(va, vb, mine) : 0f;
+                    for (int i = _edgeStart[at]; i < _edgeStart[at + 1]; i++)
+                    {
+                        Connection c = _edges[i];
+                        if (!_enabled[c.To])
+                            continue;
+                        if ((c.VertexA != va || c.VertexB != vb)
+                            && (c.VertexA != vb || c.VertexB != va))
+                            continue;
+                        int theirs = OppositeVertex(c.To, va, vb);
+                        if (theirs < 0 || here * SideOfEdge(va, vb, theirs) >= 0f)
+                            continue;
+                        shared = true;
+                        reach.Take(c.To);
+                    }
+                    if (!shared)
+                        return false; // a wall inside the body's width
+                }
+
+                // Border VERTICES as well as border edges. The spread follows shared edges, so a fan
+                // that meets this one at a single vertex and nowhere else — which the builder's
+                // non-manifold welds allow — is not walked into, and its wall would be missed.
+                if (TooClose(i0) || TooClose(i1) || TooClose(i2))
                     return false;
             }
             return true;
-        }
-
-        // The walls one face carries: its border EDGES, and its border VERTICES, since a wall corner
-        // can belong to a face further out than this test reaches.
-        private bool FaceClearOfWalls(int triangle, int i0, int i1, int i2, Vector3 from, Vector3 to,
-            float radius)
-        {
-            float squared = (radius + Clearance) * (radius + Clearance);
-            for (int e = 0; e < 3; e++)
-            {
-                int va = e == 0 ? i0 : e == 1 ? i1 : i2;
-                int vb = e == 0 ? i1 : e == 1 ? i2 : i0;
-                if (StillShared(triangle, va, vb))
-                    continue; // an interior edge is not a wall
-                if (SegmentsDistanceSquaredXZ(from, to, Source.Vertices[va], Source.Vertices[vb]) < squared)
-                    return false;
-            }
-            return !(TooClose(i0) || TooClose(i1) || TooClose(i2));
 
             bool TooClose(int vertex)
             {

@@ -351,21 +351,24 @@ public class PathQualityTests
         Assert.Contains(path, point => point.X >= 12f);
     }
 
-    // A wide floor with a THIN strip welded along its far edge, so the strip's outer boundary is a wall
-    // 0.1 m beyond a shared edge that is not one. Baked tiles produce slivers like this along walls.
-    private static BakedNavGraph FloorWithASliverAlongTheWall(float sliver)
+    // A wide floor with `count` THIN strips welded along its far edge, so the outermost boundary is a
+    // wall count * `sliver` metres beyond a shared edge that is not one. Baked tiles produce slivers
+    // like this along walls, and more than one of them where the tiles themselves meet.
+    private static BakedNavGraph FloorWithSliversAlongTheWall(float sliver, int count = 1)
     {
         var vertices = new List<Vector3>();
         var triangles = new List<int>();
-        float[] rows = { 0f, 20f, 20f + sliver };
+        var rows = new List<float> { 0f, 20f };
+        for (int i = 1; i <= count; i++)
+            rows.Add(20f + (i * sliver));
 
         for (int x = 0; x <= 20; x++)
             foreach (float z in rows)
                 vertices.Add(new Vector3(x, 0f, z));
         for (int x = 0; x < 20; x++)
-            for (int r = 0; r < rows.Length - 1; r++)
+            for (int r = 0; r < rows.Count - 1; r++)
             {
-                int a = (x * rows.Length) + r, b = a + 1, c = a + rows.Length, d = c + 1;
+                int a = (x * rows.Count) + r, b = a + 1, c = a + rows.Count, d = c + 1;
                 triangles.AddRange(new[] { a, b, c, b, d, c });
             }
 
@@ -385,16 +388,94 @@ public class PathQualityTests
     // sliver beyond carries the actual boundary at z = 20.1.
     //
     // Checking only the faces walked through therefore accepts a line 0.2 m from a wall for a body that
-    // needs 0.45. The clearance test reaches one face further out for exactly this.
+    // needs 0.45. The clearance test reaches past the faces the walk enters for exactly this.
     [Fact]
     public void TheLineWalk_SeesWallsOnFacesItDoesNotEnter()
     {
-        BakedNavGraph graph = FloorWithASliverAlongTheWall(0.1f);
+        BakedNavGraph graph = FloorWithSliversAlongTheWall(0.1f);
 
         Assert.True(graph.HasClearLine(0, new Vector3(2, 0, 10), new Vector3(18, 0, 10)),
             "a line down the middle of a 20 m floor is clear");
         Assert.False(graph.HasClearLine(0, new Vector3(2, 0, 19.9f), new Vector3(18, 0, 19.9f)),
             "0.2 m from the sliver's outer wall is not clearance for a 0.4 m body");
+    }
+
+    // And a CHAIN of them, which is what a reach measured in RINGS cannot answer. The walk stays on
+    // the wide floor the whole way, the first sliver is one face out, and the wall on the far side of
+    // the last sliver is as many faces out as there are slivers.
+    //
+    // Measured with the one-face-further reach in place, sweeping a line over the wide floor towards
+    // the outermost wall and recording the tightest clearance still accepted, against the 0.45 m a
+    // 0.40 m body asks for:
+    //
+    //     1 sliver     tightest accepted 0.450 m   correct
+    //     2 slivers    ACCEPTED at       0.201 m   <- the shortest chain that hides its own wall
+    //     3 slivers    ACCEPTED at       0.301 m
+    //     4 slivers    ACCEPTED at       0.401 m
+    //
+    // Five and beyond cannot be caught out from the wide floor at all: its own far edge is by then
+    // 0.5 m from the outermost wall, which is clearance the body has. So the whole defect lives in
+    // chains of two to four, and it is a defect at every one of them.
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    public void TheLineWalk_SeesTheWallBehindAWholeChainOfSlivers(int slivers)
+    {
+        BakedNavGraph graph = FloorWithSliversAlongTheWall(0.1f, slivers);
+        float wall = 20f + (slivers * 0.1f);
+
+        Assert.True(
+            graph.HasClearLine(0, new Vector3(2, 0, wall - 0.5f), new Vector3(18, 0, wall - 0.5f)),
+            "0.5 m from the outermost wall is clearance a 0.4 m body has");
+        Assert.False(graph.HasClearLine(0, new Vector3(2, 0, 19.99f), new Vector3(18, 0, 19.99f)),
+            $"{wall - 19.99f:0.00} m from the outermost wall is not clearance for a 0.4 m body");
+    }
+
+    // `columns` x `rows` quads of side `cell`, from the origin.
+    private static BakedNavGraph Strip(int columns, int rows, float cell)
+    {
+        var vertices = new List<Vector3>();
+        var triangles = new List<int>();
+        for (int x = 0; x <= columns; x++)
+            for (int z = 0; z <= rows; z++)
+                vertices.Add(new Vector3(x * cell, 0f, z * cell));
+        for (int x = 0; x < columns; x++)
+            for (int z = 0; z < rows; z++)
+            {
+                int a = (x * (rows + 1)) + z, b = a + 1, c = a + rows + 1, d = c + 1;
+                triangles.AddRange(new[] { a, b, c, b, d, c });
+            }
+        var flag = new NavFlag
+        {
+            Center = new Vector3(columns * cell / 2f, 0, rows * cell / 2f),
+            Size = new Vector3((columns * cell) + 4f, 200f, (rows * cell) + 4f),
+            Vertices = vertices.ToArray(),
+            Triangles = triangles.ToArray(),
+        };
+        return BakedNavGraph.Build(new[] { flag });
+    }
+
+    // The reach that replaced the ring is bounded by DISTANCE — it spreads only through edges within
+    // the body's width of the segment — which bounds it on any mesh whose faces are the size of a body
+    // or larger. It does not bound it on a mesh tessellated finer than the body is wide, where
+    // thousands of faces fit inside the 0.9 m band around a segment, so the reach carries a ceiling.
+    //
+    // Both fixtures here are the SAME 5 x 2 m floor and the same 4 m line down the middle of it — 1 m
+    // from either side, 0.5 m from either end, clear for a 0.4 m body by any measure. Only the
+    // tessellation differs. At 0.25 m faces the line is clear; at 0.05 m faces the reach fills and the
+    // walk refuses, which is the safe direction: it costs a shortcut, exactly as an exhausted walk
+    // budget does, and can never accept one.
+    [Fact]
+    public void TheClearanceReach_RefusesRatherThanGuess_WhenAMeshFinerThanTheBodyFillsIt()
+    {
+        var from = new Vector3(0.5f, 0, 1f);
+        var to = new Vector3(4.5f, 0, 1f);
+
+        Assert.True(Strip(20, 8, 0.25f).HasClearLine(0, from, to),
+            "a 4 m line down the middle of a 5 x 2 m floor is clear");
+        Assert.False(Strip(100, 40, 0.05f).HasClearLine(0, from, to),
+            "the same line over 8000 faces of the same floor fills the reach, and a full reach refuses");
     }
 
     // An edge can carry more than two faces — the builder connects every pair that shares one. Taking
