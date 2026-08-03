@@ -23,8 +23,16 @@ public static class LoadMemory
         var sw = Stopwatch.StartNew();
         long before = ProcessRssMib();
         int passes = int.TryParse(Environment.GetEnvironmentVariable("UG_RECLAIM_PASSES"), out int configured)
-            ? Math.Clamp(configured, 1, 2)
+            ? Math.Clamp(configured, 0, 2)
             : 1;
+        // Zero is the A/B control: it prices the compaction itself, which matters most for the reclaims
+        // that land after the player is already moving. Not a shipped setting — without it a session
+        // keeps every segment the one-time work grew.
+        if (passes == 0)
+        {
+            Log.Print($"[mem] {what} reclaim: skipped (UG_RECLAIM_PASSES=0), RSS {before} MB");
+            return;
+        }
         System.Runtime.GCSettings.LargeObjectHeapCompactionMode =
             System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
         GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);

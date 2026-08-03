@@ -84,7 +84,20 @@ Each piece of one-time load work prints a `[mem] <what> reclaim: RSS x -> y MB` 
 `/proc/self/status`) when its transient heap is compacted back to the OS: a quick steady-state RSS check.
 `post-load` is the streamer's, and a cold cache adds one per deferred pass that still had work to do.
 `UG_RECLAIM_PASSES=1|2` reproduces the measured one/two-compaction A/B; one pass is the default because
-California2 returned at least as much RSS in less time in repeated runs.
+California2 returned at least as much RSS in less time in repeated runs. `0` skips the compaction
+entirely, which is the control for pricing it — a reclaim that lands after the player is already moving
+(the deferred audio fallback's) is a stop-the-world pause in the middle of gameplay. Measured on a warm
+mesh cache with a cold audio cache, PEI, 45 s:
+
+| | `UG_RECLAIM_PASSES=0` | default |
+|---|---:|---:|
+| `runtime.frameMs.max` | 48.2 ms | 79.8 ms |
+| `runtime.frameMs.p99` | 7.52 ms | 7.59 ms |
+| `runtime.rssBytes` | 701,833,216 B | 343,724,032 B |
+
+One frame pays ~30 ms once; the session keeps 358 MB. The tail is untouched, and the reclaim is worth it
+at that price — but it is a real pause, so anything that would run a compaction on a schedule rather than
+once, or on a path the player can trigger repeatedly, needs this A/B again before it ships.
 
 `UG_MEM_TRACE=<seconds>` prints a line per interval with RSS, the managed heap's committed/live sizes and
 fragmentation, how much was allocated since the previous line, and the per-generation collection counts.

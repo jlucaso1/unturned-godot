@@ -250,7 +250,11 @@ public static class ModelExtractor
         // the textures. Extracting them separately cost a second full decode of the whole bundle — 1.4 GB
         // of LZMA for 20 MB of clips — and it ran after the load had already compacted its heap, so the
         // transient it allocated stayed resident for the rest of the session.
-        var audioPlans = new List<AudioExtractor.StreamPlan>();
+        // One plan for the whole bundle, carried through every serialized file: a raw clip group is
+        // resolved a container path at a time, so a bundle that splits one over two files completes it
+        // only once both have contributed. Per file, the first wrote a def.bin holding its own share.
+        AudioExtractor.StreamPlan? audioPlan = null;
+        int audioOwed = 0;
         int readSerialized = 0;
         var owedByFile = new Dictionary<string, List<BundlePass.Want>>(StringComparer.Ordinal);
         // Path ids repeat between the serialized files of one bundle, so what is settled is tracked by
@@ -272,21 +276,21 @@ public static class ModelExtractor
                 string fileTag = readSerialized == 0 ? bundleTag : $"{bundleTag}-{readSerialized + 1}";
                 readSerialized++;
 
-                AudioExtractor.StreamPlan? audioPlan = ReadSerializedNode(stream, (int)node.Size, bundlePath,
+                audioPlan = ReadSerializedNode(stream, (int)node.Size, bundlePath,
                     fileTag, objectBundlesDir, treeBundlesDir, assetsDir, neededGuids, cacheDir, db,
                     neededTextures, layerTextures, foliageAssets, isCoreBundle, layerWants, onLayerTexture,
-                    produced, staleLevels, audio);
+                    produced, staleLevels, audio, audioPlan);
 
                 // Settle what needs no stream at all, once per texture: pixels stored inline are in hand
                 // already, and anything extracted on an earlier boot only needs its key handed back. Both
                 // then stay out of the plan, so the pass reads no further than it truly owes.
                 CollectOwed(neededTextures, layerTextures, resolved, textureCacheDir,
                     bundlePath, textureSourceStamp, onTextureWritten, owedByFile, written);
+                // Only the clips this file added: the earlier ones are already owed to a node that may
+                // well have been read by now, and owing them twice would plan ranges the decoder has
+                // already gone past.
                 if (audioPlan != null)
-                {
-                    audioPlans.Add(audioPlan);
-                    OweAudioClips(audioPlan, ordered, owedByFile, written);
-                }
+                    audioOwed = OweAudioClips(audioPlan, audioOwed, ordered, owedByFile, written);
 
                 // Only once the LAST serialized file is in: the scene is built off this signal, and firing
                 // it after the first of several left the objects from the rest as fallback boxes.
@@ -355,12 +359,12 @@ public static class ModelExtractor
 
             if (nothingFurtherOwed)
             {
-                CompleteAudio(audioPlans);
+                CompleteAudio(audioPlan);
                 return; // every byte anyone asked for is in hand
             }
         }
 
-        CompleteAudio(audioPlans);
+        CompleteAudio(audioPlan);
     }
 
     // One byte range the pass owes somebody: a texture's pixels, a terrain layer's, or an audio clip's
@@ -378,10 +382,10 @@ public static class ModelExtractor
             new(string.Empty, 0, null, new UnityTexture(), plan, clip);
     }
 
-    // Plans one SerializedFile's audio clips into the stream node that carries them. A clip whose
-    // definition omits the source name (older single-stream bundles) is served by the bundle's only
+    // Owes the stream nodes every clip the plan has gained since `from`, and returns the new mark. A clip
+    // whose definition omits the source name (older single-stream bundles) is served by the bundle's only
     // .resource node, which is the same rule the standalone extractor applies.
-    private static void OweAudioClips(AudioExtractor.StreamPlan plan,
+    private static int OweAudioClips(AudioExtractor.StreamPlan plan, int from,
         List<MasterBundleStream.Node> ordered, Dictionary<string, List<BundlePass.Want>> owedByFile,
         List<OwedRange> written)
     {
@@ -390,7 +394,7 @@ public static class ModelExtractor
             if (node.Path.EndsWith(".resource", StringComparison.Ordinal))
                 soleResource = soleResource == null ? LastSegment(node.Path) : "";
 
-        for (int i = 0; i < plan.Clips.Count; i++)
+        for (int i = from; i < plan.Clips.Count; i++)
         {
             AudioExtractor.StreamPlan.Clip clip = plan.Clips[i];
             string file = clip.StreamFile.Length > 0 ? clip.StreamFile : soleResource ?? "";
@@ -400,16 +404,18 @@ public static class ModelExtractor
             Owe(owedByFile, file).Add(new BundlePass.Want(file, clip.Offset, clip.Size, written.Count));
             written.Add(OwedRange.ForAudioClip(plan, i));
         }
+
+        return plan.Clips.Count;
     }
 
     // Writes each definition's def.bin once its clips are in. Only on the pass's normal exits: a cancelled
     // pass leaves no completeness marker, so the next boot (or the deferred fallback) extracts it properly
     // instead of finding a definition that claims to be cached with half its clips missing.
-    private static void CompleteAudio(List<AudioExtractor.StreamPlan> plans)
+    private static void CompleteAudio(AudioExtractor.StreamPlan? plan)
     {
-        int completed = 0;
-        foreach (AudioExtractor.StreamPlan plan in plans)
-            completed += AudioExtractor.CompleteDefs(plan);
+        if (plan == null)
+            return;
+        int completed = AudioExtractor.CompleteDefs(plan);
         if (completed > 0)
             AppShutdown.PrintUnlessQuitting($"[audio] {completed} definitions extracted in the bundle pass");
     }
@@ -495,7 +501,8 @@ public static class ModelExtractor
         Dictionary<(string Tag, long Id), UnityTexture> neededTextures, Dictionary<string, UnityTexture> layerTextures,
         IReadOnlyList<FoliageAsset>? foliageAssets, bool isCoreBundle,
         IReadOnlyDictionary<string, Guid[]> layerWants, Action<Guid, CachedTexture>? onLayerTexture,
-        HashSet<Guid> produced, HashSet<Guid> staleLevels, AudioExtractor.Request? audio)
+        HashSet<Guid> produced, HashSet<Guid> staleLevels, AudioExtractor.Request? audio,
+        AudioExtractor.StreamPlan? audioPlan)
     {
         SerializedFile file = SerializedFile.Read(stream.Read(size));
         ExtractMeshesFrom(file, bundleTag, objectBundlesDir, treeBundlesDir, assetsDir, neededGuids,
@@ -530,9 +537,10 @@ public static class ModelExtractor
                 layerTextures[containerPath] = texture;
         }
 
-        // Planned from this same decoded file: the definitions name their clips by path id, and the clips
-        // name byte ranges in the .resource node this pass is about to walk past anyway.
-        return audio == null ? null : AudioExtractor.Plan(file, audio);
+        // Planned from this same decoded file, into the bundle's running plan: the definitions name their
+        // clips by path id, and the clips name byte ranges in the .resource node this pass is about to
+        // walk past anyway.
+        return audio == null ? audioPlan : AudioExtractor.Plan(file, audio, audioPlan);
     }
 
     // Returns the SerializedFile's memory to the OS rather than leaving it on the large object heap for

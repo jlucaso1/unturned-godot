@@ -298,6 +298,17 @@ public partial class ObjectStreamer : Node
     private Dictionary<string, AudioExtractor.Request> PlanAudio(string unturnedPath)
     {
         var wants = new Dictionary<string, AudioExtractor.Request>(StringComparer.Ordinal);
+
+        // Nothing plays these when no player spawns. FREECAM and STEP_PROBE are exactly the modes used to
+        // measure the load, so making them read the .resource tail and rebuild clips no session will ever
+        // hear both slows the measurement and taxes the thing being measured. A later ordinary session
+        // fills the cache.
+        if (OS.GetEnvironment("STEP_PROBE").Length > 0
+            || EnvFlag.IsOn(OS.GetEnvironment("FREECAM"), whenUnset: false))
+        {
+            return wants;
+        }
+
         try
         {
             string audioCacheDir = ProjectSettings.GlobalizePath("user://audio_cache");

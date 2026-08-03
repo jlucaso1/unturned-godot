@@ -417,7 +417,7 @@ public class PhysicsBodyOrderTests
             return;
         string source = File.ReadAllText(path);
         Assert.Contains("UG_RECLAIM_PASSES", source);
-        Assert.Contains("Math.Clamp(configured, 1, 2)", source);
+        Assert.Contains("Math.Clamp(configured, 0, 2)", source); // 0 is the "no compaction" A/B control
         Assert.Contains("if (passes == 2)", source);
         Assert.Contains("{passes} pass(es)", source);
     }
@@ -762,13 +762,17 @@ public class PhysicsBodyOrderTests
         // Normalized: the literals below span lines, and a checkout that materializes CRLF would make
         // every one of them miss on source that is perfectly correct.
         string extractor = File.ReadAllText(extractorPath).Replace("\r\n", "\n");
-        Assert.Contains("AudioExtractor.Plan(file, audio)", extractor);
-        Assert.Contains("OweAudioClips(audioPlan, ordered, owedByFile, written)", extractor);
+        // One plan across the bundle's serialized files, and only the clips a file added are owed: a raw
+        // clip group is resolved a container at a time, so a per-file plan completed it from the first
+        // file that held any of its clips and left the rest of them unextracted.
+        Assert.Contains("AudioExtractor.Plan(file, audio, audioPlan)", extractor);
+        Assert.Contains("audioOwed = OweAudioClips(audioPlan, audioOwed, ordered, owedByFile, written)",
+            extractor);
         Assert.Contains("AudioExtractor.WriteClip(owed.AudioPlan, owed.AudioClip, bytes)", extractor);
 
         // def.bin is the cache's only completeness marker, so it is written on the pass's normal exits
         // only: a cancelled pass must leave the definition looking absent rather than half-extracted.
-        int earlyExit = extractor.IndexOf("CompleteAudio(audioPlans);\n                return;",
+        int earlyExit = extractor.IndexOf("CompleteAudio(audioPlan);\n                return;",
             StringComparison.Ordinal);
         Assert.True(earlyExit > 0);
         int cancelled = extractor.IndexOf("if (cancellationToken.IsCancellationRequested)\n                return;",

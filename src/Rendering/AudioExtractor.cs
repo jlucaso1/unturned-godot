@@ -73,84 +73,161 @@ public static class AudioExtractor
             internal float MinPitch = 1f;
             internal float MaxPitch = 1f;
             internal readonly List<string?> ClipFiles = new();
+
+            // Slots already owed to some file's stream ranges. A group's clips arrive over several files
+            // and a slot is only filled once its bytes land, so "planned" and "written" are different
+            // questions and asking the second one would plan the same clip once per file.
+            internal readonly HashSet<int> Planned = new();
         }
 
         public readonly List<Clip> Clips = new();
         internal readonly List<PendingDef> Definitions = new();
+
+        // By cache directory, because that is what a definition IS on disk. One plan spans every
+        // serialized file of a bundle, and a definition already planned from an earlier file must not be
+        // planned a second time from a later one — its def.bin is not written yet, so it still reads as
+        // missing. A raw clip group instead accumulates: its clips are found by container path, one at a
+        // time, so a bundle that spreads them over several files completes the group only once every
+        // file has contributed. Writing per file gave that group a def.bin holding one file's share.
+        private readonly Dictionary<string, int> _byDirectory = new(StringComparer.Ordinal);
+
         public string CacheDirectory { get; internal set; } = "";
         public int DefinitionCount => Definitions.Count;
+
+        internal bool Knows(string directory) => _byDirectory.ContainsKey(directory);
+
+        internal int Add(PendingDef definition)
+        {
+            _byDirectory[definition.Directory] = Definitions.Count;
+            Definitions.Add(definition);
+            return Definitions.Count - 1;
+        }
+
+        internal (PendingDef Definition, int Index)? Existing(string directory) =>
+            _byDirectory.TryGetValue(directory, out int index) ? (Definitions[index], index) : null;
     }
 
-    // Plans one SerializedFile's share of a request: which clip ranges the pass has to hand back and which
-    // definitions they complete. Returns null when this file carries none of what is missing, so a caller
-    // with several files pays nothing for the ones that answer nothing.
-    public static StreamPlan? Plan(SerializedFile file, Request request)
+    // Plans one SerializedFile's share of a request into `plan` (a new one when null): which clip ranges
+    // the pass has to hand back and which definitions they complete. Returns null when nothing is missing
+    // and no plan was carried in, so a caller with several files pays nothing for the ones that answer
+    // nothing. Pass the same plan back for every file of one bundle.
+    public static StreamPlan? Plan(SerializedFile file, Request request, StreamPlan? plan = null)
     {
         List<string> missing = MissingDefs(request);
         List<RawClipGroup> missingGroups = MissingGroups(request);
         if (missing.Count == 0 && missingGroups.Count == 0)
-            return null;
+            return plan;
 
         var catalog = new FileCatalog(file);
-        var plan = new StreamPlan { CacheDirectory = request.AudioCacheDir };
+        plan ??= new StreamPlan { CacheDirectory = request.AudioCacheDir };
 
         foreach (string assetPath in missing)
         {
-            if (catalog.Find(assetPath) is not { } defObject)
+            string directory = Path.Combine(request.AudioCacheDir, DefKey(request.BundleTag, assetPath));
+            // A definition's clips are path ids, which are local to the file that names them, so the
+            // whole definition belongs to one file: the first that carries it is the only one that can.
+            if (plan.Knows(directory) || catalog.Find(assetPath) is not { } defObject)
                 continue;
 
-            Dictionary<string, object> def = TypeTreeReader.Read(defObject.TypeTree, file.ReaderFor(defObject));
-            string defName = DefKey(request.BundleTag, assetPath);
-            var pending = new StreamPlan.PendingDef
+            // Malformed audio metadata is a skipped definition, never a failed load: this now runs inside
+            // the pass that also streams the meshes, object textures and terrain layers, and a workshop
+            // asset whose serialized shape is not what these casts expect must not end that pass.
+            try
             {
-                Directory = Path.Combine(request.AudioCacheDir, defName),
-                Volume = Convert.ToSingle(def.GetValueOrDefault("volumeMultiplier", 1f)),
-                MinPitch = Convert.ToSingle(def.GetValueOrDefault("minPitch", 1f)),
-                MaxPitch = Convert.ToSingle(def.GetValueOrDefault("maxPitch", 1f)),
-            };
-
-            int index = plan.Definitions.Count;
-            int planned = 0;
-            if (def.TryGetValue("clips", out object? clips))
-                foreach (object c in (List<object>)clips)
-                {
-                    long clipId = PathId(c);
-                    if (catalog.ById(clipId) is { } clipObject
-                        && PlanClip(plan, pending, file, clipObject, clipId, index, planned))
-                    {
-                        planned++;
-                    }
-                }
-
-            if (planned > 0)
-                plan.Definitions.Add(pending);
+                PlanDefinition(plan, catalog, file, defObject, directory);
+            }
+            catch (Exception e) when (IsMalformedAsset(e))
+            {
+                AppShutdown.WarnUnlessQuitting($"[audio] skipping {assetPath}: unreadable definition "
+                    + $"({e.GetType().Name})");
+            }
         }
 
         foreach (RawClipGroup group in missingGroups)
         {
-            var pending = new StreamPlan.PendingDef
+            try
             {
-                Directory = Path.Combine(request.AudioCacheDir, group.Name),
-                Volume = group.Volume,
-                MinPitch = group.MinPitch,
-                MaxPitch = group.MaxPitch,
-            };
-
-            int index = plan.Definitions.Count;
-            int planned = 0;
-            foreach (string clipPath in group.ClipPaths)
-                if (catalog.Find(clipPath) is { } clipObject
-                    && PlanClip(plan, pending, file, clipObject, clipObject.PathId, index, planned))
-                {
-                    planned++;
-                }
-
-            if (planned > 0)
-                plan.Definitions.Add(pending);
+                PlanGroup(plan, catalog, file, group, Path.Combine(request.AudioCacheDir, group.Name));
+            }
+            catch (Exception e) when (IsMalformedAsset(e))
+            {
+                AppShutdown.WarnUnlessQuitting($"[audio] skipping group {group.Name}: unreadable clips "
+                    + $"({e.GetType().Name})");
+            }
         }
 
         return plan.Clips.Count > 0 ? plan : null;
     }
+
+    private static void PlanDefinition(StreamPlan plan, FileCatalog catalog, SerializedFile file,
+        SerializedObject defObject, string directory)
+    {
+        Dictionary<string, object> def = TypeTreeReader.Read(defObject.TypeTree, file.ReaderFor(defObject));
+        var pending = new StreamPlan.PendingDef
+        {
+            Directory = directory,
+            Volume = Convert.ToSingle(def.GetValueOrDefault("volumeMultiplier", 1f)),
+            MinPitch = Convert.ToSingle(def.GetValueOrDefault("minPitch", 1f)),
+            MaxPitch = Convert.ToSingle(def.GetValueOrDefault("maxPitch", 1f)),
+        };
+
+        if (def.GetValueOrDefault("clips") is not List<object> clips)
+            return;
+
+        // The slot is the clip's place in the definition's own list, so what lands on disk is in the
+        // author's order however the stream hands the ranges back. Clips the file cannot resolve leave
+        // their slot empty and CompleteDefs drops it.
+        int index = plan.Add(pending);
+        for (int slot = 0; slot < clips.Count; slot++)
+        {
+            pending.ClipFiles.Add(null);
+            if (catalog.ById(PathId(clips[slot])) is { } clipObject)
+                PlanClip(plan, file, clipObject, PathId(clips[slot]), index, slot);
+        }
+    }
+
+    // Raw clip groups are resolved one container path at a time, so a bundle whose serialized files split
+    // them contributes to the same pending definition on each pass through.
+    private static void PlanGroup(StreamPlan plan, FileCatalog catalog, SerializedFile file,
+        RawClipGroup group, string directory)
+    {
+        StreamPlan.PendingDef pending;
+        int index;
+        if (plan.Existing(directory) is { } known)
+        {
+            (pending, index) = known;
+        }
+        else
+        {
+            pending = new StreamPlan.PendingDef
+            {
+                Directory = directory,
+                Volume = group.Volume,
+                MinPitch = group.MinPitch,
+                MaxPitch = group.MaxPitch,
+            };
+            index = plan.Add(pending);
+            for (int i = 0; i < group.ClipPaths.Count; i++)
+                pending.ClipFiles.Add(null);
+        }
+
+        for (int slot = 0; slot < group.ClipPaths.Count; slot++)
+        {
+            if (pending.ClipFiles[slot] != null || pending.Planned.Contains(slot))
+                continue; // an earlier file already owns this clip
+            if (catalog.Find(group.ClipPaths[slot]) is { } clipObject
+                && PlanClip(plan, file, clipObject, clipObject.PathId, index, slot))
+            {
+                pending.Planned.Add(slot);
+            }
+        }
+    }
+
+    // What a serialized shape this reader does not expect throws as it is walked. Every one of these is
+    // "this asset is not what it claims to be", which is a skipped definition rather than a failed load.
+    private static bool IsMalformedAsset(Exception e) =>
+        e is InvalidCastException or KeyNotFoundException or NullReferenceException or FormatException
+            or OverflowException or ArgumentException or InvalidDataException;
 
     // Rebuilds one planned clip from the exact bytes of its range and writes the .ogg beside its
     // definition. Best effort per clip: a blob FMOD cannot rebuild leaves that clip out rather than
@@ -224,16 +301,20 @@ public static class AudioExtractor
         return completed;
     }
 
-    private static bool PlanClip(StreamPlan plan, StreamPlan.PendingDef pending, SerializedFile file,
-        SerializedObject clipObject, long clipId, int definition, int slot)
+    private static bool PlanClip(StreamPlan plan, SerializedFile file, SerializedObject clipObject,
+        long clipId, int definition, int slot)
     {
         Dictionary<string, object> clip = TypeTreeReader.Read(clipObject.TypeTree, file.ReaderFor(clipObject));
         string name = clip.GetValueOrDefault("m_Name") as string ?? $"clip_{clipId:x}";
-        if (clip.GetValueOrDefault("m_Resource") is not Dictionary<string, object> res)
+        if (clip.GetValueOrDefault("m_Resource") is not Dictionary<string, object> res
+            || res.GetValueOrDefault("m_Offset") is not { } rawOffset
+            || res.GetValueOrDefault("m_Size") is not { } rawSize)
+        {
             return false;
+        }
 
-        long offset = Convert.ToInt64(res["m_Offset"]);
-        int size = Convert.ToInt32(res["m_Size"]);
+        long offset = Convert.ToInt64(rawOffset);
+        int size = Convert.ToInt32(rawSize);
         if (offset < 0 || size <= 0)
             return false;
 
@@ -242,7 +323,6 @@ public static class AudioExtractor
         string source = res.GetValueOrDefault("m_Source") as string ?? "";
         plan.Clips.Add(new StreamPlan.Clip(ResourceName(source), offset, size, definition, slot, name,
             clipId));
-        pending.ClipFiles.Add(null);
         return true;
     }
 
@@ -354,17 +434,23 @@ public static class AudioExtractor
         AppShutdown.PrintUnlessQuitting($"[audio] extracting {MissingDefs(request).Count} audio definitions "
             + $"and {MissingGroups(request).Count} clip groups from masterbundle (one-time)...");
         AudioNodes nodes = ReadAudioNodes(bundlePath);
-        int extracted = 0;
+        // One plan across every serialized file this bundle carries, then written once. Planning and
+        // completing per file marked a raw clip group cached from the first file that held any of its
+        // clips, so a bundle that spread them left the rest unextracted for good.
+        StreamPlan? plan = null;
+        int served = 0;
         foreach (byte[] bytes in nodes.SerializedFiles)
         {
             if (AppShutdown.IsShuttingDown)
-                return extracted; // leaving: stop between files, never mid-definition
-            if (Plan(SerializedFile.Read(bytes), request) is not { } plan)
+                return 0; // leaving: stop between files, and write no half-built definition
+            plan = Plan(SerializedFile.Read(bytes), request, plan);
+            if (plan == null)
                 continue;
 
-            for (int i = 0; i < plan.Clips.Count; i++)
+            // Only what this file added: a clip already served keeps the bytes it was written from.
+            for (; served < plan.Clips.Count; served++)
             {
-                StreamPlan.Clip clip = plan.Clips[i];
+                StreamPlan.Clip clip = plan.Clips[served];
                 if (ResourceFor(clip.StreamFile, nodes.Resources) is not { } resource
                     || clip.Offset + clip.Size > resource.Length)
                 {
@@ -373,12 +459,11 @@ public static class AudioExtractor
 
                 var blob = new byte[clip.Size];
                 Array.Copy(resource, clip.Offset, blob, 0, clip.Size);
-                WriteClip(plan, i, blob);
+                WriteClip(plan, served, blob);
             }
-
-            extracted += CompleteDefs(plan);
         }
 
+        int extracted = plan == null ? 0 : CompleteDefs(plan);
         if (MissingDefs(request) is { Count: > 0 } absent)
             AppShutdown.WarnUnlessQuitting($"[audio] {absent.Count} definition(s) not found in "
                 + $"{Path.GetFileName(bundlePath)}, first: {absent[0]}");
