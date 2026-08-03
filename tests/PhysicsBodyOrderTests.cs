@@ -325,9 +325,19 @@ public class PhysicsBodyOrderTests
         Assert.Contains("_index.DecodeChunks(indices, token)", source);
         Assert.Contains("Task<WarmBatch> batch = Task.Run(", source);
         // Half the cap per batch: the batch being uploaded still holds its transforms while the next one
-        // decodes, so it is the pair that has to fit the bound the pass claims to respect.
+        // decodes, so it is the pair that has to fit the bound the pass claims to respect. A chunk larger
+        // than half the cap gets a batch of its own, and its successor is serialized behind it rather
+        // than pipelined over the bound — hence the exact pair check, not just the halved budget.
+        string normalized = source.Replace("\r\n", "\n");
         Assert.Contains("FoliageResidencyPlanner.WarmBatches(plan, ExpectedDecodedBytes,\n"
-            + "                Math.Max(1, _decodedByteLimit / 2));", source.Replace("\r\n", "\n"));
+            + "                Math.Max(1, _decodedByteLimit / 2));", normalized);
+        Assert.Contains("held + BatchBytes(batches[batch + 1]) <= _decodedByteLimit", source);
+        Assert.Contains("decoded = null;\n                if (more && !overlapped)", normalized);
+        // Worker wall time is not main-thread upload time: a deadline that expired while a decode was
+        // still running would spend a whole frame on a single upload, once per batch.
+        Assert.Contains("bool decodeWasPending = !decoding!.IsCompleted;", source);
+        Assert.Contains("if (decodeWasPending)\n                    until = Stopwatch.GetTimestamp() "
+            + "+ budget;", normalized);
         // Uploads are RenderingServer work and stay here, yielding on the load's own frame budget.
         Assert.Contains("await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);", source);
         // The steady loop must not plan against a half-warm residency set, and the pass must claim the
@@ -335,7 +345,7 @@ public class PhysicsBodyOrderTests
         int process = source.IndexOf("public override void _Process", StringComparison.Ordinal);
         Assert.True(process > 0 && source.IndexOf("if (_warming)", process, StringComparison.Ordinal)
             < source.IndexOf("DrainDecoded();", process, StringComparison.Ordinal));
-        Assert.Contains("_focused = true;\n            _lastFocus = focus;", source.Replace("\r\n", "\n"));
+        Assert.Contains("_focused = true;\n            _lastFocus = focus;", normalized);
         // A cancelled load frees the node between frames; uploading past that hands RIDs to a dying
         // scenario, so liveness and tree membership are re-checked before every upload.
         Assert.Contains("!token.IsCancellationRequested && GodotObject.IsInstanceValid(this) "

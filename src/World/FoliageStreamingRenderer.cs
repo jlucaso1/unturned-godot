@@ -169,11 +169,17 @@ public partial class FoliageStreamingRenderer : Node3D
             + $"queue {_maximumPending}, decoded cap {_decodedByteLimit >> 20} MiB");
     }
 
-    // The ring the player will spawn inside, made resident while the loading screen is still up. Without
-    // it the first _Process is also the first plan: every chunk already inside its visibility radius is
-    // missing, so the correctness gate below decodes and uploads all of them synchronously, on the one
-    // frame the player appears. Measured on PEI at 61 chunks and 18-26 ms, up to ~5 ms of it in a
-    // single frame.
+    // The ring the player will spawn inside, made resident under a frame budget instead of all at once.
+    // Without this the first _Process is also the first plan: every chunk already inside its visibility
+    // radius is missing, so the correctness gate below decodes and uploads all of them synchronously, on
+    // the single frame that follows the scene being built. Measured on PEI at 61 chunks and 18-26 ms, up
+    // to ~5 ms of it in one frame.
+    //
+    // On the streamed path that frame is behind the loading screen, not the first gameplay frame — the
+    // world is only released on ObjectStreamer.Finished, which is later. So this buys smoother loading
+    // frames and a decode moved off the main thread, not the removal of a gameplay hitch. The emergency
+    // path still owns teleports and anything that outruns the prefetch ring; it is only the spawn plan
+    // that is paid for here.
     //
     // The pass is the same policy the steady loop runs, only with its decodes taken off the main thread a
     // batch at a time and its uploads paced against the load's own 8 ms frame budget — nothing here is
@@ -219,10 +225,22 @@ public partial class FoliageStreamingRenderer : Node3D
             Task<WarmBatch>? decoding = batches.Count > 0 ? DecodeBatch(batches[0], token) : null;
             for (int batch = 0; batch < batches.Count; batch++)
             {
-                WarmBatch decoded = await decoding!;
-                // The next batch's IO and decode run on the worker while this one uploads here, so the
-                // pass costs the load one decode, not one per batch.
-                decoding = batch + 1 < batches.Count ? DecodeBatch(batches[batch + 1], token) : null;
+                // Only a decode that had not finished actually costs a frame. Resuming from one means a
+                // new frame has started, so the upload deadline restarts with it; charging the worker's
+                // wall time to the main thread's budget would spend a whole frame on one upload, once per
+                // batch. A decode already in hand continues inside the frame that is running.
+                bool decodeWasPending = !decoding!.IsCompleted;
+                WarmBatch? decoded = await decoding;
+                if (decodeWasPending)
+                    until = Stopwatch.GetTimestamp() + budget;
+                // Overlap the next batch's IO and decode with this batch's uploads, but only while both
+                // fit the cap at once. WarmBatches gives a chunk larger than half the cap a batch of its
+                // own, and pipelining behind that one would put the pass over the bound it respects, so
+                // an oversized batch is uploaded first and its successor started below instead.
+                long held = BatchBytes(decoded.Indices);
+                bool more = batch + 1 < batches.Count;
+                bool overlapped = more && held + BatchBytes(batches[batch + 1]) <= _decodedByteLimit;
+                decoding = overlapped ? DecodeBatch(batches[batch + 1], token) : null;
                 if (decoded.Error != null)
                 {
                     // One failure, not one per chunk in the batch: the read stops at the first bad chunk
@@ -244,6 +262,13 @@ public partial class FoliageStreamingRenderer : Node3D
                     await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
                     until = Stopwatch.GetTimestamp() + budget;
                 }
+
+                // Start a serialized successor only now, and only once this batch is unreachable: a
+                // Debug build holds a local to the end of its scope, so leaving the reference in place
+                // would let the two batches' transforms coexist past the cap anyway.
+                decoded = null;
+                if (more && !overlapped)
+                    decoding = DecodeBatch(batches[batch + 1], token);
             }
 
             // A batch this pass could not decode is refilled by the steady loop, which otherwise would
@@ -529,6 +554,14 @@ public partial class FoliageStreamingRenderer : Node3D
 
     // What a chunk's transforms occupy once decoded — 12 floats per instance, the MultiMesh buffer layout.
     private long ExpectedDecodedBytes(int index) => (long)_index.Chunks[index].Count * 12 * sizeof(float);
+
+    private long BatchBytes(int[] indices)
+    {
+        long bytes = 0;
+        foreach (int index in indices)
+            bytes += ExpectedDecodedBytes(index);
+        return bytes;
+    }
 
     private bool ShouldRemainLoaded(int index, Vector3 focus)
     {
