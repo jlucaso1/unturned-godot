@@ -1067,7 +1067,10 @@ public static class Program
         var byStart = new List<StreamRange>(wants);
         byStart.Sort((a, b) => a.Offset.CompareTo(b.Offset));
 
-        long quarter = extent - (size / 4);
+        // Clamped to zero for a node whose ranges all end inside the first quarter of it: the window then
+        // covers everything read, which is the intent. The sweep below never measured from a negative
+        // offset — `reach` starts at zero and only grows — but saying so here beats relying on it.
+        long quarter = Math.Max(0, extent - (size / 4));
         long widest = 0, widestCut = 0, reach = 0;
         foreach (StreamRange want in byStart)
         {
@@ -1349,17 +1352,28 @@ public static class Program
     {
         string appdata = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        // XDG_DATA_HOME first on Linux, as check-structural-metrics.sh already does: Godot follows it, and
-        // probing only ~/.local/share reports "no cache" on a machine that has one somewhere else.
-        string xdg = Environment.GetEnvironmentVariable("XDG_DATA_HOME") is { Length: > 0 } configured
-            ? configured
-            : Path.Combine(home, ".local", "share");
-        string[] candidates =
+
+        // Per host, the way check-structural-metrics.sh does it. XDG_DATA_HOME decides only on Linux —
+        // it is often set on Windows and macOS too, by shells and porting layers, and probing it there
+        // would hand back some unrelated tree ahead of the directory Godot actually writes.
+        var candidates = new List<string>(2);
+        if (OperatingSystem.IsLinux())
         {
-            Path.Combine(xdg, "godot", "app_userdata", "unturned-godot"),                       // Linux
-            Path.Combine(appdata, "Godot", "app_userdata", "unturned-godot"),                   // Windows
-            Path.Combine(home, "Library", "Application Support", "Godot", "app_userdata", "unturned-godot"), // macOS
-        };
+            string xdg = Environment.GetEnvironmentVariable("XDG_DATA_HOME") is { Length: > 0 } configured
+                ? configured
+                : Path.Combine(home, ".local", "share");
+            candidates.Add(Path.Combine(xdg, "godot", "app_userdata", "unturned-godot"));
+        }
+        else if (OperatingSystem.IsMacOS())
+        {
+            candidates.Add(Path.Combine(home, "Library", "Application Support", "Godot", "app_userdata",
+                "unturned-godot"));
+        }
+        else
+        {
+            candidates.Add(Path.Combine(appdata, "Godot", "app_userdata", "unturned-godot"));
+        }
+
         foreach (string c in candidates)
             if (Directory.Exists(c))
                 return c;
