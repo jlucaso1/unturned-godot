@@ -472,9 +472,17 @@ public sealed class ZombieNavigation
                     // the navmesh so a floor beneath it is never mistaken for this one's ground.
                     ray.From = point + (Vector3.Up * (stepOffset + 1.5f));
                     ray.To = point + Vector3.Down;
-                    Godot.Collections.Dictionary hit = space.IntersectRay(ray);
-                    if (hit.Count > 0)
-                        highest = MathF.Max(highest, ((Vector3)hit["position"]).Y);
+                    // Disposed rather than left to the collector. Every probe returns a fresh native
+                    // Variant dictionary behind a finalizable wrapper, and a reconciliation pass runs
+                    // hundreds of thousands of them: waiting for finalization made the process hold that
+                    // churn as native memory it never handed back — a session reconciling PEI grew ~1.6
+                    // MB of RSS per second for as long as the pass ran, and stopped dead when it did.
+                    float ground = float.MinValue;
+                    using (Godot.Collections.Dictionary hit = space.IntersectRay(ray))
+                        if (hit.Count > 0)
+                            ground = ((Vector3)hit["position"]).Y;
+                    if (ground != float.MinValue)
+                        highest = MathF.Max(highest, ground);
 
                     // A triangle has seven probes. Checking only after all seven let one triangle
                     // overrun the nominal 0.25 ms large-map budget by 2-7x. Yield between probes so

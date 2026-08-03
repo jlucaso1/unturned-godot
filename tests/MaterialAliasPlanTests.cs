@@ -58,7 +58,9 @@ public class MaterialAliasPlanTests
         };
         var identities = new Dictionary<string, string>
         {
-            ["a"] = "ONE", ["b"] = "TWO", ["c"] = "ONE",
+            ["a"] = "ONE",
+            ["b"] = "TWO",
+            ["c"] = "ONE",
         };
 
         int[] canonical = MaterialAliasPlan.Canonical(surfaces, identities);

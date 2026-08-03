@@ -39,8 +39,13 @@ public class UnityBundleRealTests
         foreach (SerializedObject o in file.Objects)
             counts[o.ClassId] = counts.GetValueOrDefault(o.ClassId) + 1;
 
+        // Pinned against the depot the fetch script downloads, which is always the current one, so these
+        // move when Valve ships an update — that is the drift the weekly schedule exists to surface, and
+        // the object table is what a parser change would move instead. Last updated 2026-08-03, when the
+        // masterbundle went from 116,304,494 to 116,312,980 bytes and gained one GameObject (24,341 ->
+        // 24,342, and 103,549 -> 103,554 objects in total) with the mesh side unchanged.
         Assert.Equal(4560, counts[43]);   // Mesh
-        Assert.Equal(24341, counts[1]);   // GameObject
+        Assert.Equal(24342, counts[1]);   // GameObject
         Assert.Equal(9381, counts[33]);   // MeshFilter
     }
 
