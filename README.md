@@ -125,6 +125,12 @@ That build runs on the .NET runtime shipped with the export template and drops e
 
 Export secrets, if you ever add any, land in `export_credentials.cfg`, which is git-ignored, so never commit it.
 
+There is no Web preset, because Godot 4 refuses to export a C#/.NET project to the web at all
+(`Exporting to Web is currently not supported in Godot 4 when using C#/.NET`). The half that does not
+depend on the engine is built and tested though: `web/` reads a real Unturned install straight off the
+player's disk through the browser's directory picker, so a web build would ship no game content either.
+[docs/WEB-EXPORT.md](docs/WEB-EXPORT.md) has the repro, what would have to change here, and how to run it.
+
 ## Structure
 
 | Project | What it holds | Engine dependency |
@@ -133,6 +139,7 @@ Export secrets, if you ever add any, land in `export_credentials.cfg`, which is 
 | `src/` (`unturned-godot`) | Godot glue: `Main`, world builders, UI, player/zombie nodes. `[ExcludeFromCodeCoverage]`. | Godot.NET.Sdk |
 | `tests/` (`UnturnedGodot.Tests`) | xUnit suite; CI requires more than 95% line and branch coverage of `core/`. | none |
 | `tools/PerfHarness` | Standalone micro-benchmarks over the Core parsers. | none |
+| `web/` | Browser file layer: directory picker, read-only VFS over the picked folder, install/map probe, demo page. Vanilla ES modules, no build step. | none, runs in Chromium |
 
 Keeping the parsers engine-free is what makes full unit-test coverage possible. `core/`, `tests/` and
 `tools/` carry a `.gdignore` so the Godot editor leaves them alone (they build via the .NET SDK).
@@ -167,6 +174,9 @@ dotnet format unturned-godot.sln                                   # auto-format
 # Boot-menu popup gate: exports a release build and drives the menu, because engine Popups only
 # misbehave there. Self-skips without Godot export templates, Xvfb or xdotool.
 ./scripts/check-menu-popup-errors.sh
+
+# Browser file layer: runs web/ against real game content in Chromium. Self-skips without either.
+node web/test/run.mjs
 ```
 
 Style and analyzers are enforced via `.editorconfig` + `Directory.Build.props` (`EnableNETAnalyzers`,

@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>unturned-godot — browser install picker</title>
+        <style>
+            :root {
+                color-scheme: light dark;
+                --bg: #10120f;
+                --panel: #191c17;
+                --line: #2e332a;
+                --text: #e6e8e2;
+                --muted: #9aa294;
+                --accent: #9ccc65;
+            }
+            @media (prefers-color-scheme: light) {
+                :root {
+                    --bg: #f6f7f3;
+                    --panel: #fff;
+                    --line: #dfe3d8;
+                    --text: #1c1f1a;
+                    --muted: #5d6557;
+                    --accent: #4c7c1f;
+                }
+            }
+            * {
+                box-sizing: border-box;
+            }
+            body {
+                margin: 0;
+                padding: 2rem 1.25rem 4rem;
+                background: var(--bg);
+                color: var(--text);
+                font:
+                    16px/1.55 system-ui,
+                    -apple-system,
+                    "Segoe UI",
+                    sans-serif;
+            }
+            main {
+                max-width: 62rem;
+                margin: 0 auto;
+            }
+            h1 {
+                font-size: 1.5rem;
+                margin: 0 0 0.35rem;
+            }
+            .lede,
+            .note {
+                color: var(--muted);
+                max-width: 46rem;
+            }
+            .note {
+                font-size: 0.9rem;
+                border-left: 3px solid var(--line);
+                padding-left: 0.85rem;
+                margin: 1.5rem 0;
+            }
+            .actions {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 0.6rem;
+                align-items: center;
+                margin: 1.5rem 0 0.75rem;
+            }
+            button {
+                font: inherit;
+                padding: 0.55rem 1.1rem;
+                border-radius: 0.5rem;
+                border: 1px solid var(--line);
+                background: var(--panel);
+                color: var(--text);
+                cursor: pointer;
+            }
+            button.primary {
+                background: var(--accent);
+                border-color: var(--accent);
+                color: #10120f;
+                font-weight: 600;
+            }
+            button:disabled {
+                opacity: 0.5;
+                cursor: not-allowed;
+            }
+            #support,
+            #status {
+                color: var(--muted);
+                font-size: 0.9rem;
+            }
+            #status {
+                min-height: 1.5rem;
+                margin: 0.5rem 0 0;
+            }
+            #summary {
+                display: grid;
+                grid-template-columns: max-content 1fr;
+                gap: 0.3rem 1.25rem;
+                margin: 1.5rem 0 0;
+                padding: 1rem 1.25rem;
+                background: var(--panel);
+                border: 1px solid var(--line);
+                border-radius: 0.6rem;
+                font-size: 0.92rem;
+            }
+            #summary dt {
+                color: var(--muted);
+            }
+            #summary dd {
+                margin: 0;
+                overflow-wrap: anywhere;
+            }
+            #maps {
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+                gap: 1rem;
+                margin-top: 1.75rem;
+            }
+            .card {
+                background: var(--panel);
+                border: 1px solid var(--line);
+                border-radius: 0.6rem;
+                overflow: hidden;
+                display: flex;
+                flex-direction: column;
+            }
+            .card.unsupported {
+                opacity: 0.6;
+            }
+            .art {
+                aspect-ratio: 16 / 9;
+                background: #0000001a;
+            }
+            .art img {
+                width: 100%;
+                height: 100%;
+                object-fit: cover;
+                display: block;
+            }
+            .body {
+                padding: 0.85rem 1rem 1rem;
+            }
+            .card h3 {
+                margin: 0 0 0.25rem;
+                font-size: 1.05rem;
+            }
+            .tags {
+                margin: 0;
+                color: var(--muted);
+                font-size: 0.82rem;
+            }
+            .blurb {
+                margin: 0.6rem 0 0;
+                font-size: 0.88rem;
+            }
+            code {
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                font-size: 0.9em;
+            }
+            a {
+                color: var(--accent);
+            }
+        </style>
+    </head>
+    <body>
+        <main>
+            <h1>Point a browser at your Unturned install</h1>
+            <p class="lede">
+                This page reads a real Unturned folder straight off your disk using the browser's directory
+                picker. Nothing is uploaded, zipped or copied: the browser hands the page a capability scoped
+                to the one folder you choose, and the game's files stay exactly where Steam put them — the
+                same rule the desktop build follows.
+            </p>
+
+            <div class="actions">
+                <button id="pick" class="primary" type="button">Select Unturned folder</button>
+                <button id="reconnect" type="button" hidden>Reconnect saved folder</button>
+                <button id="forget" type="button" hidden>Forget</button>
+            </div>
+            <p id="support"></p>
+            <p id="status">
+                Pick the <code>steamapps/common/Unturned</code> folder, or the Steam library above it to
+                include Workshop maps.
+            </p>
+
+            <label id="fallback" hidden>
+                No directory picker in this browser — select the folder here instead:
+                <input id="fallback-input" type="file" webkitdirectory directory multiple />
+            </label>
+
+            <dl id="summary" hidden></dl>
+            <div id="maps"></div>
+
+            <p class="note">
+                Selecting the folder is the part that works today. Actually <em>running</em> the game here
+                does not: Godot 4 refuses to export a C#/.NET project to the web at all, which this repo
+                verifies rather than assumes. See <code>docs/WEB-EXPORT.md</code> for the exact error, what
+                would have to change, and how this file layer plugs into the engine when it does.
+            </p>
+        </main>
+        <script type="module" src="./app.js"></script>
+    </body>
+</html>
