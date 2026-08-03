@@ -17,7 +17,13 @@ namespace UnturnedGodot.Unity;
 // tried again against the new data.
 public static class ExtractionIndex
 {
-    private const uint Magic = 0x31584755; // "UGX1"
+    // "UGX2": a miss is only ever "this reader could not make a mesh out of it", so it has to be dropped
+    // whenever the reader gains ground — not only when the bundle changes. A prefab whose geometry lived
+    // in a .resS, or whose channels carried the flags the dimension field packs, produced nothing and was
+    // recorded here; bumping MeshCache alone would leave those entries valid against an unchanged bundle
+    // stamp, so the prefab would stay a placeholder box and never be retried. Bumping this is what asks
+    // the question again.
+    private const uint Magic = 0x32584755;
     private const uint OwnerMagic = 0x314F4755; // "UGO1"
 
     // Sits next to the per-GUID meshes. Bundle filenames are not identities: unrelated workshop items

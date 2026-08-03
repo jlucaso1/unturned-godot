@@ -49,6 +49,28 @@ public class ExtractionIndexTests
         Assert.Empty(ExtractionIndex.Load(dir.Write("magic.index", wrongMagic), Stamp));
     }
 
+    // A miss says "this reader could not make a mesh out of it", so it has to be forgotten whenever the
+    // reader gains ground — not only when the bundle changes. Prefabs whose geometry lived in a .resS
+    // produced nothing and were recorded as misses; without dropping those entries they would stay
+    // placeholder boxes against an unchanged bundle stamp however capable the reader became.
+    [Fact]
+    public void Load_AnIndexFromAnEarlierReader_ForgetsItsMisses()
+    {
+        using var dir = new TempDir();
+        string path = Path.Combine(dir.Path, "reader.index");
+        ExtractionIndex.Save(path, Stamp, new[] { Guid.NewGuid() });
+
+        byte[] current = File.ReadAllBytes(path);
+        Assert.NotEmpty(ExtractionIndex.Load(path, Stamp));
+
+        foreach (uint older in new uint[] { 0x31584755 }) // UGX1: before streamed vertex buffers
+        {
+            byte[] stale = (byte[])current.Clone();
+            BinaryPrimitives.WriteUInt32LittleEndian(stale, older);
+            Assert.Empty(ExtractionIndex.Load(dir.Write("older.index", stale), Stamp));
+        }
+    }
+
     [Fact]
     public void Load_TruncatedOrNegativeCount_IsEmpty()
     {

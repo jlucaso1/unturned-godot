@@ -43,7 +43,13 @@ public static class MeshCache
     // — a missing lower level is indistinguishable from a prefab that never had one. Bumping is what
     // forces one more extraction pass so the levels exist at all and match the current selection rule;
     // without it the feature stays silently off for every install that already has a warm cache.
-    private const uint Magic = 0x424D4755;
+    //
+    // "UGMC": extraction now reads the vertex buffers Unity keeps in a bundle's .resS, and reverses the
+    // winding of a part placed through a mirroring transform. A cache written by "UGMB" is complete by its
+    // own rules and cannot be told apart from one that simply had nothing streamed or mirrored — a mesh
+    // missing its wheels looks exactly like a prefab that never had any. Bumping is what re-extracts them;
+    // without it, every install with a warm cache keeps the wheel-less meshes indefinitely.
+    private const uint Magic = 0x434D4755;
 
     // A prefab's authored lower level is cached beside its mesh as "<guid>.lod1.mesh". The suffix still
     // ends in ".mesh" so a directory scan finds both levels; callers that want only the base level filter
