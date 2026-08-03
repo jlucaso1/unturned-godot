@@ -1035,9 +1035,22 @@ public sealed class BakedNavGraph
             // Reported rather than re-derived from the geometry, because the two are not the same test.
             // An end can sit at `radius + Clearance` from its OWN vertex and still have been scaled back
             // on the other end's behalf, and a scaled end can land at that distance by coincidence.
+            //
+            // The same argument rules out an end that was inset by MORE than the circle's radius.
+            // InsetFor deliberately overshoots where a wall meets the portal at a shallow angle, since
+            // travelling d along the portal only buys d*sin(angle) away from that wall — and an end
+            // pushed out to 0.9 to clear a 10 degree wall is no more on the 0.45 circle than a shared
+            // one is. Naming it would let Push drag the corner back onto that circle in a direction
+            // nearly along the wall, undoing exactly the clearance the overshoot was paying for, and
+            // Push could not tell: it validates against wall VERTICES, and the wall EDGE is what is
+            // close. Only an end that got the plain radius, and got all of it, is on the circle.
+            float wanted = radius + Clearance;
+            bool leftOnCircle = MathF.Abs(leftInset - wanted) <= 1e-4f;
+            bool rightOnCircle = MathF.Abs(rightInset - wanted) <= 1e-4f;
+
             Vector3 unit = along / length;
             return new Portal(left + (unit * leftInset), right - (unit * rightInset),
-                paid && leftInset > 0f ? leftVertex : -1, paid && rightInset > 0f ? rightVertex : -1);
+                paid && leftOnCircle ? leftVertex : -1, paid && rightOnCircle ? rightVertex : -1);
         }
 
         // How far along the portal an end must move for the body to clear the walls that MEET it.
