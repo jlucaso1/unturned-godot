@@ -149,9 +149,13 @@ public static class NavmeshReachability
                 confirm.Add(t);
                 continue;
             }
+            // Two margins here, one above. The comparison above is against authored geometry, which is
+            // exact, so only this face's surface can have drifted. This one differences two sampled
+            // surfaces, and they can drift in opposite directions — so the gap between them moves by the
+            // allowance for each, the same way both faces' slack is already counted.
             if (context.LowestNeighbour[t] < float.MaxValue
                 && MathF.Abs(surface[t] - context.LowestNeighbour[t] - stepOffset)
-                    <= allowance + context.NeighbourSlack(t, slack))
+                    <= allowance + margin + context.NeighbourSlack(t, slack))
                 confirm.Add(t);
         }
         return confirm;

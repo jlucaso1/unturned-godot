@@ -161,7 +161,16 @@ public sealed class CollisionField
                 continue;
             SampleHeightfield(in tile, x, z, out float y, out float diagonal);
             if (y < bottomY || y > topY)
+            {
+                // Out of range settles only the height that was sampled, and on a twisted cell that is
+                // the TALLER of the two triangulations with `diagonal` the drop to the other one. If the
+                // shorter one lands inside the segment, the shape Godot actually built may answer where
+                // this one says nothing, so the column is a question rather than a clean miss.
+                float other = y - diagonal;
+                if (other >= bottomY && other <= topY)
+                    state.Doubt = true;
                 continue;
+            }
             if (y > state.Best)
             {
                 state.Best = y;
@@ -180,7 +189,8 @@ public sealed class CollisionField
         // hit was recorded as it was built, so "nothing between these two heights" is a statement about
         // the world, not an admission of ignorance. Over a column nobody recorded it is the opposite, and
         // the server is asked.
-        bool uncertain = (!state.Hit && !state.Covered) || state.Graze > state.Solid + GrazeEpsilon;
+        bool uncertain = (!state.Hit && !state.Covered) || state.Doubt
+            || state.Graze > state.Solid + GrazeEpsilon;
         return new SurfaceSample(state.Hit, state.Hit ? state.Best : 0f, state.Slack, uncertain);
     }
 
@@ -192,6 +202,7 @@ public sealed class CollisionField
         public float Slack;
         public bool Hit;
         public bool Covered;
+        public bool Doubt;
     }
 
     private static bool Covers(in Heightfield tile, float x, float z) =>
@@ -591,6 +602,7 @@ public sealed class CollisionField
             // the nearest cluster is tracked because only it can outrank the answer; anything below the
             // highest solid surface cannot change which surface that is.
             float edgeAt = float.MaxValue;
+            float edgeInsideAt = float.MaxValue;
             int edgeFaces = 0;
             bool edgeInside = false;
             // Deliberately NOT tracked separately: whether the face is turned toward the ray or away from
@@ -639,12 +651,15 @@ public sealed class CollisionField
                         edgeAt = t; // a nearer cluster supersedes whatever was found below it
                         edgeFaces = 1;
                         edgeInside = inside;
+                        edgeInsideAt = inside ? t : float.MaxValue;
                     }
                     else if (t <= edgeAt + GrazeEpsilon)
                     {
                         edgeAt = MathF.Min(edgeAt, t);
                         edgeFaces++;
                         edgeInside |= inside;
+                        if (inside && t < edgeInsideAt)
+                            edgeInsideAt = t;
                     }
                 }
             }
@@ -653,9 +668,15 @@ public sealed class CollisionField
             // tessellated surface, corroborated by the neighbour rather than in doubt. Two faces crossed
             // with the probe inside NEITHER is the same edge seen from outside the shell, which is exactly
             // the silhouette this band exists to catch — so the inside test is what separates them.
+            //
+            // The height promoted is the interior crossing's, never the cluster's lowest. A collision mesh
+            // can hold disconnected shells, and nothing stops one's silhouette from falling within the
+            // band of another's interior; taking the cluster minimum would then report a surface at a
+            // height no face was actually entered through. Only the crossing the probe passed inside of
+            // is evidence of one.
             bool corroborated = edgeFaces >= 2 && edgeInside;
-            if (corroborated && edgeAt < solid)
-                solid = edgeAt;
+            if (corroborated && edgeInsideAt < solid)
+                solid = edgeInsideAt;
             float unresolved = edgeFaces > 0 && !corroborated ? edgeAt : float.MaxValue;
 
             return new Crossing(nearest < float.MaxValue, nearest < float.MaxValue ? nearest : 0f,

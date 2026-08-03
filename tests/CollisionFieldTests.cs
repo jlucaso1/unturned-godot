@@ -535,6 +535,35 @@ public class CollisionFieldTests
     }
 
     [Fact]
+    public void ATwistedCellWhoseOtherDiagonalIsInRange_IsAQuestionNotAMiss()
+    {
+        // A saddle cell has two legal triangulations and Godot picked one when it built the shape. The
+        // sampler reports the taller and the gap between them, which the slack carries downstream — but
+        // only while the taller is in range. Out of range it used to be discarded outright, and with it
+        // the fact that the shorter one is still sitting inside the probed segment.
+        var builder = new CollisionFieldBuilder();
+        builder.AddHeightfield(Grid(new Vector3(0.5f, 0f, 0.5f), 1f), 2, 2, new[] { 0f, 4f, 4f, 0f });
+        CollisionField field = builder.Build();
+
+        // Here the two triangulations give 4 m and 2 m.
+        SurfaceSample both = field.Probe(0.75f, 0.25f, topY: 5f, bottomY: 0f);
+        Assert.True(both.Hit);
+        Assert.Equal(4f, both.Y, 0.0001f);
+        Assert.Equal(2f, both.Slack, 0.0001f);
+
+        // The taller is above the segment and the shorter inside it: whether this column has a surface
+        // depends on which triangulation the collision shape got, so it is the server's to answer.
+        SurfaceSample split = field.Probe(0.75f, 0.25f, topY: 3f, bottomY: 1f);
+        Assert.False(split.Hit);
+        Assert.True(split.Uncertain);
+
+        // Both above the segment: neither triangulation can reach it, and that is a clean answer.
+        SurfaceSample clear = field.Probe(0.75f, 0.25f, topY: 1.5f, bottomY: 0.5f);
+        Assert.False(clear.Hit);
+        Assert.False(clear.Uncertain);
+    }
+
+    [Fact]
     public void ACapsuleIsMissedCleanlyBesideIt_AndAboveAndBelowItsEnds()
     {
         // A lying capsule is the one shape where the ray can miss three separate ways, and each has to
