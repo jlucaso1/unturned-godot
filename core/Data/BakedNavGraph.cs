@@ -183,7 +183,11 @@ public sealed class BakedNavGraph
     }
 
     private readonly record struct Connection(int To, int VertexA, int VertexB);
-    private readonly record struct Portal(Vector3 Left, Vector3 Right);
+
+    // The two ends of a portal, and — for an end that was pulled in off a wall — the mesh vertex it was
+    // pulled off. The funnel emits portal ends as corners, so that vertex is what a corner is turning
+    // AROUND, and rounding needs to know it.
+    private readonly record struct Portal(Vector3 Left, Vector3 Right, int LeftVertex, int RightVertex);
     private readonly record struct EdgeRecord(int KeyA, int KeyB, int Triangle, int A, int B, int Sequence);
     private readonly record struct DirectedConnection(int From, Connection Edge, long Order);
 
@@ -209,6 +213,7 @@ public sealed class BakedNavGraph
             public readonly List<int> Reverse = new();
             public readonly List<Portal> Portals = new();
             public readonly List<Vector3> Shortcut = new();
+            public readonly List<int> Walls = new();
 
             public SearchWorkspace(int count)
             {
@@ -223,6 +228,7 @@ public sealed class BakedNavGraph
                 Reverse.Clear();
                 Portals.Clear();
                 Shortcut.Clear();
+                Walls.Clear();
                 if (++_generation == int.MaxValue)
                 {
                     Array.Clear(_generationByTriangle);
@@ -798,7 +804,7 @@ public sealed class BakedNavGraph
                 reverse.Reverse();
 
                 List<Portal> portals = workspace.Portals;
-                portals.Add(new Portal(from, from));
+                portals.Add(new Portal(from, from, -1, -1));
                 for (int i = 0; i + 1 < reverse.Count; i++)
                 {
                     int current = reverse[i], next = reverse[i + 1];
@@ -825,9 +831,14 @@ public sealed class BakedNavGraph
                         }
                     }
                 }
-                portals.Add(new Portal(destination, destination));
+                portals.Add(new Portal(destination, destination, -1, -1));
                 AppendFunnel(output, portals, destination);
                 Shortcut(output, begin, start, workspace.Shortcut, radius);
+                // After the shortcut, not before. Every leg the shortcut CREATED was walked and cleared
+                // by the body's full width, so it needs no repair; what is left to repair is only the
+                // funnel legs the shortcut could not replace, which is the smaller set. Rounding first
+                // and shortcutting after measured the same routes at 31.7 mean waypoints against 27.8.
+                RoundCorners(output, begin, portals, workspace.Walls, radius);
                 return true;
             }
             finally
@@ -863,16 +874,20 @@ public sealed class BakedNavGraph
             int leftVertex, int rightVertex, bool insetLeft, bool insetRight, float radius)
         {
             if (!insetLeft && !insetRight)
-                return new Portal(left, right);
+                return new Portal(left, right, -1, -1);
 
             Vector3 along = right - left;
             along.Y = 0f;
             float length = along.Length();
             if (length <= 1e-4f)
-                return new Portal(left, right);
+                return new Portal(left, right, -1, -1);
 
-            float leftInset = insetLeft ? InsetFor(triangle, leftVertex, along, length, radius) : 0f;
-            float rightInset = insetRight ? InsetFor(triangle, rightVertex, along, length, radius) : 0f;
+            // Each end moves INWARD along the portal, and the two ends move opposite ways: the left
+            // towards the right and the right towards the left. Which way an end travels is what decides
+            // whether a wall collinear with the portal is in front of it or behind it, so the direction
+            // goes in rather than the portal's own orientation.
+            float leftInset = insetLeft ? InsetFor(triangle, leftVertex, along, length, 1f, radius) : 0f;
+            float rightInset = insetRight ? InsetFor(triangle, rightVertex, along, length, -1f, radius) : 0f;
 
             // Share the portal when the two ends want more of it than there is, rather than halving
             // both unconditionally. Equal demands still get half each, and a single moving end still
@@ -887,10 +902,11 @@ public sealed class BakedNavGraph
                 rightInset *= share;
             }
             if (leftInset <= 0f && rightInset <= 0f)
-                return new Portal(left, right);
+                return new Portal(left, right, -1, -1);
 
             Vector3 unit = along / length;
-            return new Portal(left + (unit * leftInset), right - (unit * rightInset));
+            return new Portal(left + (unit * leftInset), right - (unit * rightInset),
+                leftInset > 0f ? leftVertex : -1, rightInset > 0f ? rightVertex : -1);
         }
 
         // How far along the portal an end must move for the body to clear the walls that MEET it.
@@ -900,7 +916,8 @@ public sealed class BakedNavGraph
         // radius. Applying the radius flat, as this used to, is only right at 90 degrees: at 10 degrees
         // it leaves 0.078 m and a 0.40 m body is still inside the wall. Measured on a plain 1 m doorway
         // with an angled approach, the flat inset left the route 0.318 m from a jamb.
-        private float InsetFor(int triangle, int vertex, Vector3 along, float length, float radius)
+        private float InsetFor(int triangle, int vertex, Vector3 along, float length, float sign,
+            float radius)
         {
             Span<Vector2> walls = stackalloc Vector2[MaxWallsPerVertex];
             int count = WallsAt(triangle, vertex, walls);
@@ -908,7 +925,9 @@ public sealed class BakedNavGraph
             if (count == 0)
                 return wanted; // a border with no wall edge in reach of the fan: the flat inset is all there is
 
-            float portalX = along.X / length, portalZ = along.Z / length;
+            // The direction this END travels, not the portal's. Every wall direction is oriented away
+            // from the shared vertex, so the two compare directly.
+            float inwardX = sign * along.X / length, inwardZ = sign * along.Z / length;
             float needed = wanted;
             for (int i = 0; i < count; i++)
             {
@@ -916,10 +935,18 @@ public sealed class BakedNavGraph
                 float wallLength = wall.Length();
                 if (wallLength <= 1e-4f)
                     continue;
-                float sine = MathF.Abs(((portalX * wall.Y) - (portalZ * wall.X)) / wallLength);
-                // Parallel: no distance along THIS portal gains any clearance from THAT wall. Ask for
-                // the whole portal and let the share above decide; the line walk's own clearance test
-                // is what still refuses a shortcut aimed down a wall it cannot get away from.
+                // The wall leaves the vertex; moving `d` inward puts the point d*cos along it and
+                // d*|sin| across it. When cos <= 0 the wall runs BEHIND the direction of travel, so the
+                // nearest point of it is the vertex itself and the plain inset already clears it — which
+                // is most collinear cases, and demanding the whole portal for them narrows a doorway to
+                // a millimetre of its far jamb for no gain.
+                float cosine = ((inwardX * wall.X) + (inwardZ * wall.Y)) / wallLength;
+                if (cosine <= 0f)
+                    continue;
+                float sine = MathF.Abs(((inwardX * wall.Y) - (inwardZ * wall.X)) / wallLength);
+                // Collinear and ahead: no distance along THIS portal gains any clearance from THAT wall.
+                // Ask for the whole portal and let the share above decide; the line walk's own clearance
+                // test is what still refuses a shortcut aimed down a wall it cannot get away from.
                 if (sine <= 1e-3f)
                     return length;
                 needed = MathF.Max(needed, wanted / sine);
@@ -983,8 +1010,12 @@ public sealed class BakedNavGraph
                     }
                     if (!shared && found < walls.Length)
                     {
-                        Vector3 p = Source.Vertices[va], q = Source.Vertices[vb];
-                        walls[found++] = new Vector2(q.X - p.X, q.Z - p.Z);
+                        // Oriented AWAY from the shared vertex, so the caller can tell a wall that runs
+                        // ahead of an inset from one that runs behind it. Unoriented, the two are the
+                        // same direction up to sign and the caller cannot.
+                        Vector3 o = Source.Vertices[vertex];
+                        Vector3 far = Source.Vertices[va == vertex ? vb : va];
+                        walls[found++] = new Vector2(far.X - o.X, far.Z - o.Z);
                     }
                 }
             }
@@ -997,6 +1028,148 @@ public sealed class BakedNavGraph
                 if (visited[i] == triangle)
                     return true;
             return false;
+        }
+
+        // A corner of the route is a portal end pulled `radius + Clearance` off a wall vertex, so it
+        // sits ON the circle of that radius around it — and the leg LEAVING that corner is a chord of
+        // that circle, which passes inside it. No per-vertex inset can see this. An inset is a
+        // one-dimensional move along one portal: it places a POINT correctly, and says nothing about
+        // the segment joining it to the next one, which belongs to a different portal.
+        //
+        // Measured on a plain 1 m doorway approached diagonally: two corners each exactly 0.450 m off
+        // the jamb at (10, 8), and the leg joining them 0.318 m from it — 0.45 * cos(45 deg), the chord
+        // of a right-angle turn. A second shape does it with one corner: the route leaves the door at
+        // (11, 7.45), correctly 0.45 off the jamb at (11, 7), and heads for a destination that pulls
+        // the leg back across the jamb at 0.336. The body walks the legs, not the corners.
+        //
+        // So the legs are repaired: where one passes a wall vertex closer than the body's radius, a
+        // waypoint goes in on that vertex's `radius + Clearance` circle, turning the chord into two
+        // shallower ones. Each pass at most halves the angle a leg subtends at the vertex, and a step
+        // of `angle` leaves the body r * cos(angle / 2), so a handful of passes is enough for any turn
+        // — four is past a hairpin.
+        //
+        // The threshold to repair is the RADIUS, not radius + Clearance: with the corner itself sitting
+        // at radius + Clearance, no chord from it can ever reach radius + Clearance, and asking for it
+        // would subdivide forever. The 0.05 m steering skin is exactly the budget this spends.
+        private const int CornerRepairs = 4;
+
+        // The wall vertices this corridor actually touches: the portal ends that were pulled in off
+        // one. Consecutive portals of a corridor share their ends, so a glance back over the tail of the
+        // list removes nearly every repeat; a full membership test would be quadratic in the corridor
+        // and a repeat that slips through only costs one more distance test.
+        private const int WallLookback = 8;
+
+        private static void CollectWalls(List<Portal> portals, List<int> walls)
+        {
+            foreach (Portal portal in portals)
+            {
+                AddWall(walls, portal.LeftVertex);
+                AddWall(walls, portal.RightVertex);
+            }
+        }
+
+        private static void AddWall(List<int> walls, int vertex)
+        {
+            if (vertex < 0)
+                return;
+            for (int at = walls.Count - 1, back = 0; at >= 0 && back < WallLookback; at--, back++)
+                if (walls[at] == vertex)
+                    return;
+            walls.Add(vertex);
+        }
+
+        private void RoundCorners(List<Vector3> output, int begin, List<Portal> portals,
+            List<int> walls, float radius)
+        {
+            CollectWalls(portals, walls);
+            if (walls.Count == 0)
+                return;
+
+            float wanted = radius + Clearance;
+            int budget = CornerRepairs * (output.Count - begin);
+            for (int i = begin + 1; i < output.Count && budget > 0; i++)
+            {
+                Vector3 a = output[i - 1], b = output[i];
+                int worst = Nearest(walls, a, b, radius, out float worstSquared);
+                if (worst < 0)
+                    continue;
+                if (!Push(walls, Source.Vertices[worst], a, b, wanted, worstSquared, out Vector3 around))
+                    continue;
+                output.Insert(i, around);
+                budget--;
+                i--; // the leg now ends at the new waypoint, and it gets measured in its turn
+            }
+        }
+
+        // The wall vertex a leg passes closest to, if any passes closer than the body is wide. The box
+        // test is what makes the loop affordable: a corridor's wall list is every jamb it squeezes past,
+        // and all but a couple of them are nowhere near any one leg.
+        private int Nearest(List<int> walls, Vector3 a, Vector3 b, float reach, out float squared)
+        {
+            float minX = MathF.Min(a.X, b.X) - reach, maxX = MathF.Max(a.X, b.X) + reach;
+            float minZ = MathF.Min(a.Z, b.Z) - reach, maxZ = MathF.Max(a.Z, b.Z) + reach;
+            int nearest = -1;
+            squared = reach * reach;
+            foreach (int vertex in walls)
+            {
+                Vector3 v = Source.Vertices[vertex];
+                if (v.X < minX || v.X > maxX || v.Z < minZ || v.Z > maxZ)
+                    continue;
+                float candidate = PointSegmentDistanceSquaredXZ(v.X, v.Z, a.X, a.Z, b.X, b.Z);
+                if (candidate >= squared)
+                    continue;
+                squared = candidate;
+                nearest = vertex;
+            }
+            return nearest;
+        }
+
+        // The waypoint that walks the leg around `centre` instead of through it: the point where the leg
+        // came nearest, pushed out onto the circle the corners themselves sit on.
+        //
+        // It is only taken when it is an improvement against EVERY wall, not just against this one. A
+        // gap narrower than the body has no point that clears both its jambs, and pushing off one of
+        // them there just walks the route into the other; the funnel has already collapsed such a gap to
+        // its middle, which is the best a body can aim at.
+        private bool Push(List<int> walls, Vector3 centre, Vector3 a, Vector3 b, float wanted,
+            float worstSquared, out Vector3 around)
+        {
+            around = default;
+            float dx = b.X - a.X, dz = b.Z - a.Z;
+            float lengthSquared = (dx * dx) + (dz * dz);
+            if (lengthSquared <= 1e-8f)
+                return false;
+            float t = Math.Clamp((((centre.X - a.X) * dx) + ((centre.Z - a.Z) * dz)) / lengthSquared,
+                0f, 1f);
+            float outX = (a.X + (dx * t)) - centre.X, outZ = (a.Z + (dz * t)) - centre.Z;
+            float outLength = MathF.Sqrt((outX * outX) + (outZ * outZ));
+            // A leg running exactly over the vertex has no side to be pushed to; take the leg's own left
+            // normal, which is a direction rather than a preference and keeps the result deterministic.
+            if (outLength <= 1e-4f)
+            {
+                float legLength = MathF.Sqrt(lengthSquared);
+                outX = -dz / legLength;
+                outZ = dx / legLength;
+            }
+            else
+            {
+                outX /= outLength;
+                outZ /= outLength;
+            }
+
+            around = new Vector3(centre.X + (outX * wanted), a.Y + ((b.Y - a.Y) * t),
+                centre.Z + (outZ * wanted));
+            float reach = MathF.Sqrt(worstSquared);
+            foreach (int vertex in walls)
+            {
+                Vector3 v = Source.Vertices[vertex];
+                float ax = v.X - around.X, az = v.Z - around.Z;
+                if (MathF.Abs(ax) > reach || MathF.Abs(az) > reach)
+                    continue;
+                if ((ax * ax) + (az * az) <= worstSquared)
+                    return false;
+            }
+            return true;
         }
 
         // Triangles the shortcut pass may walk over one route. It is a ceiling on pathological input, not

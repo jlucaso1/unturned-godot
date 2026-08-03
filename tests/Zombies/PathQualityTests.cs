@@ -221,14 +221,18 @@ public class PathQualityTests
         Assert.True(worst > 0f,
             $"the route enters a wall at ({worstAt.X:0.00}, {worstAt.Z:0.00})");
 
-        // Insetting a portal end ALONG its own portal by the radius buys the full width AT the corner
-        // but not on the segment ARRIVING at it, which can still cut across the jamb behind: this route
-        // came 0.318 m from a wall at (9.78, 7.78) while the corner itself was clear. The inset is now
-        // asked of the WALL rather than of the portal, and the same route measures 0.447.
+        // Insetting a portal end ALONG its own portal buys the full width AT the corner but not on the
+        // LEG that arrives at or leaves it. A corner sits exactly `radius + Clearance` from the wall
+        // vertex it turns around — ON the circle of that radius — so a leg between two such corners is
+        // a chord of that circle and passes inside it. Measured on this doorway: two corners each
+        // exactly 0.450 m off the jamb at (10, 8), and the leg joining them 0.318 m from it, which is
+        // 0.45 * cos(45 deg). A second route did it with a SINGLE corner, leaving the door correctly
+        // 0.450 m off the jamb at (11, 7) and then bending back across it at 0.336 m.
         //
-        // 0.447 m measured, against a body of 0.400 — the full radius plus almost all of the steering
-        // skin, the shortfall being the portal's own 1 mm margin against inverting. The assertion is the
-        // requirement rather than the measurement: the body never touches a wall.
+        // Legs are now repaired against the wall vertices the corridor touches, so each turn is walked
+        // as an arc rather than as one chord, and the same routes measure 0.416 — the radius plus a
+        // third of the steering skin, which is what that skin is for. The assertion is the requirement
+        // rather than the measurement: the body never touches a wall.
         Assert.True(worst >= BakedNavGraph.AgentRadius,
             $"the route passes {worst:0.000} m from a wall at ({worstAt.X:0.00}, {worstAt.Z:0.00})");
     }
