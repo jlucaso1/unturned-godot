@@ -329,9 +329,12 @@ a path (`UG_OBJECT_CHUNK_METRES`, `SCREENSHOT_PATH`, `TIME_OF_DAY`, …) are una
   work it did. That is why the pass plans every flag in one hop and reaches its verdicts inline, and why
   the reconciliation checkpoints are written on a chain and awaited once at the end rather than per flag.
 - `UG_NAV_CONFIRM_MARGIN=<metres>` (default 0.05) widens how close to the step threshold a face has to be
-  before its verdict is settled on the server rather than in the field. The heightfield's triangulation is
-  not covered by it — `CollisionField` measures that per probe and reports it as slack, which is added on
-  top per face. Independently of the margin, every face the sampled surfaces would *drop* is confirmed:
+  before its verdict is settled on the server rather than in the field. It is reserved once against
+  authored geometry, which is exact, and twice where a face is compared against a neighbour: those are two
+  independently sampled surfaces and they can drift apart in opposite directions. The heightfield's
+  triangulation is not covered by it — `CollisionField` measures that per probe and reports it as slack,
+  which is added on top per face. Independently of the margin, every face the sampled surfaces would
+  *drop* is confirmed:
   keeping a face leaves the baked navmesh as shipped, while dropping one takes route out of the graph, so
   only the destructive verdict needs the physics to sign it off.
 - `UG_NAV_PROBE_AUDIT=1` probes every face both ways and reports where they part company — including how
@@ -343,7 +346,10 @@ a path (`UG_OBJECT_CHUNK_METRES`, `SCREENSHOT_PATH`, `TIME_OF_DAY`, …) are una
   needed confirming, 90 measured a different surface — none of them a surface the field failed to find —
   and 19 reached a different verdict out of the 6,266 the server dropped. Confirming the drop set is what
   buys most of that last number: without it the same map reached a different verdict on 66 faces, from a
-  confirmation set of 3,685.
+  confirmation set of 3,685. Those counts predate two later widenings of the escalation set — the second
+  margin described above, and escalating a twisted heightfield cell whose other triangulation is the one
+  inside the probed segment. On the terrain-only `navprobe` suite the pair moved the confirmation set from
+  13.9% of faces to 14.6%, so the totals above are low by roughly that.
 - One thing the audit settled that reasoning did not. `ObjectsBuilder` leaves `BackfaceCollision` off on
   its `ConcavePolygonShape3D`s, so in principle the server culls a crossing of a face turned away from the
   probe and `CollisionField` should escalate rather than claim one. Measured, it does not: escalating
