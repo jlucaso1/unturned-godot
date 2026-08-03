@@ -293,6 +293,51 @@ public class ZombieSystemTests
         Assert.Equal(2, zombie.TargetPlayer);
     }
 
+    // Stealing a target hands the old one's tally back. This is the ordinary case and it already worked.
+    [Fact]
+    public void StealingATarget_ReleasesTheOldPlayersAgro()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        var far = Player(1, new Vector3(10, 5, 0));
+        var near = Player(2, new Vector3(4, 5, 0));
+
+        system.Tick(new[] { far }, 0.1f);
+        Assert.Equal(1, system.AgroOn(1));
+
+        system.Tick(new[] { far, near }, 0.1f);
+        Assert.Equal(2, zombie.TargetPlayer);
+        Assert.Equal(0, system.AgroOn(1));
+        Assert.Equal(1, system.AgroOn(2));
+    }
+
+    // The case that leaked. Detect runs BEFORE the Behave loop, so in the tick a player disconnects a
+    // zombie can be re-alerted onto someone else before Hunt would have noticed the target was gone and
+    // called Leave — and Leave was the only path that gave the tally back. The departed player's count
+    // stayed one too high for the rest of the session, and player ids are recycled, so the next player
+    // to be handed that id inherited the skew.
+    //
+    // It is a small thing: agro only shapes RollPath's every-third-rushes spread. But it is a counter
+    // that is supposed to mean "how many zombies are hunting you", and it was wrong.
+    [Fact]
+    public void AVanishedTargetReleasesItsAgro_WhenTheZombieIsReAlertedTheSameTick()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        var leaving = Player(1, new Vector3(4, 5, 0));
+        var arriving = Player(2, new Vector3(3, 5, 0));
+
+        system.Tick(new[] { leaving }, 0.1f);
+        Assert.Equal(1, zombie.TargetPlayer);
+        Assert.Equal(1, system.AgroOn(1));
+
+        // Player 1 is gone from the roster this tick, and player 2 is in range: Alert re-targets before
+        // Hunt ever runs.
+        system.Tick(new[] { arriving }, 0.1f);
+
+        Assert.Equal(2, zombie.TargetPlayer);
+        Assert.Equal(0, system.AgroOn(1)); // was 1: nothing ever gave it back
+        Assert.Equal(1, system.AgroOn(2));
+    }
+
     // ---- Approach paths ------------------------------------------------------------------------
 
     [Fact]

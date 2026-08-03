@@ -406,13 +406,23 @@ public sealed class ZombieSystem
     // others drift to a side (megas always rush).
     private void Alert(ZombieInstance zombie, in ZombiePlayerView player, IReadOnlyList<ZombiePlayerView> players)
     {
-        if (zombie.TargetPlayer != byte.MaxValue
-            && TryGetPlayer(players, zombie.TargetPlayer, out ZombiePlayerView current))
+        if (zombie.TargetPlayer != byte.MaxValue)
         {
-            float currentSqr = (current.Position - zombie.Position).LengthSquared();
-            float newSqr = (player.Position - zombie.Position).LengthSquared();
-            if (newSqr >= currentSqr)
-                return;
+            // Only a LIVE target gets to defend its claim; a target that has left the roster cannot be
+            // compared against and is simply given up.
+            if (TryGetPlayer(players, zombie.TargetPlayer, out ZombiePlayerView current))
+            {
+                float currentSqr = (current.Position - zombie.Position).LengthSquared();
+                float newSqr = (player.Position - zombie.Position).LengthSquared();
+                if (newSqr >= currentSqr)
+                    return;
+            }
+
+            // Released either way. Detect runs before the Behave loop, so in the tick a player
+            // disconnects a zombie can be re-alerted here BEFORE Hunt would have noticed the target was
+            // gone and called Leave — and Leave was the only path that gave the count back. Skipping it
+            // left that player's tally permanently one too high, and ids are recycled, so the next
+            // player handed that id inherited the skew.
             AdjustAgro(zombie.TargetPlayer, -1);
         }
 
@@ -439,6 +449,11 @@ public sealed class ZombieSystem
             return EZombiePath.Rush;
         return _random.NextSingle() < 0.5f ? EZombiePath.Left : EZombiePath.Right;
     }
+
+    // How many zombies are currently hunting this player — the original's Player.agro. It shapes the
+    // approach spread (RollPath rushes every third), so it is part of the simulation rather than a
+    // statistic, and worth being able to read from outside.
+    public int AgroOn(byte playerId) => _agro.TryGetValue(playerId, out int agro) ? agro : 0;
 
     private void AdjustAgro(byte playerId, int delta)
     {
