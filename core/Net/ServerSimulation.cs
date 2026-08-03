@@ -168,10 +168,19 @@ public sealed class ServerSimulation
     // next claim is adopted instead of being measured against where it used to be. Used by the bug-repro
     // harness to stand the reporter back where the dump was taken: without clearing the baseline the
     // speed budget would treat the jump as a cheat and rubber-band them back within a tick.
-    public bool Teleport(byte id, Vector3 position)
+    public bool Teleport(byte id, Vector3 position) =>
+        _players.TryGetValue(id, out Entry? entry)
+        && Teleport(id, position, entry.State.Stance, entry.State.Moving);
+
+    // With the stance and whether they were moving, because those are not decoration: the stealth
+    // radius a player is detected at is computed from both (ZombieDetection.RadiusFor), so putting a
+    // sprinting player back as a stander alerts a different set of zombies on the very first tick.
+    public bool Teleport(byte id, Vector3 position, EPlayerStance stance, bool moving)
     {
         if (!_players.TryGetValue(id, out Entry? entry) || !IsFinite(position))
             return false;
+        entry.State.Stance = stance;
+        entry.State.Moving = moving;
         entry.State.Position = position;
         entry.State.Velocity = Vector3.Zero;
         entry.HasVerifiedPosition = false;

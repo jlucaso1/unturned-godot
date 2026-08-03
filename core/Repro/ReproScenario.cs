@@ -167,7 +167,8 @@ public sealed class ReproScenario
         // already put it — which is precisely the tick a short window is about.
         var tracks = new Dictionary<int, MotionTrack>();
         foreach (ZombieInstance zombie in System.Zombies)
-            tracks[zombie.Id] = new MotionTrack(zombie.Position, zombie.Yaw);
+            tracks[zombie.Id] = new MotionTrack(zombie.Position, zombie.Yaw,
+                zombie.State != EZombieState.Idle || zombie.TargetPlayer != byte.MaxValue);
 
         int total = WindowTicks + Math.Max(0, extraTicks);
         for (int i = 0; i < total; i++)
@@ -178,11 +179,13 @@ public sealed class ReproScenario
             foreach (ZombieInstance zombie in System.Zombies)
             {
                 if (!tracks.TryGetValue(zombie.Id, out MotionTrack? track))
-                    tracks[zombie.Id] = track = new MotionTrack(zombie.Position, zombie.Yaw);
+                    tracks[zombie.Id] = track = new MotionTrack(zombie.Position, zombie.Yaw, false);
                 bool awake = zombie.State != EZombieState.Idle || zombie.TargetPlayer != byte.MaxValue;
-                // Once a zombie has done something, it keeps being measured: how it SETTLES is part of
-                // what a fix has to get right.
-                if (awake || track.Samples > 0)
+                // Once a zombie has done something — including having been mid-something when the
+                // window opened — it keeps being measured. A zombie that reaches its retreat point on
+                // the very first tick is the whole incident in some short windows, and measuring it
+                // only from the tick AFTER it settles measures nothing at all.
+                if (awake || track.StartedAwake || track.Samples > 0)
                     track.Add(zombie);
             }
         }
@@ -214,6 +217,7 @@ public sealed class ReproScenario
             float error = (live.Position - ReproVector.To(expected.Position)).Length();
             float yawError = MathF.Abs(Mathf.Wrap(live.Yaw - expected.Yaw, -180f, 180f));
             report.ComparedSamples++;
+            report.PositionSamples++;
             report.SumPositionError += error;
             report.MaxPositionError = MathF.Max(report.MaxPositionError, error);
             report.MaxYawError = MathF.Max(report.MaxYawError, yawError);
@@ -234,6 +238,7 @@ public sealed class ReproScenario
             if (_sampledThisFrame.Contains(live.Id))
                 continue;
             report.ComparedSamples++;
+            report.SilenceChecks++;
             if (live.State != EZombieState.Idle || live.TargetPlayer != byte.MaxValue)
                 report.SilentWakeups++;
         }
@@ -245,7 +250,9 @@ public sealed class ReproScenario
             return recorded;
         if (Collision != null)
         {
-            Recompute(Collision.Covers(from) && Collision.Covers(to));
+            // The capsule reaches `radius` sideways and its full height up from the feet.
+            float reach = radius + ZombieBody.CapsuleTop;
+            Recompute(Collision.Covers(from, reach) && Collision.Covers(to, reach));
             return Collision.Resolve(from, to, radius);
         }
         Unanswered();
@@ -258,7 +265,7 @@ public sealed class ReproScenario
             return hit;
         if (Collision != null)
         {
-            Recompute(Collision.Covers(position));
+            Recompute(Collision.Covers(position, ZombieBody.GroundProbeDown));
             return Collision.GroundSnap(position, out y);
         }
         Unanswered();
@@ -324,12 +331,15 @@ public sealed class ReproScenario
         private Vector3 _previous;
         private float _previousYaw;
 
-        public MotionTrack(Vector3 position, float yaw)
+        public MotionTrack(Vector3 position, float yaw, bool startedAwake)
         {
             _first = position;
             _previous = position;
             _previousYaw = yaw;
+            StartedAwake = startedAwake;
         }
+
+        public bool StartedAwake { get; }
 
         public float Travelled { get; private set; }
 
@@ -373,6 +383,13 @@ public sealed class ReproReplayReport
 {
     public int Ticks { get; set; }
     public int ComparedSamples { get; set; }
+
+    // Of those, the ones that carried a position to measure. A map with three hundred sleeping
+    // zombies contributes three hundred checks per frame that no trajectory error can move, and
+    // averaging the error over those would report a near-zero mean for a replay that is metres out
+    // on every zombie that actually did something.
+    public int PositionSamples { get; set; }
+    public int SilenceChecks { get; set; }
     public float MaxPositionError { get; set; }
     public float SumPositionError { get; set; }
     public float MaxYawError { get; set; }
@@ -390,7 +407,7 @@ public sealed class ReproReplayReport
     public int RoutesRecomputed { get; set; }
     public List<ReproMotionSummary> Motion { get; } = new();
 
-    public float MeanPositionError => ComparedSamples > 0 ? SumPositionError / ComparedSamples : 0f;
+    public float MeanPositionError => PositionSamples > 0 ? SumPositionError / PositionSamples : 0f;
 
     // Did the replay reproduce the RECORDING, rather than merely something plausible? Only meaningful
     // for unmodified code; a millimetre is well inside the rounding a dump stores positions at.
@@ -406,7 +423,8 @@ public sealed class ReproReplayReport
     {
         var text = new System.Text.StringBuilder();
         text.Append("replayed ").Append(Ticks).Append(" ticks; ")
-            .Append(ComparedSamples).Append(" samples compared\n");
+            .Append(PositionSamples).Append(" motion samples compared, ")
+            .Append(SilenceChecks).Append(" idle zombies checked for staying idle\n");
         text.Append("  position error   max ").Append(Format(MaxPositionError))
             .Append(" m, mean ").Append(Format(MeanPositionError)).Append(" m\n");
         text.Append("  yaw error        max ").Append(Format(MaxYawError)).Append("°\n");

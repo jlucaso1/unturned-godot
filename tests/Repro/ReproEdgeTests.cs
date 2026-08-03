@@ -132,7 +132,9 @@ public class ReproEdgeTests
         var report = new ReproReplayReport
         {
             Ticks = 10,
-            ComparedSamples = 4,
+            ComparedSamples = 20,
+            PositionSamples = 4,
+            SilenceChecks = 16,
             MaxPositionError = 2f,
             SumPositionError = 4f,
             MaxYawError = 30f,
@@ -150,6 +152,8 @@ public class ReproEdgeTests
             YawChurnDegrees = 900f,
             FinalState = EZombieState.Chase,
         });
+        // The mean is over the four samples that carried a position, not over the sixteen idle
+        // zombies that could not move the number in either direction.
         Assert.Equal(1f, report.MeanPositionError);
         Assert.False(report.ReproducesRecording);
         string text = report.Describe();
@@ -157,7 +161,12 @@ public class ReproEdgeTests
         Assert.Contains("state mismatches 1", text, StringComparison.Ordinal);
 
         // A clean one reads the other way.
-        var clean = new ReproReplayReport { ComparedSamples = 1, MaxPositionError = 0.001f };
+        var clean = new ReproReplayReport
+        {
+            ComparedSamples = 1,
+            PositionSamples = 1,
+            MaxPositionError = 0.001f,
+        };
         Assert.True(clean.ReproducesRecording);
         Assert.Contains("reproduces the recording", clean.Describe(), StringComparison.Ordinal);
 
@@ -811,5 +820,65 @@ public class ReproEdgeTests
         Assert.True(report.SilentWakeups > 0);
         Assert.False(report.ReproducesRecording);
         Assert.Contains("woke up unexpectedly", report.Describe(), StringComparison.Ordinal);
+    }
+
+    // The slice is the world the replay has. A body whose CENTRE is inside it can still be leaning on
+    // a wall whose triangles are outside, so coverage has to account for how far the query reaches.
+    [Fact]
+    public void CoverageAccountsForTheBodyNotJustItsCentre()
+    {
+        ReproTriangles triangles = ReproTriangles.From(
+            new ReproWorlds.Geometry().Ground().Build(Vector3.Zero, 16f))!;
+        var world = new ReproCollisionWorld(triangles, null, Vector3.Zero, 16f);
+
+        Assert.True(world.Covers(new Vector3(10f, 0f, 0f)));
+        // ...and the same point stops being covered once the question reaches past the edge.
+        Assert.True(world.Covers(new Vector3(10f, 0f, 0f), 5f));
+        Assert.False(world.Covers(new Vector3(10f, 0f, 0f), 7f));
+
+        // A slice with no radius at all (a hand-written dump) covers everything rather than nothing.
+        var unbounded = new ReproCollisionWorld(triangles);
+        Assert.True(unbounded.Covers(new Vector3(5000f, 0f, 5000f), 100f));
+    }
+
+    // A zombie that was mid-something when the window opened and settles on the very first tick is
+    // the whole incident in a short recording. Measuring it only from the tick after it settles
+    // measures nothing at all.
+    [Fact]
+    public void AZombieThatSettlesOnTheFirstTickIsStillMeasured()
+    {
+        var dump = new ReproDump
+        {
+            World = new ReproWorldData
+            {
+                Bounds = { Box() },
+                Tables = { new ReproZombieTable { Name = "Test", Damage = 5 } },
+            },
+            Zombies = new ReproZombieSection
+            {
+                Seams = new ReproWorldSeams(),
+                State = new ReproSystemState
+                {
+                    Zombies =
+                    {
+                        // On its retreat point already: the first Step arrives and it stops.
+                        new ReproZombieRecord
+                        {
+                            Id = 4,
+                            Position = new[] { 20f, 0f, 20f },
+                            State = EZombieState.Return,
+                            Target = byte.MaxValue,
+                            LeaveTo = new[] { 20.2f, 0f, 20f },
+                        },
+                    },
+                },
+                Frames = { new ReproFrame { Dt = 0.08f } },
+            },
+        };
+
+        ReproReplayReport report = new ReproScenario(dump).Run();
+        ReproMotionSummary summary = Assert.Single(report.Motion);
+        Assert.Equal(4, summary.Id);
+        Assert.Equal(EZombieState.Idle, summary.FinalState);
     }
 }

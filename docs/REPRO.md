@@ -38,15 +38,19 @@ tree and reports how far it drifted:
 
 ```
 world: 383 collision triangles, the dump's navmesh slice
-replayed 43 ticks; 86 samples compared
+replayed 44 ticks; 88 motion samples compared, 16324 idle zombies checked for staying idle
   position error   max 0 m, mean 0 m
   yaw error        max 0.002°
-  state mismatches 0
-  answers          93 recorded, 0 from geometry, 0 unanswered
+  state mismatches 0, target mismatches 0, woke up unexpectedly 0
+  answers          95 recorded, 0 from geometry, 0 unanswered
   verdict          reproduces the recording
-  zombie 191  travelled 14.573 m, net 6.796 m, turned 453.907°, Chase
-  zombie 219  travelled 0 m, net 0 m, turned 0.021°, Attack
+  zombie 191  travelled 15.45 m, net 7.137 m, turned 457.405°, Chase
+  zombie 219  travelled 0 m, net 0 m, turned 0.035°, Attack
 ```
+
+Both halves of that first line matter. The motion samples are the zombies that did something; the
+idle checks are the ones the recording says slept through the window, and a build that newly wakes
+one of them is caught by that count rather than by a position nobody recorded.
 
 (That is a real dump taken out of a headless PEI session and replayed with no engine in sight.)
 

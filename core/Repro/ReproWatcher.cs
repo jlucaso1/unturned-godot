@@ -49,6 +49,16 @@ public sealed class ReproWatcher
     public ReproWatcher(ReproWatcherOptions? options = null) =>
         _options = options ?? new ReproWatcherOptions();
 
+    // Forgets everything it has been watching. Loading a dump replaces the population but reuses its
+    // ids, so a track left over from the session before would blend two different simulations into one
+    // window — and the dump most likely to be loaded is the one whose incident filled that track with
+    // exactly the churn or blockage this looks for.
+    public void Forget()
+    {
+        _tracks.Clear();
+        _cooldown = 0f;
+    }
+
     // Feeds one tick in and reports the first zombie that qualifies. Cheap by construction: a handful
     // of floats per AWAKE zombie, and idle ones are dropped as soon as they settle.
     public bool Poll(ZombieSystem system, float dt, out string reason, out Vector3 focus)

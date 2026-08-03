@@ -438,6 +438,27 @@ public class ServerSimulationTests
         Assert.True(after.Y > 34f, $"the player did not stay where they were put: {after}");
     }
 
+    // Stance and movement travel with the position: the stealth radius a player is noticed at is
+    // computed from both, so putting a crouching reporter back as a stander alerts a different set of
+    // zombies on the very first tick of the replay.
+    [Fact]
+    public void Teleport_CarriesTheStanceAndMovement()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Vector3.Zero);
+        Assert.Equal(EPlayerStance.Stand, sim.GetState(1).Stance);
+
+        Assert.True(sim.Teleport(1, new Vector3(5f, 10f, 5f), EPlayerStance.Prone, moving: true));
+        Assert.Equal(EPlayerStance.Prone, sim.GetState(1).Stance);
+        Assert.True(sim.GetState(1).Moving);
+
+        // The short form leaves both as they are, for callers that only want the position.
+        Assert.True(sim.Teleport(1, new Vector3(6f, 10f, 6f)));
+        Assert.Equal(EPlayerStance.Prone, sim.GetState(1).Stance);
+        Assert.True(sim.GetState(1).Moving);
+        Assert.False(sim.Teleport(9, Vector3.Zero, EPlayerStance.Crouch, moving: false));
+    }
+
     [Fact]
     public void Teleport_RefusesUnknownPlayersAndNonFinitePositions()
     {

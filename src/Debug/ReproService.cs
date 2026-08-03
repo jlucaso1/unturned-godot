@@ -290,6 +290,10 @@ public sealed partial class ReproService : Node
             // And the history in the ring belongs to the session that was running a moment ago.
             // Capturing straight after a load would splice a pre-load anchor onto post-load ticks.
             _recorder?.Restart();
+            // Same for what the automatic trigger has been watching: ids are reused by the restored
+            // population, and the dump most likely to be loaded is the one whose incident filled those
+            // tracks with the very churn the trigger looks for.
+            _watcher?.Forget();
         }
 
         // Players go back to where the WINDOW starts, not to where the capture ended. The zombie state
@@ -307,21 +311,23 @@ public sealed partial class ReproService : Node
         if (atWindowStart.Count > 0)
         {
             foreach (ReproPlayerSample player in atWindowStart)
-                Place(player.Id, ReproVector.To(player.Position));
+                Place(player.Id, ReproVector.To(player.Position), player.Stance, player.Moving);
         }
         else
         {
             foreach (ReproPlayerState player in dump.Session.Players)
-                Place(player.Id, ReproVector.To(player.Position));
+                Place(player.Id, ReproVector.To(player.Position), player.Stance, player.Moving);
         }
 
         // The body follows the LOCAL player's own sample. A dump from a session with several players
         // has several recorded positions and only one of them is this machine's; standing the
         // controller on whichever happened to be last would put it somewhere the simulation does not
         // think it is, and its next position claim would drag the whole replay after it.
-        void Place(byte id, Vector3 position)
+        void Place(byte id, Vector3 position, Player.EPlayerStance stance, bool moving)
         {
-            _server?.Teleport(id, position);
+            // Stance and movement travel with the position: the detection radius is computed from
+            // them, so a crouching reporter put back standing is seen from twice as far.
+            _server?.Teleport(id, position, stance, moving);
             if (placed && id != local)
                 return;
             focus = position;

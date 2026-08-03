@@ -81,6 +81,10 @@ public sealed class NetServer
     // running session is the only caller: it puts the reporter back where the dump was taken.
     public bool Teleport(byte id, Vector3 position) => _simulation.Teleport(id, position);
 
+    // With the stance and movement the dump recorded: both decide how far away a player is noticed.
+    public bool Teleport(byte id, Vector3 position, Player.EPlayerStance stance, bool moving) =>
+        _simulation.Teleport(id, position, stance, moving);
+
     public NetServer(IServerTransport transport, ServerSimulation simulation, Vector3 spawnPosition,
         string levelName)
     {

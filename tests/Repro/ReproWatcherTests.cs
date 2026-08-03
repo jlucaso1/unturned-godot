@@ -156,4 +156,27 @@ public class ReproWatcherTests
     public void ItRefusesAMissingSystem() =>
         Assert.Throws<ArgumentNullException>(() =>
             new ReproWatcher().Poll(null!, Dt, out _, out _));
+
+    // Loading a dump replaces the population but reuses its ids. Anything the watcher had been
+    // accumulating belongs to the session before, and the dump most likely to be loaded is the one
+    // whose incident filled those tracks with exactly the churn this looks for.
+    [Fact]
+    public void ForgettingDropsWhatItWasWatching()
+    {
+        ZombieSystem system = Idle(out ZombieInstance zombie);
+        zombie.State = EZombieState.Chase;
+        zombie.TargetPlayer = 1;
+
+        var watcher = new ReproWatcher();
+        for (int i = 0; i < 30; i++)
+        {
+            zombie.Yaw = Mathf.Wrap(zombie.Yaw + 45f, 0f, 360f);
+            Assert.False(watcher.Poll(system, Dt, out _, out _)); // still inside the first window
+        }
+
+        // Forgotten mid-window, the churn accumulated so far cannot carry into the next one.
+        watcher.Forget();
+        for (int i = 0; i < 12; i++)
+            Assert.False(watcher.Poll(system, Dt, out _, out _));
+    }
 }

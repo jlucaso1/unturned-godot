@@ -55,8 +55,18 @@ public sealed class ReproCollisionWorld
     // Is this point somewhere the capture actually looked? Outside the slice there are no triangles,
     // so every query answers "nothing there" — which is indistinguishable from open ground and is the
     // one way this world can lie. Callers ask first and count the difference.
-    public bool Covers(Vector3 point) =>
-        (point - _centre).LengthSquared() <= _radiusSquared;
+    //
+    // `reach` is how far the query extends from the point: a swept capsule reaches its own radius
+    // sideways and its full height upward, and a ground probe reaches metres down. A body whose centre
+    // sits just inside the slice can still be resting against a wall whose triangles are just outside
+    // it, so the centre alone is not the question.
+    public bool Covers(Vector3 point, float reach = 0f)
+    {
+        if (float.IsPositiveInfinity(_radiusSquared))
+            return true;
+        float distance = (point - _centre).Length() + MathF.Max(0f, reach);
+        return distance * distance <= _radiusSquared;
+    }
 
     public int TriangleCount => _triangles.TriangleCount;
 
