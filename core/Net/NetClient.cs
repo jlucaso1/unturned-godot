@@ -15,14 +15,19 @@ public sealed class RemotePlayer
 
     public string Name { get; }
 
+    // The roster version this player was known to be present at. A roster no newer than this cannot be
+    // evidence that they left — it simply predates them.
+    public uint KnownAtVersion { get; }
+
     // Latest replicated stance and input-derived moving flag: discrete, so they snap (no interpolation).
     public UnturnedGodot.Player.EPlayerStance Stance { get; private set; }
     public bool Moving { get; private set; }
     public bool Grounded { get; private set; } = true;
 
-    public RemotePlayer(string name, in PoseSnapshot initial, double now)
+    public RemotePlayer(string name, in PoseSnapshot initial, double now, uint knownAtVersion = 0)
     {
         Name = name;
+        KnownAtVersion = knownAtVersion;
         _buffer.UpdateLastSnapshot(initial, now);
         _lastUpdatePos = initial.Position;
     }
@@ -52,6 +57,17 @@ public sealed class NetClient
     private readonly IClientTransport _transport;
     private readonly Dictionary<byte, RemotePlayer> _remotes = new();
 
+    // Scratch for reconciling a Welcome's roster against the remotes we hold; reused so a rejoin storm
+    // does not allocate a set and a list per message.
+    private readonly HashSet<byte> _rosterIds = new();
+    private readonly List<byte> _departed = new();
+
+    // The newest roster version at which each id was seen to LEAVE. Player ids are bytes, so the whole
+    // tombstone table is 256 entries and never grows: a roster older than an id's departure may not put
+    // that player back on the map, however late it arrives. Cleared when the session itself resets,
+    // because a server that restarted counts its versions from zero again.
+    private readonly uint[] _leftAtVersion = new uint[256];
+
     public byte PlayerId { get; private set; }
 
     // Datagrams that reached a decoder and did not survive it. See NetServer.MalformedPacketsDropped.
@@ -60,6 +76,15 @@ public sealed class NetClient
     // Extension seam: message types this client doesn't handle (future replicated systems) land here
     // instead of being dropped, so a feature module can subscribe without editing NetClient.
     public Action<byte[]>? OnUnhandledMessage;
+
+    // Set once the server refuses us (wrong map, wrong build, full). Terminal: the retry loop stops,
+    // and the UI has a reason to show instead of a join that quietly never happens.
+    public JoinRejection? Rejection { get; private set; }
+    public Action<JoinRejection>? OnRejected;
+
+    // The level this client built, as sent in the Hello.
+    public string Level => _level;
+
     public bool Joined { get; private set; }
     public PlayerSnapshotState LocalServerState { get; private set; }
     public IReadOnlyDictionary<byte, RemotePlayer> Remotes => _remotes;
@@ -71,13 +96,17 @@ public sealed class NetClient
     public const double StateTimeout = 10.0;
 
     private readonly string _name;
+    private readonly string _level;
     private double _lastHello = double.NegativeInfinity;
     private double _lastStateAt;
 
-    public NetClient(IClientTransport transport, string name)
+    // levelName is the map folder this client actually built. The server admits us only onto that
+    // world; see NetMessages.LevelsMatch.
+    public NetClient(IClientTransport transport, string name, string levelName)
     {
         _transport = transport;
         _name = name;
+        _level = levelName;
     }
 
     public void SendInput(in InputCommand input) =>
@@ -87,12 +116,14 @@ public sealed class NetClient
     {
         _transport.Update(now); // give the transport the clock BEFORE any reliable send
 
-        if (!Joined && now - _lastHello >= HelloRetryInterval)
+        // A rejection is an answer, not a hiccup: retrying a Hello the server has already refused only
+        // hammers it with a request whose verdict cannot change.
+        if (!Joined && Rejection == null && now - _lastHello >= HelloRetryInterval)
         {
             // Deferred from the constructor: a reliable frame stamped before the transport ever saw the
             // real clock would look GiveUpAfter-seconds old on the next Update and kill the channel.
             _lastHello = now;
-            _transport.Send(NetMessages.WriteHello(_name), ESendType.Reliable);
+            _transport.Send(NetMessages.WriteHello(_name, _level), ESendType.Reliable);
         }
 
         while (_transport.TryReceive(out byte[] payload))
@@ -101,8 +132,11 @@ public sealed class NetClient
         if (Joined && now - _lastStateAt > StateTimeout)
         {
             // The server stopped talking to us (session dropped, host restarted): rejoin from scratch.
+            // The tombstones go too — a host that restarted counts its roster versions from zero, and
+            // stale ones would refuse every listing in the fresh roster it sends us.
             Joined = false;
             _remotes.Clear();
+            Array.Clear(_leftAtVersion);
             _lastHello = double.NegativeInfinity;
         }
     }
@@ -132,32 +166,107 @@ public sealed class NetClient
                         break;
                     }
 
-                    (byte id, _, List<PlayerListing> players) = welcome;
+                    (byte id, _, uint rosterVersion, List<PlayerListing> players) = welcome;
                     PlayerId = id;
                     Joined = true;
                     _lastStateAt = now;
+
+                    // The roster is COMPLETE — "everyone already here" as of rosterVersion — so it
+                    // replaces what we hold rather than adding to it. A second Welcome is ordinary (an
+                    // unadmitted client re-Hellos every couple of seconds, and a joined session that
+                    // Hellos again is answered with a fresh roster), and UDP may hand it to us after the
+                    // PlayerLeft it predates: merging left that player standing there forever, unseeable
+                    // and unshootable. Players still listed keep the remote we already have, so a
+                    // re-Welcome does not restart anyone's interpolation mid-session.
+                    _rosterIds.Clear();
                     foreach (PlayerListing p in players)
-                        _remotes[p.PlayerId] = SpawnRemote(p, now);
+                    {
+                        if (p.PlayerId == PlayerId)
+                            continue; // the server does not list us; a roster that did would double us
+                        if (_leftAtVersion[p.PlayerId] > rosterVersion)
+                            continue; // we already know they left, later than this roster was taken
+                        _rosterIds.Add(p.PlayerId);
+                        if (!_remotes.ContainsKey(p.PlayerId))
+                            _remotes[p.PlayerId] = SpawnRemote(p, now, rosterVersion);
+                    }
+
+                    if (_remotes.Count > _rosterIds.Count)
+                    {
+                        _departed.Clear();
+                        foreach ((byte known, RemotePlayer remote) in _remotes)
+                        {
+                            // Absent from a roster older than the player is no evidence they left: that
+                            // snapshot was taken before they arrived. Their PlayerJoined is reliable and
+                            // already consumed, so it is never replayed — dropping them here would leave
+                            // them invisible for the rest of the session, since state updates only move
+                            // remotes that already exist.
+                            if (!_rosterIds.Contains(known) && remote.KnownAtVersion <= rosterVersion)
+                                _departed.Add(known);
+                        }
+                        foreach (byte gone in _departed)
+                            _remotes.Remove(gone);
+                    }
                     break;
                 }
             case ENetMessage.PlayerJoined:
                 {
-                    if (!MalformedPacket.TryDecode(payload, ReadPlayerJoined, out var p))
+                    if (!MalformedPacket.TryDecode(payload, ReadPlayerJoined, out var joined))
                     {
                         MalformedPacketsDropped++;
                         break;
                     }
 
-                    if (p.PlayerId != PlayerId)
-                        _remotes[p.PlayerId] = SpawnRemote(p, now);
+                    (uint joinedVersion, PlayerListing p) = joined;
+                    // A join can be the stale message. Someone who connects and drops straight back out
+                    // produces a join and a leave moments apart, and the leave may arrive first: acting
+                    // on the join then leaves that player standing there for good, because nothing
+                    // removes a remote except a leave and theirs has already been spent. Ids are also
+                    // recycled, so an older join can describe the PREVIOUS holder of one we already
+                    // have — taking it would lose both, the newer occupant overwritten here and the
+                    // stale one removed by the leave that follows.
+                    if (p.PlayerId != PlayerId
+                        && _leftAtVersion[p.PlayerId] <= joinedVersion
+                        && (!_remotes.TryGetValue(p.PlayerId, out RemotePlayer? held)
+                            || held.KnownAtVersion < joinedVersion))
+                    {
+                        _remotes[p.PlayerId] = SpawnRemote(p, now, joinedVersion);
+                    }
+                    break;
+                }
+            case ENetMessage.Reject:
+                {
+                    if (!MalformedPacket.TryDecode(payload, ReadReject, out JoinRejection rejection))
+                    {
+                        MalformedPacketsDropped++;
+                        break;
+                    }
+
+                    Rejection = rejection;
+                    Joined = false;
+                    _remotes.Clear();
+                    OnRejected?.Invoke(rejection);
                     break;
                 }
             case ENetMessage.PlayerLeft:
-                if (MalformedPacket.TryDecode(payload, ReadPlayerLeft, out byte left))
-                    _remotes.Remove(left);
-                else
-                    MalformedPacketsDropped++;
-                break;
+                {
+                    if (!MalformedPacket.TryDecode(payload, ReadPlayerLeft, out var left))
+                    {
+                        MalformedPacketsDropped++;
+                        break;
+                    }
+
+                    (uint leftVersion, byte leftId) = left;
+                    // Remembered even if we never held that remote: the roster carrying them may still
+                    // be in flight behind this, and it must not put them back.
+                    if (leftVersion > _leftAtVersion[leftId])
+                        _leftAtVersion[leftId] = leftVersion;
+                    if (_remotes.TryGetValue(leftId, out RemotePlayer? leaving)
+                        && leaving.KnownAtVersion <= leftVersion)
+                    {
+                        _remotes.Remove(leftId); // the id was handed out again if the join is newer
+                    }
+                    break;
+                }
             case ENetMessage.StateUpdate:
                 {
                     if (!MalformedPacket.TryDecode(payload, ReadStateUpdate, out var update))
@@ -182,16 +291,20 @@ public sealed class NetClient
 
     // Cached so a method group does not allocate a delegate on every received message.
     private static readonly Func<byte[], ENetMessage> ReadType = NetMessages.TypeOf;
-    private static readonly Func<byte[], (byte PlayerId, uint Tick, List<PlayerListing> Players)> ReadWelcome =
-        NetMessages.ReadWelcome;
-    private static readonly Func<byte[], PlayerListing> ReadPlayerJoined = NetMessages.ReadPlayerJoined;
-    private static readonly Func<byte[], byte> ReadPlayerLeft = NetMessages.ReadPlayerLeft;
+    private static readonly
+        Func<byte[], (byte PlayerId, uint Tick, uint RosterVersion, List<PlayerListing> Players)> ReadWelcome =
+            NetMessages.ReadWelcome;
+    private static readonly Func<byte[], (uint RosterVersion, PlayerListing Player)> ReadPlayerJoined =
+        NetMessages.ReadPlayerJoined;
+    private static readonly Func<byte[], JoinRejection> ReadReject = NetMessages.ReadReject;
+    private static readonly Func<byte[], (uint RosterVersion, byte PlayerId)> ReadPlayerLeft =
+        NetMessages.ReadPlayerLeft;
     private static readonly Func<byte[], (uint Tick, List<PlayerSnapshotState> States)> ReadStateUpdate =
         NetMessages.ReadStateUpdate;
 
-    private static RemotePlayer SpawnRemote(PlayerListing p, double now)
+    private static RemotePlayer SpawnRemote(PlayerListing p, double now, uint knownAtTick)
     {
-        var remote = new RemotePlayer(p.Name, Pose(p.Position, p.Pitch, p.Yaw), now);
+        var remote = new RemotePlayer(p.Name, Pose(p.Position, p.Pitch, p.Yaw), now, knownAtTick);
         remote.Push(Pose(p.Position, p.Pitch, p.Yaw), p.Stance, moving: false, grounded: true, now);
         return remote;
     }

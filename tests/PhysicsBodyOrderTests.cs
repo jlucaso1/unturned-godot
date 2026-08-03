@@ -17,6 +17,27 @@ namespace UnturnedGodot.Tests;
 // hermetic suite can run (a physics space needs a live Godot runtime), so it is checked in the source.
 public class PhysicsBodyOrderTests
 {
+    // Hardcoded WASD has to ask for the PHYSICAL key, never the keycode. A keycode names the character
+    // the key prints, which moves with the layout: on AZERTY the "W" key sits where QWERTY has Z, and
+    // "A" where QWERTY has Q, so a free camera bound by keycode answers to a scattering of keys under
+    // nobody's fingers. This is one of the few assertions in this file that is about an API choice
+    // rather than a shape of text, so it survives reformatting.
+    //
+    // PlayerController is exempt on purpose: it reads the player's own Unturned binds, where the
+    // character IS the question being asked.
+    [Fact]
+    public void FreeCamera_ReadsPhysicalKeys_SoItWorksOffQwerty()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "UI", "FreeCamera.cs")) is not { } path)
+            return; // running from a package without the sources next to it
+
+        string source = File.ReadAllText(path);
+
+        Assert.DoesNotContain("Input.IsKeyPressed(", source);
+        foreach (string key in new[] { "Key.W", "Key.S", "Key.A", "Key.D", "Key.E", "Key.Q" })
+            Assert.Contains($"Input.IsPhysicalKeyPressed({key})", source);
+    }
+
     [Fact]
     public void InstancedStaticBody_AddsShapesBeforeJoiningTheSpace()
     {
@@ -49,7 +70,7 @@ public class PhysicsBodyOrderTests
             return;
 
         string source = File.ReadAllText(path);
-        Assert.Contains("OS.GetEnvironment(\"UG_HEADLESS_INTERACTIVE\") == \"1\"", source);
+        Assert.Contains("EnvFlag.IsOn(OS.GetEnvironment(\"UG_HEADLESS_INTERACTIVE\"), whenUnset: false)", source);
         Assert.Contains("&& string.IsNullOrEmpty(shot)", source);
         Assert.Contains("if ((headless && !headlessInteractive) || !string.IsNullOrEmpty(shot))", source);
         Assert.Contains("bool autoStart = headlessInteractive", source);
@@ -187,8 +208,14 @@ public class PhysicsBodyOrderTests
 
         string menu = File.ReadAllText(menuPath);
         string picker = File.ReadAllText(pickerPath);
-        Assert.Equal(2, CountOccurrences(menu, "OnStart?.Invoke(map.SelectionKey"));
+
+        // Play carries the exact selection key, because workshop folder names are not unique.
+        Assert.Equal(1, CountOccurrences(menu, "OnStart?.Invoke(map.SelectionKey"));
         Assert.Contains("_maps[i].SelectionKey", picker);
+
+        // Connect carries no map at all: the server names the level it runs and the client builds
+        // that one. Passing the browser's selection here is what put a joining player on the wrong map.
+        Assert.Equal(1, CountOccurrences(menu, "OnStart?.Invoke(\"\", address)"));
     }
 
     [Fact]
@@ -517,7 +544,9 @@ public class PhysicsBodyOrderTests
             return;
         string world = File.ReadAllText(worldPath);
         string occluder = File.ReadAllText(occluderPath);
-        Assert.Contains("OS.GetEnvironment(\"TERRAIN_OCCLUDERS\") != \"0\"", world);
+        // Asserts the flag defaults ON. The spelling moved to EnvFlag so that "false" turns it off
+        // instead of on — `!= "0"` compared the string without reading it.
+        Assert.Contains("EnvFlag.IsOn(OS.GetEnvironment(\"TERRAIN_OCCLUDERS\"), whenUnset: true)", world);
         Assert.Contains("occluders[i] = TerrainOccluder.Prepare(meshes[i])", world);
         Assert.Contains("TerrainOccluder.Finish(occluders[i])", world);
         Assert.Contains("public static Prepared Prepare", occluder);
@@ -538,6 +567,26 @@ public class PhysicsBodyOrderTests
         Assert.Contains("sparseExtraBatches += cells.Count - 1", source);
         Assert.Contains("BuildFallbackBatch(inCell, mesh, material", source);
         Assert.Contains("cells.TryGetValue(cell", source);
+    }
+
+    [Fact]
+    public void ObjectCellsAreAnchoredPerGroupAndCoarsenedByTheGeometryTheyCarry()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs")) is not { } path)
+            return;
+        string source = File.ReadAllText(path);
+        // Anchoring the grid at the world origin cuts every group straddling it along both axes whatever
+        // the cell size is, so such a group can never fall below four batches — and official maps are
+        // centred there. The anchor has to come from the group.
+        Assert.Contains("AnchorOf(transforms)", source);
+        Assert.Contains("(origin.X - anchor.X) / cellSize", source);
+        Assert.Contains("(origin.Z - anchor.Z) / cellSize", source);
+        // Splitting buys frustum rejection and costs a draw call per cell, so it pays in proportion to
+        // the geometry each cell carries. Coarsening by doubling keeps the grids nested, which is what
+        // makes the cell count fall monotonically and the walk terminate.
+        Assert.Contains("UG_OBJECT_CELL_MIN_TRIS", source);
+        Assert.Contains("trianglesPerInstance * transforms.Count / cells >= MinCellTriangles", source);
+        Assert.Contains("metres *= 2f", source);
     }
 
     [Fact]
@@ -1170,6 +1219,15 @@ public class PhysicsBodyOrderTests
     }
 
     // Walks up from the test assembly to the repository root (the folder holding the solution).
+    //
+    // Null means one thing only: the repository root itself could not be found, which is a run from
+    // outside the tree with genuinely nothing to check. A file missing UNDER a located root is the
+    // opposite situation — the thing this test guards was renamed or deleted — and that is precisely
+    // when it has to fail. Returning null there made every caller's `is not { } path) return;` into a
+    // pass, so the tests failed open on exactly the refactor most likely to break the invariant.
+    //
+    // Measured before changing it: renaming src/World/InstancedStaticBody.cs left all 67 tests in this
+    // file green, including the one that exists to read it.
     private static string? FindRepositoryFile(string relativePath)
     {
         var directory = new DirectoryInfo(Directory.GetCurrentDirectory());
@@ -1178,7 +1236,11 @@ public class PhysicsBodyOrderTests
             if (File.Exists(Path.Combine(directory.FullName, "unturned-godot.sln")))
             {
                 string candidate = Path.Combine(directory.FullName, relativePath);
-                return File.Exists(candidate) ? candidate : null;
+                Assert.True(File.Exists(candidate),
+                    $"'{relativePath}' does not exist. This test reads that file and asserts on its "
+                    + "contents, so it cannot pass without it: either update the path to where the code "
+                    + "moved, or delete this test along with the thing it was guarding.");
+                return candidate;
             }
 
             directory = directory.Parent;

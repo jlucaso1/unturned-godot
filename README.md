@@ -86,8 +86,11 @@ never extracted streams in just those.
 `Shift` sprint, `X` crouch, `Z` prone, `H` (or `F5`) toggle first/third person, `Esc` pause. In free-camera
 mode: `WASD` + `Q`/`E` down/up, `Shift` to boost. `F3` toggles the performance HUD.
 
-**Multiplayer.** The main menu's *Connect* joins a `host:port`. To host, start a session and hit *Open to
-LAN* in the pause menu, or run a dedicated server:
+**Multiplayer.** The main menu's *Connect* joins a `host:port`. You do not pick the map: the client asks
+the server which one it is running and loads that, so both ends are always on the same world — and a
+server refuses a client that is somehow on another map instead of admitting it onto the wrong one. If the
+server's map is not installed here, it says so instead of joining. To host, start a session and hit *Open
+to LAN* in the pause menu, or run a dedicated server:
 
 ```sh
 "$GODOT" --headless -- --server --port=27015 --map=Washington

@@ -21,9 +21,20 @@ public sealed class NetServer
     private readonly IServerTransport _transport;
     private readonly ServerSimulation _simulation;
     private readonly Vector3 _spawnPosition;
+    private readonly string _levelName;
     private readonly Dictionary<ITransportConnection, Session> _sessions = new();
     private readonly PlayerIdPool _playerIds = new();
     private double _nextTick = double.NaN;
+
+    // Bumped on every membership event — one admission, one departure, one step — and stamped on the
+    // Welcome, PlayerJoined and PlayerLeft it produces. Several of those can happen inside one frame,
+    // so the simulation tick cannot order them for a client that receives them out of order; this can.
+    private uint _rosterVersion;
+
+    // How many 0.08 s steps one Update may run to make up for lost time. Enough to absorb the jitter of
+    // a machine that misses a few frames; short of the "replay the whole stall at once" behaviour that
+    // turns a hitch into a burst of hundreds of datagrams per client.
+    public const int MaxCatchUpTicks = 5; // 0.4 s
 
     public int PlayerCount { get; private set; }
 
@@ -35,6 +46,10 @@ public sealed class NetServer
     // Datagrams that reached a decoder and did not survive it. Non-zero means someone is sending the
     // server bytes it cannot read — a mismatched build, a corrupt link, or a probe.
     public long MalformedPacketsDropped { get; private set; }
+
+    // Transport events handled per Update. Comfortably above what a full server generates at its own
+    // cadence, so it bounds a flood without shaping normal traffic.
+    public const int MaxEventsPerUpdate = 512;
 
     // Extension seams for replicated systems (zombies, resources, doors): hook the fixed tick to run
     // server logic and use Broadcast to ship your own ENetMessage; hook OnPlayerAdmitted to send a
@@ -54,18 +69,28 @@ public sealed class NetServer
                 visit(session.PlayerId, _simulation.GetState(session.PlayerId), connection);
     }
 
-    public NetServer(IServerTransport transport, ServerSimulation simulation, Vector3 spawnPosition)
+    // The level this server runs, by folder name. Not optional: a server always hosts one specific
+    // world, and a handshake that cannot name it is how two players ended up walking different maps.
+    public string LevelName => _levelName;
+
+    public NetServer(IServerTransport transport, ServerSimulation simulation, Vector3 spawnPosition,
+        string levelName)
     {
         _transport = transport;
         _simulation = simulation;
         _spawnPosition = spawnPosition;
+        _levelName = levelName;
     }
 
     public void Update(double now)
     {
         _transport.Update(now);
 
-        while (_transport.TryReceive(out ServerTransportEvent evt))
+        // Drain what is queued, but not without limit: how much work this loop does was decided entirely by
+        // how much anyone chose to send, and it runs on the frame thread. Anything left over is still
+        // queued in the transport and drains next Update, so a burst is spread rather than dropped.
+        int budget = MaxEventsPerUpdate;
+        while (budget-- > 0 && _transport.TryReceive(out ServerTransportEvent evt))
         {
             switch (evt.Type)
             {
@@ -83,14 +108,44 @@ public sealed class NetServer
 
         if (double.IsNaN(_nextTick))
             _nextTick = now;
-        while (now >= _nextTick)
+
+        // Time the budget below cannot make up is dropped HERE, before any step runs, so the steps that
+        // do run carry recent instants. Dropping it afterwards instead left them stamped with the
+        // moment the stall began: the claims still in the buffer describe where the player got to
+        // DURING the stall, and judged against a third of a second of budget every one of them was
+        // refused — the avatar sitting at its pre-stall position until the next frame arrived. The gap
+        // is still credited exactly once, to the first step that runs.
+        double unmakeable = now - _nextTick - (MaxCatchUpTicks * ServerSimulation.TickRate);
+        if (unmakeable > 0)
+            _nextTick = now - ((MaxCatchUpTicks - 1) * ServerSimulation.TickRate);
+
+        int caughtUp = 0;
+        while (now >= _nextTick && caughtUp < MaxCatchUpTicks)
         {
-            List<PlayerSnapshotState> states = _simulation.Step();
+            // Each step is stamped with the instant it was SCHEDULED for, not with the clock reading of
+            // the frame running it. The two differ whenever one frame makes up several ticks, and the
+            // trusted-position budget is a speed limit: handing every step of a late frame the same
+            // reading pays each of them a fresh minimum tick of movement on top of the one real gap,
+            // which on a persistently late server is a standing speed bonus. Scheduled instants are
+            // monotonic, one TickRate apart, and after a stall the re-anchor below leaves a gap the
+            // size of the stall — so the time that really passed is credited exactly once.
+            double stepAt = _nextTick;
+            _nextTick += ServerSimulation.TickRate;
+            List<PlayerSnapshotState> states = _simulation.Step(stepAt);
             if (states.Count > 0)
                 Broadcast(NetMessages.WriteStateUpdate(_simulation.Tick, states), ESendType.Unreliable);
             OnTick?.Invoke(_simulation.Tick);
-            _nextTick += ServerSimulation.TickRate;
+            caughtUp++;
         }
+
+        // Whatever is left of the gap is dropped rather than replayed, and the clock comes back to the
+        // present. A host stalls for real reasons — the world streamer finishing, a navmesh reconcile,
+        // a laptop lid — and replaying a minute of ticks inside one frame floods every client with
+        // hundreds of datagrams, jumps the zombies a minute along their paths, and makes the very frame
+        // that is already late do all of it. Left behind instead, the loop would spend its full budget
+        // on every following frame and never catch up at all.
+        if (now >= _nextTick)
+            _nextTick = now + ServerSimulation.TickRate;
     }
 
     private void HandleMessage(ITransportConnection connection, byte[] payload, double now)
@@ -110,23 +165,52 @@ public sealed class NetServer
 
         switch (type)
         {
+            // Answerable before (and without) joining: this is the pre-flight a client runs to learn
+            // which level to build, so it must work on a connection that has said nothing else.
+            case ENetMessage.ServerInfoRequest:
+                connection.Send(
+                    NetMessages.WriteServerInfo(_levelName, PlayerCount, FreePlayerSlotsAt(now)),
+                    ESendType.Reliable);
+                break;
             case ENetMessage.Hello:
                 {
-                    if (!MalformedPacket.TryDecode(payload, ReadHello, out (byte Version, string Name) hello))
+                    // The version comes first and alone. Reading the whole Hello up front would make
+                    // an older client's shorter one merely "malformed": no refusal, no close, and —
+                    // since the transport acks it anyway — a client free to retry that forever.
+                    if (!MalformedPacket.TryDecode(payload, ReadHelloVersion, out byte version))
                     {
                         MalformedPacketsDropped++;
                         break;
                     }
 
-                    (byte version, string name) = hello;
                     if (version != NetMessages.ProtocolVersion)
                     {
-                        connection.Close(); // incompatible build: refuse cleanly instead of mis-parsing frames
+                        // Incompatible build: refuse cleanly instead of mis-parsing its frames. The
+                        // reason is sent anyway — a build that speaks a version we do not know may
+                        // still read this message, and one that cannot is no worse off.
+                        Refuse(connection, EJoinRejection.ProtocolMismatch);
+                        break;
+                    }
+
+                    if (!MalformedPacket.TryDecode(payload, ReadHello,
+                        out (byte Version, string Name, string Level) hello))
+                    {
+                        MalformedPacketsDropped++;
+                        break;
+                    }
+
+                    (_, string name, string level) = hello;
+                    if (!NetMessages.LevelsMatch(level, _levelName))
+                    {
+                        // The reported bug, refused at its source: this client built another world.
+                        // The reason carries our level, so the client can say which map to load
+                        // instead of leaving the player to guess.
+                        Refuse(connection, EJoinRejection.LevelMismatch);
                     }
                     else if (!session.Joined)
                     {
                         if (!AdmitPlayer(connection, session, name, now))
-                            connection.Close(); // server full: refuse cleanly, do not invent an id
+                            Refuse(connection, EJoinRejection.ServerFull); // do not invent an id
                     }
                     else
                     {
@@ -136,7 +220,9 @@ public sealed class NetServer
                         foreach (Session other in _sessions.Values)
                             if (other.Joined && other != session)
                                 roster.Add(Listing(other, _simulation.GetState(other.PlayerId)));
-                        connection.Send(NetMessages.WriteWelcome(session.PlayerId, _simulation.Tick, roster),
+                        connection.Send(
+                            NetMessages.WriteWelcome(session.PlayerId, _simulation.Tick, _rosterVersion,
+                                roster),
                             ESendType.Reliable);
                         OnPlayerAdmitted?.Invoke(session.PlayerId, connection);
                     }
@@ -151,9 +237,20 @@ public sealed class NetServer
         }
     }
 
+    // Says why, then hangs up. The send dispatches the datagram immediately, so the reason is on the
+    // wire before the close drops the connection (and with it any retransmission of it). Losing that
+    // one datagram is not fatal: the client keeps re-Helloing until it is told, or gives up.
+    private void Refuse(ITransportConnection connection, EJoinRejection reason)
+    {
+        connection.Send(NetMessages.WriteReject(reason, _levelName), ESendType.Reliable);
+        connection.Close();
+    }
+
     // Cached so a method group does not allocate a delegate on every received message.
     private static readonly Func<byte[], ENetMessage> ReadType = NetMessages.TypeOf;
-    private static readonly Func<byte[], (byte Version, string Name)> ReadHello = NetMessages.ReadHello;
+    private static readonly Func<byte[], byte> ReadHelloVersion = NetMessages.ReadHelloVersion;
+    private static readonly Func<byte[], (byte Version, string Name, string Level)> ReadHello =
+        NetMessages.ReadHello;
     private static readonly Func<byte[], InputCommand> ReadInput = NetMessages.ReadInput;
 
     // False when there is no id left to give — the caller refuses the join. Ids come from a pool and go
@@ -166,7 +263,7 @@ public sealed class NetServer
             return false;
 
         session.PlayerId = playerId;
-        session.Name = name;
+        session.Name = NetMessages.ClampName(name);
         session.Joined = true;
         PlayerCount++;
         _simulation.AddPlayer(session.PlayerId, _spawnPosition);
@@ -176,9 +273,17 @@ public sealed class NetServer
             if (other.Joined && other != session)
                 existing.Add(Listing(other, _simulation.GetState(other.PlayerId)));
 
-        connection.Send(NetMessages.WriteWelcome(session.PlayerId, _simulation.Tick, existing), ESendType.Reliable);
+        // The admission is itself a membership event, and the roster above predates it: the new player's
+        // own Welcome carries the version BEFORE the bump, the PlayerJoined everyone else receives
+        // carries the version after. Anyone holding the older roster can then tell that this join is
+        // newer than it, rather than deleting a player who has only just arrived.
+        connection.Send(
+            NetMessages.WriteWelcome(session.PlayerId, _simulation.Tick, _rosterVersion, existing),
+            ESendType.Reliable);
 
-        byte[] joined = NetMessages.WritePlayerJoined(Listing(session, _simulation.GetState(session.PlayerId)));
+        _rosterVersion++;
+        byte[] joined = NetMessages.WritePlayerJoined(_rosterVersion,
+            Listing(session, _simulation.GetState(session.PlayerId)));
         foreach ((ITransportConnection conn, Session other) in _sessions)
             if (other.Joined && other != session)
                 conn.Send(joined, ESendType.Reliable);
@@ -194,7 +299,8 @@ public sealed class NetServer
         PlayerCount--;
         _simulation.RemovePlayer(session.PlayerId);
         _playerIds.Return(session.PlayerId, now);
-        Broadcast(NetMessages.WritePlayerLeft(session.PlayerId), ESendType.Reliable);
+        _rosterVersion++;
+        Broadcast(NetMessages.WritePlayerLeft(_rosterVersion, session.PlayerId), ESendType.Reliable);
     }
 
     public void Broadcast(byte[] payload, ESendType sendType)

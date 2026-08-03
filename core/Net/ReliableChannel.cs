@@ -19,6 +19,29 @@ public sealed class ReliableChannel
 
     private const int DedupWindow = 1024;
 
+    // Outstanding unacked reliable frames. Every one is retained until acked or GiveUpAfter, and Update
+    // scans and retransmits the whole set, so this is both a memory bound and a per-Update work bound.
+    //
+    // It matters most before a peer has authenticated: a flood of ServerInfoRequest — answerable, by
+    // design, on a connection that has said nothing else — produces one reliable reply each, and without
+    // this the set grows as fast as the requests arrive.
+    //
+    // Sized ABOVE the largest burst the protocol itself can aim at one healthy connection, because
+    // reaching it now ends the connection rather than the message. A server filling in a single Update —
+    // everyone reconnecting after a restart — sends the first-admitted player its Welcome plus a
+    // PlayerJoined for each of the other 253, which is 254 frames before a single ack can come back:
+    // the transport pumps once per Update, so nothing is acked mid-burst. A region entered on that same
+    // tick then adds ceil(zombies / ZombieNetMessages.ListChunkSize) more. At 256 the third of those
+    // chunks would have disconnected a player whose only mistake was joining first.
+    //
+    // 1024 leaves roughly four times that burst. Detecting a peer that has stopped reading is not this
+    // constant's job — GiveUpAfter already does it, on evidence (ten seconds without an ack) rather than
+    // on a queue depth a legitimate roster can reach.
+    public const int MaxPending = 1024;
+
+    // Reliable sends refused because MaxPending was already reached.
+    public long RefusedSends { get; private set; }
+
     private readonly Action<byte[]> _rawSend;
     private readonly Dictionary<ushort, (byte[] Datagram, double FirstSent, double LastSent)> _pending = new();
     private readonly HashSet<ushort> _seen = new();
@@ -38,6 +61,22 @@ public sealed class ReliableChannel
             datagram[0] = ChannelUnreliable;
             payload.CopyTo(datagram, 1);
             _rawSend(datagram);
+            return;
+        }
+
+        if (_pending.Count >= MaxPending)
+        {
+            // Give up on the peer rather than drop the frame. Callers send reliably precisely because they
+            // then mutate state as though it arrived — ZombieHost marks a region loaded once it has pushed
+            // its chunks — so silently discarding one leaves the two sides disagreeing with nothing to
+            // notice it, and nothing to retry it. A peer holding this many frames unacked is not reading,
+            // which is the same conclusion the GiveUpAfter deadline reaches by a slower route, so this
+            // takes the same exit: the owner drops the connection on its next Update.
+            //
+            // The frame is still not sent — it cannot be, the set is full — but the connection dies with
+            // it, so "reliable" keeps meaning delivered-or-disconnected rather than silently-maybe.
+            HasGivenUp = true;
+            RefusedSends++;
             return;
         }
 

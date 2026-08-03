@@ -17,7 +17,7 @@ namespace UnturnedGodot.Net;
 // mis-parsing each other's frames.
 public enum ENetMessage : byte
 {
-    Hello,        // client -> server, reliable: I want to join (name + protocol version)
+    Hello,        // client -> server, reliable: I want to join (name + protocol version + level)
     Welcome,      // server -> client, reliable: your id + everyone already here
     PlayerJoined, // server -> all, reliable
     PlayerLeft,   // server -> all, reliable
@@ -25,6 +25,45 @@ public enum ENetMessage : byte
     StateUpdate,  // server -> all, unreliable: every player's position, view angles and stance
     ZombieList,   // server -> client, reliable: a chunk of the zombie population (sent on admission)
     ZombieStates, // server -> all, unreliable: the zombies that moved or changed state this tick
+
+    // Pre-join, before the client has built anything: "what are you running?". This is what lets a
+    // client load the server's level instead of guessing — see ServerQuery.
+    ServerInfoRequest, // client -> server, reliable
+    ServerInfo,        // server -> client, reliable: protocol version, level, population
+    Reject,            // server -> client, reliable: why this Hello will never be admitted
+}
+
+// Why a Hello was refused. Sent before the connection is closed so the player is told what happened
+// instead of watching a join silently fail (or, worse, succeed onto the wrong world).
+public enum EJoinRejection : byte
+{
+    ProtocolMismatch, // incompatible build
+    LevelMismatch,    // the client built another map than the one this server runs
+    ServerFull,       // no player id left to hand out
+}
+
+public readonly struct JoinRejection
+{
+    public readonly EJoinRejection Reason;
+    public readonly byte ServerProtocolVersion;
+    public readonly string ServerLevel;
+
+    public JoinRejection(EJoinRejection reason, byte serverProtocolVersion, string serverLevel)
+    {
+        Reason = reason;
+        ServerProtocolVersion = serverProtocolVersion;
+        ServerLevel = serverLevel;
+    }
+}
+
+// What a server answers a pre-join query with: enough to build the right world and to show the player
+// what they are about to join.
+public sealed class ServerInfo
+{
+    public required byte ProtocolVersion { get; init; }
+    public required string Level { get; init; }
+    public byte PlayerCount { get; init; }
+    public byte FreeSlots { get; init; }
 }
 
 public static class NetAngles
@@ -124,85 +163,213 @@ public sealed class PlayerListing
     public Vector3 Position;
     public byte Pitch;
     public byte Yaw;
-    public EPlayerStance Stance;
+
+    // Spelled out because default(EPlayerStance) is 0 and the enum starts at Sprint = 2 (the game's own
+    // numbering): a listing nobody filled in must read as a standing player, not as no stance at all.
+    public EPlayerStance Stance = EPlayerStance.Stand;
 }
 
 // Encoders/decoders for each message. Little-endian BinaryWriter framing; the first byte is ENetMessage.
 public static class NetMessages
 {
     // Bump whenever a message layout changes; the server refuses mismatched clients at the handshake.
-    public const byte ProtocolVersion = 5;
+    public const byte ProtocolVersion = 7;
+
+    // Two level names denote the same world. The name on the wire is the map's FOLDER name — the one
+    // identity that survives the trip between two machines (paths and workshop ids do not) — and it
+    // reaches us from menus and command lines, so case and stray spaces are not a different map.
+    // Empty never matches anything, including another empty: a client that cannot name its world is
+    // exactly the client this check exists for.
+    public static bool LevelsMatch(string a, string b)
+    {
+        a = a.Trim();
+        b = b.Trim();
+        return a.Length > 0 && string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+    }
 
     // The transport drops empty payloads, so this is the second line of defence rather than the first —
     // but it is the one every reader funnels through, and reading [0] off an empty array is the
     // cheapest way to lose a server to a one-byte datagram.
+    // The longest player name, in UTF-8 bytes, that the roster may carry.
+    //
+    // Welcome names every joined player, so one oversized name inflates the Welcome sent to everyone who
+    // joins afterwards. With the transport now refusing datagrams past MaxPayloadBytes, an unbounded name
+    // does not merely bloat the roster — it makes a full server's Welcome undeliverable, and the clients
+    // it was meant for are admitted and then time out without ever joining.
+    //
+    // Bounded in bytes rather than characters because that is what the datagram is measured in: 32
+    // characters of CJK is 96 bytes and of astral-plane emoji is 128. At 32 bytes, a full 254-player
+    // roster is about 12.5 KB, comfortably inside the transport's 16 KiB ceiling.
+    public const int MaxNameBytes = 32;
+
+    // Truncates on a character boundary, so a clamped name is never cut through a multi-byte sequence.
+    public static string ClampName(string name)
+    {
+        if (string.IsNullOrEmpty(name))
+            return string.Empty;
+        if (System.Text.Encoding.UTF8.GetByteCount(name) <= MaxNameBytes)
+            return name;
+
+        int bytes = 0;
+        var element = System.Globalization.StringInfo.GetTextElementEnumerator(name);
+        var kept = new System.Text.StringBuilder();
+        while (element.MoveNext())
+        {
+            var text = (string)element.Current;
+            int size = System.Text.Encoding.UTF8.GetByteCount(text);
+            if (bytes + size > MaxNameBytes)
+                break;
+            bytes += size;
+            kept.Append(text);
+        }
+        return kept.ToString();
+    }
+
     public static ENetMessage TypeOf(byte[] payload) =>
         payload.Length == 0
             ? throw new InvalidDataException("Empty net payload carries no message type.")
             : (ENetMessage)payload[0];
 
-    public static byte[] WriteHello(string name)
+    // The level travels with the join request, not as an afterthought: the server admits a player onto
+    // its world only if that is the world the client actually built.
+    public static byte[] WriteHello(string name, string level)
     {
         using var ms = new MemoryStream();
         using var w = new BinaryWriter(ms);
         w.Write((byte)ENetMessage.Hello);
         w.Write(ProtocolVersion);
         w.Write(name);
+        w.Write(level);
         return ms.ToArray();
     }
 
-    public static (byte Version, string Name) ReadHello(byte[] payload)
+    public static (byte Version, string Name, string Level) ReadHello(byte[] payload)
     {
         using BinaryReader r = Reader(payload);
-        return (r.ReadByte(), r.ReadString());
+        return (r.ReadByte(), r.ReadString(), r.ReadString());
     }
 
-    public static byte[] WriteWelcome(byte playerId, uint tick, IReadOnlyList<PlayerListing> players)
+    // The version alone, read WITHOUT touching the rest of the message. Everything after it is
+    // versioned — the level field only exists from 6 on — so decoding the whole Hello first turns an
+    // older client's shorter one into a malformed packet, and it never hears the refusal it is owed.
+    // The version byte is the one field the format promises never to move.
+    public static byte ReadHelloVersion(byte[] payload)
+    {
+        using BinaryReader r = Reader(payload);
+        return r.ReadByte();
+    }
+
+    public static byte[] WriteServerInfoRequest() => new[] { (byte)ENetMessage.ServerInfoRequest };
+
+    public static byte[] WriteServerInfo(string level, int playerCount, int freeSlots)
+    {
+        using var ms = new MemoryStream();
+        using var w = new BinaryWriter(ms);
+        w.Write((byte)ENetMessage.ServerInfo);
+        w.Write(ProtocolVersion);
+        w.Write(level);
+        w.Write((byte)Math.Clamp(playerCount, 0, byte.MaxValue));
+        w.Write((byte)Math.Clamp(freeSlots, 0, byte.MaxValue));
+        return ms.ToArray();
+    }
+
+    public static ServerInfo ReadServerInfo(byte[] payload)
+    {
+        using BinaryReader r = Reader(payload);
+        return new ServerInfo
+        {
+            ProtocolVersion = r.ReadByte(),
+            Level = r.ReadString(),
+            PlayerCount = r.ReadByte(),
+            FreeSlots = r.ReadByte(),
+        };
+    }
+
+    public static byte[] WriteReject(EJoinRejection reason, string serverLevel)
+    {
+        using var ms = new MemoryStream();
+        using var w = new BinaryWriter(ms);
+        w.Write((byte)ENetMessage.Reject);
+        w.Write((byte)reason);
+        w.Write(ProtocolVersion);
+        w.Write(serverLevel);
+        return ms.ToArray();
+    }
+
+    public static JoinRejection ReadReject(byte[] payload)
+    {
+        using BinaryReader r = Reader(payload);
+        return new JoinRejection((EJoinRejection)r.ReadByte(), r.ReadByte(), r.ReadString());
+    }
+
+    // ROSTER VERSION: a counter the server bumps on every membership event — one admission, one
+    // departure, one step of the counter — carried by Welcome, PlayerJoined and PlayerLeft alike.
+    //
+    // It exists because these three race. Reliable delivery retransmits, it does not order, so a client
+    // can see a roster after the join or the leave that supersedes it, and then has to decide which
+    // describes the newer world. The simulation tick cannot answer that: several membership events
+    // happen inside ONE server frame (a joined client re-Hellos while a new player is admitted), so
+    // they share a tick and the tie goes to whichever arrives last. A per-event counter has no ties.
+    public static byte[] WriteWelcome(byte playerId, uint tick, uint rosterVersion,
+        IReadOnlyList<PlayerListing> players)
     {
         using var ms = new MemoryStream();
         using var w = new BinaryWriter(ms);
         w.Write((byte)ENetMessage.Welcome);
         w.Write(playerId);
         w.Write(tick);
+        w.Write(rosterVersion);
         w.Write((byte)players.Count);
         foreach (PlayerListing p in players)
             WriteListing(w, p);
         return ms.ToArray();
     }
 
-    public static (byte PlayerId, uint Tick, List<PlayerListing> Players) ReadWelcome(byte[] payload)
+    public static (byte PlayerId, uint Tick, uint RosterVersion, List<PlayerListing> Players) ReadWelcome(
+        byte[] payload)
     {
         using BinaryReader r = Reader(payload);
         byte id = r.ReadByte();
         uint tick = r.ReadUInt32();
+        uint rosterVersion = r.ReadUInt32();
         int count = r.ReadByte();
         var players = new List<PlayerListing>(count);
         for (int i = 0; i < count; i++)
             players.Add(ReadListing(r));
-        return (id, tick, players);
+        return (id, tick, rosterVersion, players);
     }
 
-    public static byte[] WritePlayerJoined(PlayerListing player)
+    public static byte[] WritePlayerJoined(uint rosterVersion, PlayerListing player)
     {
         using var ms = new MemoryStream();
         using var w = new BinaryWriter(ms);
         w.Write((byte)ENetMessage.PlayerJoined);
+        w.Write(rosterVersion);
         WriteListing(w, player);
         return ms.ToArray();
     }
 
-    public static PlayerListing ReadPlayerJoined(byte[] payload)
+    public static (uint RosterVersion, PlayerListing Player) ReadPlayerJoined(byte[] payload)
     {
         using BinaryReader r = Reader(payload);
-        return ReadListing(r);
+        return (r.ReadUInt32(), ReadListing(r));
     }
 
-    public static byte[] WritePlayerLeft(byte playerId)
+    // The leave is versioned too, so a roster older than it cannot put the player back on the map.
+    public static byte[] WritePlayerLeft(uint rosterVersion, byte playerId)
     {
-        return new[] { (byte)ENetMessage.PlayerLeft, playerId };
+        var payload = new byte[6];
+        payload[0] = (byte)ENetMessage.PlayerLeft;
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(1), rosterVersion);
+        payload[5] = playerId;
+        return payload;
     }
 
-    public static byte ReadPlayerLeft(byte[] payload) => payload[1];
+    public static (uint RosterVersion, byte PlayerId) ReadPlayerLeft(byte[] payload)
+    {
+        using BinaryReader r = Reader(payload);
+        return (r.ReadUInt32(), r.ReadByte());
+    }
 
     public static byte[] WriteInput(in InputCommand input)
     {

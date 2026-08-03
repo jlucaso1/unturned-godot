@@ -215,11 +215,13 @@ public class PlayerIdExhaustionTests
         return true;
     }
 
+    private const string Level = "PEI";
+
     private static (NetServer, FakeServerTransport) Build()
     {
         var transport = new FakeServerTransport();
         var server = new NetServer(transport, new ServerSimulation(new HeightfieldMoveSolver(FlatGround)),
-            Vector3.Zero);
+            Vector3.Zero, Level);
         return (server, transport);
     }
 
@@ -227,7 +229,7 @@ public class PlayerIdExhaustionTests
     {
         var c = new FakeConnection();
         transport.Connect(c);
-        transport.Message(c, NetMessages.WriteHello("player"));
+        transport.Message(c, NetMessages.WriteHello("player", Level));
         server.Update(now);
         return c;
     }
@@ -284,6 +286,10 @@ public class PlayerIdExhaustionTests
 
         Assert.True(turnedAway.Closed);
         Assert.Equal(PlayerIdPool.Capacity, server.PlayerCount);
+
+        // And it is told why, rather than watching the connection die for no stated reason.
+        byte[] reject = turnedAway.Sent.Find(p => NetMessages.TypeOf(p) == ENetMessage.Reject)!;
+        Assert.Equal(EJoinRejection.ServerFull, NetMessages.ReadReject(reject).Reason);
     }
 
     // The server-level shape of the ordering hazard: a client that had the leaver's id must not see the

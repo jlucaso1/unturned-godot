@@ -1,6 +1,7 @@
 using Godot;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Data;
+using UnturnedGodot.Net;
 
 namespace UnturnedGodot;
 
@@ -65,14 +66,14 @@ public partial class Main : Node3D
         // CHAR_ONLY=1: just the character + a light + a front camera, no world build. For fast iteration on
         // the character material/shader (renders in seconds instead of the ~2 min full-world build).
         string shotOnly = OS.GetEnvironment("SCREENSHOT_PATH");
-        if (OS.GetEnvironment("CHAR_ONLY") == "1" && !string.IsNullOrEmpty(shotOnly))
+        if (EnvFlag.IsOn(OS.GetEnvironment("CHAR_ONLY"), whenUnset: false) && !string.IsNullOrEmpty(shotOnly))
         {
             if (CharacterModel.Build(unturnedPath) is { } model)
             {
                 if (model is CharacterSkeleton rig && OS.GetEnvironment("CHAR_STANCE") is { Length: > 0 } s)
                 {
                     rig.SetState(System.Enum.Parse<Player.EPlayerStance>(s, ignoreCase: true),
-                        OS.GetEnvironment("CHAR_MOVING") == "1");
+                        EnvFlag.IsOn(OS.GetEnvironment("CHAR_MOVING"), whenUnset: false));
                     if (OS.GetEnvironment("CHAR_PITCH") is { Length: > 0 } cp)
                         rig.SetPitch(cp.ToFloat()); // look pitch -> spine/skull bend
                     rig.Seek(OS.GetEnvironment("CHAR_ANIM_TIME") is { Length: > 0 } at ? at.ToFloat() : 0f);
@@ -91,8 +92,8 @@ public partial class Main : Node3D
             });
             var cam = new Camera3D { Current = true };
             AddChild(cam);
-            float side = OS.GetEnvironment("CHAR_BACK") == "1" ? 3.2f : -3.2f; // -Z is the front
-            cam.Position = OS.GetEnvironment("CHAR_SIDE") == "1"
+            float side = EnvFlag.IsOn(OS.GetEnvironment("CHAR_BACK"), whenUnset: false) ? 3.2f : -3.2f; // -Z is the front
+            cam.Position = EnvFlag.IsOn(OS.GetEnvironment("CHAR_SIDE"), whenUnset: false)
                 ? new Vector3(4.0f, 1.0f, 0f)  // side profile, for reading prone/lie-down poses
                 : new Vector3(0, 1.1f, side);  // full-body 3/4-front, so any stance is framed
             cam.LookAt(new Vector3(0, 0.5f, 0));
@@ -102,6 +103,7 @@ public partial class Main : Node3D
         }
 
         string[] userArgs = OS.GetCmdlineUserArgs();
+        UncapFramesForMeasurement(userArgs);
 
         // Dedicated server: godot --headless -- --server [--port=27015] [--map=Washington]. Movement-sim
         // only, raw UDP.
@@ -127,7 +129,8 @@ public partial class Main : Node3D
 
             _mapName = serverMap.SelectionKey;
             (Vector3 serverSpawn, _) = ResolveSpawn(unturnedPath, _mapName, heights: null);
-            AddChild(DedicatedServer.Create(unturnedPath, _mapName, serverSpawn, serverPort));
+            AddChild(DedicatedServer.Create(unturnedPath, _mapName, serverMap.FolderName, serverSpawn,
+                serverPort));
             return;
         }
 
@@ -163,14 +166,14 @@ public partial class Main : Node3D
         // apart. UG_HEADLESS_INTERACTIVE=1 runs the normal interactive path with no driver at all, and
         // differencing the two answers how much of RSS is the renderer. A screenshot still wins, since it
         // needs something drawn.
-        bool headlessInteractive = headless && OS.GetEnvironment("UG_HEADLESS_INTERACTIVE") == "1"
+        bool headlessInteractive = headless && EnvFlag.IsOn(OS.GetEnvironment("UG_HEADLESS_INTERACTIVE"), whenUnset: false)
             && string.IsNullOrEmpty(shot);
         _headlessInteractive = headlessInteractive;
         if (headlessInteractive)
             Log.Print("[unturned-godot] Headless interactive: no rendering driver; "
                 + "view-dependent metrics (draw calls, primitives, frame time) do not apply.");
 
-        if (!string.IsNullOrEmpty(shot) && OS.GetEnvironment("MENU_SHOT") == "1")
+        if (!string.IsNullOrEmpty(shot) && EnvFlag.IsOn(OS.GetEnvironment("MENU_SHOT"), whenUnset: false))
         {
             // Screenshot of the boot menu, no world.
             AddChild(new MainMenu { Name = "MainMenu", UnturnedPath = unturnedPath, InitialMap = _mapName });
@@ -202,7 +205,7 @@ public partial class Main : Node3D
 
             // A screenshot uses the free camera + SHOT_CAM by default; PLAYER=1 spawns the character and
             // shoots from its (third-person) camera instead.
-            if (OS.GetEnvironment("PLAYER") == "1")
+            if (EnvFlag.IsOn(OS.GetEnvironment("PLAYER"), whenUnset: false))
             {
                 SpawnPlayer(world.Terrain, thirdPerson: true, unturnedPath, world.Heights);
                 RunPendingAudioExtraction(); // no streamer on this path; extract right away
@@ -223,14 +226,14 @@ public partial class Main : Node3D
         // automation; OPEN_LAN is only for tests where a second client actually joins.
         // A headless interactive session has no menu to click, so it always boots into the world.
         bool autoStart = headlessInteractive
-            || OS.GetEnvironment("SOLO") == "1"
-            || OS.GetEnvironment("FREECAM") == "1" || OS.GetEnvironment("OPEN_LAN") == "1"
+            || EnvFlag.IsOn(OS.GetEnvironment("SOLO"), whenUnset: false)
+            || EnvFlag.IsOn(OS.GetEnvironment("FREECAM"), whenUnset: false) || EnvFlag.IsOn(OS.GetEnvironment("OPEN_LAN"), whenUnset: false)
             || OS.GetEnvironment("OPEN_LAN_AFTER") is { Length: > 0 }
             || OS.GetEnvironment("JOIN") is { Length: > 0 }
             || OS.GetEnvironment("MAP") is { Length: > 0 };
         if (autoStart)
         {
-            _ = StartInteractiveWorld(unturnedPath, environmentDir, lighting,
+            _ = StartInteractiveWorld(unturnedPath,
                 OS.GetEnvironment("JOIN") is { Length: > 0 } join ? join : null);
             return;
         }
@@ -239,14 +242,14 @@ public partial class Main : Node3D
         menu.OnStart = (mapName, joinTarget) =>
         {
             menu.QueueFree();
-            _mapName = mapName;
-            SaveLastMap(mapName);
-
-            // The map is only known now, so its lighting is read here rather than at boot.
-            string mapEnvironment = EnvironmentDir(unturnedPath, mapName);
-            LevelLighting? mapLighting =
-                LevelLighting.Load(System.IO.Path.Combine(mapEnvironment, "Lighting.dat"));
-            _ = StartInteractiveWorld(unturnedPath, mapEnvironment, mapLighting, joinTarget);
+            // Joining carries no map: the server's answer decides it, so the remembered pick stays
+            // untouched — including when the join never gets off the ground and we come back here.
+            if (joinTarget == null)
+            {
+                _mapName = mapName;
+                SaveLastMap(mapName);
+            }
+            _ = StartInteractiveWorld(unturnedPath, joinTarget);
         };
         AddChild(menu);
     }
@@ -271,8 +274,8 @@ public partial class Main : Node3D
 
         var body = new CharacterBody3D
         {
-            CollisionLayer = 2,
-            CollisionMask = 1 | ObjectsBuilder.MediumFurnitureLayer,
+            CollisionLayer = CollisionLayers.Player,
+            CollisionMask = CollisionLayers.CharacterMask,
             FloorMaxAngle = Mathf.DegToRad(Player.PlayerConfig.MaxWalkableSlopeDegrees),
             FloorSnapLength = 0.5f,
             FloorStopOnSlope = true,
@@ -342,6 +345,19 @@ public partial class Main : Node3D
         return map is { SizeMetres: > 0f } ? map.SizeMetres : 4 * Landscape.TILE_SIZE;
     }
 
+    // How this map is named ON THE WIRE: its folder name, the one identity two machines can agree on.
+    // A selection key can be a workshop path that exists nowhere else, and a display name is localized.
+    //
+    // Folder names are not globally unique — two workshop items can ship "Ireland" — so this cannot
+    // prove the two ends hold the SAME content, only that they agree on which map they mean. A
+    // stronger identity would have to be a content signature: the workshop item id is not it, since
+    // the same map reached through a subscription on one machine and the game's bundled copy on the
+    // other carries different ids and would refuse a join that is perfectly fine. Unturned itself
+    // keys servers by map name for the same reason. What this does close is the reported failure —
+    // two different maps, silently played at once.
+    private static string LevelIdentity(string unturnedPath, string mapName) =>
+        MapCatalog.Find(unturnedPath, mapName)?.FolderName ?? mapName;
+
     // The map's localized name for the UI, falling back to the folder name.
     private static string MapDisplayName(string unturnedPath, string mapName) =>
         MapCatalog.Read(MapCatalog.ResolvePath(unturnedPath, mapName), MapSource.Official)?.DisplayName
@@ -392,15 +408,27 @@ public partial class Main : Node3D
 
     // Builds the streamed interactive world behind a loading screen, yielding to the render loop between
     // stages (and inside the heavy ones) so the UI never freezes; joinTarget != null also connects there.
-    private async System.Threading.Tasks.Task StartInteractiveWorld(string unturnedPath, string environmentDir,
-        LevelLighting? lighting, string? joinTarget)
+    private async System.Threading.Tasks.Task StartInteractiveWorld(string unturnedPath, string? joinTarget)
     {
         _pendingJoin = joinTarget;
 
-        var loading = new LoadingScreen { Name = "LoadingScreen", MapName = MapDisplayName(unturnedPath, _mapName) };
+        var loading = new LoadingScreen
+        {
+            Name = "LoadingScreen",
+            MapName = joinTarget == null ? MapDisplayName(unturnedPath, _mapName) : "",
+        };
         AddChild(loading);
         await NextFrame(); // paint the loading screen before any heavy work
         long loadStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+
+        // Joining: the SERVER decides which map is played, so ask it before building anything. The
+        // client used to build whatever the map browser had selected and connect regardless, which is
+        // how a player joined a PEI host and spawned into California 2 — same session, two worlds.
+        if (joinTarget != null && !await AdoptServerMap(unturnedPath, joinTarget, loading))
+            return;
+
+        string environmentDir = EnvironmentDir(unturnedPath, _mapName);
+        LevelLighting? lighting = LevelLighting.Load(System.IO.Path.Combine(environmentDir, "Lighting.dat"));
 
         // The navigation map goes up next, not before the screen: parsing the pre-baked navmesh and handing
         // it to the NavigationServer takes a couple of seconds on a large map, and doing that first meant
@@ -429,9 +457,136 @@ public partial class Main : Node3D
         }
     }
 
+    // Asks the server which level it runs and points this session at that map. False means the join is
+    // over before it started (nobody answered, or the map is not installed here) — the loading screen
+    // already says why and offers the way back.
+    private async System.Threading.Tasks.Task<bool> AdoptServerMap(string unturnedPath, string joinTarget,
+        LoadingScreen loading)
+    {
+        (string host, ushort port) = ParseJoinTarget(joinTarget);
+        loading.SetStatus($"Asking {host}:{port} which map it is running…");
+
+        ServerInfo? info;
+        try
+        {
+            info = await QueryServer(host, port);
+        }
+        catch (System.Exception e) when (e is System.Net.Sockets.SocketException or System.ArgumentException)
+        {
+            // An unresolvable host never gets as far as a datagram.
+            return FailJoin(loading, $"Could not reach {host}:{port} — {e.Message}");
+        }
+
+        if (info == null)
+            return FailJoin(loading, $"No server answered at {host}:{port}.");
+
+        // Everything the handshake would refuse us for is already knowable here, and finding out now
+        // costs seconds instead of a full world build followed by a kick.
+        if (info.ProtocolVersion != NetMessages.ProtocolVersion)
+        {
+            return FailJoin(loading, $"That server speaks protocol {info.ProtocolVersion} and this "
+                + $"build speaks {NetMessages.ProtocolVersion}: one of them needs updating.");
+        }
+        if (info.FreeSlots == 0)
+            return FailJoin(loading, $"That server is full ({info.PlayerCount} players).");
+
+        // The wire carries the map's FOLDER name; resolve it against what is installed here, exactly
+        // as the map browser and the command line do.
+        MapEntry? map = MapCatalog.Find(unturnedPath, info.Level);
+        if (map == null)
+        {
+            return FailJoin(loading,
+                $"That server is running '{info.Level}', which is not installed on this machine.");
+        }
+        if (!map.IsSupported)
+        {
+            return FailJoin(loading, $"That server is running '{map.DisplayName}', whose terrain format "
+                + "this port cannot read yet.");
+        }
+
+        _mapName = map.SelectionKey;
+        loading.SetMap(map.DisplayName);
+        Log.Print($"[net] {host}:{port} is running '{info.Level}' ({info.PlayerCount} online); loading it");
+        return true;
+    }
+
+    // Always false, so the callers can `return FailJoin(...)`: the join is over either way.
+    private bool FailJoin(LoadingScreen loading, string message)
+    {
+        Log.PrintErr($"[net] could not join: {message}");
+        if (_headlessInteractive)
+        {
+            // No display to show the screen on and no input to press its button with; the same reason
+            // a failed world build ends the process in this mode.
+            GetTree().Quit(1);
+            return false;
+        }
+        loading.Fail(message, BackToMenu, "Could not join.");
+        return false;
+    }
+
+    // Runs the pre-join query on its own short-lived socket, pumped from the frame loop. The session's
+    // real connection is opened later, once the world is built: holding this one open through a load
+    // that takes minutes would only have the server time it out.
+    private async System.Threading.Tasks.Task<ServerInfo?> QueryServer(string host, ushort port)
+    {
+        var transport = new UdpClientTransport(host, port);
+        try
+        {
+            var query = new ServerQuery(transport);
+            while (query.State == EServerQueryState.Pending)
+            {
+                if (AppShutdown.IsShuttingDown)
+                    return null;
+                query.Update(NetworkManager.Now);
+                await NextFrame();
+            }
+            return query.Info;
+        }
+        finally
+        {
+            transport.Close();
+        }
+    }
+
+    // "host", "host:port" or an IPv4 address with either shape.
+    private static (string Host, ushort Port) ParseJoinTarget(string target)
+    {
+        string[] parts = target.Split(':');
+        return (parts[0],
+            parts.Length > 1 && ushort.TryParse(parts[1], out ushort port) ? port : NetworkManager.DefaultPort);
+    }
+
+    // The server hung up on us. The join flow asks which map to build before connecting, so reaching
+    // here means something changed underneath (the host switched maps, filled up, or runs another
+    // build): say so and offer the way back, rather than leaving the player alone in a loaded world.
+    private void ShowJoinRefused(JoinRejection rejection)
+    {
+        if (_joinRefused)
+            return;
+        _joinRefused = true; // one screen per session; BackToMenu clears it for the next attempt
+
+        if (_headlessInteractive)
+        {
+            // Same reason FailJoin quits: no display for the screen, no input for its button. A
+            // benchmark would otherwise wait on an overlay nothing can ever dismiss.
+            Log.PrintErr($"[net] the server refused the join: {NetworkManager.Describe(rejection)}");
+            GetTree().Quit(1);
+            return;
+        }
+
+        // The player was walking when this arrived, so the cursor is captured and the button under it
+        // is unclickable. Release it, exactly as the menu and the pause screen do.
+        Input.MouseMode = Input.MouseModeEnum.Visible;
+        var screen = new LoadingScreen { Name = "JoinRefused" };
+        AddChild(screen);
+        screen.Fail(NetworkManager.Describe(rejection), BackToMenu, "The server refused the join:");
+    }
+
     // Returns to the map browser after a failed load, clearing whatever the attempt already built.
     private ObjectStreamer? _activeLoadStreamer;
     private bool _returningToMenu;
+    private bool _joinRefused;
     private bool _headlessInteractive;
 
     private async void BackToMenu()
@@ -442,6 +597,7 @@ public partial class Main : Node3D
 
         ObjectStreamer? failedStreamer = _activeLoadStreamer;
         _activeLoadStreamer = null;
+        _joinRefused = false; // the next attempt gets its own refusal screen
         if (failedStreamer != null)
             await failedStreamer.CancelAsync();
 
@@ -456,11 +612,12 @@ public partial class Main : Node3D
         menu.OnStart = (mapName, joinTarget) =>
         {
             menu.QueueFree();
-            _mapName = mapName;
-            SaveLastMap(mapName);
-            string mapEnvironment = EnvironmentDir(_unturnedPath, mapName);
-            _ = StartInteractiveWorld(_unturnedPath, mapEnvironment,
-                LevelLighting.Load(System.IO.Path.Combine(mapEnvironment, "Lighting.dat")), joinTarget);
+            if (joinTarget == null)
+            {
+                _mapName = mapName;
+                SaveLastMap(mapName);
+            }
+            _ = StartInteractiveWorld(_unturnedPath, joinTarget);
         };
         AddChild(menu);
         _returningToMenu = false;
@@ -497,7 +654,7 @@ public partial class Main : Node3D
         string? stepProbe = OS.GetEnvironment("STEP_PROBE") is { Length: > 0 } probe ? probe : null;
         // STEP_PROBE is a diagnostic run with no player/input. It starts from MeshesReady below rather
         // than from a guessed delay, so it always sees the object collision world it measures.
-        if (stepProbe == null && OS.GetEnvironment("FREECAM") == "1")
+        if (stepProbe == null && EnvFlag.IsOn(OS.GetEnvironment("FREECAM"), whenUnset: false))
             AddFreeCamera();
         else if (stepProbe == null)
             _player = SpawnPlayer(terrain, thirdPerson: false, unturnedPath, heights);
@@ -568,8 +725,9 @@ public partial class Main : Node3D
 
         (Vector3 spawnPosition, float spawnYaw) = ResolveSpawn(unturnedPath, _mapName, heights);
 
-        var network = new NetworkManager { Name = "Network" };
+        var network = new NetworkManager { Name = "Network", LevelName = LevelIdentity(unturnedPath, _mapName) };
         _network = network;
+        network.OnRejected += ShowJoinRefused;
         if (heights != null)
             network.Configure(heights, spawnPosition);
         AddChild(network);
@@ -595,10 +753,8 @@ public partial class Main : Node3D
         // one-player simulation step; the lone StateUpdate doubles as the self-healing keepalive.
         if (_pendingJoin is { Length: > 0 } join)
         {
-            string[] parts = join.Split(':');
-            network.JoinServer(parts[0],
-                parts.Length > 1 && ushort.TryParse(parts[1], out ushort p) ? p : NetworkManager.DefaultPort,
-                playerName);
+            (string host, ushort port) = ParseJoinTarget(join);
+            network.JoinServer(host, port, playerName);
         }
         else
         {
@@ -618,7 +774,7 @@ public partial class Main : Node3D
                 AppShutdown.RequestQuit(GetTree());
             };
 
-        if (OS.GetEnvironment("OPEN_LAN") == "1")
+        if (EnvFlag.IsOn(OS.GetEnvironment("OPEN_LAN"), whenUnset: false))
             network.OpenToLan(NetworkManager.DefaultPort);
         else if (OS.GetEnvironment("OPEN_LAN_AFTER") is { Length: > 0 } delay)
             GetTree().CreateTimer(delay.ToFloat()).Timeout += () => network.OpenToLan(NetworkManager.DefaultPort);
@@ -803,6 +959,26 @@ public partial class Main : Node3D
     // live; both camera paths hand theirs over here.
     private DayNightController? _dayNight;
 
+    // Measurement runs need frames as fast as the machine can produce them; players do not. project.godot
+    // used to ship vsync OFF so the benchmarks would be uncapped, which meant every player also got an
+    // uncapped renderer — a menu spinning the GPU at several hundred FPS, and tearing, as the default.
+    //
+    // The requirement belongs to the benchmark, so the benchmark asks for it. Turning it off here rather
+    // than in the config keeps the shipped default honest without making the numbers in bench/ and
+    // docs/PROFILING.md quietly refresh-rate-limited instead — which is the failure that would have made
+    // this change worse than leaving it alone: not a crash, just numbers that stop meaning anything.
+    //
+    // Headless has no window to set a mode on, and no frames to pace either, so it is left alone.
+    private static void UncapFramesForMeasurement(string[] userArgs)
+    {
+        bool measuring = System.Array.IndexOf(userArgs, "--benchmark") >= 0
+            || OS.GetEnvironment("UG_RUNTIME_BENCH_SECS") is { Length: > 0 };
+        if (!measuring || DisplayServer.GetName() == "headless")
+            return;
+
+        DisplayServer.WindowSetVsyncMode(DisplayServer.VSyncMode.Disabled);
+    }
+
     private void AddFreeCamera()
     {
         var camera = new FreeCamera { Name = "FreeCamera" };
@@ -837,7 +1013,7 @@ public partial class Main : Node3D
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
 
         // PLAYER_FRONT=1 frames the character from the front (its face) instead of the over-the-shoulder view.
-        if (OS.GetEnvironment("PLAYER_FRONT") == "1" && GetNodeOrNull<Node3D>("Player") is { } player)
+        if (EnvFlag.IsOn(OS.GetEnvironment("PLAYER_FRONT"), whenUnset: false) && GetNodeOrNull<Node3D>("Player") is { } player)
         {
             Vector3 headTarget = player.GlobalPosition + new Vector3(0, 1.7f, 0);
             Vector3 forward = -player.GlobalTransform.Basis.Z; // the character's facing

@@ -42,11 +42,13 @@ public class MalformedPacketTests
         return true;
     }
 
+    private const string Level = "PEI";
+
     private static (NetServer Server, FakeServerTransport Transport) Build()
     {
         var transport = new FakeServerTransport();
         var server = new NetServer(transport, new ServerSimulation(new HeightfieldMoveSolver(FlatGround)),
-            Vector3.Zero);
+            Vector3.Zero, Level);
         return (server, transport);
     }
 
@@ -58,6 +60,11 @@ public class MalformedPacketTests
         { "unknown message type", new byte[] { 0xFF } },
         { "Hello with no version", new[] { (byte)ENetMessage.Hello } },
         { "Hello with no name", new[] { (byte)ENetMessage.Hello, NetMessages.ProtocolVersion } },
+        // Name present, level missing: a v6 header truncated exactly where the new field starts.
+        {
+            "Hello with no level",
+            new[] { (byte)ENetMessage.Hello, NetMessages.ProtocolVersion, (byte)1, (byte)'A' }
+        },
         // A 7-bit-encoded string length that promises far more bytes than the datagram carries.
         {
             "Hello with a lying name length",
@@ -89,7 +96,7 @@ public class MalformedPacketTests
         // And the server still admits a legitimate client afterwards.
         var honest = new FakeConnection();
         transport.Connect(honest);
-        transport.Message(honest, NetMessages.WriteHello("player"));
+        transport.Message(honest, NetMessages.WriteHello("player", Level));
         server.Update(0.1);
 
         Assert.Equal(1, server.PlayerCount);
@@ -115,7 +122,7 @@ public class MalformedPacketTests
         (NetServer server, FakeServerTransport transport) = Build();
         var client = new FakeConnection();
         transport.Connect(client);
-        transport.Message(client, NetMessages.WriteHello("player"));
+        transport.Message(client, NetMessages.WriteHello("player", Level));
         transport.Message(client, NetMessages.WriteInput(new InputCommand(0, 0, -1, false, false, 0, 90)));
 
         server.Update(0.0);
@@ -217,7 +224,7 @@ public class MalformedPacketTests
     public void ClientSurvivesAMalformedServerMessage()
     {
         var transport = new FakeClientTransport();
-        var client = new NetClient(transport, "player");
+        var client = new NetClient(transport, "player", Level);
         transport.Deliver(Array.Empty<byte>());
         transport.Deliver(new[] { (byte)ENetMessage.Welcome }); // roster header missing
 
@@ -225,6 +232,58 @@ public class MalformedPacketTests
 
         Assert.False(client.Joined);
         Assert.Equal(2, client.MalformedPacketsDropped);
+    }
+
+    // Every message the client decodes, truncated where its body begins. A joined client keeps its
+    // roster and its session: a torn datagram is dropped and counted, never acted on halfway.
+    public static TheoryData<string, byte[]> HostileServerPayloads() => new()
+    {
+        { "PlayerJoined with no listing", new[] { (byte)ENetMessage.PlayerJoined } },
+        { "PlayerLeft with no id", new[] { (byte)ENetMessage.PlayerLeft } },
+        { "StateUpdate with no tick", new[] { (byte)ENetMessage.StateUpdate } },
+        // A snapshot count the payload cannot back up.
+        {
+            "StateUpdate promising states it does not carry",
+            new[] { (byte)ENetMessage.StateUpdate, (byte)0, (byte)0, (byte)0, (byte)0, (byte)4 }
+        },
+        { "Reject with no reason", new[] { (byte)ENetMessage.Reject } },
+        // ServerInfo is deliberately absent: NetClient does not decode it (the pre-join ServerQuery
+        // does, and guards it there), so it reaches OnUnhandledMessage rather than a reader here.
+    };
+
+    [Theory]
+    [MemberData(nameof(HostileServerPayloads))]
+    public void AHostileServerDatagram_IsDropped_AndTheSessionSurvives(string _, byte[] payload)
+    {
+        var transport = new FakeClientTransport();
+        var client = new NetClient(transport, "player", Level);
+        transport.Deliver(NetMessages.WriteWelcome(1, 0, 1,
+            new[] { new PlayerListing { PlayerId = 2, Name = "A" } }));
+        transport.Deliver(payload);
+
+        client.Update(0.0); // must not throw
+
+        Assert.True(client.Joined);
+        Assert.Single(client.Remotes); // the roster it already had is untouched
+        Assert.Equal(1, client.MalformedPacketsDropped);
+        Assert.Null(client.Rejection);
+    }
+
+    // Inputs are the one message a JOINED client sends, so their decode guard only runs on a session
+    // the server already admitted.
+    [Fact]
+    public void ATruncatedInputFromAJoinedPlayer_IsDropped_AndTheSessionSurvives()
+    {
+        (NetServer server, FakeServerTransport transport) = Build();
+        var conn = new FakeConnection();
+        transport.Connect(conn);
+        transport.Message(conn, NetMessages.WriteHello("player", Level));
+        transport.Message(conn, new[] { (byte)ENetMessage.Input, (byte)1 }); // ends mid-frame
+        server.Update(0.0);
+
+        Assert.Equal(1, server.PlayerCount);
+        Assert.Equal(1, server.MalformedPacketsDropped);
+        Assert.Equal(Level, server.LevelName);
     }
 
     // The guard is scoped to decoding on purpose. Everything past it is our own code, so a fault there
@@ -236,7 +295,7 @@ public class MalformedPacketTests
         server.OnPlayerAdmitted += (_, _) => throw new ArgumentException("defect in a replicated system");
         var client = new FakeConnection();
         transport.Connect(client);
-        transport.Message(client, NetMessages.WriteHello("player"));
+        transport.Message(client, NetMessages.WriteHello("player", Level));
 
         Assert.Throws<ArgumentException>(() => server.Update(0.0));
         Assert.Equal(0, server.MalformedPacketsDropped);
@@ -246,7 +305,7 @@ public class MalformedPacketTests
     public void AFaultInOnUnhandledMessage_Propagates_AndIsNotCountedAsAMalformedPacket()
     {
         var transport = new FakeClientTransport();
-        var client = new NetClient(transport, "player");
+        var client = new NetClient(transport, "player", Level);
         client.OnUnhandledMessage += _ => throw new ArgumentException("defect in a subscriber");
         transport.Deliver(new[] { (byte)ENetMessage.ZombieList, (byte)0, (byte)0 });
 

@@ -13,6 +13,7 @@ public partial class LoadingScreen : CanvasLayer
 
     private Control _root = null!;
     private VBoxContainer _column = null!;
+    private Label _title = null!;
     private Label _status = null!;
     private bool _failed;
     private ColorRect _sweep = null!;
@@ -57,15 +58,15 @@ public partial class LoadingScreen : CanvasLayer
         center.AddChild(_column);
         VBoxContainer column = _column;
 
-        var title = new Label
+        _title = new Label
         {
             Text = string.IsNullOrEmpty(MapName) ? "Loading" : $"Loading {MapName}",
             HorizontalAlignment = HorizontalAlignment.Center,
         };
-        title.AddThemeFontSizeOverride("font_size", 26);
-        title.AddThemeColorOverride("font_shadow_color", new Color(0, 0, 0, 0.5f));
-        title.AddThemeConstantOverride("shadow_offset_y", 2);
-        column.AddChild(title);
+        _title.AddThemeFontSizeOverride("font_size", 26);
+        _title.AddThemeColorOverride("font_shadow_color", new Color(0, 0, 0, 0.5f));
+        _title.AddThemeConstantOverride("shadow_offset_y", 2);
+        column.AddChild(_title);
 
         // Indeterminate bar: an Unturned-olive track with a bright segment sweeping across.
         var track = new Control { CustomMinimumSize = new Vector2(340, 10), ClipContents = true };
@@ -113,13 +114,19 @@ public partial class LoadingScreen : CanvasLayer
 
     public void SetStatus(string text) => _status.Text = text;
 
+    // Names the map once it is known. Joining a server, that only happens after it answers which level
+    // it runs — the screen is already up by then, titled "Loading".
+    public void SetMap(string mapName) => _title.Text = $"Loading {mapName}";
+
     // The load died: say so and offer the way back instead of sweeping the bar forever. Some maps use
     // formats this port does not read yet, and that has to be visible rather than look like a hang.
-    public void Fail(string message, System.Action onBack)
+    // The headline is a parameter because the same screen also reports a join that never happened,
+    // where "could not load this map" would name the wrong culprit.
+    public void Fail(string message, System.Action onBack, string headline = "Could not load this map.")
     {
         _failed = true;
         _sweep.Visible = false;
-        _status.Text = $"Could not load this map.\n{message}";
+        _status.Text = $"{headline}\n{message}";
 
         Button back = UnturnedUi.MakeBar("←", "Back to maps", UnturnedUi.Brown, onBack);
         back.CustomMinimumSize = new Vector2(320, 40);

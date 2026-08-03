@@ -38,6 +38,8 @@ public class WindowShortcutTests
             startWorld - autoStart));
     }
 
+    // Null means the repository root was not found, and nothing else — see the copy in
+    // PhysicsBodyOrderTests for why a file missing under a located root must fail instead.
     private static string? FindRepositoryFile(string relativePath)
     {
         var directory = new DirectoryInfo(Directory.GetCurrentDirectory());
@@ -46,7 +48,11 @@ public class WindowShortcutTests
             if (File.Exists(Path.Combine(directory.FullName, "unturned-godot.sln")))
             {
                 string candidate = Path.Combine(directory.FullName, relativePath);
-                return File.Exists(candidate) ? candidate : null;
+                Assert.True(File.Exists(candidate),
+                    $"'{relativePath}' does not exist. This test reads that file and asserts on its "
+                    + "contents, so it cannot pass without it: either update the path to where the code "
+                    + "moved, or delete this test along with the thing it was guarding.");
+                return candidate;
             }
 
             directory = directory.Parent;

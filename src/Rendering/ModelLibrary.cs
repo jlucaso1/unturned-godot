@@ -13,7 +13,7 @@ namespace UnturnedGodot;
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class ModelLibrary
 {
-    private static readonly bool DeduplicateGpu = System.Environment.GetEnvironmentVariable("UG_DEDUP_GPU") != "0";
+    private static readonly bool DeduplicateGpu = EnvFlag.IsOn(System.Environment.GetEnvironmentVariable("UG_DEDUP_GPU"), whenUnset: true);
     // How long the realise phase works before handing the frame back. Fixed rather than derived from the
     // frame rate: a slower machine has longer frames, so this is a smaller share of one, not a larger.
     private const double RealiseSecondsPerFrame = 0.008;

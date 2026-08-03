@@ -305,8 +305,8 @@ public static class GpuBenchmark
             RotationDegrees = new Vector3(-50, -30, 0),
             ShadowEnabled = EnvInt("UG_SHADOW", 1) != 0,
             // Match DayNightController so Tier 2 measures the shipping shadow workload by default.
-            DirectionalShadowMaxDistance = 128f,
-            DirectionalShadowSplit1 = 0.125f,
+            DirectionalShadowMaxDistance = 64f,
+            DirectionalShadowSplit1 = 0.25f,
             DirectionalShadowBlendSplits = true,
         };
         float dist = EnvFloat("UG_SHADOW_DIST", -1f);
@@ -364,7 +364,7 @@ public static class GpuBenchmark
             poses.Add(("ground_diag", Look(ground + new Vector3(0, 12f, 0),
                 ground + new Vector3(80f, 2f, -80f), Vector3.Up)));
         }
-        if (OS.GetEnvironment("UG_FOLIAGE_TRAVERSAL") == "1")
+        if (EnvFlag.IsOn(OS.GetEnvironment("UG_FOLIAGE_TRAVERSAL"), whenUnset: false))
             AddFoliageTraversalPoses(poses, bounds, heights);
         return poses;
     }

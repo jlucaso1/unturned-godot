@@ -68,14 +68,14 @@ public partial class PlayerController : CharacterBody3D
     public override void _Ready()
     {
         _thirdPerson = StartThirdPerson;
-        _benchmarkMovement = OS.GetEnvironment("UG_RUNTIME_BENCH_MOVE") == "1";
+        _benchmarkMovement = EnvFlag.IsOn(OS.GetEnvironment("UG_RUNTIME_BENCH_MOVE"), whenUnset: false);
         _benchmarkMovementStarted = Engine.GetPhysicsFrames();
 
-        // The body lives on layer 2 so the zombie brain's world queries (ground rays, vision rays,
-        // movement sweeps — all mask 1) never treat the player as static geometry; the body itself
-        // still collides against the layer-1 world via its mask.
-        CollisionLayer = 2;
-        CollisionMask = 1 | ObjectsBuilder.MediumFurnitureLayer; // world + furniture
+        // The body has its own bit so no world query treats the player as geometry. It used to sit on
+        // bit 1, which is VisionBlocker — the bit the zombie alert raycast masks — so that ray ended
+        // inside the player's own capsule at close range and reported vision blocked.
+        CollisionLayer = CollisionLayers.Player;
+        CollisionMask = CollisionLayers.CharacterMask; // world + furniture
 
         FloorMaxAngle = Mathf.DegToRad(PlayerConfig.MaxWalkableSlopeDegrees);
         FloorSnapLength = 0.5f;

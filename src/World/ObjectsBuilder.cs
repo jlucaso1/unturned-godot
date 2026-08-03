@@ -11,15 +11,16 @@ namespace UnturnedGodot;
 public static class ObjectsBuilder
 {
     // Collision layer bit for the bodies Unturned's RayMasks.BLOCK_VISION would hit (the LARGE and
-    // MEDIUM object layers). Zombie alert raycasts query exactly this bit.
-    public const uint VisionBlockerLayer = 1u << 1;
+    // MEDIUM object layers). Zombie alert raycasts query exactly this bit. See CollisionLayers for the
+    // whole layout — these two names are kept because the call sites read well with them.
+    public const uint VisionBlockerLayer = CollisionLayers.VisionBlocker;
 
     // MEDIUM furniture (gravestones, benches, beds) collides with the PLAYER but not with zombie
     // movement: the original's navmesh ignores it (BLOCK_NAVMESH rasterizes only the dedicated Nav
     // colliders) and its zombies shove straight through such props — colliding here made ours jam
     // dead-still on a gravestone the route legitimately crosses. Zombie ground/step rays still see
     // it (a zombie standing on a deck must find the deck).
-    public const uint MediumFurnitureLayer = 1u << 2;
+    public const uint MediumFurnitureLayer = CollisionLayers.MediumFurniture;
 
     // Instances real meshes (grouped per GUID into one MultiMesh each) where available; placed objects
     // without an extracted mesh fall back to colored placeholder boxes.
@@ -30,11 +31,22 @@ public static class ObjectsBuilder
     //
     // The cell size is a trade, not a free win: finer cells shed geometry at eye level, where most of a
     // group is behind the camera or beyond it, and cost draw calls in views that take in the whole map at
-    // once, where nothing can be rejected. This default sits at the knee — cutting it further keeps
-    // improving the ground view but the aerial cost climbs faster than the gain.
+    // once, where nothing can be rejected. Widening it is the crudest way to settle that trade, because
+    // it gives up rejection everywhere to save draw calls on the groups too thin to be worth splitting;
+    // MinCellTriangles is what separates those two cases, so this stays at the size that suits the dense
+    // groups and the coarsening handles the rest.
     private static readonly float ObjectChunkMetres = EnvFloat("UG_OBJECT_CHUNK_METRES", 1024f, 0f, 8192f);
     private static readonly long ObjectChunkMinTriangles = EnvLong("UG_OBJECT_CHUNK_MIN_TRIS", 0, 0, long.MaxValue);
     private static readonly bool ObjectChunkRequireSpread = EnvBool("UG_OBJECT_CHUNK_REQUIRE_SPREAD", true);
+    // Geometry an average cell must carry for its own draw call to be worth taking. See CellSizeFor.
+    // The default sits where the measured cost of the next step up stops being worth it: coarsening this
+    // far buys most of the aerial saving that a larger cell size would, for a fraction of its cost at eye
+    // level, and going further costs ground geometry about as fast as simply widening the cells would.
+    // Zero restores a single fixed cell size for every group, which is the A/B control.
+    private static readonly long MinCellTriangles = EnvLong("UG_OBJECT_CELL_MIN_TRIS", 500, 0, long.MaxValue);
+    // Ceiling for that coarsening walk. Past the widest map a cell holds every copy of a group, so going
+    // further cannot change the partition — this only bounds the loop against degenerate coordinates.
+    private const float MaxCellMetres = 65_536f;
     private static readonly bool ChunkSparseObjects = EnvBool("UG_CHUNK_SPARSE_OBJECTS", true);
     private static readonly long SparseChunkMinTriangles =
         EnvLong("UG_SPARSE_OBJECT_MIN_TRIS", 0, 0, long.MaxValue);
@@ -79,15 +91,15 @@ public static class ObjectsBuilder
         }
 
         var collision = new Node3D { Name = "ObjectCollision" };
-        InstancedStaticBodies? collisionOwner = OS.GetEnvironment("UG_NODE_PHYSICS") == "1"
+        InstancedStaticBodies? collisionOwner = EnvFlag.IsOn(OS.GetEnvironment("UG_NODE_PHYSICS"), whenUnset: false)
             ? null : new InstancedStaticBodies { Name = "ObjectBodies" };
         int collisionBodyCount = 0;
-        MultiMeshRidRenderer? render = OS.GetEnvironment("UG_NODE_MULTIMESH") == "1"
+        MultiMeshRidRenderer? render = EnvFlag.IsOn(OS.GetEnvironment("UG_NODE_MULTIMESH"), whenUnset: false)
             ? null : new MultiMeshRidRenderer { Name = "ObjectBatches" };
         var collisionShapes = new CollisionShapePool();
         withMesh = 0;
         int renderBatches = 0, sparseGroups = 0, sparseExtraBatches = 0;
-        if (OS.GetEnvironment("UG_OBJECT_PROFILE") == "1")
+        if (EnvFlag.IsOn(OS.GetEnvironment("UG_OBJECT_PROFILE"), whenUnset: false))
             PrintObjectCosts(byMesh, meshLibrary, db);
         foreach ((Guid guid, List<Transform3D> transforms) in byMesh)
         {
@@ -110,7 +122,8 @@ public static class ObjectsBuilder
             float chunkMetres = lodMesh != null && ObjectChunkMetres > 0f && LodChunkMetres > 0f
                 ? Mathf.Min(ObjectChunkMetres, LodChunkMetres)
                 : ObjectChunkMetres;
-            long placementTriangles = TriangleCount(renderMesh) * transforms.Count;
+            long trianglesPerInstance = TriangleCount(renderMesh);
+            long placementTriangles = trianglesPerInstance * transforms.Count;
             bool spread = chunkMetres > 0f && transforms.Count > 1
                 && ExceedsCellSpan(transforms, chunkMetres);
             bool sparseWide = ChunkSparseObjects && transforms.Count < MinChunkedInstances && spread
@@ -119,16 +132,8 @@ public static class ObjectsBuilder
                 && placementTriangles >= ObjectChunkMinTriangles
                 && (!ObjectChunkRequireSpread || spread))
             {
-                var cells = new Dictionary<(int X, int Z), List<Transform3D>>();
-                foreach (Transform3D transform in transforms)
-                {
-                    var cell = (
-                        Mathf.FloorToInt(transform.Origin.X / chunkMetres),
-                        Mathf.FloorToInt(transform.Origin.Z / chunkMetres));
-                    if (!cells.TryGetValue(cell, out List<Transform3D>? inCell))
-                        cells[cell] = inCell = new List<Transform3D>();
-                    inCell.Add(transform);
-                }
+                chunkMetres = CellSizeFor(transforms, chunkMetres, trianglesPerInstance);
+                Dictionary<(int X, int Z), List<Transform3D>> cells = Cells(transforms, chunkMetres);
                 if (sparseWide)
                 {
                     sparseGroups++;
@@ -183,7 +188,8 @@ public static class ObjectsBuilder
         if (ObjectChunkMetres > 0f)
             Log.Print($"[unturned-godot] Object render batches: {renderBatches} " +
                 $"({ObjectChunkMetres:0} m cells, min {MinChunkedInstances} instances / " +
-                $"{ObjectChunkMinTriangles:N0} placement tris, require spread={ObjectChunkRequireSpread}, " +
+                $"{ObjectChunkMinTriangles:N0} placement tris, coarsen below {MinCellTriangles:N0} " +
+                $"tris/cell, require spread={ObjectChunkRequireSpread}, " +
                 $"sparse-wide >= {SparseChunkMinTriangles:N0} tris: {sparseGroups} groups / " +
                 $"+{sparseExtraBatches} batches)");
 
@@ -216,6 +222,75 @@ public static class ObjectsBuilder
         for (int surface = 0; surface < mesh.GetSurfaceCount(); surface++)
             triangles += mesh.SurfaceGetArrayIndexLen(surface) / 3;
         return triangles;
+    }
+
+    // The grid is laid out from the group's own lowest corner, not from the world origin. Anchoring it
+    // at the origin makes the partition depend on where the map happens to sit relative to it: a group
+    // straddling the origin is cut along it however large the cells are, so it can never fall below four
+    // batches — and on a map centred there, that is most of them. Anchoring per group means the cell size
+    // alone decides how a group is cut, wherever it lies.
+    private static (int X, int Z) CellOf(Vector3 origin, Vector3 anchor, float cellSize) => (
+        Mathf.FloorToInt((origin.X - anchor.X) / cellSize),
+        Mathf.FloorToInt((origin.Z - anchor.Z) / cellSize));
+
+    private static Vector3 AnchorOf(List<Transform3D> transforms)
+    {
+        Vector3 anchor = transforms[0].Origin;
+        foreach (Transform3D transform in transforms)
+            anchor = anchor.Min(transform.Origin);
+        return anchor;
+    }
+
+    private static Dictionary<(int X, int Z), List<Transform3D>> Cells(
+        List<Transform3D> transforms, float cellSize)
+    {
+        Vector3 anchor = AnchorOf(transforms);
+        var cells = new Dictionary<(int X, int Z), List<Transform3D>>();
+        foreach (Transform3D transform in transforms)
+        {
+            (int X, int Z) cell = CellOf(transform.Origin, anchor, cellSize);
+            if (!cells.TryGetValue(cell, out List<Transform3D>? inCell))
+                cells[cell] = inCell = new List<Transform3D>();
+            inCell.Add(transform);
+        }
+        return cells;
+    }
+
+    private static int CellCount(List<Transform3D> transforms, float cellSize)
+    {
+        Vector3 anchor = AnchorOf(transforms);
+        var seen = new HashSet<(int X, int Z)>();
+        foreach (Transform3D transform in transforms)
+            seen.Add(CellOf(transform.Origin, anchor, cellSize));
+        return seen.Count;
+    }
+
+    // One cell size cannot suit every group. A split trades a draw call for the chance to reject
+    // geometry, so it pays in proportion to how much geometry lands in each cell it creates: cutting a
+    // group of heavy copies into cells sheds most of it at eye level, while cutting a group of tiny ones
+    // scatters near-empty batches across the map that reject almost nothing and are pure cost in any view
+    // that takes the whole map in at once. Both live in the same scene, and the count of cells a fixed
+    // size produces also grows with the map, so a single tuned number is either too fine for one map or
+    // too coarse for the other.
+    //
+    // Coarsen per group instead, from the configured size, until an average cell carries enough geometry
+    // to earn its draw call. Doubling keeps the grids nested, so the cell count falls monotonically and
+    // the walk always terminates — in the limit at the whole group in one cell, which is what a group too
+    // light to be worth splitting should be.
+    private static float CellSizeFor(List<Transform3D> transforms, float baseMetres,
+        long trianglesPerInstance)
+    {
+        if (MinCellTriangles <= 0 || trianglesPerInstance <= 0)
+            return baseMetres;
+        float metres = baseMetres;
+        while (metres < MaxCellMetres)
+        {
+            int cells = CellCount(transforms, metres);
+            if (cells <= 1 || trianglesPerInstance * transforms.Count / cells >= MinCellTriangles)
+                return metres;
+            metres *= 2f;
+        }
+        return metres;
     }
 
     private static bool ExceedsCellSpan(List<Transform3D> transforms, float cellSize)
@@ -292,7 +367,7 @@ public static class ObjectsBuilder
         private readonly Dictionary<PrimitiveShapeIdentity, int> _finalPrimitives = new();
         private readonly Dictionary<string, int> _finalMeshes = new(StringComparer.Ordinal);
         private static readonly bool DeduplicateFinal =
-            System.Environment.GetEnvironmentVariable("UG_DEDUP_FINAL_SHAPES") != "0";
+            EnvFlag.IsOn(System.Environment.GetEnvironmentVariable("UG_DEDUP_FINAL_SHAPES"), whenUnset: true);
         public int PrimitiveAliases { get; private set; }
         public int MeshAliases { get; private set; }
         public int Add(Shape3D shape) { Shapes.Add(shape); return Shapes.Count - 1; }
@@ -354,7 +429,7 @@ public static class ObjectsBuilder
                 primitives.Add((c, colliderIndex));
         }
 
-        bool directBuckets = OS.GetEnvironment("UG_DIRECT_COLLISION_BUCKETS") != "0";
+        bool directBuckets = EnvFlag.IsOn(OS.GetEnvironment("UG_DIRECT_COLLISION_BUCKETS"), whenUnset: true);
         bool mayChunk = CollisionChunkMetres > 0f
             && (long)instances.Count * (primitives.Count + meshes.Count) >= MinChunkedCollisionShapes;
         SpatialBuckets<(int Shape, Transform3D Transform)>? buckets = directBuckets && mayChunk
@@ -773,10 +848,12 @@ public static class ObjectsBuilder
         if (ObjectChunkMetres > 0f && items.Count > 1)
         {
             var cells = new Dictionary<(int X, int Z), List<(Transform3D transform, Color color)>>();
+            Vector3 anchor = items[0].transform.Origin;
+            foreach ((Transform3D transform, Color _) in items)
+                anchor = anchor.Min(transform.Origin);
             foreach ((Transform3D transform, Color color) in items)
             {
-                var cell = (Mathf.FloorToInt(transform.Origin.X / ObjectChunkMetres),
-                    Mathf.FloorToInt(transform.Origin.Z / ObjectChunkMetres));
+                (int X, int Z) cell = CellOf(transform.Origin, anchor, ObjectChunkMetres);
                 if (!cells.TryGetValue(cell,
                     out List<(Transform3D transform, Color color)>? inCell))
                     cells[cell] = inCell = new List<(Transform3D, Color)>();

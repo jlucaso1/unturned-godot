@@ -39,14 +39,72 @@ public class NetMessagesTests
     }
 
     [Fact]
-    public void Hello_RoundTrips_WithProtocolVersion()
+    public void Hello_RoundTrips_WithProtocolVersionAndLevel()
     {
-        byte[] p = NetMessages.WriteHello("Joao");
+        byte[] p = NetMessages.WriteHello("Joao", "California 2");
         Assert.Equal(ENetMessage.Hello, NetMessages.TypeOf(p));
-        (byte version, string name) = NetMessages.ReadHello(p);
+        (byte version, string name, string level) = NetMessages.ReadHello(p);
         Assert.Equal(NetMessages.ProtocolVersion, version);
         Assert.Equal("Joao", name);
+        Assert.Equal("California 2", level);
     }
+
+    [Fact]
+    public void ServerInfo_RoundTrips()
+    {
+        byte[] p = NetMessages.WriteServerInfo("PEI", playerCount: 4, freeSlots: 250);
+        Assert.Equal(ENetMessage.ServerInfo, NetMessages.TypeOf(p));
+        ServerInfo info = NetMessages.ReadServerInfo(p);
+        Assert.Equal(NetMessages.ProtocolVersion, info.ProtocolVersion);
+        Assert.Equal("PEI", info.Level);
+        Assert.Equal(4, info.PlayerCount);
+        Assert.Equal(250, info.FreeSlots);
+    }
+
+    // The counts are bytes on the wire; a server that somehow reports more saturates instead of
+    // wrapping a 300-player count round to 44.
+    [Fact]
+    public void ServerInfo_SaturatesOutOfRangeCounts()
+    {
+        ServerInfo info = NetMessages.ReadServerInfo(
+            NetMessages.WriteServerInfo("PEI", playerCount: 300, freeSlots: -1));
+        Assert.Equal(255, info.PlayerCount);
+        Assert.Equal(0, info.FreeSlots);
+    }
+
+    [Fact]
+    public void ServerInfoRequest_IsASingleTypeByte()
+    {
+        byte[] p = NetMessages.WriteServerInfoRequest();
+        Assert.Equal(ENetMessage.ServerInfoRequest, NetMessages.TypeOf(p));
+        Assert.Single(p);
+    }
+
+    [Fact]
+    public void Reject_RoundTrips()
+    {
+        byte[] p = NetMessages.WriteReject(EJoinRejection.LevelMismatch, "PEI");
+        Assert.Equal(ENetMessage.Reject, NetMessages.TypeOf(p));
+        JoinRejection rejection = NetMessages.ReadReject(p);
+        Assert.Equal(EJoinRejection.LevelMismatch, rejection.Reason);
+        Assert.Equal(NetMessages.ProtocolVersion, rejection.ServerProtocolVersion);
+        Assert.Equal("PEI", rejection.ServerLevel);
+    }
+
+    // Map names reach the wire from menus, folder listings and command lines. Only a real difference
+    // is a different world — and nothing at all is never a match, since a client that cannot name its
+    // world is the one this check exists to catch.
+    [Theory]
+    [InlineData("PEI", "PEI", true)]
+    [InlineData("pei", "PEI", true)]
+    [InlineData("  PEI\t", "PEI", true)]
+    [InlineData("California 2", "PEI", false)]
+    [InlineData("", "PEI", false)]
+    [InlineData("PEI", "", false)]
+    [InlineData("", "", false)]
+    [InlineData("   ", "PEI", false)]
+    public void LevelsMatch_IsCaseAndWhitespaceInsensitive_ButNeverEmpty(string a, string b, bool expected) =>
+        Assert.Equal(expected, NetMessages.LevelsMatch(a, b));
 
     [Fact]
     public void Welcome_RoundTrips()
@@ -57,11 +115,12 @@ public class NetMessagesTests
                 Stance = UnturnedGodot.Player.EPlayerStance.Prone },
             new() { PlayerId = 7, Name = "Bo", Position = new Vector3(-4, 5, -6), Pitch = 10, Yaw = 170 },
         };
-        byte[] p = NetMessages.WriteWelcome(9, 1234, players);
+        byte[] p = NetMessages.WriteWelcome(9, 1234, 77, players);
 
-        (byte id, uint tick, List<PlayerListing> read) = NetMessages.ReadWelcome(p);
+        (byte id, uint tick, uint rosterVersion, List<PlayerListing> read) = NetMessages.ReadWelcome(p);
         Assert.Equal(9, id);
         Assert.Equal(1234u, tick);
+        Assert.Equal(77u, rosterVersion); // which membership events this roster already reflects
         Assert.Equal(2, read.Count);
         Assert.Equal("Ana", read[0].Name);
         Assert.Equal(UnturnedGodot.Player.EPlayerStance.Prone, read[0].Stance);
@@ -73,11 +132,15 @@ public class NetMessagesTests
     public void JoinedAndLeft_RoundTrip()
     {
         var listing = new PlayerListing { PlayerId = 3, Name = "Cy", Position = Vector3.One, Pitch = 1, Yaw = 2 };
-        PlayerListing joined = NetMessages.ReadPlayerJoined(NetMessages.WritePlayerJoined(listing));
+        (uint joinedVersion, PlayerListing joined) =
+            NetMessages.ReadPlayerJoined(NetMessages.WritePlayerJoined(4321, listing));
+        Assert.Equal(4321u, joinedVersion); // so a roster older than the join cannot bury them
         Assert.Equal(3, joined.PlayerId);
         Assert.Equal("Cy", joined.Name);
 
-        Assert.Equal(5, NetMessages.ReadPlayerLeft(NetMessages.WritePlayerLeft(5)));
+        (uint leftVersion, byte leftId) = NetMessages.ReadPlayerLeft(NetMessages.WritePlayerLeft(31, 5));
+        Assert.Equal(31u, leftVersion); // so a roster older than the leave cannot bring them back
+        Assert.Equal(5, leftId);
     }
 
     [Fact]

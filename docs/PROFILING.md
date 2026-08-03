@@ -182,6 +182,12 @@ aggregate-AABB range, so an instance near a chunk edge never fades early. These 
 materials, shadows and world transforms; they change only submission/culling granularity and how quickly
 the already-usable baked navigation graph is refined.
 
+Every boolean flag below goes through `EnvFlag`, so `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` all
+work, in any case. A value that is none of those is treated as unset and the flag keeps its default —
+previously the value was compared rather than read, so `UG_FOLIAGE_RESIDENCY=false` *enabled* residency
+(`"false" != "0"`) and `UG_NODE_MULTIMESH=true` left it off (`"true" != "1"`). Flags that take a number or
+a path (`UG_OBJECT_CHUNK_METRES`, `SCREENSHOT_PATH`, `TIME_OF_DAY`, …) are unaffected.
+
 - `TERRAIN_OCCLUDERS=0` disables the default coarse terrain occluders. Every occluder triangle is built
   below the minimum source height of its complete cell, so it cannot hide geometry above the terrain;
   disabling is retained for performance and screenshot A/B checks.
@@ -194,6 +200,12 @@ the already-usable baked navigation graph is refined.
   `UG_OBJECT_CHUNK_METRES=0` restores their former map-wide batch as well.
 - `UG_OBJECT_CHUNK_MIN_TRIS=<count>` partitions only groups whose total placed triangle count reaches the
   threshold.
+- `UG_OBJECT_CELL_MIN_TRIS=<count>` is the geometry an average cell must carry for its draw call to pay
+  for itself. Groups whose cells fall short are partitioned on a coarser grid instead (doubling until
+  they clear it, or until the group is a single batch). Zero gives every group the same fixed cell size,
+  which is the A/B control for the whole mechanism. It responds to how dense a group is rather than how
+  far it is spread, which is why one setting suits maps of different sizes: a wider map multiplies spread
+  but not density.
 - `UG_COLLISION_CHUNK_METRES=0` disables physics-body partitioning for A/B comparisons.
 - `UG_FOLIAGE_CHUNK_TILES=<1..32>` changes the number of 32 m foliage tiles per render chunk;
   `UG_FOLIAGE_DISTANCE=<metres>` changes its fade range.
