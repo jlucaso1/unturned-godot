@@ -56,6 +56,8 @@ public static class Program
             PreviewSuite(unturned);
         if (all || wanted.Contains("navcache"))
             NavigationCacheSuite(map);
+        if (all || wanted.Contains("navprobe"))
+            NavigationProbeSuite(map);
         if (wanted.Contains("nav"))
             NavigationDiagnostic(map);
         if (wanted.Contains("ress"))
@@ -157,6 +159,96 @@ public static class Program
         Console.WriteLine("== navcache: published reconciliation state ==");
         Console.WriteLine($"  {indices:N0} rejected indices / {completed:N0}/{triangles.Length:N0} completed flags: "
             + $"HashSets retain ~{retained / 1024.0:0.0} KiB; after release ~{Math.Max(0, afterClear) / 1024.0:0.0} KiB");
+        Console.WriteLine();
+    }
+
+    // The probe pass navmesh reconciliation now runs on workers instead of on the physics thread.
+    //
+    // The engine version of this loop could only run inside a physics notification, which capped it at a
+    // fraction of a millisecond per tick however much CPU was idle — a map's first session spent minutes
+    // there. This measures the replacement against the map's real terrain and its real navmesh, and says
+    // how many faces the CPU pass still hands to the physics server. Object colliders are not here (they
+    // are built by the game, not by Core), so the probe count is real while the field is terrain-only;
+    // treat the throughput as the number and the confirmation rate as a floor.
+    private static void NavigationProbeSuite(string? map)
+    {
+        string? heightmaps = map == null ? null : Path.Combine(map, "Landscape", "Heightmaps");
+        string? environment = map == null ? null : Path.Combine(map, "Environment");
+        bool present = heightmaps != null && Directory.Exists(heightmaps)
+            && environment != null && Directory.Exists(environment);
+        if (Skip("navprobe", present ? map : null, out string _))
+            return;
+
+        var field = new CollisionFieldBuilder();
+        int tiles = 0;
+        foreach (string file in Directory.GetFiles(heightmaps!, "Tile_*.heightmap"))
+        {
+            string[] parts = Path.GetFileNameWithoutExtension(file).Split('_'); // Tile_X_Y_Source
+            HeightmapTile tile = HeightmapTile.Read(file, int.Parse(parts[1]), int.Parse(parts[2]));
+            field.AddHeightfield(
+                TerrainHeightfield.CollisionTransform(tile.CoordX, tile.CoordY),
+                Landscape.HEIGHTMAP_RESOLUTION, Landscape.HEIGHTMAP_RESOLUTION,
+                tile.RawSamples != null
+                    ? TerrainHeightfield.MapData(tile.RawSamples)
+                    : TerrainHeightfield.MapData(tile.Heights));
+            tiles++;
+        }
+
+        List<NavFlag> flags = LevelNavmesh.Load(environment!);
+        if (tiles == 0 || flags.Count == 0)
+        {
+            Console.WriteLine("== navprobe: SKIP (no terrain tiles or no navmesh flags) ==\n");
+            return;
+        }
+
+        CollisionField world = field.Build();
+        int faces = 0;
+        foreach (NavFlag flag in flags)
+            faces += flag.Triangles.Length / 3;
+        long probes = (long)faces * 7; // NavmeshReachability samples every face seven times
+
+        Console.WriteLine($"== navprobe: {faces:N0} navmesh faces over {tiles} terrain tiles ==");
+        const float StepOffset = 0.5f;
+        double median = Bench("CollisionField probe pass (all flags)", () =>
+        {
+            foreach (NavFlag flag in flags)
+                GC.KeepAlive(NavmeshSurfaceSampling.Sample(flag, world, StepOffset));
+        }, warmup: 1, iters: 5);
+        Console.WriteLine($"  {probes:N0} probes -> {probes / Math.Max(0.001, median) / 1000.0:N2} M probes/s");
+
+        // The reachability arithmetic around the probes. It runs per flag on a worker, twice — once to
+        // choose the confirmation set and once to reach the verdict — so it is on the same critical path
+        // the probes are, and worth seeing next to them.
+        var sampledFlags = new List<NavmeshSurfaceSampling.FlagSurfaces>(flags.Count);
+        foreach (NavFlag flag in flags)
+            sampledFlags.Add(NavmeshSurfaceSampling.Sample(flag, world, StepOffset));
+        Bench("NeedsConfirmation (all flags)", () =>
+        {
+            for (int i = 0; i < flags.Count; i++)
+                GC.KeepAlive(NavmeshReachability.NeedsConfirmation(flags[i], StepOffset,
+                    sampledFlags[i].Surface, sampledFlags[i].Known, sampledFlags[i].Slack,
+                    sampledFlags[i].Uncertain, margin: 0.05f));
+        }, warmup: 1, iters: 5);
+        Bench("Unreachable (all flags)", () =>
+        {
+            for (int i = 0; i < flags.Count; i++)
+                GC.KeepAlive(NavmeshReachability.Unreachable(flags[i], StepOffset,
+                    sampledFlags[i].Surface, sampledFlags[i].Known));
+        }, warmup: 1, iters: 5);
+
+        int confirm = 0, uncertain = 0, unknown = 0;
+        for (int i = 0; i < flags.Count; i++)
+        {
+            NavmeshSurfaceSampling.FlagSurfaces sampled = sampledFlags[i];
+            confirm += NavmeshReachability.NeedsConfirmation(flags[i], StepOffset, sampled.Surface,
+                sampled.Known, sampled.Slack, sampled.Uncertain, margin: 0.05f).Count;
+            uncertain += sampled.UncertainSamples;
+            for (int t = 0; t < sampled.Known.Length; t++)
+                if (!sampled.Known[t])
+                    unknown++;
+        }
+        Console.WriteLine($"  hands {confirm:N0}/{faces:N0} faces ({100.0 * confirm / faces:0.0}%) to the "
+            + $"physics server; {uncertain:N0} uncertain probes, {unknown:N0} faces with no surface found");
         Console.WriteLine();
     }
 

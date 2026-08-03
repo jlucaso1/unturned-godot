@@ -65,10 +65,15 @@ public static class ObjectsBuilder
     // as their original single compound (slower locally, but with no collision dropped).
     private const int MaxObjectCollisionBodies = 8_000;
 
+    // `navigationField`, when given, receives a CPU copy of every shape and placement that lands on
+    // CollisionLayers.World — the only geometry a downward navmesh probe can hit. Recording it here rather
+    // than re-deriving it later is what lets navmesh reconciliation run off the physics thread without the
+    // two worlds being able to drift apart. See CollisionField.
     public static Node3D Build(IReadOnlyList<PlacedObject> objects, ObjectAssetDatabase db,
         IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary,
         IReadOnlyDictionary<Guid, List<CachedCollider>> colliderLibrary, out int withMesh,
-        IReadOnlyDictionary<Guid, ArrayMesh>? lod1Library = null)
+        IReadOnlyDictionary<Guid, ArrayMesh>? lod1Library = null,
+        CollisionFieldBuilder? navigationField = null)
     {
         var root = new Node3D { Name = "Objects" };
 
@@ -96,7 +101,7 @@ public static class ObjectsBuilder
         int collisionBodyCount = 0;
         MultiMeshRidRenderer? render = EnvFlag.IsOn(OS.GetEnvironment("UG_NODE_MULTIMESH"), whenUnset: false)
             ? null : new MultiMeshRidRenderer { Name = "ObjectBatches" };
-        var collisionShapes = new CollisionShapePool();
+        var collisionShapes = new CollisionShapePool(navigationField);
         withMesh = 0;
         int renderBatches = 0, sparseGroups = 0, sparseExtraBatches = 0;
         if (EnvFlag.IsOn(OS.GetEnvironment("UG_OBJECT_PROFILE"), whenUnset: false))
@@ -370,7 +375,34 @@ public static class ObjectsBuilder
             EnvFlag.IsOn(System.Environment.GetEnvironmentVariable("UG_DEDUP_FINAL_SHAPES"), whenUnset: true);
         public int PrimitiveAliases { get; private set; }
         public int MeshAliases { get; private set; }
-        public int Add(Shape3D shape) { Shapes.Add(shape); return Shapes.Count - 1; }
+
+        // The CPU mirror of this pool. Every shape created for the physics server is recorded there as
+        // well, and _mirrored maps a pool index to the field's own — the field may already hold shapes
+        // from another builder, so the two tables cannot be assumed to run in lockstep.
+        public readonly CollisionFieldBuilder? Field;
+        private readonly List<int> _mirrored = new();
+
+        public CollisionShapePool(CollisionFieldBuilder? field) => Field = field;
+
+        public int MirrorOf(int shape) => _mirrored[shape];
+
+        private int Add(Shape3D shape, Vector3[]? faces)
+        {
+            Shapes.Add(shape);
+            if (Field == null)
+                return Shapes.Count - 1;
+            _mirrored.Add(shape switch
+            {
+                BoxShape3D box => Field.AddBoxShape(box.Size),
+                SphereShape3D sphere => Field.AddSphereShape(sphere.Radius),
+                CapsuleShape3D capsule => Field.AddCapsuleShape(capsule.Radius, capsule.Height),
+                _ when faces != null => Field.AddMeshShape(faces),
+                // A shape the field does not model. Recorded anyway, so the pool index still maps to
+                // something, and simply never hit — the confirmation pass is what covers it.
+                _ => Field.AddUnsupportedShape(),
+            });
+            return Shapes.Count - 1;
+        }
 
         public int AddPrimitive(Shape3D shape)
         {
@@ -390,7 +422,7 @@ public static class ObjectsBuilder
                 shape.Dispose();
                 return existing;
             }
-            int added = Add(shape);
+            int added = Add(shape, null);
             if (DeduplicateFinal)
                 _finalPrimitives[identity] = added;
             return added;
@@ -407,7 +439,7 @@ public static class ObjectsBuilder
                 MeshAliases++;
                 return existing;
             }
-            int added = Add(new ConcavePolygonShape3D { Data = faces });
+            int added = Add(new ConcavePolygonShape3D { Data = faces }, faces);
             if (DeduplicateFinal)
                 _finalMeshes[identity] = added;
             return added;
@@ -439,8 +471,15 @@ public static class ObjectsBuilder
         List<(int Shape, Transform3D Transform, Vector3 WorldOrigin)>? legacy = directBuckets
             ? null : new List<(int, Transform3D, Vector3)>();
 
+        // Only the bodies a navmesh probe can hit are worth mirroring: that probe masks
+        // CollisionLayers.World, so MEDIUM furniture — which deliberately sits off it — is skipped here
+        // exactly as the physics query skips it.
+        CollisionFieldBuilder? field =
+            (collisionLayer & CollisionLayers.World) != 0 ? pool.Field : null;
+
         void AddPlacement(int shape, Transform3D transform, Vector3 origin)
         {
+            field?.AddInstance(pool.MirrorOf(shape), transform);
             if (buckets != null)
                 buckets.Add(origin.X, origin.Z, (shape, transform));
             else if (directFlat != null)

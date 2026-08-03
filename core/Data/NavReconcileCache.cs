@@ -14,7 +14,11 @@ public static class NavReconcileCache
 {
     private const uint Magic = 0x524E4755; // "UGNR" little-endian
     private const int FormatVersion = 2;
-    public const int AlgorithmVersion = 2;
+    // 3: the surface probe moved off the physics server onto CollisionField for everything but the faces
+    // whose verdict is close enough to the step threshold to need confirming. The verdict is meant to be
+    // the same one, but "meant to" is not what a cache should be pinned on — an entry written by the old
+    // measurement is not an entry this one produced, so it is not reused.
+    public const int AlgorithmVersion = 3;
 
     public static string Fingerprint(string levelDir, string colliderCacheDir)
         => Fingerprint(levelDir, colliderCacheDir, selectedColliders: null);
@@ -44,6 +48,16 @@ public static class NavReconcileCache
 
     public static string WithStepOffset(string fingerprint, float stepOffset) =>
         $"{fingerprint}:step={BitConverter.SingleToInt32Bits(stepOffset):x8}";
+
+    // How the surfaces behind a cached verdict were measured. Neither of these is an input to the
+    // geometry, but both decide which faces the physics server settled and which the CPU field did, so a
+    // cache written under one and read under the other describes a measurement that was never taken.
+    // Widening the margin to check a suspicion, or turning the field off to compare against it, has to
+    // recompute rather than hand back the answer from the other setting.
+    public static string WithProbeSettings(string fingerprint, bool cpuField, float confirmMargin) =>
+        cpuField
+            ? $"{fingerprint}:margin={BitConverter.SingleToInt32Bits(confirmMargin):x8}"
+            : $"{fingerprint}:server-only";
 
     private static void AppendTree(StringBuilder manifest, string label, string root, string pattern)
     {

@@ -78,8 +78,149 @@ public static class NavmeshReachability
         if (count == 0)
             return drop;
 
-        // Adjacency by shared edge. The baked mesh indexes shared vertices, so an undirected index pair
-        // identifies an edge exactly — no proximity guessing.
+        Context context = Analyse(flag, surface, known, count);
+        for (int t = 0; t < count; t++)
+            if (known[t] && Drops(in context, t, surface, stepOffset))
+                drop.Add(t);
+
+        return drop;
+    }
+
+    // The rule itself. NeedsConfirmation asks the same question of its cheaper surfaces, so it lives in
+    // one place: a confirmation set derived from a drifted copy of this would confirm the wrong faces.
+    private static bool Drops(in Context context, int t, float[] surface, float stepOffset) =>
+        // A face can be part of a whole cluster bridging the same obstacle, leaving no lower neighbour to
+        // expose it. Compare against its authored upper envelope too: a collision surface above every
+        // vertex by more than the body can step is not the walkable face.
+        (context.HasNeighbour[t] && surface[t] - context.AuthoredHighest[t] > stepOffset)
+        || (context.LowestNeighbour[t] < float.MaxValue
+            && surface[t] - context.LowestNeighbour[t] > stepOffset);
+
+    // The faces whose verdict a cheap surface sampler is not entitled to settle on its own.
+    //
+    // CollisionField answers the same downward probe the physics server does, off the physics thread and
+    // orders of magnitude faster, but it is a second implementation of the same geometry and the two agree
+    // only to within a margin. That is harmless almost everywhere: a face sitting a metre clear of the step
+    // threshold reaches the same verdict either way. It is not harmless in three places, and this names
+    // all three.
+    //
+    // The first is a sample the field flagged as uncertain — it is saying outright that it cannot answer.
+    //
+    // The second is a face whose comparison is close: within `margin` (the fixed allowance for the gap
+    // between two collision implementations) plus `slack` (the sampler's own measured uncertainty for this
+    // face). A neighbour's slack counts too, because a face's verdict is measured against its neighbours'
+    // surfaces as much as its own.
+    //
+    // The third is every face the sampled surfaces would DROP. The two directions of this decision are not
+    // symmetric: keeping a face leaves the baked navmesh as its authors shipped it, while dropping one
+    // removes route from the graph, and a route removed in error is the failure this whole pass exists to
+    // prevent — a zombie with nowhere to walk is worse than one taking a route it has to shove through.
+    // The destructive verdict is therefore never reached on the cheap measurement alone, however far it
+    // sits from the threshold.
+    public static HashSet<int> NeedsConfirmation(NavFlag flag, float stepOffset, float[] surface,
+        bool[] known, float[] slack, bool[] uncertain, float margin)
+    {
+        int count = flag.Triangles.Length / 3;
+        var confirm = new HashSet<int>();
+        if (count == 0)
+            return confirm;
+
+        Context context = Analyse(flag, surface, known, count);
+        for (int t = 0; t < count; t++)
+        {
+            if (uncertain[t])
+            {
+                confirm.Add(t);
+                continue;
+            }
+            if (!known[t])
+                continue;
+
+            if (Drops(in context, t, surface, stepOffset))
+            {
+                confirm.Add(t);
+                continue;
+            }
+
+            float allowance = margin + slack[t];
+            if (context.HasNeighbour[t]
+                && MathF.Abs(surface[t] - context.AuthoredHighest[t] - stepOffset) <= allowance)
+            {
+                confirm.Add(t);
+                continue;
+            }
+            // Two margins here, one above. The comparison above is against authored geometry, which is
+            // exact, so only this face's surface can have drifted. This one differences two sampled
+            // surfaces, and they can drift in opposite directions — so the gap between them moves by the
+            // allowance for each, the same way both faces' slack is already counted.
+            if (context.LowestNeighbour[t] < float.MaxValue
+                && MathF.Abs(surface[t] - context.LowestNeighbour[t] - stepOffset)
+                    <= allowance + margin + context.NeighbourSlack(t, slack))
+                confirm.Add(t);
+        }
+        return confirm;
+    }
+
+    // The faces that would be dropped by surfaces the physics server has not measured — the ones that
+    // would still be dropped, and the ones that only became droppable BECAUSE it measured something else.
+    //
+    // Confirming a face changes its neighbours' arithmetic, not just its own. A face sitting a hair under
+    // the threshold against a neighbour the sampler read at the same height needs no confirming, until the
+    // server replaces that neighbour with a lower one and pushes the comparison over — at which point the
+    // face is dropped on a height nobody verified. So this is asked again after each confirmation pass,
+    // and the answer feeds the next one, until it comes back empty. It terminates because `verified` only
+    // grows, and in the limit it is every face — which is the behaviour this replaced.
+    //
+    // Only the neighbour holding the MINIMUM matters. A neighbour the sampler read too high hides a lower
+    // true surface and so hides a drop, which is the safe direction; one read too low invents a drop, and
+    // that one is by definition the minimum.
+    public static HashSet<int> UnverifiedDrops(NavFlag flag, float stepOffset, float[] surface,
+        bool[] known, IReadOnlySet<int> verified)
+    {
+        int count = flag.Triangles.Length / 3;
+        var unverified = new HashSet<int>();
+        if (count == 0)
+            return unverified;
+
+        Context context = Analyse(flag, surface, known, count);
+        for (int t = 0; t < count; t++)
+        {
+            if (!known[t] || !Drops(in context, t, surface, stepOffset))
+                continue;
+            if (!verified.Contains(t))
+                unverified.Add(t);
+            if (context.LowestNeighbour[t] >= float.MaxValue
+                || surface[t] - context.LowestNeighbour[t] <= stepOffset)
+                continue; // dropped by its own authored envelope; no neighbour's height is in the verdict
+            foreach (int other in context.Neighbours[t])
+                if (known[other] && surface[other] <= context.LowestNeighbour[t]
+                    && !verified.Contains(other))
+                    unverified.Add(other);
+        }
+        return unverified;
+    }
+
+    private readonly struct Context
+    {
+        public required float[] LowestNeighbour { get; init; }
+        public required float[] AuthoredHighest { get; init; }
+        public required bool[] HasNeighbour { get; init; }
+        public required List<int>[] Neighbours { get; init; }
+
+        public float NeighbourSlack(int triangle, float[] slack)
+        {
+            float worst = 0f;
+            foreach (int other in Neighbours[triangle])
+                if (slack[other] > worst)
+                    worst = slack[other];
+            return worst;
+        }
+    }
+
+    // Adjacency by shared edge. The baked mesh indexes shared vertices, so an undirected index pair
+    // identifies an edge exactly — no proximity guessing.
+    private static Context Analyse(NavFlag flag, float[] surface, bool[] known, int count)
+    {
         var byEdge = new Dictionary<(int, int), List<int>>();
         for (int t = 0; t < count; t++)
             for (int e = 0; e < 3; e++)
@@ -95,9 +236,11 @@ public static class NavmeshReachability
         var lowestNeighbour = new float[count];
         var authoredHighest = new float[count];
         var hasNeighbour = new bool[count];
+        var neighbours = new List<int>[count];
         for (int t = 0; t < count; t++)
         {
             lowestNeighbour[t] = float.MaxValue;
+            neighbours[t] = new List<int>();
             authoredHighest[t] = MathF.Max(
                 flag.Vertices[flag.Triangles[t * 3]].Y,
                 MathF.Max(flag.Vertices[flag.Triangles[(t * 3) + 1]].Y,
@@ -109,20 +252,17 @@ public static class NavmeshReachability
                     if (other != t)
                     {
                         hasNeighbour[t] = true;
+                        neighbours[t].Add(other);
                         if (known[other] && surface[other] < lowestNeighbour[t])
                             lowestNeighbour[t] = surface[other];
                     }
 
-        for (int t = 0; t < count; t++)
-            if (known[t] && (
-                // A face can be part of a whole cluster bridging the same obstacle, leaving no lower
-                // neighbour to expose it. Compare against its authored upper envelope too: a collision
-                // surface above every vertex by more than the body can step is not the walkable face.
-                (hasNeighbour[t] && surface[t] - authoredHighest[t] > stepOffset)
-                || (lowestNeighbour[t] < float.MaxValue
-                    && surface[t] - lowestNeighbour[t] > stepOffset)))
-                drop.Add(t);
-
-        return drop;
+        return new Context
+        {
+            LowestNeighbour = lowestNeighbour,
+            AuthoredHighest = authoredHighest,
+            HasNeighbour = hasNeighbour,
+            Neighbours = neighbours,
+        };
     }
 }

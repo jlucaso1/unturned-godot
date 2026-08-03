@@ -360,8 +360,24 @@ public sealed class ZombieNavigation
     // MUST run after the object colliders are in the physics space. Called earlier it measures bare
     // terrain, which silently deletes the wrong tenth of the navmesh — see the ObjectStreamer.Finished
     // wiring in Main.
-    public async Task PruneAgainstCollisionAsync(Node owner, PhysicsDirectSpaceState3D space, float stepOffset,
-        IReadOnlySet<Guid> colliderGuids)
+    public async Task PruneAgainstCollisionAsync(Node owner, PhysicsDirectSpaceState3D space,
+        float stepOffset, IReadOnlySet<Guid> colliderGuids, CollisionFieldBuilder? collision = null)
+    {
+        try
+        {
+            await ReconcileAsync(owner, space, stepOffset, colliderGuids, collision);
+        }
+        finally
+        {
+            // What the builder holds is the map's entire collision geometry, recorded during the load
+            // purely so this pass could probe it. Reconciliation happens once, so however this ended —
+            // finished, cache hit, shutdown, or a failure — nothing is going to ask for it again.
+            collision?.Release();
+        }
+    }
+
+    private async Task ReconcileAsync(Node owner, PhysicsDirectSpaceState3D space, float stepOffset,
+        IReadOnlySet<Guid> colliderGuids, CollisionFieldBuilder? collision)
     {
         // Diagnostic/benchmark aid: isolates NavigationServer publication cost from collision probing.
         if (EnvFlag.IsOn(OS.GetEnvironment("NAV_SKIP_RECONCILE"), whenUnset: false))
@@ -373,10 +389,39 @@ public sealed class ZombieNavigation
         string? cachePath = null;
         string? fingerprint = null;
         bool partialCheckpoints = EnvFlag.IsOn(OS.GetEnvironment("UG_PARTIAL_NAV_CACHE"), whenUnset: true);
+        // An audit does not touch the cache at either end. Reading it would return before any comparison
+        // happened, and the common run is a warm one — so an audit that honoured the cache would report
+        // nothing on exactly the runs someone would use it on. Writing it is worse: an audit replaces
+        // every face with the server's own answer, so its verdicts are the OLD algorithm's, and leaving
+        // them under the ordinary fingerprint would have the next normal run restore them instead of
+        // running the hybrid it is supposed to. A diagnostic measures; it does not leave results behind.
+        bool audit = EnvFlag.IsOn(OS.GetEnvironment("UG_NAV_PROBE_AUDIT"), whenUnset: false);
+        bool cpuField = collision != null && EnvFlag.IsOn(OS.GetEnvironment("UG_NAV_CPU_PROBE"),
+            whenUnset: true);
+        // The audit exists to compare the field against the server, so it needs the field whatever
+        // UG_NAV_CPU_PROBE says. Left alone, the two flags together would send every flag down the
+        // server-only path and report nothing — a diagnostic that silently measures nothing is worse than
+        // one that refuses. Where no geometry was recorded there is no field to turn on, so the audit is
+        // declined out loud instead.
+        if (audit && !cpuField)
+        {
+            if (collision != null)
+            {
+                cpuField = true;
+                Log.Print("[nav] UG_NAV_PROBE_AUDIT is on, so UG_NAV_CPU_PROBE=0 is ignored for this run");
+            }
+            else
+            {
+                audit = false;
+                Log.Print("[nav] UG_NAV_PROBE_AUDIT needs a collision field, and this session recorded "
+                    + "none — reconciling normally instead");
+            }
+        }
+        _auditing = audit; // read once for the whole pass rather than per flag and per face
         int[] triangleCounts = new int[_flags.Count];
         for (int i = 0; i < _flags.Count; i++)
             triangleCounts[i] = _flags[i].Triangles.Length / 3;
-        if (_levelDir != null)
+        if (_levelDir != null && !audit)
         {
             try
             {
@@ -386,6 +431,7 @@ public sealed class ZombieNavigation
                 {
                     string fp = NavReconcileCache.Fingerprint(_levelDir, modelCache, colliderGuids);
                     fp = NavReconcileCache.WithStepOffset(fp, stepOffset);
+                    fp = NavReconcileCache.WithProbeSettings(fp, cpuField, ConfirmationMargin);
                     return (fp, System.IO.Path.Combine(reconcileCache,
                         NavReconcileCache.MapKey(_levelDir) + ".cache"));
                 });
@@ -430,6 +476,23 @@ public sealed class ZombieNavigation
         // graph in place; small maps use it as a deterministic fallback until the final Godot map syncs.
         await PublishProgressGraphAsync();
 
+        // The CPU copy of the solid world, if the load recorded one. Building it is pure CPU (mostly the
+        // per-collider BVHs) so it goes to a worker; a map that did not record one — free-cam, a headless
+        // server, an old save path — simply keeps the server-only probing below.
+        CollisionField? field = null;
+        if (cpuField && collision != null)
+        {
+            var fieldWatch = Stopwatch.StartNew();
+            CollisionFieldBuilder source = collision;
+            field = await Task.Run(source.Build);
+            source.Release(); // the field owns what it kept; the rest can go now rather than at the end
+            if (_disposed || AppShutdown.IsShuttingDown)
+                return;
+            Log.Print($"[nav] collision field built in {fieldWatch.ElapsedMilliseconds} ms: "
+                + $"{field.TileCount} terrain tiles, {field.InstanceCount:N0} collider instances over "
+                + $"{field.ShapeCount:N0} shapes ({field.TriangleCount:N0} triangles)");
+        }
+
         var ray = new PhysicsRayQueryParameters3D { CollisionMask = 1 };
         double frameBudgetMs = OS.GetEnvironment("NAV_RECONCILE_BUDGET_MS") is { Length: > 0 } configured
             ? Math.Max(0.25, configured.ToFloat())
@@ -440,88 +503,386 @@ public sealed class ZombieNavigation
             // measuring how quickly it completes.
             : 0.25;
         var total = Stopwatch.StartNew();
+        _probeTally = default;
+        var pending = new List<NavFlag>();
         foreach (NavFlag flag in _flags)
+            if (!_unreachable.ContainsKey(flag))
+                pending.Add(flag);
+
+        // The whole map's sampling and planning in ONE hop to the thread pool.
+        //
+        // Not for the CPU — that is a fraction of a second for a map (see PerfHarness `navprobe`). For the
+        // hop itself. An await inside a Godot signal handler resumes on the engine's synchronization
+        // context, which drains once a frame, so every worker round trip costs a whole frame however
+        // little work it did. Doing this per flag per phase cost 19 flags x 3 phases x a frame, and on a
+        // slow machine that measured 78 seconds of pure waiting against one second of actual probing.
+        List<FlagPlan>? plans = null;
+        if (field != null)
         {
-            if (_unreachable.ContainsKey(flag))
-                continue;
-
-            // PublishProgressGraphAsync, reachability computation and checkpoint persistence can resume
-            // on the idle synchronization context. DirectSpaceState queries are only valid from a physics
-            // notification when Godot runs physics on a separate thread, so explicitly re-enter one for
-            // every batch instead of relying on where the previous await happened to resume.
-            await owner.ToSignal(owner.GetTree(), SceneTree.SignalName.PhysicsFrame);
-            if (_disposed || AppShutdown.IsShuttingDown)
-                return;
-            int count = flag.Triangles.Length / 3;
-            var surface = new float[count];
-            var known = new bool[count];
-            var budget = Stopwatch.StartNew();
-            long benchmarkStarted = Benchmark.RuntimeCounters.Start();
-            for (int triangle = 0; triangle < count; triangle++)
+            var planWatch = Stopwatch.StartNew();
+            CollisionField world = field;
+            try
             {
-                if (_disposed || AppShutdown.IsShuttingDown)
-                    return;
-
-                Vector3 a = flag.Vertices[flag.Triangles[triangle * 3]];
-                Vector3 b = flag.Vertices[flag.Triangles[(triangle * 3) + 1]];
-                Vector3 c = flag.Vertices[flag.Triangles[(triangle * 3) + 2]];
-                float highest = float.MinValue;
-                foreach (Vector3 point in NavmeshReachability.SamplePoints(a, b, c))
-                {
-                    // Look down from above the highest thing the agent could step onto, and stop below
-                    // the navmesh so a floor beneath it is never mistaken for this one's ground.
-                    ray.From = point + (Vector3.Up * (stepOffset + 1.5f));
-                    ray.To = point + Vector3.Down;
-                    // Disposed rather than left to the collector. Every probe returns a fresh native
-                    // Variant dictionary behind a finalizable wrapper, and a reconciliation pass runs
-                    // hundreds of thousands of them: waiting for finalization made the process hold that
-                    // churn as native memory it never handed back — a session reconciling PEI grew ~1.6
-                    // MB of RSS per second for as long as the pass ran, and stopped dead when it did.
-                    float ground = float.MinValue;
-                    using (Godot.Collections.Dictionary hit = space.IntersectRay(ray))
-                        if (hit.Count > 0)
-                            ground = ((Vector3)hit["position"]).Y;
-                    if (ground != float.MinValue)
-                        highest = MathF.Max(highest, ground);
-
-                    // A triangle has seven probes. Checking only after all seven let one triangle
-                    // overrun the nominal 0.25 ms large-map budget by 2-7x. Yield between probes so
-                    // reconciliation remains invisible to the physics-frame tail while preserving
-                    // every sample and the exact final reachability decision.
-                    if (budget.Elapsed.TotalMilliseconds >= frameBudgetMs)
-                    {
-                        Benchmark.RuntimeCounters.Record(
-                            Benchmark.RuntimeCounters.Counter.NavigationReconcile, benchmarkStarted);
-                        await owner.ToSignal(owner.GetTree(), SceneTree.SignalName.PhysicsFrame);
-                        budget.Restart();
-                        benchmarkStarted = Benchmark.RuntimeCounters.Start();
-                    }
-                }
-                if (highest != float.MinValue)
-                {
-                    surface[triangle] = highest;
-                    known[triangle] = true;
-                }
-
+                plans = await Task.Run(() => Plan(pending, world, stepOffset));
             }
-            Benchmark.RuntimeCounters.Record(Benchmark.RuntimeCounters.Counter.NavigationReconcile,
-                benchmarkStarted);
-
-            HashSet<int> unreachable = await Task.Run(
-                () => NavmeshReachability.Unreachable(flag, stepOffset, surface, known));
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            _probeTally.SampleMs = planWatch.Elapsed.TotalMilliseconds;
             if (_disposed || AppShutdown.IsShuttingDown)
                 return;
+        }
+
+        for (int i = 0; i < pending.Count; i++)
+        {
+            NavFlag flag = pending[i];
+            HashSet<int>? unreachable = plans != null
+                ? await ConfirmFlagAsync(owner, space, ray, flag, stepOffset, plans[i], frameBudgetMs)
+                : await ReconcileFlagOnServerAsync(owner, space, ray, flag, stepOffset, frameBudgetMs);
+            if (unreachable == null)
+                return; // shutting down
             _unreachable[flag] = unreachable;
             (_useBakedGraph ? _bakedGraph : _progressGraph)?.Disable(flag, unreachable);
             if (partialCheckpoints && cachePath != null && fingerprint != null)
-                await PersistCheckpointAsync(cachePath, fingerprint, triangleCounts);
+                QueueCheckpoint(cachePath, fingerprint, triangleCounts);
         }
 
         await PublishAsync(fingerprint, cachePath == null ? null : cachePath + ".csr");
         if (cachePath != null && fingerprint != null)
-            await PersistCheckpointAsync(cachePath, fingerprint, triangleCounts);
-        Log.Print($"[nav] collision reconciliation submitted in {total.ElapsedMilliseconds} ms");
+            QueueCheckpoint(cachePath, fingerprint, triangleCounts);
+        try
+        {
+            await _checkpoints;
+        }
+        catch (Exception e)
+        {
+            // Publication has already happened, so a checkpoint that failed for a reason WriteCheckpoint
+            // did not expect costs only the resume optimisation. Letting it escape here would skip the
+            // state release below and leave the rejected-triangle sets — hundreds of thousands of entries
+            // on a large map — resident for the whole session over a file that did not get written.
+            AppShutdown.WarnUnlessQuitting($"[nav] reconciliation checkpoint failed ({e.Message})");
+        }
+        Log.Print($"[nav] collision reconciliation submitted in {total.ElapsedMilliseconds} ms"
+            + (field == null ? " (physics-server probes only)" : $" ({DescribeProbes()})"));
         ReleaseReconciliationState();
+    }
+
+    // What the sampling pass worked out about one flag, ready for the physics server to settle the part
+    // it could not.
+    private readonly record struct FlagPlan(NavmeshSurfaceSampling.FlagSurfaces Sampled,
+        HashSet<int> Confirm);
+
+    private List<FlagPlan> Plan(List<NavFlag> flags, CollisionField field, float stepOffset)
+    {
+        var plans = new List<FlagPlan>(flags.Count);
+        foreach (NavFlag flag in flags)
+        {
+            // Sequential across flags, parallel across each flag's faces: one flag already saturates the
+            // machine, and taking them one at a time keeps only one flag's surfaces being written at once.
+            NavmeshSurfaceSampling.FlagSurfaces sampled =
+                NavmeshSurfaceSampling.Sample(flag, field, stepOffset, AppShutdown.Token);
+            HashSet<int> confirm = NavmeshReachability.NeedsConfirmation(flag, stepOffset, sampled.Surface,
+                sampled.Known, sampled.Slack, sampled.Uncertain, ConfirmationMargin);
+            plans.Add(new FlagPlan(sampled, confirm));
+        }
+        return plans;
+    }
+
+    private ProbeTally _probeTally;
+    private bool _auditing;
+
+    private struct ProbeTally
+    {
+        public long CpuSamples;
+        public long CpuUncertain;
+        public long ServerSamples;
+        public long Confirmed;
+        public long Reconfirmed; // faces the post-confirmation rounds added to the planned set
+        public long Triangles;
+        public long AuditDisagreements;
+        public long AuditUnescalated;
+        public long AuditVerdictDifferences;
+        public long AuditDropped;
+        // Where the wall clock actually goes. The physics-frame share is the only part that has to wait
+        // for a tick; the rest is worker time and says whether the CPU pass is paying for itself.
+        public double SampleMs;
+        public double ServerMs;
+        public double VerdictMs;
+    }
+
+    private string DescribeProbes()
+    {
+        string audit = _probeTally.AuditDisagreements > 0
+            ? $", {_probeTally.AuditDisagreements:N0} audit disagreements "
+                + $"({_probeTally.AuditUnescalated:N0} unescalated, "
+                + $"{_probeTally.AuditVerdictDifferences:N0} verdict differences over "
+                + $"{_probeTally.AuditDropped:N0} dropped faces)"
+            : "";
+        return $"{_probeTally.CpuSamples:N0} CPU probes, {_probeTally.ServerSamples:N0} on the physics "
+            + $"server for {_probeTally.Confirmed:N0}(+{_probeTally.Reconfirmed:N0})/"
+            + $"{_probeTally.Triangles:N0} faces ({_probeTally.CpuUncertain:N0} uncertain){audit}; "
+            + $"sample+plan {_probeTally.SampleMs:0} ms, server {_probeTally.ServerMs:0} ms, "
+            + $"verdict {_probeTally.VerdictMs:0} ms";
+    }
+
+    // How far apart two collision implementations are allowed to be before a face's verdict has to be
+    // settled by the one that owns the physics. It covers the collision engine's own convex margins and
+    // the residual float difference between the two ray solvers; the heightfield's triangulation is not
+    // in here because CollisionField measures that per probe and reports it as slack.
+    private static float ConfirmationMargin =>
+        OS.GetEnvironment("UG_NAV_CONFIRM_MARGIN") is { Length: > 0 } configured
+            ? Math.Max(0f, configured.ToFloat()) : 0.05f;
+
+    // Settles one planned flag: re-probe the faces the sampling pass would not decide, then reach the
+    // verdict. Everything here except the probing is arithmetic measured in single-digit milliseconds per
+    // flag, and a hop to a worker to escape that would cost a whole frame — an order of magnitude more —
+    // so it stays inline.
+    private async Task<HashSet<int>?> ConfirmFlagAsync(Node owner, PhysicsDirectSpaceState3D space,
+        PhysicsRayQueryParameters3D ray, NavFlag flag, float stepOffset, FlagPlan plan,
+        double frameBudgetMs)
+    {
+        int count = flag.Triangles.Length / 3;
+        NavmeshSurfaceSampling.FlagSurfaces sampled = plan.Sampled;
+        float[] surface = sampled.Surface;
+        bool[] known = sampled.Known;
+        HashSet<int> confirm = _auditing ? AllTriangles(count) : plan.Confirm;
+
+
+        float[] before = _auditing ? (float[])surface.Clone() : System.Array.Empty<float>();
+        bool[] knownBefore = _auditing ? (bool[])known.Clone() : System.Array.Empty<bool>();
+
+        _probeTally.CpuSamples += sampled.Samples;
+        _probeTally.CpuUncertain += sampled.UncertainSamples;
+        _probeTally.Triangles += count;
+        _probeTally.Confirmed += plan.Confirm.Count;
+
+        // Confirm, then look again, until nothing droppable is left resting on a height the server did not
+        // measure. One pass is not enough: replacing a face's surface changes what its NEIGHBOURS compare
+        // against, so a face that needed no confirming before the pass can be droppable after it — and
+        // dropping it would use its own, still unmeasured, height. Rounds after the first are small (the
+        // planned set already contains everything droppable by the sampled surfaces), and the loop ends
+        // because the verified set only ever grows.
+        var phase = Stopwatch.StartNew();
+        var verified = new HashSet<int>();
+        HashSet<int> round = confirm;
+        while (round.Count > 0)
+        {
+            if (!await ProbeOnServerAsync(owner, space, ray, flag, stepOffset, round, surface, known,
+                    frameBudgetMs))
+                return null;
+            verified.UnionWith(round);
+            round = NavmeshReachability.UnverifiedDrops(flag, stepOffset, surface, known, verified);
+            _probeTally.Reconfirmed += round.Count;
+        }
+        _probeTally.ServerMs += phase.Elapsed.TotalMilliseconds;
+
+        // Judged against the planned set: audit mode confirms every face in round one, so the real pass's
+        // later rounds cannot be observed here. ReportAudit replays them itself, against the server
+        // answers it now has for every face, so what it compares is the state a normal run would publish.
+        if (_auditing)
+            ReportAudit(flag, before, knownBefore, surface, known, sampled, plan.Confirm, stepOffset);
+
+        phase.Restart();
+        HashSet<int> unreachable = NavmeshReachability.Unreachable(flag, stepOffset, surface, known);
+        _probeTally.VerdictMs += phase.Elapsed.TotalMilliseconds;
+        return _disposed || AppShutdown.IsShuttingDown ? null : unreachable;
+    }
+
+    private static HashSet<int> AllTriangles(int count)
+    {
+        var all = new HashSet<int>(count);
+        for (int t = 0; t < count; t++)
+            all.Add(t);
+        return all;
+    }
+
+    // UG_NAV_PROBE_AUDIT=1: probe every face both ways and say where they part company. This is how the
+    // CPU field is validated against the collision world it is standing in for — it is deliberately as
+    // slow as the old path, because it does all of the old path's work plus the new.
+    //
+    // A disagreement is not by itself a defect. The design does not claim the two measurements are equal;
+    // it claims that wherever they might differ enough to change a verdict, the server is asked. So the
+    // number to watch is the last one: faces the two probes disagreed about that a normal run would NOT
+    // have sent to the server. Those, and only those, are places where this could decide differently.
+    private void ReportAudit(NavFlag flag, float[] cpuSurface, bool[] cpuKnown, float[] serverSurface,
+        bool[] serverKnown, NavmeshSurfaceSampling.FlagSurfaces sampled, HashSet<int> wouldConfirm,
+        float stepOffset)
+    {
+        // What a normal run would actually have had in hand: the CPU sampling everywhere, with the server's
+        // answer where the confirmation pass asked for it. Comparing the verdict THAT reaches against the
+        // verdict a full server probe reaches is the only comparison that decides whether this pass changes
+        // the game — a surface differing where the difference cannot move a face across the step threshold
+        // is a difference in a number nobody reads.
+        //
+        // Including the rounds after the planned set, replayed here against the server's own answers. The
+        // real pass keeps confirming until nothing droppable rests on an unmeasured height, and an audit
+        // that stopped at the planned set would warn about a state no normal run ever publishes.
+        int count = serverSurface.Length;
+        float margin = ConfirmationMargin; // an environment read and a parse; not once per face
+        var hybridSurface = (float[])cpuSurface.Clone();
+        var hybridKnown = (bool[])cpuKnown.Clone();
+        var replayed = new HashSet<int>();
+        HashSet<int> round = wouldConfirm;
+        while (round.Count > 0)
+        {
+            foreach (int t in round)
+            {
+                hybridSurface[t] = serverSurface[t];
+                hybridKnown[t] = serverKnown[t];
+            }
+            replayed.UnionWith(round);
+            round = NavmeshReachability.UnverifiedDrops(flag, stepOffset, hybridSurface, hybridKnown,
+                replayed);
+        }
+        HashSet<int> hybridDrop = NavmeshReachability.Unreachable(flag, stepOffset, hybridSurface,
+            hybridKnown);
+        HashSet<int> serverDrop = NavmeshReachability.Unreachable(flag, stepOffset, serverSurface,
+            serverKnown);
+        int verdictDifferences = 0;
+        foreach (int t in hybridDrop)
+            if (!serverDrop.Contains(t))
+                verdictDifferences++;
+        foreach (int t in serverDrop)
+            if (!hybridDrop.Contains(t))
+                verdictDifferences++;
+        _probeTally.AuditVerdictDifferences += verdictDifferences;
+        _probeTally.AuditDropped += serverDrop.Count;
+
+        int disagreements = 0, missed = 0, invented = 0, unescalated = 0;
+        float worst = 0f;
+        int worstTriangle = -1;
+        for (int t = 0; t < count; t++)
+        {
+            bool differs;
+            if (cpuKnown[t] != serverKnown[t])
+            {
+                differs = true;
+                if (serverKnown[t])
+                    missed++;
+                else
+                    invented++;
+            }
+            else if (!serverKnown[t])
+            {
+                continue;
+            }
+            else
+            {
+                float delta = MathF.Abs(cpuSurface[t] - serverSurface[t]);
+                differs = delta > margin + sampled.Slack[t];
+                if (differs && delta > worst)
+                {
+                    worst = delta;
+                    worstTriangle = t;
+                }
+            }
+            if (!differs)
+                continue;
+            disagreements++;
+            if (!replayed.Contains(t))
+                unescalated++;
+        }
+        _probeTally.AuditDisagreements += disagreements;
+        _probeTally.AuditUnescalated += unescalated;
+        if (disagreements == 0 && verdictDifferences == 0)
+            return;
+        string report = $"[nav] probe audit: {disagreements}/{count} faces disagree "
+            + $"({missed} the CPU field missed, {invented} it invented, {unescalated} a normal run would "
+            + $"not have confirmed); worst height gap {worst:0.###} m at face {worstTriangle}; "
+            + $"{verdictDifferences} verdict difference(s) against {serverDrop.Count} server-dropped faces";
+        // A measured height that differs is expected — two collision implementations, one margin. A face
+        // that would be KEPT here and dropped by the server, or the reverse, is not, and only that earns
+        // the warning channel.
+        if (verdictDifferences > 0)
+            Log.PushWarning(report);
+        else
+            Log.Print(report);
+    }
+
+    // The named faces, re-probed against the real collision world on physics frames, inside the same
+    // cooperative budget the whole scan used to run under.
+    private async Task<bool> ProbeOnServerAsync(Node owner, PhysicsDirectSpaceState3D space,
+        PhysicsRayQueryParameters3D ray, NavFlag flag, float stepOffset, HashSet<int> triangles,
+        float[] surface, bool[] known, double frameBudgetMs)
+    {
+        // DirectSpaceState queries are only valid from a physics notification when Godot runs physics on
+        // a separate thread, so explicitly enter one rather than relying on where the last await resumed.
+        await owner.ToSignal(owner.GetTree(), SceneTree.SignalName.PhysicsFrame);
+        if (_disposed || AppShutdown.IsShuttingDown)
+            return false;
+
+        var budget = Stopwatch.StartNew();
+        long benchmarkStarted = Benchmark.RuntimeCounters.Start();
+        foreach (int triangle in triangles)
+        {
+            if (_disposed || AppShutdown.IsShuttingDown)
+                return false;
+
+            Vector3 a = flag.Vertices[flag.Triangles[triangle * 3]];
+            Vector3 b = flag.Vertices[flag.Triangles[(triangle * 3) + 1]];
+            Vector3 c = flag.Vertices[flag.Triangles[(triangle * 3) + 2]];
+            float highest = float.MinValue;
+            foreach (Vector3 point in NavmeshReachability.SamplePoints(a, b, c))
+            {
+                // Look down from above the highest thing the agent could step onto, and stop below
+                // the navmesh so a floor beneath it is never mistaken for this one's ground.
+                ray.From = point + (Vector3.Up * (stepOffset + NavmeshSurfaceSampling.ProbeHeadroom));
+                ray.To = point + (Vector3.Down * NavmeshSurfaceSampling.ProbeReach);
+                // Disposed rather than left to the collector. Every probe returns a fresh native
+                // Variant dictionary behind a finalizable wrapper, and a reconciliation pass runs
+                // hundreds of thousands of them: waiting for finalization made the process hold that
+                // churn as native memory it never handed back — a session reconciling PEI grew ~1.6
+                // MB of RSS per second for as long as the pass ran, and stopped dead when it did.
+                float ground = float.MinValue;
+                using (Godot.Collections.Dictionary hit = space.IntersectRay(ray))
+                    if (hit.Count > 0)
+                        ground = ((Vector3)hit["position"]).Y;
+                _probeTally.ServerSamples++;
+                if (ground != float.MinValue)
+                    highest = MathF.Max(highest, ground);
+
+                // A triangle has seven probes. Checking only after all seven let one triangle
+                // overrun the nominal 0.25 ms large-map budget by 2-7x. Yield between probes so
+                // reconciliation remains invisible to the physics-frame tail while preserving
+                // every sample and the exact final reachability decision.
+                if (budget.Elapsed.TotalMilliseconds >= frameBudgetMs)
+                {
+                    Benchmark.RuntimeCounters.Record(
+                        Benchmark.RuntimeCounters.Counter.NavigationReconcile, benchmarkStarted);
+                    await owner.ToSignal(owner.GetTree(), SceneTree.SignalName.PhysicsFrame);
+                    if (_disposed || AppShutdown.IsShuttingDown)
+                        return false;
+                    budget.Restart();
+                    benchmarkStarted = Benchmark.RuntimeCounters.Start();
+                }
+            }
+            surface[triangle] = highest == float.MinValue ? 0f : highest;
+            known[triangle] = highest != float.MinValue;
+        }
+        Benchmark.RuntimeCounters.Record(Benchmark.RuntimeCounters.Counter.NavigationReconcile,
+            benchmarkStarted);
+        return true;
+    }
+
+    // The original path, kept for every flow that never recorded a collision field: probe every face on
+    // the physics server, a slice of a tick at a time.
+    private async Task<HashSet<int>?> ReconcileFlagOnServerAsync(Node owner,
+        PhysicsDirectSpaceState3D space, PhysicsRayQueryParameters3D ray, NavFlag flag, float stepOffset,
+        double frameBudgetMs)
+    {
+        int count = flag.Triangles.Length / 3;
+        var surface = new float[count];
+        var known = new bool[count];
+        _probeTally.Triangles += count;
+        _probeTally.Confirmed += count;
+        if (!await ProbeOnServerAsync(owner, space, ray, flag, stepOffset, AllTriangles(count), surface,
+                known, frameBudgetMs))
+            return null;
+
+        HashSet<int> unreachable = await Task.Run(
+            () => NavmeshReachability.Unreachable(flag, stepOffset, surface, known));
+        return _disposed || AppShutdown.IsShuttingDown ? null : unreachable;
     }
 
     // Built on first demand rather than at startup. A server that never spawns a body wider than the
@@ -567,29 +928,41 @@ public sealed class ZombieNavigation
 
     private bool _checkpointWarningIssued;
 
-    private async Task PersistCheckpointAsync(string cachePath, string fingerprint,
+    // Every checkpoint the pass produces, written one after another on the pool and awaited once at the
+    // end. Awaiting each write where it was queued cost a whole frame apiece, for the same reason the
+    // sampling hop did — and unlike the sampling, nothing downstream reads the file back, so there was
+    // never anything to wait for. The chain is what keeps the writes ordered, so the last one queued is
+    // the one left on disk.
+    private Task _checkpoints = Task.CompletedTask;
+
+    private void QueueCheckpoint(string cachePath, string fingerprint,
         IReadOnlyList<int> triangleCounts)
     {
+        // Snapshotted here, on the thread that owns the dictionary, rather than inside the write.
         var ordered = new List<HashSet<int>?>(_flags.Count);
         foreach (NavFlag flag in _flags)
             ordered.Add(_unreachable.GetValueOrDefault(flag));
+        _checkpoints = _checkpoints.ContinueWith(_ => WriteCheckpoint(cachePath, fingerprint, ordered,
+            triangleCounts), TaskScheduler.Default);
+    }
+
+    private void WriteCheckpoint(string cachePath, string fingerprint,
+        IReadOnlyList<HashSet<int>?> ordered, IReadOnlyList<int> triangleCounts)
+    {
         try
         {
-            await Task.Run(() =>
-            {
-                System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(cachePath)!);
-                string temporary = cachePath + ".tmp";
-                using (System.IO.FileStream output = System.IO.File.Create(temporary))
-                    NavReconcileCache.WritePartial(output, fingerprint, ordered, triangleCounts);
-                System.IO.File.Move(temporary, cachePath, overwrite: true);
-            });
+            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(cachePath)!);
+            string temporary = cachePath + ".tmp";
+            using (System.IO.FileStream output = System.IO.File.Create(temporary))
+                NavReconcileCache.WritePartial(output, fingerprint, ordered, triangleCounts);
+            System.IO.File.Move(temporary, cachePath, overwrite: true);
         }
         catch (Exception e) when (e is System.IO.IOException or UnauthorizedAccessException)
         {
             if (!_checkpointWarningIssued)
             {
                 _checkpointWarningIssued = true;
-                Log.PushWarning($"[nav] reconciliation checkpoint unavailable ({e.Message})");
+                AppShutdown.WarnUnlessQuitting($"[nav] reconciliation checkpoint unavailable ({e.Message})");
             }
         }
     }

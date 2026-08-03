@@ -189,6 +189,23 @@ public class NavReconcileCacheTests
             NavReconcileCache.WithStepOffset("same", 0.5f));
     }
 
+    [Fact]
+    public void ProbeSettingsArePartOfTheCacheIdentity()
+    {
+        // Two runs over identical geometry can still produce different verdicts: the margin decides which
+        // faces the physics server settles, and turning the CPU field off hands it all of them. A cache
+        // written under one setting describes a measurement the other never took.
+        string margin = NavReconcileCache.WithProbeSettings("world", cpuField: true, 0.05f);
+        Assert.Equal(margin, NavReconcileCache.WithProbeSettings("world", cpuField: true, 0.05f));
+        Assert.NotEqual(margin, NavReconcileCache.WithProbeSettings("world", cpuField: true, 0.06f));
+
+        // Server-only carries no margin — nothing is compared against the CPU field, so widening it
+        // changes nothing and must not split the cache.
+        string serverOnly = NavReconcileCache.WithProbeSettings("world", cpuField: false, 0.05f);
+        Assert.NotEqual(margin, serverOnly);
+        Assert.Equal(serverOnly, NavReconcileCache.WithProbeSettings("world", cpuField: false, 0.06f));
+    }
+
     private static MemoryStream ValidCache()
     {
         var stream = new MemoryStream();

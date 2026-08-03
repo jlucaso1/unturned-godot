@@ -309,6 +309,57 @@ a path (`UG_OBJECT_CHUNK_METRES`, `SCREENSHOT_PATH`, `TIME_OF_DAY`, …) are una
   Completed results persist under `user://nav_reconcile`; remove the selected map's cache file when a
   deliberately cold reconciliation run is required. The reconciled CSR routing graph is cached beside it;
   valid hits deserialize the graph directly, while misses build and write it off the main thread.
+- `UG_NAV_CPU_PROBE=0` sends every reconciliation probe back to the PhysicsServer, except under
+  `UG_NAV_PROBE_AUDIT=1`, which needs the field to have anything to compare against and says so in the log
+  when it overrides this. By default the load
+  records the layer-`World` collision geometry into a `CollisionField` — terrain heightfields and object
+  colliders, as the bodies for them are created — and the first session probes that on workers, asking the
+  server only about the faces `NavmeshReachability.NeedsConfirmation` names. Direct-space queries are only
+  legal inside a physics notification, so the old path serialised thousands of probes into a slice of each
+  tick; `runtime.subsystem.NavigationReconcile.calls` and the time to `[nav] collision reconciliation
+  submitted` are what this moves. On one paired PEI run on a 4-vCPU software-rendered container
+  (`NAV_RECONCILE_BUDGET_MS=100` on both sides, so the frame rate rather than the budget is held
+  constant), the same 42,642 faces reconciled in **54,263 ms** with `UG_NAV_CPU_PROBE=0` and **9,780 ms**
+  with it on — 298,494 physics-server probes down to 75,096, and the completion line breaks that down as
+  `sample+plan 1,779 ms, server 6,284 ms, verdict 83 ms`. The face count in that line reads
+  `8,054(+2,674)`: the planned confirmation set, and what the rounds after it added once the server's own
+  answers changed what the faces beside them were measured against.
+- Two things about that split are worth knowing before tuning it. The CPU work itself is a fraction of a
+  second for a whole map (`PerfHarness -- navprobe` measures it in isolation), so `sample+plan` is mostly
+  the cost of one hop to the thread pool: an `await` inside a Godot signal handler resumes on the engine's
+  synchronization context, which drains once a frame, so a worker round trip costs a frame however little
+  work it did. That is why the pass plans every flag in one hop and reaches its verdicts inline, and why
+  the reconciliation checkpoints are written on a chain and awaited once at the end rather than per flag.
+- `UG_NAV_CONFIRM_MARGIN=<metres>` (default 0.05) widens how close to the step threshold a face has to be
+  before its verdict is settled on the server rather than in the field. It is reserved once against
+  authored geometry, which is exact, and twice where a face is compared against a neighbour: those are two
+  independently sampled surfaces and they can drift apart in opposite directions. The heightfield's
+  triangulation is not covered by it — `CollisionField` measures that per probe and reports it as slack,
+  which is added on top per face. Independently of the margin, every face the sampled surfaces would
+  *drop* is confirmed:
+  keeping a face leaves the baked navmesh as shipped, while dropping one takes route out of the graph, so
+  only the destructive verdict needs the physics to sign it off.
+- `UG_NAV_PROBE_AUDIT=1` probes every face both ways and reports where they part company — including how
+  many faces would reach a different verdict than a full server probe, which is the only disagreement that
+  changes the game. It is deliberately slower than either path alone, and neither reads nor writes the
+  reconciliation cache: reading it would return before any comparison happened, and its verdicts are the
+  server's own, so leaving them behind would have the next normal run restore them instead of running the
+  hybrid. One PEI run on the container above (all 19 flags, 42,642 faces, 298,494 probes): 8,054 faces
+  needed confirming, 90 measured a different surface — none of them a surface the field failed to find —
+  and 19 reached a different verdict out of the 6,266 the server dropped. Confirming the drop set is what
+  buys most of that last number: without it the same map reached a different verdict on 66 faces, from a
+  confirmation set of 3,685. Those counts predate two later widenings of the escalation set — the second
+  margin described above, and escalating a twisted heightfield cell whose other triangulation is the one
+  inside the probed segment. On the terrain-only `navprobe` suite the pair moved the confirmation set from
+  13.9% of faces to 14.6%, so the totals above are low by roughly that.
+- One thing the audit settled that reasoning did not. `ObjectsBuilder` leaves `BackfaceCollision` off on
+  its `ConcavePolygonShape3D`s, so in principle the server culls a crossing of a face turned away from the
+  probe and `CollisionField` should escalate rather than claim one. Measured, it does not: escalating
+  back-facing crossings took the uncertain probes from 842 to 99,525 — a third of every probe on the map,
+  and the confirmation set from 19% of faces to 50% — while the disagreement count stayed at 90 and the
+  verdict differences moved 19 to 15. A third of crossings being back-facing while the server reports the
+  same surfaces says the server is not culling them here, so the mesh test stays two-sided. If that ever
+  changes, the audit shows it as a jump in "the CPU field invented", not as a timing regression.
 - `UG_RUNTIME_BENCH_MOVE=1` makes Tier 3 alternate forward/back once per second, exercising real movement
   collision and the loopback multiplayer position stream instead of profiling only an idle player. Note
   that it oscillates rather than traverses: net displacement stays near zero, so it does not carry the
