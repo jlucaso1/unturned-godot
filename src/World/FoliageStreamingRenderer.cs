@@ -227,7 +227,10 @@ public partial class FoliageStreamingRenderer : Node3D
             CancellationToken token = cancellation.Token;
             long budget = (long)(Stopwatch.Frequency * 0.008);
             long until = Stopwatch.GetTimestamp() + budget;
-            Task<WarmBatch>? decoding = batches.Count > 0 ? DecodeBatch(batches[0], token) : null;
+            Task<WarmBatch>? decoding = null;
+            long held = 0;
+            if (batches.Count > 0)
+                (decoding, held) = StartWarmDecode(batches[0], token, ref outstandingBytes);
             for (int batch = 0; batch < batches.Count; batch++)
             {
                 // Only a decode that had not finished actually costs a frame. Resuming from one means a
@@ -238,34 +241,39 @@ public partial class FoliageStreamingRenderer : Node3D
                 WarmBatch? decoded = await decoding;
                 if (decodeWasPending)
                     until = Stopwatch.GetTimestamp() + budget;
-                long held = DecodedBytes(decoded.Chunks);
-                if (held > 0)
-                {
-                    outstandingBytes += held;
-                    UpdateMaximum(ref _maxDecodedBytes, Interlocked.Add(ref _decodedBytes, held));
-                }
                 // Overlap the next batch's IO and decode with this batch's uploads, but only while both
                 // fit the cap at once. WarmBatches gives a chunk larger than half the cap a batch of its
                 // own, and pipelining behind that one would put the pass over the bound it respects, so
                 // an oversized batch is uploaded first and its successor started below instead.
                 bool more = batch + 1 < batches.Count;
                 bool overlapped = more && held + BatchBytes(batches[batch + 1]) <= _decodedByteLimit;
-                decoding = overlapped ? DecodeBatch(batches[batch + 1], token) : null;
-                if (decoded.Error != null)
+                long carried = held;
+                if (overlapped)
+                    (decoding, held) = StartWarmDecode(batches[batch + 1], token, ref outstandingBytes);
+                else
+                    decoding = null;
+                if (decoded.Error != null || decoded.Chunks == null)
                 {
-                    // One failure, not one per chunk in the batch: the read stops at the first bad chunk
-                    // and the rest were never attempted. Either way the refill below hands them back to
-                    // the steady loop rather than leaving them missing until the player moves.
-                    _decodeFailures++;
-                    incomplete = true;
-                    AppShutdown.WarnUnlessQuitting($"[foliage-stream] prewarm batch of "
-                        + $"{decoded.Indices.Length} chunks could not be decoded: {decoded.Error.Message}");
+                    // Nothing of this batch will be uploaded, so give its charge back here — the loop
+                    // below only releases the chunks it actually lands. One failure, not one per chunk:
+                    // the read stops at the first bad one and the rest were never attempted. Either way
+                    // the refill below hands them to the steady loop rather than leaving them missing.
+                    outstandingBytes -= carried;
+                    Interlocked.Add(ref _decodedBytes, -carried);
+                    if (decoded.Error != null)
+                    {
+                        _decodeFailures++;
+                        incomplete = true;
+                        AppShutdown.WarnUnlessQuitting($"[foliage-stream] prewarm batch of "
+                            + $"{decoded.Indices.Length} chunks could not be decoded: "
+                            + decoded.Error.Message);
+                    }
                 }
                 for (int i = 0; decoded.Chunks != null && i < decoded.Chunks.Count; i++)
                 {
                     if (!WarmMayContinue(token))
                         return;
-                    long uploaded = (long)decoded.Chunks[i].Packed.Length * sizeof(float);
+                    long uploaded = ExpectedDecodedBytes(decoded.Indices[i]);
                     Upload(decoded.Indices[i], decoded.Chunks[i]);
                     _prewarmedChunks++;
                     // Resident now, not decoded-and-waiting: hand the bytes over to ResidentBufferBytes'
@@ -283,7 +291,7 @@ public partial class FoliageStreamingRenderer : Node3D
                 // would let the two batches' transforms coexist past the cap anyway.
                 decoded = null;
                 if (more && !overlapped)
-                    decoding = DecodeBatch(batches[batch + 1], token);
+                    (decoding, held) = StartWarmDecode(batches[batch + 1], token, ref outstandingBytes);
             }
 
             // A batch this pass could not decode is refilled by the steady loop, which otherwise would
@@ -330,6 +338,20 @@ public partial class FoliageStreamingRenderer : Node3D
     // a scenario being torn down, and the node itself may already be gone.
     private bool WarmMayContinue(CancellationToken token) =>
         !token.IsCancellationRequested && GodotObject.IsInstanceValid(this) && IsInsideTree();
+
+    // Charged when the decode starts, not when it lands. An overlapped batch is already holding its
+    // transforms on the worker while the previous one uploads, and accounting for it only on arrival —
+    // by which point the previous batch has been released chunk by chunk — would let maxDecodedBytes
+    // record one batch where two were held at once. Estimated bytes are exact here: a chunk decodes to
+    // its instance count times the 12-float buffer layout, which is what ExpectedDecodedBytes returns.
+    private (Task<WarmBatch> Decoding, long Bytes) StartWarmDecode(int[] indices, CancellationToken token,
+        ref long outstandingBytes)
+    {
+        long bytes = BatchBytes(indices);
+        outstandingBytes += bytes;
+        UpdateMaximum(ref _maxDecodedBytes, Interlocked.Add(ref _decodedBytes, bytes));
+        return (DecodeBatch(indices, token), bytes);
+    }
 
     private Task<WarmBatch> DecodeBatch(int[] indices, CancellationToken token)
     {
@@ -580,18 +602,6 @@ public partial class FoliageStreamingRenderer : Node3D
         long bytes = 0;
         foreach (int index in indices)
             bytes += ExpectedDecodedBytes(index);
-        return bytes;
-    }
-
-    // What a decoded batch actually occupies, for the batch already in hand. The estimate above is only
-    // needed for a batch that has not been read yet.
-    private static long DecodedBytes(IReadOnlyList<FoliageChunk>? chunks)
-    {
-        if (chunks == null)
-            return 0;
-        long bytes = 0;
-        foreach (FoliageChunk chunk in chunks)
-            bytes += (long)chunk.Packed.Length * sizeof(float);
         return bytes;
     }
 

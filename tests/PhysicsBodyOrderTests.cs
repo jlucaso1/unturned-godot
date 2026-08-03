@@ -337,9 +337,15 @@ public class PhysicsBodyOrderTests
         // the counter maxDecodedBytes reports — otherwise a warm pass that answered the whole ring lets
         // the benchmark report a peak of zero while it was holding two batches — and anything it never
         // uploaded has to be given back, since the steady loop reads that counter before decoding.
-        Assert.Contains("UpdateMaximum(ref _maxDecodedBytes, Interlocked.Add(ref _decodedBytes, held))",
+        Assert.Contains("UpdateMaximum(ref _maxDecodedBytes, Interlocked.Add(ref _decodedBytes, bytes))",
             source);
+        // Charged when the decode starts, not when it lands: an overlapped batch is already holding its
+        // transforms while the previous one uploads, and accounting on arrival — after the previous
+        // batch has been released chunk by chunk — would record one batch where two were held.
+        Assert.Contains("private (Task<WarmBatch> Decoding, long Bytes) StartWarmDecode(", source);
+        Assert.DoesNotContain("decoding = overlapped ? DecodeBatch(", source);
         Assert.Contains("Interlocked.Add(ref _decodedBytes, -uploaded);", source);
+        Assert.Contains("Interlocked.Add(ref _decodedBytes, -carried);", source);
         Assert.Contains("if (outstandingBytes != 0)\n                Interlocked.Add(ref _decodedBytes, "
             + "-outstandingBytes);", normalized);
         // Worker wall time is not main-thread upload time: a deadline that expired while a decode was
@@ -384,6 +390,17 @@ public class PhysicsBodyOrderTests
                 + "cancellation", streamer);
             Assert.Contains("if (_loadCancellation.IsCancellationRequested)\n            return;\n"
                 + "        _sceneBuilt = true;", streamer);
+            // Both build paths guard, not just the cold one: the warm task is not even stored for
+            // CancelAsync to wait on, so falling through publishes a world already queued for deletion.
+            Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(streamer,
+                @"await PrewarmFoliageAsync\(\);\n        // The warm pass consumes").Count);
+            // Textures are applied before the pass yields its frames, on both paths: a material that
+            // reaches the renderer bare and is textured later makes it compile the pipelines twice.
+            Assert.True(streamer.IndexOf("_registry.ApplyAllAvailable();", StringComparison.Ordinal)
+                < streamer.IndexOf("await PrewarmFoliageAsync();", StringComparison.Ordinal));
+            Assert.True(streamer.IndexOf("_appliedTextures += _registry.ApplyAllAvailable();",
+                    StringComparison.Ordinal)
+                < streamer.LastIndexOf("await PrewarmFoliageAsync();", StringComparison.Ordinal));
         }
     }
 

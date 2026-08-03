@@ -404,15 +404,24 @@ public partial class ObjectStreamer : Node
         phase.Restart();
         BuildObjects(meshLibrary, lod1Library);
         Log.Print($"[stream] scene built: {phase.ElapsedMilliseconds} ms");
-        // Before the yield, not after it. The build above put the streaming foliage in the tree, so the
-        // very next frame is the one whose _Process runs its first plan — and takes the whole spawn ring
-        // synchronously. Warming has to claim that frame first or there is nothing left to warm.
-        await PrewarmFoliageAsync();
-        await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
 
+        // Textures first, and before any frame is yielded. A material that reaches the renderer bare and
+        // is textured a frame later makes it build the pipelines twice, so the warm pass — which yields
+        // several frames — must not come between the scene and its textures.
         phase.Restart();
         _registry.ApplyAllAvailable();
         Log.Print($"[stream] textures applied: {phase.ElapsedMilliseconds} ms");
+
+        // Then warm, still before the yield below. The build above put the streaming foliage in the
+        // tree, so the very next frame is the one whose _Process runs its first plan — and takes the
+        // whole spawn ring synchronously. Warming has to claim that frame first or there is nothing
+        // left to warm.
+        await PrewarmFoliageAsync();
+        // The warm pass consumes cancellation and returns normally, so returning to the menu mid-pass
+        // would otherwise fall through to publishing a world already queued for deletion. The cold
+        // build below makes the same check for the same reason.
+        if (_loadCancellation.IsCancellationRequested)
+            return;
         await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
         _finished = true;
         TryFinalizeLoadState();
@@ -656,6 +665,15 @@ public partial class ObjectStreamer : Node
             return;
 
         BuildObjects(meshLibrary, lod1Library);
+
+        // Whatever the decode already produced goes on before the world is shown. Applying a texture
+        // changes the material's shader key (an albedo map appears, the filter may switch to nearest, a
+        // cutout swaps shader), so a material that reaches the scene bare and is textured a frame later
+        // makes the renderer build its pipelines twice. Everything still arriving keeps streaming through
+        // _Process; this only closes the gap for what was ready all along, at a cost of tens of ms.
+        // It runs before the warm pass, which yields frames: they would be exactly that bare gap.
+        _appliedTextures += _registry.ApplyAllAvailable();
+
         // Warmed before time-to-playable is read, and counted in it: a world handed over with its spawn
         // ring undecoded is not yet playable without the burst this replaces. _sceneBuilt is set after,
         // not before: it is also what releases _Process to apply textures, and the two would then spend
@@ -671,13 +689,6 @@ public partial class ObjectStreamer : Node
         // Read after the build, not before it: this is reported as time-to-playable, and the staged
         // realise above happens while the player is still waiting.
         double meshMs = _coldWatch.Elapsed.TotalMilliseconds;
-
-        // Whatever the decode already produced goes on before the world is shown. Applying a texture
-        // changes the material's shader key (an albedo map appears, the filter may switch to nearest, a
-        // cutout swaps shader), so a material that reaches the scene bare and is textured a frame later
-        // makes the renderer build its pipelines twice. Everything still arriving keeps streaming through
-        // _Process; this only closes the gap for what was ready all along, at a cost of tens of ms.
-        _appliedTextures += _registry.ApplyAllAvailable();
 
         EmitSignal(SignalName.MeshesReady, meshMs);
         EmitSignal(SignalName.Progress, _appliedTextures, _totalTextureKeys);
