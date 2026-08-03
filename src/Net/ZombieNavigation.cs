@@ -646,10 +646,9 @@ public sealed class ZombieNavigation
         }
         _probeTally.ServerMs += phase.Elapsed.TotalMilliseconds;
 
-        // The audit is judged against the PLANNED set, not everything the loop ended up verifying: in
-        // audit mode round one already confirms every face, so the later rounds cannot be observed. That
-        // makes the reported "a normal run would not have confirmed" figure an over-estimate of the risk,
-        // which is the direction an audit should err in.
+        // Judged against the planned set: audit mode confirms every face in round one, so the real pass's
+        // later rounds cannot be observed here. ReportAudit replays them itself, against the server
+        // answers it now has for every face, so what it compares is the state a normal run would publish.
         if (audit)
             ReportAudit(flag, before, knownBefore, surface, known, sampled, plan.Confirm, stepOffset);
 
@@ -684,13 +683,25 @@ public sealed class ZombieNavigation
         // verdict a full server probe reaches is the only comparison that decides whether this pass changes
         // the game — a surface differing where the difference cannot move a face across the step threshold
         // is a difference in a number nobody reads.
+        //
+        // Including the rounds after the planned set, replayed here against the server's own answers. The
+        // real pass keeps confirming until nothing droppable rests on an unmeasured height, and an audit
+        // that stopped at the planned set would warn about a state no normal run ever publishes.
         int count = serverSurface.Length;
         var hybridSurface = (float[])cpuSurface.Clone();
         var hybridKnown = (bool[])cpuKnown.Clone();
-        foreach (int t in wouldConfirm)
+        var replayed = new HashSet<int>();
+        HashSet<int> round = wouldConfirm;
+        while (round.Count > 0)
         {
-            hybridSurface[t] = serverSurface[t];
-            hybridKnown[t] = serverKnown[t];
+            foreach (int t in round)
+            {
+                hybridSurface[t] = serverSurface[t];
+                hybridKnown[t] = serverKnown[t];
+            }
+            replayed.UnionWith(round);
+            round = NavmeshReachability.UnverifiedDrops(flag, stepOffset, hybridSurface, hybridKnown,
+                replayed);
         }
         HashSet<int> hybridDrop = NavmeshReachability.Unreachable(flag, stepOffset, hybridSurface,
             hybridKnown);
@@ -737,7 +748,7 @@ public sealed class ZombieNavigation
             if (!differs)
                 continue;
             disagreements++;
-            if (!wouldConfirm.Contains(t))
+            if (!replayed.Contains(t))
                 unescalated++;
         }
         _probeTally.AuditDisagreements += disagreements;
