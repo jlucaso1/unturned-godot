@@ -75,12 +75,7 @@ public static class MeshCache
         w.Write(Magic);
 
         w.Write(vertices.Length);
-        foreach (Vector3 v in vertices)
-        {
-            w.Write(v.X);
-            w.Write(v.Y);
-            w.Write(v.Z);
-        }
+        WriteBlock(w, vertices);
 
         WriteVectors3(w, normals, vertices.Length);
         WriteVectors2(w, uvs, vertices.Length);
@@ -98,8 +93,7 @@ public static class MeshCache
             w.Write(sm.Smoothness);
             w.Write((byte)sm.Cull);
             w.Write(sm.Indices.Length);
-            foreach (int i in sm.Indices)
-                w.Write(i);
+            WriteBlock(w, sm.Indices);
         }
     }
 
@@ -147,17 +141,25 @@ public static class MeshCache
         return (vertices, normals, uvs, submeshes);
     }
 
+    // The write side of ReadVector3Array/ReadVector2Array/ReadIntArray: one bulk reinterpret of a
+    // blittable array instead of a virtual BinaryWriter call per component. Read was already doing this
+    // and said why — "instead of millions of virtual BinaryReader.ReadSingle/ReadInt32 dispatches" — and
+    // the same arithmetic applies going out, at roughly 6.1M calls for a cold PEI extraction.
+    //
+    // It also makes the two sides agree about byte order. MemoryMarshal reinterprets in the HOST's
+    // endianness while BinaryWriter.Write(float) always emits little-endian, so on a big-endian machine
+    // the old Write and the current Read disagreed and the cache would not have round-tripped. Nothing
+    // .NET realistically runs on is big-endian, so this fixes a bug nobody was going to hit — but a
+    // format whose reader and writer are written against different conventions is worth not leaving.
+    private static void WriteBlock<T>(BinaryWriter w, T[] values) where T : unmanaged =>
+        w.Write(MemoryMarshal.AsBytes(values.AsSpan()));
+
     private static void WriteVectors3(BinaryWriter w, Vector3[] values, int expectedCount)
     {
         bool present = values.Length == expectedCount && expectedCount > 0;
         w.Write(present);
         if (present)
-            foreach (Vector3 v in values)
-            {
-                w.Write(v.X);
-                w.Write(v.Y);
-                w.Write(v.Z);
-            }
+            WriteBlock(w, values);
     }
 
     private static void WriteVectors2(BinaryWriter w, Vector2[] values, int expectedCount)
@@ -165,11 +167,7 @@ public static class MeshCache
         bool present = values.Length == expectedCount && expectedCount > 0;
         w.Write(present);
         if (present)
-            foreach (Vector2 v in values)
-            {
-                w.Write(v.X);
-                w.Write(v.Y);
-            }
+            WriteBlock(w, values);
     }
 
     // Bulk reinterpret the little-endian float/int block (blittable, matching the sequential write layout).
