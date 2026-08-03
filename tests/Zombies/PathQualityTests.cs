@@ -427,6 +427,39 @@ public class PathQualityTests
             "the walk spent its budget without crossing the floor");
     }
 
+    // A duplicated face shares its edges from the SAME side. Where one of those edges is a real outer
+    // boundary, counting the duplicate as "floor across it" turns the wall into an interior edge: it
+    // stops being tested for clearance, and its vertices stop being borders, so nothing at all guards
+    // the edge of the navmesh. A route can then run half a metre inside it with the capsule hanging off.
+    //
+    // The duplicate here changes nothing about where a body may stand — same floor, same boundary.
+    [Fact]
+    public void TheLineWalk_IsNotBlindedToABoundaryByADuplicateFaceBesideIt()
+    {
+        NavFlag field = FlatField(20);
+        const int Side = 21;
+        var triangles = new List<int>(field.Triangles);
+        // The far row's second face carries the boundary edge (x, 20) - (x + 1, 20). Duplicate each.
+        for (int x = 0; x < 20; x++)
+        {
+            int a = (x * Side) + 19, b = a + 1, c = a + Side, d = c + 1;
+            triangles.AddRange(new[] { b, d, c });
+        }
+        var flag = new NavFlag
+        {
+            Center = field.Center,
+            Size = field.Size,
+            Vertices = field.Vertices,
+            Triangles = triangles.ToArray(),
+        };
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { flag });
+
+        Assert.True(graph.HasClearLine(0, new Vector3(2, 0, 10), new Vector3(18, 0, 10)),
+            "a line down the middle of the floor is clear");
+        Assert.False(graph.HasClearLine(0, new Vector3(2, 0, 19.8f), new Vector3(18, 0, 19.8f)),
+            "0.2 m inside the edge of the navmesh is not clearance for a 0.4 m body");
+    }
+
     // A flag with no faces snaps to no triangle, and the walk has to answer that rather than index it.
     [Fact]
     public void AFlagWithNoFaces_HasNoClearLines()

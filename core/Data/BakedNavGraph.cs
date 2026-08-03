@@ -630,13 +630,25 @@ public sealed class BakedNavGraph
         // The caller has already cleared `_enabled` for the face being disabled, so it excludes itself.
         private bool StillShared(int triangle, int vertexA, int vertexB)
         {
+            // Across, not merely alongside. A duplicated or overlapping face shares an edge from the
+            // SAME side, and counting it turns a real outer boundary into an interior edge: the wall
+            // stops being tested for clearance and its vertices stop being borders, so a route can run
+            // half a metre from the edge of the navmesh with the capsule hanging off it. Every use of
+            // this asks "is there still floor on the other side", which is what this now answers.
+            int mine = OppositeVertex(triangle, vertexA, vertexB);
+            if (mine < 0)
+                return false;
+            float here = SideOfEdge(vertexA, vertexB, mine);
             for (int at = _edgeStart[triangle]; at < _edgeStart[triangle + 1]; at++)
             {
                 Connection c = _edges[at];
                 if (!_enabled[c.To])
                     continue;
-                if ((c.VertexA == vertexA && c.VertexB == vertexB)
-                    || (c.VertexA == vertexB && c.VertexB == vertexA))
+                if ((c.VertexA != vertexA || c.VertexB != vertexB)
+                    && (c.VertexA != vertexB || c.VertexB != vertexA))
+                    continue;
+                int theirs = OppositeVertex(c.To, vertexA, vertexB);
+                if (theirs >= 0 && here * SideOfEdge(vertexA, vertexB, theirs) < 0f)
                     return true;
             }
             return false;
@@ -659,16 +671,10 @@ public sealed class BakedNavGraph
                 {
                     int v0 = Source.Triangles[(t * 3) + e];
                     int v1 = Source.Triangles[(t * 3) + ((e + 1) % 3)];
-                    bool shared = false;
-                    for (int at = _edgeStart[t]; at < _edgeStart[t + 1] && !shared; at++)
-                    {
-                        Connection c = _edges[at];
-                        if (!_enabled[c.To])
-                            continue;
-                        shared = (c.VertexA == v0 && c.VertexB == v1)
-                            || (c.VertexA == v1 && c.VertexB == v0);
-                    }
-                    if (!shared)
+                    // One definition of "still has floor across it", shared with Disable and with the
+                    // line walk's clearance test, so a wall cannot be a wall to one of them and not the
+                    // others.
+                    if (!StillShared(t, v0, v1))
                     {
                         _borderVertex[v0] = true;
                         _borderVertex[v1] = true;
@@ -887,6 +893,31 @@ public sealed class BakedNavGraph
             int anchor = begin;
             int anchorTriangle = startTriangle;
 
+            // A body ground-snaps, so what it actually covers is the SURFACE under the line, not the
+            // line. Over a rise that can be longer than the detour it replaces — A* costs its corridor
+            // in 3D and will happily go round a ridge, and swapping that for a straight line over the
+            // top is a shortcut only in plan. So the walk measures the ground it crosses and a shortcut
+            // has to beat the waypoints it removes.
+            //
+            // The comparison is deliberately one-sided: the run being replaced is measured as straight
+            // segments between its waypoints, which do not follow the ground either, so it is
+            // undercounted. That biases against shortcutting over broken ground, which is the safe way
+            // to be wrong here.
+            bool Reaches(int probe, out int end)
+            {
+                end = -1;
+                if (!TryLine(anchorTriangle, output[anchor], output[probe], ref budget,
+                    out int reached, out float surface))
+                    return false;
+                float replaced = 0f;
+                for (int i = anchor + 1; i <= probe; i++)
+                    replaced += output[i - 1].DistanceTo(output[i]);
+                if (surface > replaced)
+                    return false;
+                end = reached;
+                return true;
+            }
+
             while (anchor < output.Count - 1)
             {
                 int last = output.Count - 1;
@@ -903,8 +934,7 @@ public sealed class BakedNavGraph
                 int limit = last;
                 while (anchor + reach <= last)
                 {
-                    if (!TryLine(anchorTriangle, output[anchor], output[anchor + reach],
-                        ref budget, out int end))
+                    if (!Reaches(anchor + reach, out int end))
                     {
                         limit = anchor + reach - 1;
                         break;
@@ -916,7 +946,7 @@ public sealed class BakedNavGraph
                 for (int low = furthest + 1, high = limit; low <= high;)
                 {
                     int middle = low + ((high - low) / 2);
-                    if (TryLine(anchorTriangle, output[anchor], output[middle], ref budget, out int end))
+                    if (Reaches(middle, out int end))
                     {
                         furthest = middle;
                         reached = end;
@@ -953,15 +983,21 @@ public sealed class BakedNavGraph
         // route it replaces. It is in fact a stronger test: the portal inset runs ALONG the portal and so
         // yields only radius * sin(angle) away from the wall the portal meets, while this measures the
         // real distance from the segment to the wall.
-        private bool TryLine(int startTriangle, Vector3 from, Vector3 to, ref int budget, out int endTriangle)
+        private bool TryLine(int startTriangle, Vector3 from, Vector3 to, ref int budget,
+            out int endTriangle, out float surface)
         {
             endTriangle = startTriangle;
+            surface = 0f;
             if (startTriangle < 0)
                 return false;
 
             float ax = from.X, az = from.Z;
             float dx = to.X - ax, dz = to.Z - az;
             int current = startTriangle;
+            // Where the walk entered the face it is on, and how high the ground was there. A body
+            // ground-snaps, so what it actually covers is the surface under the line, not the line.
+            float markX = ax, markZ = az;
+            float markY = TryHeightOn(startTriangle, ax, az, out float seed) ? seed : from.Y;
 
             while (true)
             {
@@ -1023,9 +1059,18 @@ public sealed class BakedNavGraph
                     // zombie simply stays downstairs and counts the target as reached below it.
                     if (!CarriesPoint(current, to))
                         return false;
+                    surface += Rise(markX, markZ, markY, to.X, to.Z,
+                        TryHeightOn(current, to.X, to.Z, out float last) ? last : markY);
                     endTriangle = current;
                     return true;
                 }
+
+                float crossX = ax + (dx * exit), crossZ = az + (dz * exit);
+                float crossY = TryHeightOn(current, crossX, crossZ, out float height) ? height : markY;
+                surface += Rise(markX, markZ, markY, crossX, crossZ, crossY);
+                markX = crossX;
+                markZ = crossZ;
+                markY = crossY;
 
                 // `exit` is only ever set together with the pair, so past here a crossing was found.
                 //
@@ -1064,7 +1109,13 @@ public sealed class BakedNavGraph
         }
 
         public bool HasClearLine(int start, Vector3 from, Vector3 to, ref int budget) =>
-            TryLine(start, from, to, ref budget, out _);
+            TryLine(start, from, to, ref budget, out _, out _);
+
+        private static float Rise(float ax, float az, float ay, float bx, float bz, float by)
+        {
+            float dx = bx - ax, dy = by - ay, dz = bz - az;
+            return MathF.Sqrt((dx * dx) + (dy * dy) + (dz * dz));
+        }
 
         // Which side of the directed edge a vertex falls on, by sign. Used to tell the face across an
         // edge from another face sharing it on this side.
@@ -1093,18 +1144,23 @@ public sealed class BakedNavGraph
 
         // Is the point ON this face, rather than a floor above or below it? Barycentric in XZ, which is
         // the same interpolation LevelNavmesh.SnapXZ uses to decide the very same question.
-        private bool CarriesPoint(int triangle, Vector3 point)
+        private bool CarriesPoint(int triangle, Vector3 point) =>
+            TryHeightOn(triangle, point.X, point.Z, out float height)
+            && MathF.Abs(height - point.Y) <= StoreyTolerance;
+
+        private bool TryHeightOn(int triangle, float x, float z, out float height)
         {
+            height = 0f;
             Vector3 a = Source.Vertices[Source.Triangles[triangle * 3]];
             Vector3 b = Source.Vertices[Source.Triangles[(triangle * 3) + 1]];
             Vector3 c = Source.Vertices[Source.Triangles[(triangle * 3) + 2]];
             float area2 = ((b.X - a.X) * (c.Z - a.Z)) - ((c.X - a.X) * (b.Z - a.Z));
             if (MathF.Abs(area2) < 1e-6f)
                 return false; // a zero-area face carries nothing; it would divide by its own degeneracy
-            float w1 = (((b.Z - c.Z) * (point.X - c.X)) + ((c.X - b.X) * (point.Z - c.Z))) / area2;
-            float w2 = (((c.Z - a.Z) * (point.X - c.X)) + ((a.X - c.X) * (point.Z - c.Z))) / area2;
-            float height = (w1 * a.Y) + (w2 * b.Y) + ((1f - w1 - w2) * c.Y);
-            return MathF.Abs(height - point.Y) <= StoreyTolerance;
+            float w1 = (((b.Z - c.Z) * (x - c.X)) + ((c.X - b.X) * (z - c.Z))) / area2;
+            float w2 = (((c.Z - a.Z) * (x - c.X)) + ((a.X - c.X) * (z - c.Z))) / area2;
+            height = (w1 * a.Y) + (w2 * b.Y) + ((1f - w1 - w2) * c.Y);
+            return true;
         }
 
         // Is a straight segment far enough from every wall around this face? A wall does not have to
