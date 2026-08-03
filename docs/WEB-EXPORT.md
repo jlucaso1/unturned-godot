@@ -211,6 +211,14 @@ node web/test/differential.mjs   # the .dat port against core/Dat/DatParser.cs
 node web/test/casing.mjs         # the casing tables against the BCL
 ```
 
+`web/package.json` exists only to say `"type": "module"`. It declares no dependencies and adds no build
+step — the browser never reads it. Node does: without it, the `.js` files under `web/lib/` are classified
+as CommonJS and the two checks above fail at their `import` before running anything. Node 22 hides that
+behind module-syntax detection, so the failure only shows on a runtime without it
+(`node --no-experimental-detect-module web/test/casing.mjs`). Renaming the library to `.mjs` would work
+for Node and break nothing at runtime, but the files are also loaded directly by the browser and reading
+`.js` there is what anyone would expect.
+
 The suite seeds Chromium's origin-private filesystem from real game content and runs the shipping modules
 against it. That matters: `navigator.storage.getDirectory()` returns a real `FileSystemDirectoryHandle` —
 the same type `showDirectoryPicker()` returns — so `HandleFs` is exercised on the production path, not a

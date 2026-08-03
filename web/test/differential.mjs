@@ -166,7 +166,10 @@ File.WriteAllText(args[0], JsonSerializer.Serialize(outcomes));
     if (failures.length > 0) {
         console.error(failures.slice(0, 10).join("\n\n"));
         console.error(`\n${failures.length} of ${checked} comparisons disagree.`);
-        process.exit(1);
+        // exitCode rather than exit(): process.exit() tears the process down without unwinding, so
+        // the finally that removes the scratch project would not run on the one path it exists for.
+        process.exitCode = 1;
+        return;
     }
     console.log(`dat differential: ${checked} comparisons over ${cases.length} documents agree.`);
 }

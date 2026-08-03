@@ -143,26 +143,26 @@ async function onReconnect() {
 }
 
 async function onForget() {
-    // Retire any scan still in flight, so it cannot repaint the listing this is about to clear — and
-    // keep the token, because the delete is itself an await the player can outrun by picking a folder.
-    const previous = generation;
-    const token = claim();
+    // Nothing is retired before the delete, only observed. Claiming first and rolling back on failure
+    // does not actually restore anything: an artwork load already awaiting objectUrl() or decode() sees
+    // the retired generation, returns, and no later rollback brings it back — the card stays blank under
+    // a listing this path deliberately keeps. So the generation moves only once the listing is really
+    // about to be cleared, and the delete's own await is covered by watching for someone else's claim.
+    const before = generation;
     try {
         await forgetHandle();
     } catch (error) {
-        if (!isCurrent(token)) return;
-        // Nothing was cleared, so put the generation back. The cards are still on screen and every
-        // lazy artwork task queued against them carries the old token — leaving them retired would
-        // mean scrolling the listing produced permanently blank artwork while the status says the
-        // folder is still stored and the maps are still usable. Restoring is exact rather than
-        // approximate: isCurrent(token) just proved nothing else claimed in between.
-        generation = previous;
         // "Forget" is the privacy-facing control on this page: reporting success while the handle is
         // still in IndexedDB, and still restorable on the next load, is the one lie it must not tell.
         setStatus(`Could not forget the saved folder: ${error?.message ?? error}. It is still stored.`);
         return;
     }
-    if (!isCurrent(token)) return;
+    // The delete happened either way. If the player outran it — picked a folder, started or finished a
+    // scan — that newer action owns the screen now, and clearing its listing or overwriting its status
+    // would be the stale write the generation exists to prevent.
+    if (generation !== before) return;
+
+    claim(); // now retire anything in flight: the listing is going away.
     ui.forget.hidden = true;
     ui.reconnect.hidden = true;
     ui.summary.hidden = true;

@@ -100,7 +100,10 @@ function compare(project) {
         console.error(failures.slice(0, 20).join("\n"));
         console.error(`\n${failures.length} of ${checked} code points disagree.`);
         console.error("Regenerate the tables in web/lib/dotnet.js -- a Unicode version has moved.");
-        process.exit(1);
+        // exitCode rather than exit(): process.exit() tears the process down without unwinding, so
+        // the finally that removes the scratch project would not run on the one path it exists for.
+        process.exitCode = 1;
+        return;
     }
     console.log(`dotnet casing: ${checked} code points agree.`);
 }
