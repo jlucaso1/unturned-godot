@@ -44,9 +44,16 @@ public class UnityBundleRealTests
         // the object table is what a parser change would move instead. Last updated 2026-08-03, when the
         // masterbundle went from 116,304,494 to 116,312,980 bytes and gained one GameObject (24,341 ->
         // 24,342, and 103,549 -> 103,554 objects in total) with the mesh side unchanged.
-        Assert.Equal(4560, counts[43]);   // Mesh
-        Assert.Equal(24342, counts[1]);   // GameObject
-        Assert.Equal(9381, counts[33]);   // MeshFilter
+        //
+        // Asserted as ONE tuple rather than three statements, so a mismatch reports every class at once.
+        // Separately, the first failing Assert.Equal ended the test, and an update that moved more than
+        // one count could only be discovered a round at a time — which is how this drift was met: CI
+        // reported GameObject while Mesh and MeshFilter were never read, and establishing that those two
+        // still held, the signature that says content rather than parser, took another run to learn.
+        var actual = (Mesh: counts.GetValueOrDefault(43),
+            GameObject: counts.GetValueOrDefault(1),
+            MeshFilter: counts.GetValueOrDefault(33));
+        Assert.Equal((Mesh: 4560, GameObject: 24342, MeshFilter: 9381), actual);
     }
 
     [RealDataFact(RequiresMasterBundle = true)]
