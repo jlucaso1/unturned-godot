@@ -17,6 +17,16 @@ public sealed class BakedNavGraph
     private const uint CacheMagic = 0x43424755; // UGBC
     private const int CacheVersion = 1;
     private const float EndpointSnapMargin = 64f; // Bounds.dat expands authored navigation by this distance
+
+    // The body the routes are for. A route is a line for a point, but a zombie is a capsule, and the
+    // funnel string-pulls to portal ENDPOINTS — which are mesh vertices, and at a doorway that vertex is
+    // the jamb. Aiming a 0.4 m capsule at a point on the wall is what left them grinding there.
+    //
+    // It lives here, in Data, and ZombieInstance.Radius reads it, rather than the two carrying their own
+    // 0.4f: the graph is built once for the level and cannot be per-speciality, so if the capsule is ever
+    // resized the routes have to move with it or they go back to aiming at walls. Megas are wider (0.75)
+    // and are not modelled — a mega does not fit through a house door in the original either.
+    public const float AgentRadius = 0.4f;
     private readonly List<FlagGraph> _flags;
 
     private BakedNavGraph(List<FlagGraph> flags) => _flags = flags;
@@ -577,9 +587,21 @@ public sealed class BakedNavGraph
                     continue;
                 _enabled[triangle] = false;
                 changed++;
+
+                // Only the edges this face used to close can become walls, so mark those and nothing
+                // else. A full rescan here would be O(triangles) on the reconciliation frame, which is
+                // budgeted to 0.25 ms — measured at about 41 ms for a 266k-triangle flag, a visible
+                // hitch every time a large flag finishes. Faces are only ever disabled, never
+                // re-enabled, so borders only grow and this stays exact rather than merely cheap.
+                for (int at = _edgeStart[triangle]; at < _edgeStart[triangle + 1]; at++)
+                {
+                    Connection c = _edges[at];
+                    if (!_enabled[c.To])
+                        continue;
+                    _borderVertex[c.VertexA] = true;
+                    _borderVertex[c.VertexB] = true;
+                }
             }
-            if (changed > 0)
-                RecomputeBorderVertices(); // disabling a face turns its open edges into walls
             return changed;
         }
 
@@ -756,11 +778,6 @@ public sealed class BakedNavGraph
         // floor look like a slalom; the movement forward-look then turns that zigzag into a wide arc.
         // Funnel/string-pulling emits only corners forced by the corridor and is deterministic because
         // portal order and every tie follow the source triangle/index order.
-        // The body the routes are for. A route is a line for a point, but a zombie is a capsule, and the
-        // funnel string-pulls to portal ENDPOINTS — which are mesh vertices, and at a doorway that vertex
-        // is the jamb. Aiming a 0.4 m capsule at a point on the wall is what left them grinding there.
-        public const float AgentRadius = 0.4f;
-
         // Skin on top of the radius. Insetting by exactly the radius aims the body at the precise limit
         // of where it fits, leaving nothing for the turn: these bodies steer at 720 deg/s toward a
         // look-ahead point, so they arrive at an angle and clip the jamb they were aimed to graze. A
@@ -789,7 +806,12 @@ public sealed class BakedNavGraph
             if (length <= 1e-4f)
                 return new Portal(left, right);
 
-            float inset = MathF.Min(AgentRadius + Clearance, (length * 0.5f) - 1e-3f);
+            // Half the portal only when BOTH ends move and could cross each other. A single moving end
+            // has the whole portal to travel, and halving it there under-insets: a 0.6 m portal with one
+            // wall end has room for the full 0.45 and was being given 0.299, leaving the capsule on the
+            // vertex it was supposed to clear.
+            float budget = (insetLeft && insetRight ? length * 0.5f : length) - 1e-3f;
+            float inset = MathF.Min(AgentRadius + Clearance, budget);
             if (inset <= 0f)
                 return new Portal(left, right);
 

@@ -20,15 +20,16 @@ public class PathQualityTests
     private const float WallMinX = 10f;
     private const float WallMaxX = 11f;
 
-    // A perfectly flat, unobstructed field: quadsPerSide squared quads, two triangles each.
-    private static NavFlag FlatField(int quadsPerSide)
+    // A perfectly flat, unobstructed field: quadsPerSide squared quads, two triangles each. `cell` is
+    // the quad size, so a fixture can make an opening narrower than a whole metre.
+    private static NavFlag FlatField(int quadsPerSide, float cell = 1f)
     {
         var vertices = new List<Vector3>();
         var triangles = new List<int>();
         int side = quadsPerSide + 1;
         for (int x = 0; x < side; x++)
             for (int z = 0; z < side; z++)
-                vertices.Add(new Vector3(x, 0f, z));
+                vertices.Add(new Vector3(x * cell, 0f, z * cell));
         for (int x = 0; x < quadsPerSide; x++)
             for (int z = 0; z < quadsPerSide; z++)
             {
@@ -37,8 +38,8 @@ public class PathQualityTests
             }
         return new NavFlag
         {
-            Center = new Vector3(quadsPerSide / 2f, 0, quadsPerSide / 2f),
-            Size = new Vector3(quadsPerSide + 2f, 100f, quadsPerSide + 2f),
+            Center = new Vector3(quadsPerSide * cell / 2f, 0, quadsPerSide * cell / 2f),
+            Size = new Vector3((quadsPerSide * cell) + 2f, 100f, (quadsPerSide * cell) + 2f),
             Vertices = vertices.ToArray(),
             Triangles = triangles.ToArray(),
         };
@@ -222,18 +223,63 @@ public class PathQualityTests
             + $"({zombie.Position.X:0.00}, {zombie.Position.Z:0.00})");
     }
 
-    // The inset must not invent a route where a body does not fit, nor refuse one where it does. A
-    // portal narrower than the body degrades to its midpoint rather than inverting into a backwards
-    // portal, and whether the capsule physically passes stays the collision resolver's call.
+    // The clamp path, which the previous version of this test did not reach: Inset only clamps when a
+    // portal is narrower than 2 * (AgentRadius + Clearance) = 0.9 m, and a 1 m door never gets there. A
+    // half-metre grid does, so this is the branch that would invert a portal if it regressed.
+    //
+    // The query is deliberately OFF the door's midline at both ends, so the assertion depends on where
+    // the portal actually put the route rather than on the straight line already lying down the middle.
     [Fact]
-    public void ANarrowGapStillRoutes_AimedDownItsMiddle()
+    public void AGapNarrowerThanTheBody_CollapsesToItsMiddleInsteadOfInverting()
     {
-        (NavFlag _, BakedNavGraph graph) = Doorway();
-        var path = new List<Vector3>();
-        Assert.True(graph.TryPath(new Vector3(4, 0, 7.5f), new Vector3(16, 0, 7.5f), path));
+        const float Cell = 0.5f;
+        const int Quads = 40;
+        const int WallColumn = 20;   // wall spans x in [10.0, 10.5]
+        const int DoorRow = 14;      // opening spans z in [7.0, 7.5] — 0.5 m, under the 0.9 m clamp
 
+        NavFlag flag = FlatField(Quads, Cell);
+        var blocked = new HashSet<int>();
+        for (int z = 0; z < Quads; z++)
+        {
+            if (z == DoorRow)
+                continue;
+            int quad = (WallColumn * Quads) + z;
+            blocked.Add(quad * 2);
+            blocked.Add((quad * 2) + 1);
+        }
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { flag },
+            new Dictionary<NavFlag, HashSet<int>> { [flag] = blocked });
+
+        float doorMinZ = DoorRow * Cell, doorMaxZ = (DoorRow + 1) * Cell;
+        float wallMinX = WallColumn * Cell, wallMaxX = (WallColumn + 1) * Cell;
+
+        var path = new List<Vector3>();
+        Assert.True(graph.TryPath(new Vector3(4, 0, 4), new Vector3(16, 0, 11), path),
+            "a gap narrower than the body must still be routed through, not refused");
+
+        // Nothing may land outside the opening, and nothing may land outside the portal it came from:
+        // an inverted portal shows up as a waypoint beyond a jamb.
         foreach (Vector3 point in path)
-            if (point.X >= WallMinX && point.X <= WallMaxX)
-                Assert.InRange(point.Z, DoorMinZ, DoorMaxZ);
+            if (point.X >= wallMinX && point.X <= wallMaxX)
+                Assert.InRange(point.Z, doorMinZ, doorMaxZ);
+
+        // And the clamp really did engage. Interpolating where the route crosses the middle of the wall
+        // band rather than looking for a waypoint inside it: the band is 0.5 m wide and the funnel has no
+        // reason to place a vertex inside it.
+        float mid = (wallMinX + wallMaxX) * 0.5f;
+        float? crossingZ = null;
+        for (int i = 1; i < path.Count && crossingZ == null; i++)
+        {
+            Vector3 a = path[i - 1], b = path[i];
+            if ((a.X - mid) * (b.X - mid) > 0f)
+                continue;
+            float t = MathF.Abs(b.X - a.X) < 1e-6f ? 0f : (mid - a.X) / (b.X - a.X);
+            crossingZ = a.Z + ((b.Z - a.Z) * t);
+        }
+
+        Assert.True(crossingZ.HasValue, "the route never crossed the wall");
+        // With both ends inset by 0.45 the 0.5 m portal would have inverted; clamped, it collapses to the
+        // opening's middle, which is the only place a body can aim.
+        Assert.Equal((doorMinZ + doorMaxZ) * 0.5f, crossingZ!.Value, 2);
     }
 }
