@@ -58,6 +58,8 @@ public static class Program
             NavigationCacheSuite(map);
         if (wanted.Contains("nav"))
             NavigationDiagnostic(map);
+        if (wanted.Contains("ress"))
+            ResSDiagnostic(unturned);
         return 0;
     }
 
@@ -685,6 +687,335 @@ public static class Program
         Console.WriteLine($"  flag {index}: triangles={count} exact-edge components={sizes.Count} "
             + $"largest={largest}");
     }
+
+    // Correctness/shape diagnostic rather than a timed suite. The cold load's texture pass is one
+    // forward LZMA pass over a ~1.18 GB .resS, and it stops at the END of the last range anyone asked
+    // for — so a handful of wanted textures sitting near the tail cost the whole file. This prints where
+    // the wanted ranges actually sit, and what the pass would read if the last k of them were deferred.
+    // If the ranges are spread evenly there is nothing to win by deferring and the idea dies here.
+    //
+    // Only metadata is decoded: the ranges come from the SerializedFile, so the .resS itself is never
+    // read except for the short sample that measures this machine's decode rate.
+    // RESS_BUNDLE overrides the bundle; RESS_TAG the cache tag when it is not derived from the file name.
+    private static void ResSDiagnostic(string? unturned)
+    {
+        string? bundlePath = Environment.GetEnvironmentVariable("RESS_BUNDLE")
+            ?? (unturned == null ? null : UnturnedInstall.FindMasterBundle(unturned));
+        if (Skip("ress", bundlePath != null && File.Exists(bundlePath) ? bundlePath : null, out string path))
+            return;
+
+        using MasterBundleStream? stream = MasterBundleStream.OpenFile(path);
+        if (stream == null)
+        {
+            Console.WriteLine($"== ress: SKIP ({Path.GetFileName(path)} is not the single-LZMA-block "
+                + "shape the streaming reader handles) ==\n");
+            return;
+        }
+
+        string tag = Environment.GetEnvironmentVariable("RESS_TAG")
+            ?? TextureKey.TagFor(Path.GetFileName(path));
+        Console.WriteLine($"== ress: forward-pass read extent over {Path.GetFileName(path)} ==");
+        Console.WriteLine($"  bundle: {path}");
+        Console.WriteLine($"  {Mb(new FileInfo(path).Length)} on disk, {Mb(stream.TotalSize)} decompressed, "
+            + $"tag '{tag}'");
+
+        var ordered = new List<MasterBundleStream.Node>(stream.Nodes);
+        ordered.Sort((a, b) => a.Offset.CompareTo(b.Offset));
+
+        // Every streamed Texture2D the bundle declares, by the stream file that holds its pixels. Reading
+        // past the first stream node would cost the very ~1.18 GB decode this diagnostic exists to avoid,
+        // so serialized files sitting behind one are counted and skipped rather than scanned.
+        var declared = new Dictionary<string, List<StreamRange>>(StringComparer.Ordinal);
+        int scanned = 0, skippedSerialized = 0;
+        bool pastFirstStream = false;
+        foreach (MasterBundleStream.Node node in ordered)
+        {
+            if (IsResSNode(node.Path))
+            {
+                pastFirstStream = true;
+                continue;
+            }
+
+            if (pastFirstStream)
+            {
+                skippedSerialized++;
+                continue;
+            }
+
+            string fileTag = scanned == 0 ? tag : $"{tag}-{scanned + 1}";
+            scanned++;
+            var timer = Stopwatch.StartNew();
+            SerializedFile file = SerializedFile.Read(stream.Read((int)node.Size));
+            timer.Stop();
+            Console.WriteLine($"  serialized: {LastSegment(node.Path)} {Mb(node.Size)} "
+                + $"({timer.Elapsed.TotalSeconds:0.00} s to decode+parse)");
+            CollectStreamRanges(file, fileTag, declared);
+        }
+
+        if (skippedSerialized > 0)
+        {
+            Console.WriteLine($"  note: {skippedSerialized} serialized file(s) sit behind a stream node "
+                + "and were not scanned — their textures are missing from the numbers below");
+        }
+
+        // What the real cold load asks for is the subset that a previous run actually extracted: one
+        // .tex per wanted texture, named <tag>_<hex path id>. Without that cache every streamed texture
+        // in the bundle is the honest stand-in — a superset, which can only overstate the read extent.
+        HashSet<string>? cachedKeys = ReadTextureCacheKeys();
+        string wantSource = cachedKeys == null
+            ? "every streamed Texture2D in the bundle (no texture cache on this machine — SUPERSET)"
+            : $"texture cache ({cachedKeys.Count:N0} .tex entries)";
+        Console.WriteLine($"  want set: {wantSource}");
+
+        foreach (MasterBundleStream.Node node in ordered)
+        {
+            if (!IsResSNode(node.Path))
+                continue;
+
+            string name = LastSegment(node.Path);
+            declared.TryGetValue(name, out List<StreamRange>? all);
+            var wants = new List<StreamRange>();
+            foreach (StreamRange range in all ?? new List<StreamRange>())
+                if (range.Offset >= 0 && range.Size > 0 && range.Offset + range.Size <= node.Size
+                    && (cachedKeys == null || cachedKeys.Contains(range.Key)))
+                {
+                    wants.Add(range);
+                }
+
+            ReportNode(name, node.Size, wants);
+        }
+
+        MeasureDecodeRate(stream, ordered);
+        Console.WriteLine();
+    }
+
+    // One wanted texture's pixels inside a stream file: where they sit, the cache key that names them, and
+    // the asset folder it belongs to (so a subset drawn from one folder can be told from the whole bundle).
+    private readonly record struct StreamRange(string Key, string Group, long Offset, int Size)
+    {
+        public long End => Offset + Size;
+    }
+
+    private static void CollectStreamRanges(SerializedFile file, string fileTag,
+        Dictionary<string, List<StreamRange>> declared)
+    {
+        const int texture2DClassId = 28;
+        Dictionary<long, string> groupById = ReadContainerGroups(file);
+        foreach (SerializedObject obj in file.Objects)
+        {
+            if (obj.ClassId != texture2DClassId)
+                continue;
+
+            UnityTexture texture = UnityTexture.Read(TypeTreeReader.Read(obj.TypeTree, file.ReaderFor(obj)));
+            if (texture.StreamPath.Length == 0 || texture.StreamSize <= 0)
+                continue; // pixels stored inline: the pass never waits on the stream for these
+
+            string streamFile = texture.StreamFileName;
+            if (!declared.TryGetValue(streamFile, out List<StreamRange>? list))
+                declared[streamFile] = list = new List<StreamRange>();
+            list.Add(new StreamRange(TextureKey.For(fileTag, obj.PathId),
+                groupById.TryGetValue(obj.PathId, out string? group) ? group : "(uncontained)",
+                texture.StreamOffset, texture.StreamSize));
+        }
+    }
+
+    // The asset folder each object sits in, from the AssetBundle object that names every asset by its
+    // container path ("assets/coremasterbundle/objects/..." -> "objects"). A real load wants textures
+    // reachable from the map's placed prefabs, so the per-folder spans below bound what ANY such subset
+    // can look like — a folder spread over the whole node cannot have a deferrable tail.
+    private static Dictionary<long, string> ReadContainerGroups(SerializedFile file)
+    {
+        const int assetBundleClassId = 142;
+        var groups = new Dictionary<long, string>();
+        foreach (SerializedObject obj in file.Objects)
+        {
+            if (obj.ClassId != assetBundleClassId)
+                continue;
+
+            Dictionary<string, object> bundle = TypeTreeReader.Read(obj.TypeTree, file.ReaderFor(obj));
+            foreach (object entry in (List<object>)bundle["m_Container"])
+            {
+                var pair = (Dictionary<string, object>)entry;
+                var info = (Dictionary<string, object>)pair["second"];
+                long assetId = Convert.ToInt64(((Dictionary<string, object>)info["asset"])["m_PathID"]);
+                // "assets/<bundle name>/<folder>/..." — the folder is the third segment.
+                string[] segments = ((string)pair["first"]).Split('/');
+                groups.TryAdd(assetId, segments.Length >= 3 ? segments[2] : "(root)");
+            }
+        }
+        return groups;
+    }
+
+    // The whole point of the diagnostic: read extent is set by the single furthest range, so the curve
+    // below says how much of the file the tail alone is responsible for.
+    private static void ReportNode(string name, long size, List<StreamRange> wants)
+    {
+        Console.WriteLine($"\n  {name} {Mb(size)}");
+        if (wants.Count == 0)
+        {
+            Console.WriteLine("    nothing wanted here — the pass never touches this node");
+            return;
+        }
+
+        wants.Sort((a, b) => a.End.CompareTo(b.End));
+        long pixels = 0;
+        foreach (StreamRange want in wants)
+            pixels += want.Size;
+        long extent = wants[^1].End;
+
+        Console.WriteLine($"    wanted:      {wants.Count:N0} ranges, {Mb(pixels)} of pixels "
+            + $"({Percent(pixels, size)} of the node)");
+        Console.WriteLine($"    read extent: {Mb(extent)} ({Percent(extent, size)}) — "
+            + $"{Mb(extent - pixels)} decoded for nothing");
+
+        // Where the wanted ranges sit, in tenths of the node. An even spread here means no tail to defer.
+        var perDecile = new int[10];
+        foreach (StreamRange want in wants)
+            perDecile[Math.Clamp((int)(want.Offset * 10 / Math.Max(size, 1)), 0, 9)]++;
+        var histogram = new List<string>(10);
+        for (int i = 0; i < 10; i++)
+            histogram.Add(perDecile[i].ToString("N0"));
+        Console.WriteLine($"    ranges per tenth of the node: {string.Join(" ", histogram)}");
+
+        Console.WriteLine("    deferring the last k ranges (by end offset):");
+        Console.WriteLine($"      {"k",5}  {"read extent",13}  {"saved",11}  {"of node",8}  {"deferred px",12}");
+        long deferredPixels = 0;
+        for (int k = 1; k <= wants.Count; k++)
+        {
+            deferredPixels += wants[^k].Size;
+            long remaining = k == wants.Count ? 0 : wants[^(k + 1)].End;
+            if (k <= 4 || k == 8 || k == 16 || k == 32 || k == 64 || k == wants.Count)
+            {
+                Console.WriteLine($"      {k,5}  {Mb(remaining),13}  {Mb(extent - remaining),11}  "
+                    + $"{Percent(extent - remaining, size),8}  {Mb(deferredPixels),12}");
+            }
+        }
+
+        // The decision numbers: how few ranges have to move for the pass to read materially less.
+        foreach (int target in new[] { 10, 25, 50 })
+        {
+            int k = 0;
+            while (k < wants.Count)
+            {
+                long remaining = k + 1 == wants.Count ? 0 : wants[^(k + 2)].End;
+                k++;
+                if ((extent - remaining) * 100 >= (long)target * size)
+                    break;
+            }
+            Console.WriteLine($"    reading {target}% less of the node needs the last {k:N0} range(s) "
+                + $"deferred ({Percent(k, wants.Count)} of what is wanted)");
+        }
+
+        // A deferral is only worth anything where the wanted ranges thin out. The biggest gap in the last
+        // quarter is the best single cut available anywhere near the tail.
+        long quarter = extent - (size / 4);
+        long widest = 0;
+        int widestAt = 0;
+        for (int i = wants.Count - 1; i > 0; i--)
+        {
+            if (wants[i].End < quarter)
+                break;
+            long gap = wants[i].Offset - wants[i - 1].End;
+            if (gap > widest)
+            {
+                widest = gap;
+                widestAt = wants.Count - i;
+            }
+        }
+        Console.WriteLine($"    widest gap in the last quarter: {Bytes(widest)} — cutting there defers "
+            + $"{widestAt:N0} range(s)");
+
+        ReportGroups(wants, size, extent);
+    }
+
+    // What the pass would read if only ONE asset folder were wanted. The real want set is a subset of the
+    // bundle drawn from the folders a map places, so a folder whose own extent is already the whole node
+    // is proof that no realistic subset of it has a short tail to trim.
+    private static void ReportGroups(List<StreamRange> wants, long size, long extent)
+    {
+        var byGroup = new Dictionary<string, (int Count, long Pixels, long First, long Extent)>(
+            StringComparer.Ordinal);
+        foreach (StreamRange want in wants)
+        {
+            byGroup.TryGetValue(want.Group, out (int Count, long Pixels, long First, long Extent) g);
+            byGroup[want.Group] = (g.Count + 1, g.Pixels + want.Size,
+                g.Count == 0 ? want.Offset : Math.Min(g.First, want.Offset), Math.Max(g.Extent, want.End));
+        }
+
+        var groups = new List<KeyValuePair<string, (int Count, long Pixels, long First, long Extent)>>(byGroup);
+        groups.Sort((a, b) => b.Value.Count.CompareTo(a.Value.Count));
+        Console.WriteLine($"    by asset folder ({groups.Count} of them), {"count",8}  {"pixels",10}  "
+            + $"{"first",10}  {"extent",10}  {"of node",8}");
+        for (int i = 0; i < groups.Count && i < 12; i++)
+        {
+            (string name, (int count, long pixels, long first, long groupExtent)) = groups[i];
+            Console.WriteLine($"      {name,-28} {count,8:N0}  {Mb(pixels),10}  {Mb(first),10}  "
+                + $"{Mb(groupExtent),10}  {Percent(groupExtent, size),8}");
+        }
+        if (groups.Count > 12)
+            Console.WriteLine($"      ... {groups.Count - 12} more");
+        Console.WriteLine($"    (the full want set's extent is {Mb(extent)}; a folder's own extent is what "
+            + "the pass would read if only that folder were wanted)");
+    }
+
+    // LZMA decode rate on this machine, from the head of the first stream node — what turns the megabytes
+    // above into the seconds a deferral would actually save. Consumes the sample, so it runs last.
+    private static void MeasureDecodeRate(MasterBundleStream stream, List<MasterBundleStream.Node> ordered)
+    {
+        long remaining = stream.TotalSize - stream.Cursor;
+        int sample = (int)Math.Min(64L << 20, remaining);
+        if (sample <= 0)
+            return;
+
+        var buffer = new byte[1 << 20];
+        var timer = Stopwatch.StartNew();
+        int read = 0;
+        while (read < sample)
+        {
+            int n = stream.Read(buffer, 0, Math.Min(buffer.Length, sample - read));
+            if (n <= 0)
+                break;
+            read += n;
+        }
+        timer.Stop();
+        double rate = read / 1048576.0 / timer.Elapsed.TotalSeconds;
+        Console.WriteLine($"\n  decode rate: {rate:0.0} MB/s over a {Mb(read)} sample "
+            + $"({timer.Elapsed.TotalSeconds:0.00} s) — every 100 MB not read is ~{100 / rate:0.00} s");
+    }
+
+    // The .tex files a previous run left behind, keyed exactly as TextureKey names them.
+    private static HashSet<string>? ReadTextureCacheKeys()
+    {
+        string? cache = FindGodotUserDir() is { } user ? Path.Combine(user, "texture_cache") : null;
+        if (cache == null || !Directory.Exists(cache))
+            return null;
+
+        var keys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string file in Directory.GetFiles(cache, "*.tex"))
+            keys.Add(Path.GetFileNameWithoutExtension(file));
+        return keys.Count > 0 ? keys : null;
+    }
+
+    private static bool IsResSNode(string path) =>
+        path.EndsWith(".resS", StringComparison.Ordinal)
+        || path.EndsWith(".resource", StringComparison.Ordinal);
+
+    private static string LastSegment(string path)
+    {
+        int slash = path.LastIndexOf('/');
+        return slash >= 0 ? path[(slash + 1)..] : path;
+    }
+
+    private static string Mb(long bytes) => $"{bytes / 1048576.0:N1} MB";
+
+    // Gaps between wanted ranges are the one figure that can land far below a megabyte, and rounding
+    // those to "0.0 MB" would hide the difference between a thin tail and no tail at all.
+    private static string Bytes(long bytes) => bytes < 1048576
+        ? $"{bytes:N0} B"
+        : Mb(bytes);
+
+    private static string Percent(long part, long whole) =>
+        whole <= 0 ? "n/a" : $"{part * 100.0 / whole:0.0}%";
 
     private static Vector3 ParsePoint(string spec)
     {
