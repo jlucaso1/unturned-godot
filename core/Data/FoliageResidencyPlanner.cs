@@ -68,6 +68,50 @@ public static class FoliageResidencyPlanner
         return new FoliageResidencyPlan(Indices(visible), Indices(prefetch), retire, truncated, deferred);
     }
 
+    // The order and grouping of a warm pass: everything a plan asked for, visible set first, cut into
+    // batches whose decoded transforms fit the renderer's own steady-state byte cap. The warm pass decodes
+    // a whole batch off the main thread before uploading it, so without this bound a map whose spawn ring
+    // is larger than the cap would hold every chunk's transforms at once — the exact peak the streaming
+    // renderer exists to avoid. A chunk larger than the whole cap still gets its own batch rather than
+    // being dropped: refusing to warm it would only hand it back to the synchronous path this replaces.
+    public static IReadOnlyList<int[]> WarmBatches(FoliageResidencyPlan plan, Func<int, long> decodedBytes,
+        long byteLimit)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(decodedBytes);
+        if (byteLimit <= 0)
+            throw new ArgumentOutOfRangeException(nameof(byteLimit));
+
+        var batches = new List<int[]>();
+        var current = new List<int>();
+        long bytes = 0;
+        foreach (int index in Ordered(plan))
+        {
+            long size = Math.Max(0, decodedBytes(index));
+            if (current.Count > 0 && bytes + size > byteLimit)
+            {
+                batches.Add(current.ToArray());
+                current.Clear();
+                bytes = 0;
+            }
+            current.Add(index);
+            bytes += size;
+        }
+        if (current.Count > 0)
+            batches.Add(current.ToArray());
+        return batches;
+    }
+
+    // Visible before prefetch: both lists are already near-first, and the visible set is the one whose
+    // absence costs a synchronous decode on the frame the player appears.
+    private static IEnumerable<int> Ordered(FoliageResidencyPlan plan)
+    {
+        foreach (int index in plan.VisibleMissing)
+            yield return index;
+        foreach (int index in plan.Prefetch)
+            yield return index;
+    }
+
     private static int CompareDistance((int Index, float DistanceSquared) a,
         (int Index, float DistanceSquared) b)
     {

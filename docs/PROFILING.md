@@ -237,8 +237,21 @@ a path (`UG_OBJECT_CHUNK_METRES`, `SCREENSHOT_PATH`, `TIME_OF_DAY`, …) are una
   the visible radius into a synchronous main-thread decode, so size the bound with these two before
   blaming frame-time tails on upload bursts. `emergencyVisible.totalMs` and `emergencyVisible.maxMs`
   price that synchronous work: `emergencyVisibleLoads` says how many chunks took it, these say what the
-  main thread paid for them. Both cover the whole session, including the deterministic burst at spawn,
-  so compare them across runs of the same map rather than reading one number as a budget.
+  main thread paid for them. Both cover the whole session, so compare them across runs of the same map
+  rather than reading one number as a budget.
+- `UG_FOLIAGE_PREWARM=0` restores the unwarmed spawn, where the first plan runs on the frame the player
+  appears and every chunk already inside its visibility radius is decoded and uploaded synchronously
+  right then. By default the streamer hands the renderer that plan while the loading screen still owns
+  the frame: the decodes go to a worker a batch at a time (bounded by `UG_FOLIAGE_DECODED_MIB`, so a warm
+  pass never holds more transforms than the steady loop would), and the uploads are paced against the
+  load's own 8 ms frame budget. `prewarmedChunks` is what it made resident and `prewarmMs` what it spent
+  doing so; read them against `emergencyVisibleLoads`, which the pass is there to keep at zero through
+  the spawn. Nothing is resident that the first plan would not have asked for a frame later anyway, so
+  this trades load time for the burst and not for a larger resident set. The flag is the A/B control:
+  measured on PEI (Tier 3, warm cache, GPU-less container), 61 emergency loads / 18–26 ms total /
+  3.7–4.0 ms in the worst frame become 0, for 55–80 ms of load spent behind the loading screen and an
+  identical settled set of 188 chunks / 129,752 instances. Tier 2 builds its world synchronously and
+  jumps its camera between poses, so it never warms and reports `prewarmedChunks` 0.
   The residency counts are always reported, but on their own
   keys depending on whether the upload queue had drained: `residentChunks` when `runtime.foliage.settled`
   (Tier 3) or `foliage.settled` (Tier 2) is 1, and `residentChunksUnsettled` when it is 0. The split is

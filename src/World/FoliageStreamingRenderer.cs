@@ -19,6 +19,9 @@ public partial class FoliageStreamingRenderer : Node3D
 {
     private sealed record Resident(Rid Instance, MultiMesh Mesh, int Count, long Bytes);
     private sealed record DecodeResult(int Generation, int Index, FoliageChunk? Chunk, Exception? Error);
+    // A warm batch never faults its task: the pass runs unattended behind the loading screen, and a batch
+    // abandoned by a cancelled load would otherwise be an unobserved exception nobody is left to await.
+    private sealed record WarmBatch(int[] Indices, IReadOnlyList<FoliageChunk>? Chunks, Exception? Error);
 
     private FoliageResidencyIndex _index = null!;
     private readonly List<FoliageResidencyItem> _items = new();
@@ -60,6 +63,10 @@ public partial class FoliageStreamingRenderer : Node3D
     private int _maxDeferredPrefetch;
     private bool _needsRefill;
     private bool _acceptDecoded = true;
+    private readonly bool _prewarmEnabled;
+    private bool _warming;
+    private int _prewarmedChunks;
+    private long _prewarmTicks;
 
     public int ResidentChunks => _resident.Count;
     public long ResidentInstances { get; private set; }
@@ -80,6 +87,11 @@ public partial class FoliageStreamingRenderer : Node3D
     // whether the frame noticed. Sampled with the same clock in both tiers, including the spawn burst.
     public double EmergencyVisibleTotalMs => Milliseconds(_emergencyVisibleTicks);
     public double EmergencyVisibleMaxMs => Milliseconds(_maxEmergencyVisibleTicks);
+    // What the warm pass took off that path: the chunks it made resident before the first frame, and the
+    // wall-clock it spent doing so behind the loading screen. Read them together with the emergency
+    // counters — the pass is only worth its load time while it keeps those at zero through the spawn.
+    public int PrewarmedChunks => _prewarmedChunks;
+    public double PrewarmTotalMs => Milliseconds(_prewarmTicks);
 
     private static double Milliseconds(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
     // How often admission hit UG_FOLIAGE_MAX_PENDING, and the largest single-plan shortfall behind it.
@@ -144,6 +156,8 @@ public partial class FoliageStreamingRenderer : Node3D
         _maximumWorkers = EnvInt("UG_FOLIAGE_DECODE_WORKERS", 1, 1, 4);
         _uploadsPerFrame = EnvInt("UG_FOLIAGE_UPLOADS_PER_FRAME", 16, 1, 256);
         _decodedByteLimit = (long)EnvInt("UG_FOLIAGE_DECODED_MIB", 32, 4, 512) * 1024 * 1024;
+        _prewarmEnabled = EnvFlag.IsOn(System.Environment.GetEnvironmentVariable("UG_FOLIAGE_PREWARM"),
+            whenUnset: true);
     }
 
     public override void _Ready()
@@ -155,8 +169,125 @@ public partial class FoliageStreamingRenderer : Node3D
             + $"queue {_maximumPending}, decoded cap {_decodedByteLimit >> 20} MiB");
     }
 
+    // The ring the player will spawn inside, made resident while the loading screen is still up. Without
+    // it the first _Process is also the first plan: every chunk already inside its visibility radius is
+    // missing, so the correctness gate below decodes and uploads all of them synchronously, on the one
+    // frame the player appears. Measured on PEI at 61 chunks and 18-26 ms, up to ~5 ms of it in a
+    // single frame.
+    //
+    // The pass is the same policy the steady loop runs, only with its decodes taken off the main thread a
+    // batch at a time and its uploads paced against the load's own 8 ms frame budget — nothing here is
+    // resident that the first plan would not have asked for anyway.
+    //
+    // It must be called before the renderer's first _Process, which means before the caller's next frame
+    // yield: SceneTree emits process_frame ahead of the nodes' own process pass, so a single yield
+    // between attaching this node and warming it is enough for the burst to have already happened.
+    public async Task PrewarmAsync()
+    {
+        // _focused means a plan already ran: the burst has been paid and warming would only duplicate it.
+        if (!_prewarmEnabled || _focused || _items.Count == 0 || !IsInsideTree())
+            return;
+        if (GetViewport()?.GetCamera3D() is not { } camera)
+            return;
+
+        Vector3 focus = camera.GlobalPosition;
+        _warming = true;
+        long startedTicks = Stopwatch.GetTimestamp();
+        bool completed = false;
+        bool incomplete = false;
+        try
+        {
+            FoliageResidencyPlan plan = FoliageResidencyPlanner.Plan(focus, _items,
+                new HashSet<int>(_resident.Keys), _pending, _prefetchMargin, _unloadHysteresis,
+                _maximumPending);
+            IReadOnlyList<int[]> batches = FoliageResidencyPlanner.WarmBatches(plan, ExpectedDecodedBytes,
+                _decodedByteLimit);
+            CancellationToken token = _lifetimeCancellation.Token;
+            long budget = (long)(Stopwatch.Frequency * 0.008);
+            long until = Stopwatch.GetTimestamp() + budget;
+            Task<WarmBatch>? decoding = batches.Count > 0 ? DecodeBatch(batches[0], token) : null;
+            for (int batch = 0; batch < batches.Count; batch++)
+            {
+                WarmBatch decoded = await decoding!;
+                // The next batch's IO and decode run on the worker while this one uploads here, so the
+                // pass costs the load one decode, not one per batch.
+                decoding = batch + 1 < batches.Count ? DecodeBatch(batches[batch + 1], token) : null;
+                if (decoded.Error != null)
+                {
+                    // One failure, not one per chunk in the batch: the read stops at the first bad chunk
+                    // and the rest were never attempted. Either way the refill below hands them back to
+                    // the steady loop rather than leaving them missing until the player moves.
+                    _decodeFailures++;
+                    incomplete = true;
+                    AppShutdown.WarnUnlessQuitting($"[foliage-stream] prewarm batch of "
+                        + $"{decoded.Indices.Length} chunks could not be decoded: {decoded.Error.Message}");
+                }
+                for (int i = 0; decoded.Chunks != null && i < decoded.Chunks.Count; i++)
+                {
+                    if (!WarmMayContinue(token))
+                        return;
+                    Upload(decoded.Indices[i], decoded.Chunks[i]);
+                    _prewarmedChunks++;
+                    if (Stopwatch.GetTimestamp() < until)
+                        continue;
+                    await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+                    until = Stopwatch.GetTimestamp() + budget;
+                }
+            }
+
+            // A batch this pass could not decode is refilled by the steady loop, which otherwise would
+            // not replan until the camera moved 16 m — and would meet those chunks on the emergency path.
+            _needsRefill = plan.PrefetchTruncated || incomplete;
+            if (plan.PrefetchTruncated)
+                _truncatedAdmissions++;
+            _maxDeferredPrefetch = Math.Max(_maxDeferredPrefetch, plan.PrefetchDeferred);
+            // Claim the focus this pass planned for. The first _Process then replans only if the camera
+            // has actually moved since, and finds the ring resident either way.
+            _focused = true;
+            _lastFocus = focus;
+            completed = true;
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception e)
+        {
+            _decodeFailures++;
+            _needsRefill = true;
+            AppShutdown.WarnUnlessQuitting($"[foliage-stream] prewarm stopped: {e.Message}");
+        }
+        finally
+        {
+            _prewarmTicks = Stopwatch.GetTimestamp() - startedTicks;
+            _warming = false;
+        }
+
+        if (completed)
+            Log.Print($"[foliage-stream] prewarmed {_prewarmedChunks} chunks ({ResidentInstances} "
+                + $"instances, {ResidentBufferBytes >> 20} MiB) around the spawn in {PrewarmTotalMs:0} ms");
+    }
+
+    // A cancelled load frees this node between the frames the warm pass yields on, so both its liveness
+    // and its place in the tree are re-checked before every upload: past that point the RIDs would go to
+    // a scenario being torn down, and the node itself may already be gone.
+    private bool WarmMayContinue(CancellationToken token) =>
+        !token.IsCancellationRequested && GodotObject.IsInstanceValid(this) && IsInsideTree();
+
+    private Task<WarmBatch> DecodeBatch(int[] indices, CancellationToken token)
+    {
+        Task<WarmBatch> batch = Task.Run(() =>
+        {
+            try { return new WarmBatch(indices, _index.DecodeChunks(indices, token), null); }
+            catch (OperationCanceledException) { return new WarmBatch(indices, null, null); }
+            catch (Exception e) { return new WarmBatch(indices, null, e); }
+        });
+        AppShutdown.Track(batch);
+        return batch;
+    }
+
     public override void _Process(double delta)
     {
+        // The warm pass owns residency until it is done, and yields to the render loop while it runs.
+        if (_warming)
+            return;
         DrainDecoded();
         Camera3D? camera = GetViewport()?.GetCamera3D();
         if (camera != null)
@@ -251,7 +382,7 @@ public partial class FoliageStreamingRenderer : Node3D
                 _pending.Remove(index);
                 continue;
             }
-            long expectedBytes = (long)_index.Chunks[index].Count * 12 * sizeof(float);
+            long expectedBytes = ExpectedDecodedBytes(index);
             long committed = Interlocked.Read(ref _decodedBytes) + Interlocked.Read(ref _reservedDecodeBytes);
             if (committed > 0 && committed + expectedBytes > _decodedByteLimit)
                 break;
@@ -381,6 +512,9 @@ public partial class FoliageStreamingRenderer : Node3D
         _retiredChunks++;
     }
 
+    // What a chunk's transforms occupy once decoded — 12 floats per instance, the MultiMesh buffer layout.
+    private long ExpectedDecodedBytes(int index) => (long)_index.Chunks[index].Count * 12 * sizeof(float);
+
     private bool ShouldRemainLoaded(int index, Vector3 focus)
     {
         FoliageResidencyItem item = Item(index);
@@ -423,9 +557,9 @@ public partial class FoliageStreamingRenderer : Node3D
             Retire(index);
         _generationCancellation.Dispose();
         _lifetimeCancellation.Dispose();
-        Log.Print($"[foliage-stream] stopped: {_retiredChunks} retired, {_emergencyVisibleLoads} emergency "
-            + $"visible loads, {_visibleSetMisses} visible-set misses, {_staleResults} stale results, "
-            + $"{_decodeFailures} failures");
+        Log.Print($"[foliage-stream] stopped: {_prewarmedChunks} prewarmed, {_retiredChunks} retired, "
+            + $"{_emergencyVisibleLoads} emergency visible loads, {_visibleSetMisses} visible-set misses, "
+            + $"{_staleResults} stale results, {_decodeFailures} failures");
     }
 
     private static int EnvInt(string name, int fallback, int min, int max) =>

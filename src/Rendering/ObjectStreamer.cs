@@ -43,6 +43,8 @@ public partial class ObjectStreamer : Node
     private Dictionary<Guid, FoliageAsset.Owned> _foliageAssets = new();
     private LevelFoliageChunks? _foliage;
     private FoliageResidencyIndex? _foliageIndex;
+    // Held only between building the scene and warming the spawn ring; the tree owns the node itself.
+    private FoliageStreamingRenderer? _foliageRenderer;
 
     // Every GUID this map needs a mesh for: placed objects, trees and the resolved foliage types. Drives
     // both the cold-load check and which slice of the shared cache is realised.
@@ -351,6 +353,10 @@ public partial class ObjectStreamer : Node
         phase.Restart();
         BuildObjects(meshLibrary, lod1Library);
         Log.Print($"[stream] scene built: {phase.ElapsedMilliseconds} ms");
+        // Before the yield, not after it. The build above put the streaming foliage in the tree, so the
+        // very next frame is the one whose _Process runs its first plan — and takes the whole spawn ring
+        // synchronously. Warming has to claim that frame first or there is nothing left to warm.
+        await PrewarmFoliageAsync();
         await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
 
         phase.Restart();
@@ -438,9 +444,11 @@ public partial class ObjectStreamer : Node
         AddChild(root);
         double attachMs = stage.Elapsed.TotalMilliseconds;
         stage.Restart();
-        AddChild(_foliageIndex != null
+        Node3D foliageRoot = _foliageIndex != null
             ? FoliageBuilder.Build(_foliageIndex, meshLibrary)
-            : FoliageBuilder.Build(_foliage, meshLibrary));
+            : FoliageBuilder.Build(_foliage, meshLibrary);
+        AddChild(foliageRoot);
+        _foliageRenderer = foliageRoot as FoliageStreamingRenderer;
         Log.Print($"[stream] objects build {buildMs:0} ms, attach {attachMs:0} ms, "
             + $"foliage {stage.Elapsed.TotalMilliseconds:0} ms");
         _totalTextureKeys = _registry.PendingKeyCount;
@@ -455,6 +463,20 @@ public partial class ObjectStreamer : Node
         _objects = null!;
         _db = null!;
         _foliageAssets = new(); // consumed by the streaming worker / mesh extraction; drop it too
+    }
+
+    // Hands the streaming foliage the spawn ring while the loading screen still owns the frame. The
+    // camera is already where the player will stand — Main spawns the character before this node begins —
+    // so this is the first plan the renderer would have run anyway, paid for here instead of on the frame
+    // the world appears. It yields internally; awaiting it keeps the load staged rather than overlapping
+    // its uploads with the texture apply below.
+    private async Task PrewarmFoliageAsync()
+    {
+        FoliageStreamingRenderer? foliage = _foliageRenderer;
+        _foliageRenderer = null;
+        if (foliage == null || _loadCancellation.IsCancellationRequested)
+            return;
+        await foliage.PrewarmAsync();
     }
 
     private void StartStreaming()
@@ -610,6 +632,9 @@ public partial class ObjectStreamer : Node
 
         BuildObjects(meshLibrary, lod1Library);
         _sceneBuilt = true;
+        // Warmed before time-to-playable is read, and counted in it: a world handed over with its spawn
+        // ring undecoded is not yet playable without the burst this replaces.
+        await PrewarmFoliageAsync();
         // Read after the build, not before it: this is reported as time-to-playable, and the staged
         // realise above happens while the player is still waiting.
         double meshMs = _coldWatch.Elapsed.TotalMilliseconds;

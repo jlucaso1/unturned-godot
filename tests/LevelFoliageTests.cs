@@ -636,6 +636,54 @@ public class LevelFoliageTests
         Assert.Equal(items.Length - 4 - 5, resident.PrefetchDeferred);
     }
 
+    // The warm pass runs behind the loading screen, so it decodes a whole batch before uploading any of
+    // it. That is only safe while a batch's transforms fit the same byte cap the steady loop decodes
+    // under: the visible set must come first (it is the set whose absence costs a synchronous decode),
+    // and the whole plan must still be covered.
+    [Fact]
+    public void PrewarmBatches_TakeTheVisibleSetFirstAndStayInsideTheDecodedByteCap()
+    {
+        var items = new List<FoliageResidencyItem>();
+        for (int i = 0; i < 8; i++)
+            items.Add(new FoliageResidencyItem(i, new Vector3(i * 10, 0, 0), 25));
+
+        FoliageResidencyPlan plan = FoliageResidencyPlanner.Plan(Vector3.Zero, items,
+            new HashSet<int>(), new HashSet<int>(), prefetchMargin: 40, unloadHysteresis: 20,
+            maximumPrefetch: 16);
+        Assert.Equal(new[] { 0, 1, 2 }, plan.VisibleMissing);
+        Assert.Equal(new[] { 3, 4, 5, 6 }, plan.Prefetch);
+
+        IReadOnlyList<int[]> batches = FoliageResidencyPlanner.WarmBatches(plan,
+            index => 100, byteLimit: 250);
+
+        Assert.Equal(new[] { new[] { 0, 1 }, new[] { 2, 3 }, new[] { 4, 5 }, new[] { 6 } }, batches);
+        Assert.Equal(plan.VisibleMissing.Concat(plan.Prefetch), batches.SelectMany(b => b));
+        foreach (int[] batch in batches)
+            Assert.True(batch.Length * 100 <= 250);
+    }
+
+    [Fact]
+    public void PrewarmBatches_KeepAnOversizedChunkRatherThanDroppingIt()
+    {
+        var plan = new FoliageResidencyPlan(new[] { 0 }, new[] { 1, 2 }, System.Array.Empty<int>(),
+            false, 0);
+        var bytes = new Dictionary<int, long> { [0] = 10, [1] = 4096, [2] = 10 };
+
+        // A chunk larger than the entire cap gets a batch of its own: refusing to warm it would only hand
+        // it back to the synchronous path the warm pass exists to empty.
+        Assert.Equal(new[] { new[] { 0 }, new[] { 1 }, new[] { 2 } },
+            FoliageResidencyPlanner.WarmBatches(plan, index => bytes[index], byteLimit: 64));
+
+        // One batch when everything fits, and no batches at all when the plan asks for nothing.
+        Assert.Equal(new[] { new[] { 0, 1, 2 } },
+            FoliageResidencyPlanner.WarmBatches(plan, index => bytes[index], byteLimit: 8192));
+        Assert.Empty(FoliageResidencyPlanner.WarmBatches(
+            new FoliageResidencyPlan(System.Array.Empty<int>(), System.Array.Empty<int>(),
+                System.Array.Empty<int>(), false, 0), index => 1, byteLimit: 8192));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            FoliageResidencyPlanner.WarmBatches(plan, index => 1, byteLimit: 0));
+    }
+
     [Fact]
     public void FoliageSettlingTracker_RequiresConsecutiveStableObservationsAndResetsOnWork()
     {
