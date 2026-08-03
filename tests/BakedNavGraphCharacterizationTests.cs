@@ -80,17 +80,9 @@ public class BakedNavGraphCharacterizationTests
     // be inside a single flag — two flags is a different code path, already pinned elsewhere.
     private static (NavFlag Flag, BakedNavGraph Graph) TwoIslands()
     {
-        const int Quads = 20;
-        NavFlag flag = FlatField(Quads);
-        var blocked = new HashSet<int>();
-        for (int z = 0; z < Quads; z++)
-        {
-            int quad = (WallColumn * Quads) + z;
-            blocked.Add(quad * 2);
-            blocked.Add((quad * 2) + 1);
-        }
-        return (flag, BakedNavGraph.Build(new[] { flag },
-            new Dictionary<NavFlag, HashSet<int>> { [flag] = blocked }));
+        // An opening of no quads is a solid wall: Opening's skip condition is z >= 7 && z < 7, which
+        // nothing satisfies. Delegating keeps the two fixtures walling the same column if it ever moves.
+        return Opening(0);
     }
 
     private static void AssertRoute(IReadOnlyList<Vector3> expected, IReadOnlyList<Vector3> actual)
