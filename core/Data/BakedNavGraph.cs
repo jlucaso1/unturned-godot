@@ -591,18 +591,45 @@ public sealed class BakedNavGraph
                 // Only the edges this face used to close can become walls, so mark those and nothing
                 // else. A full rescan here would be O(triangles) on the reconciliation frame, which is
                 // budgeted to 0.25 ms — measured at about 41 ms for a 266k-triangle flag, a visible
-                // hitch every time a large flag finishes. Faces are only ever disabled, never
-                // re-enabled, so borders only grow and this stays exact rather than merely cheap.
+                // hitch every time a large flag finishes.
+                //
+                // Faces are only ever disabled, never re-enabled, so this only ever ADDS borders — the
+                // safe direction, since an over-marked vertex costs a narrowed portal while an
+                // under-marked one aims a body at a wall. It is exact for the edges this face closed.
+                // The one thing it cannot walk back is a vertex that was already a border because of a
+                // FREE edge of the face being disabled and is now interior; noticing that needs a
+                // vertex-to-face index, which this does not carry.
                 for (int at = _edgeStart[triangle]; at < _edgeStart[triangle + 1]; at++)
                 {
                     Connection c = _edges[at];
-                    if (!_enabled[c.To])
+                    if (!_enabled[c.To] || StillShared(c.To, c.VertexA, c.VertexB))
                         continue;
                     _borderVertex[c.VertexA] = true;
                     _borderVertex[c.VertexB] = true;
                 }
             }
             return changed;
+        }
+
+        // Does an ENABLED face still sit across this vertex pair from `triangle`? An edge is not always
+        // shared by exactly two faces — the builder connects every pair that shares one — so disabling
+        // one of three leaves the other two joined and the edge is still not a wall. Assuming otherwise
+        // narrows portals in the middle of open mesh: on a flat field, one disabled flap on a shared
+        // diagonal bent a dead-straight run into (2, 16) -> (17, 15.55) -> (30, 16).
+        //
+        // The caller has already cleared `_enabled` for the face being disabled, so it excludes itself.
+        private bool StillShared(int triangle, int vertexA, int vertexB)
+        {
+            for (int at = _edgeStart[triangle]; at < _edgeStart[triangle + 1]; at++)
+            {
+                Connection c = _edges[at];
+                if (!_enabled[c.To])
+                    continue;
+                if ((c.VertexA == vertexA && c.VertexB == vertexB)
+                    || (c.VertexA == vertexB && c.VertexB == vertexA))
+                    return true;
+            }
+            return false;
         }
 
         // Which vertices sit on the edge of the walkable region — the wall corners. Derived from the CSR
