@@ -118,12 +118,16 @@ public sealed class ContentSource
         string trees = Path.Combine(itemDirectory, "Resources"); // the game's Trees folder, mod-side name
         string assets = Path.Combine(itemDirectory, "Assets");
         string vehicles = Path.Combine(itemDirectory, "Vehicles");
-        // Asset-only bundles are valid sources too. Foliage, physics materials and landscapes are consumed
-        // independently of Objects/Resources, and every one of those scanners starts from Discover's
-        // result. Rejecting an item that contains only one of them silently drops otherwise valid content.
+        string spawns = Path.Combine(itemDirectory, "Spawns");
+        // Asset-only bundles are valid sources too. Foliage, physics materials, landscapes and spawn
+        // tables are consumed independently of Objects/Resources, and every one of those scanners starts
+        // from Discover's result. Rejecting an item that contains only one of them silently drops
+        // otherwise valid content: an item shipping nothing but spawn tables is what a map's own
+        // vehicle table resolves through, and dropping it leaves every spawnpoint using it empty.
         bool hasSupportedAssets = Directory.Exists(Path.Combine(assets, "Landscapes"))
             || Directory.Exists(Path.Combine(assets, "Foliage"))
-            || Directory.Exists(Path.Combine(assets, "PhysicsMaterials"));
+            || Directory.Exists(Path.Combine(assets, "PhysicsMaterials"))
+            || Directory.Exists(spawns);
         if (!Directory.Exists(objects) && !Directory.Exists(trees) && !Directory.Exists(vehicles)
             && !hasSupportedAssets)
         {
@@ -142,7 +146,7 @@ public sealed class ContentSource
             trees,
             assets,
             vehicles,
-            Path.Combine(itemDirectory, "Spawns"),
+            spawns,
             isCore: false);
     }
 

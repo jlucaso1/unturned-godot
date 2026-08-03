@@ -248,8 +248,8 @@ public static class WorldPreview
     }
 
     // The map's placed objects plus everything needed to turn them into nodes, all read off disk.
-    private sealed record Placements(List<PlacedObject> Objects, ObjectAssetDatabase Db,
-        LevelFoliage? Foliage, HashSet<Guid> Needed);
+    private sealed record Placements(List<PlacedObject> Objects, List<PlacedObject> Vehicles,
+        ObjectAssetDatabase Db, LevelFoliage? Foliage, HashSet<Guid> Needed);
 
     private static Placements ReadPlacements(string unturnedPath, LevelInfo level)
     {
@@ -257,18 +257,23 @@ public static class WorldPreview
         foreach (PlacedTree t in LevelTrees.Load(Path.Combine(level.Path, "Terrain", "Trees.dat")))
             objects.Add(new PlacedObject(t.Position, t.EulerDegrees, t.Scale, 0, t.Guid));
 
-        ObjectAssetDatabase db = ContentExtraction.ScanAssets(ContentSource.Discover(unturnedPath));
+        IReadOnlyList<ContentSource> sources = ContentSource.Discover(unturnedPath);
+        ObjectAssetDatabase db = ContentExtraction.ScanAssets(sources);
         LevelFoliage? foliage = LevelFoliage.Load(Path.Combine(level.Path, "Foliage.blob"));
+        // The roll is seeded, so the preview shows the same vehicles a session would.
+        List<PlacedObject> vehicles = VehicleSpawnPlan.Load(level, sources, db);
 
         var needed = new HashSet<Guid>();
         foreach (PlacedObject o in objects)
             needed.Add(o.Guid);
+        foreach (PlacedObject v in vehicles)
+            needed.Add(v.Guid);
         if (foliage != null)
             foreach (Guid guid in foliage.AssetGuids)
                 needed.Add(guid);
         needed.Remove(Guid.Empty);
 
-        return new Placements(objects, db, foliage, needed);
+        return new Placements(objects, vehicles, db, foliage, needed);
     }
 
     private static async System.Threading.Tasks.Task BuildObjectsAsync(Node3D root, Placements placements,
@@ -320,6 +325,12 @@ public static class WorldPreview
                 int missing = placements.Objects.Count - withMesh;
                 report.Add($"  {withMesh}/{placements.Objects.Count} objects, {meshLibrary.Count} unique meshes" +
                     (missing > 0 ? $" ({missing} as fallback boxes — warm the cache to fill them in)" : ""));
+
+                // Under the objects toggle, because that is what they are here: static placements sharing
+                // the same library, the same batching and the same fallback boxes.
+                root.AddChild(WorldBuilder.BuildVehicles(placements.Vehicles, placements.Db, meshLibrary,
+                    noColliders, lod1Library));
+                report.Add($"  {placements.Vehicles.Count} vehicles");
             });
 
         if (options.Foliage)

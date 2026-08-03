@@ -283,7 +283,7 @@ public static class WorldBuilder
     public static Node3D BuildVehicles(IReadOnlyList<PlacedObject> vehicles, ObjectAssetDatabase db,
         IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary,
         IReadOnlyDictionary<Guid, List<CachedCollider>> colliderLibrary,
-        IReadOnlyDictionary<Guid, ArrayMesh> lod1Library)
+        IReadOnlyDictionary<Guid, ArrayMesh>? lod1Library)
     {
         if (vehicles.Count == 0)
             return new Node3D { Name = "Vehicles" };
