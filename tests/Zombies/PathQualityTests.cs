@@ -221,14 +221,18 @@ public class PathQualityTests
         Assert.True(worst > 0f,
             $"the route enters a wall at ({worstAt.X:0.00}, {worstAt.Z:0.00})");
 
-        // Insetting a portal end ALONG its own portal by the radius buys the full width AT the corner
-        // but not on the segment ARRIVING at it, which can still cut across the jamb behind: this route
-        // came 0.318 m from a wall at (9.78, 7.78) while the corner itself was clear. The inset is now
-        // asked of the WALL rather than of the portal, and the same route measures 0.447.
+        // Insetting a portal end ALONG its own portal buys the full width AT the corner but not on the
+        // LEG that arrives at or leaves it. A corner sits exactly `radius + Clearance` from the wall
+        // vertex it turns around — ON the circle of that radius — so a leg between two such corners is
+        // a chord of that circle and passes inside it. Measured on this doorway: two corners each
+        // exactly 0.450 m off the jamb at (10, 8), and the leg joining them 0.318 m from it, which is
+        // 0.45 * cos(45 deg). A second route did it with a SINGLE corner, leaving the door correctly
+        // 0.450 m off the jamb at (11, 7) and then bending back across it at 0.336 m.
         //
-        // 0.447 m measured, against a body of 0.400 — the full radius plus almost all of the steering
-        // skin, the shortfall being the portal's own 1 mm margin against inverting. The assertion is the
-        // requirement rather than the measurement: the body never touches a wall.
+        // Legs are now repaired against the wall vertices the corridor touches, so each turn is walked
+        // as an arc rather than as one chord, and the same routes measure 0.416 — the radius plus a
+        // third of the steering skin, which is what that skin is for. The assertion is the requirement
+        // rather than the measurement: the body never touches a wall.
         Assert.True(worst >= BakedNavGraph.AgentRadius,
             $"the route passes {worst:0.000} m from a wall at ({worstAt.X:0.00}, {worstAt.Z:0.00})");
     }
@@ -347,21 +351,318 @@ public class PathQualityTests
         Assert.Contains(path, point => point.X >= 12f);
     }
 
-    // A wide floor with a THIN strip welded along its far edge, so the strip's outer boundary is a wall
-    // 0.1 m beyond a shared edge that is not one. Baked tiles produce slivers like this along walls.
-    private static BakedNavGraph FloorWithASliverAlongTheWall(float sliver)
+    // The same building, with a LANDING: one more metre of upper floor past the head of the ramp,
+    // before it folds back over the ground floor. Every real staircase has one.
+    //
+    //   Y=3          +---------------------+--+   upper floor x in [3, 13], landing x in [13, 14]
+    //                                     /
+    //   Y=0  +--------------------------+       ground floor x in [0, 10], ramp x in [10, 13]
+    //
+    // It matters because without it the upper floor turns back AT the ramp's top column, and a fold
+    // is not "floor across" that column — both faces lie on the same side of it in plan — so the
+    // graph calls it a wall and nothing can spread past it. The landing makes ramp -> landing and
+    // landing -> upper floor ordinary shared edges, which is what a real building has and what lets
+    // a spread over shared mesh reach the storey above.
+    private static BakedNavGraph TwoStoreysWithALanding()
     {
         var vertices = new List<Vector3>();
         var triangles = new List<int>();
-        float[] rows = { 0f, 20f, 20f + sliver };
+        const int Rows = 5;
+
+        int Column(float x, float y)
+        {
+            int first = vertices.Count;
+            for (int z = 0; z < Rows; z++)
+                vertices.Add(new Vector3(x, y, z));
+            return first;
+        }
+
+        void Quads(int left, int right)
+        {
+            for (int z = 0; z < Rows - 1; z++)
+            {
+                int a = left + z, b = a + 1, c = right + z, d = c + 1;
+                triangles.AddRange(new[] { a, b, c, b, d, c });
+            }
+        }
+
+        int previous = Column(0f, 0f);
+        for (int x = 1; x <= 13; x++)
+        {
+            int current = Column(x, MathF.Max(0f, x - 10f));
+            Quads(previous, current);
+            previous = current;
+        }
+        int head = previous;
+        Quads(head, Column(14f, 3f));   // the landing, past the head of the ramp
+        previous = head;
+        for (int x = 12; x >= 3; x--)   // and the upper floor, back over the ground floor
+        {
+            int current = Column(x, 3f);
+            Quads(previous, current);
+            previous = current;
+        }
+
+        var flag = new NavFlag
+        {
+            Center = new Vector3(7f, 0, 2),
+            Size = new Vector3(40, 200, 40),
+            Vertices = vertices.ToArray(),
+            Triangles = triangles.ToArray(),
+        };
+        return BakedNavGraph.Build(new[] { flag });
+    }
+
+    // The clearance reach spreads over shared mesh, which was supposed to be what stopped it leaving
+    // the floor the segment is on: a body can only get to the next storey by a way it could walk. It
+    // can walk up a ramp — and the floor folded back OVER the one it started on is then ordinary
+    // shared mesh, sitting directly above the segment and so nought metres from it in PLAN, which is
+    // the only distance the reach was measuring.
+    //
+    // The segment below is the flat run and the ramp in one leg, which the funnel's own route takes
+    // (AShortcut_DoesNotJumpBetweenStoreysThatOverlapInPlan says so: "collapsing the flat run AND the
+    // ramp into one leg is fine and does happen"). Measured on this fixture:
+    //
+    //     one-ring reach        (1, 0, 2) -> (13, 3, 2)   CLEAR
+    //     distance-bounded      (1, 0, 2) -> (13, 3, 2)   REFUSED
+    //
+    // and what it was refused for is the upper floor's own far edge at x = 3, which is 3 m above the
+    // start of the segment. Rejecting that leg costs the shortcut the whole climb and leaves the
+    // funnel's wandering corners, which is the symptom the shortcut pass exists to remove.
+    //
+    // Two-sided, on the SAME edge: from the upper floor, x = 3 is still a wall and a line 0.2 m off
+    // it is still refused. The reach did not stop seeing the wall — it stopped mistaking it for one
+    // a body three metres below could walk into.
+    [Fact]
+    public void TheClearanceReach_DoesNotClimbAStoreyToFindAWall()
+    {
+        BakedNavGraph graph = TwoStoreysWithALanding();
+
+        Assert.True(graph.HasClearLine(0, new Vector3(1, 0, 2), new Vector3(13, 3, 2)),
+            "the flat run and the ramp is one leg a body walks, and nothing is in its way");
+
+        // The same wall, from the storey it belongs to.
+        Assert.True(graph.HasClearLine(0, new Vector3(6, 3, 2), new Vector3(11, 3, 2)),
+            "a line down the middle of the upper floor is clear");
+        Assert.False(graph.HasClearLine(0, new Vector3(3.2f, 3, 2), new Vector3(11, 3, 2)),
+            "0.2 m from the upper floor's own far edge is not clearance for a 0.4 m body");
+
+        // And the ground floor's own walls are still walls.
+        Assert.False(graph.HasClearLine(0, new Vector3(1, 0, 0.2f), new Vector3(9, 0, 0.2f)),
+            "0.2 m from the ground floor's own edge is not clearance for a 0.4 m body");
+        // The storey guard is a guard on the CLEARANCE test, not on the walk: a line from downstairs
+        // to a waypoint upstairs is still refused, by the face test that has always refused it.
+        Assert.False(graph.HasClearLine(0, new Vector3(1, 0, 2), new Vector3(4, 3, 2)),
+            "the ground floor does not carry an upstairs waypoint just because it is under it");
+    }
+
+    // The same building again, with the ramp as ONE span (columns at x = 10 and x = 13) instead of three
+    // 1 m ones. A flight of stairs is a couple of triangles in baked navmesh, not one per step, and the
+    // difference is the whole point: the clearance test reads the ground under the segment from a
+    // profile the WALK fills in, so a face the walk has not entered yet is judged against the height
+    // where the walk currently stands. Over three 1 m steps that lag is 1 m, which is exactly
+    // StoreyTolerance, and every wall squeaks through by a hair. Over one 3 m span it is 3 m.
+    private static BakedNavGraph TwoStoreysWhoseRampIsOneSpan()
+    {
+        var vertices = new List<Vector3>();
+        var triangles = new List<int>();
+        const int Rows = 5;
+
+        int Column(float x, float y)
+        {
+            int first = vertices.Count;
+            for (int z = 0; z < Rows; z++)
+                vertices.Add(new Vector3(x, y, z));
+            return first;
+        }
+
+        void Quads(int left, int right)
+        {
+            for (int z = 0; z < Rows - 1; z++)
+            {
+                int a = left + z, b = a + 1, c = right + z, d = c + 1;
+                triangles.AddRange(new[] { a, b, c, b, d, c });
+            }
+        }
+
+        int previous = Column(0f, 0f);
+        for (int x = 1; x <= 10; x++)   // the ground floor
+        {
+            int current = Column(x, 0f);
+            Quads(previous, current);
+            previous = current;
+        }
+        int head = Column(13f, 3f);
+        Quads(previous, head);          // the ramp, in one span
+        Quads(head, Column(14f, 3f));   // the landing, past the head of the ramp
+        previous = head;
+        for (int x = 12; x >= 3; x--)   // and the upper floor, back over the ground floor
+        {
+            int current = Column(x, 3f);
+            Quads(previous, current);
+            previous = current;
+        }
+
+        var flag = new NavFlag
+        {
+            Center = new Vector3(7f, 0, 2),
+            Size = new Vector3(40, 200, 40),
+            Vertices = vertices.ToArray(),
+            Triangles = triangles.ToArray(),
+        };
+        return BakedNavGraph.Build(new[] { flag });
+    }
+
+    // The storey filter above compares an edge against the ground under the SEGMENT, and the profile it
+    // reads that from was being filled by the same walk that consults it. So at the first step the
+    // profile holds one sample — the start — and the spread, which reaches the whole length of the
+    // segment because those faces are nought metres from it in plan, judges every edge it finds against
+    // the height where the segment STARTED. On a climb that answers "another storey" for real walls, and
+    // the faces are stamped as it goes, so the walk arriving there later never re-tests them.
+    //
+    // Measured on this fixture, a leg that climbs the ramp while drifting onto the ramp's own side
+    // boundary — the wall of the very face the body is walking on, 2.8 m above where the leg started:
+    //
+    //     ends 0.45 m off that wall     accepted    correct: that is radius + Clearance
+    //     ends 0.10 m off that wall     accepted    <- the wall was never tested at all
+    //
+    // and it stayed accepted with the upper floor deleted from the fixture, so this is not the
+    // two-storey case at all — any climb does it. The profile is now measured by its own pass over the
+    // whole segment, endpoint included, before a single edge is tested.
+    [Fact]
+    public void TheClearanceReach_MeasuresTheGroundUnderTheWholeSegment_BeforeTestingAnyOfIt()
+    {
+        BakedNavGraph graph = TwoStoreysWhoseRampIsOneSpan();
+        var foot = new Vector3(1, 0, 2);
+
+        Assert.False(graph.HasClearLine(0, foot, new Vector3(12.8f, 2.8f, 0.1f)),
+            "0.1 m off the ramp's own side boundary is not clearance for a 0.4 m body");
+        Assert.False(graph.HasClearLine(0, foot, new Vector3(12.8f, 2.8f, 0.4f)),
+            "0.4 m off the ramp's own side boundary is not clearance for a 0.4 m body");
+
+        // The wall is refused for its distance, not for being uphill: the same leg one body-width out
+        // is still the shortcut the climb is worth taking.
+        Assert.True(graph.HasClearLine(0, foot, new Vector3(12.8f, 2.8f, 0.5f)),
+            "half a metre off the boundary clears a 0.4 m body and must still be walkable");
+        Assert.True(graph.HasClearLine(0, foot, new Vector3(12.8f, 2.8f, 2f)),
+            "straight up the middle of the ramp has nothing in its way");
+    }
+
+    // A ground floor WIDER than the storey above it (z from -2 to 4 against z from 0 to 4), so the upper
+    // floor's boundary hangs over open ground floor with no wall of its own underneath.
+    private static BakedNavGraph NarrowUpperFloorOverAWideOne()
+    {
+        var vertices = new List<Vector3>();
+        var triangles = new List<int>();
+
+        int Column(float x, float y, float from, float to)
+        {
+            int first = vertices.Count;
+            for (float z = from; z <= to; z += 1f)
+                vertices.Add(new Vector3(x, y, z));
+            return first;
+        }
+
+        void Quads(int left, int right, int rows)
+        {
+            for (int z = 0; z < rows - 1; z++)
+            {
+                int a = left + z, b = a + 1, c = right + z, d = c + 1;
+                triangles.AddRange(new[] { a, b, c, b, d, c });
+            }
+        }
+
+        int previous = Column(0f, 0f, -2f, 4f);
+        for (int x = 1; x <= 10; x++)
+        {
+            int current = Column(x, 0f, -2f, 4f);
+            Quads(previous, current, 7);
+            previous = current;
+        }
+        int foot = previous + 2;                    // the z = 0 vertex of the x = 10 column
+        int head = Column(13f, 3f, 0f, 4f);
+        Quads(foot, head, 5);                       // the ramp, narrow and in one span
+        Quads(head, Column(14f, 3f, 0f, 4f), 5);    // the landing
+        previous = head;
+        for (int x = 12; x >= 3; x--)               // the upper floor, back over the ground floor
+        {
+            int current = Column(x, 3f, 0f, 4f);
+            Quads(previous, current, 5);
+            previous = current;
+        }
+
+        var flag = new NavFlag
+        {
+            Center = new Vector3(7f, 0, 1),
+            Size = new Vector3(40, 200, 40),
+            Vertices = vertices.ToArray(),
+            Triangles = triangles.ToArray(),
+        };
+        return BakedNavGraph.Build(new[] { flag });
+    }
+
+    // The corner repair had the same blindness, and it is worse there. Its wall list is every portal end
+    // of the corridor, so a corridor that climbs carries the boundary vertices of the floor it climbed
+    // TO — and those sit directly over the legs on the floor below, nought metres away in plan.
+    //
+    // Measured on this fixture, the route from (1, 0, -1.5) to (4, 3, 1):
+    //
+    //     before     25 waypoints, 28.66 m   legs across the open ground floor bent around the upper
+    //                                        floor's vertices 3 m overhead — and since pushing off one
+    //                                        lands beside the next, the route ORBITED (8, 3, 0) at
+    //                                        exactly radius + Clearance, twice round
+    //     after       5 waypoints, 22.47 m
+    //
+    // The leg it bent was one the shortcut had already walked and cleared at the body's full width
+    // ((1, 0, -1.5) -> (8, 0, 0) is CLEAR). The repair runs after the shortcut pass, so nothing re-walks
+    // what it inserts: bending a leg around a wall the body can never meet is not a repair that is
+    // merely wasted, it is an unchecked waypoint put somewhere no walk ever agreed to.
+    [Fact]
+    public void TheCornerRepair_DoesNotBendALegAroundTheStoreyAboveIt()
+    {
+        BakedNavGraph graph = NarrowUpperFloorOverAWideOne();
+        var path = new List<Vector3>();
+
+        Assert.True(graph.TryPath(new Vector3(1, 0, -1.5f), new Vector3(4, 3, 1), path));
+        Assert.True(path.Count <= 8,
+            $"the route needs 5 waypoints and has {path.Count}: it is orbiting something");
+        Assert.True(Length(path) < 24f,
+            $"the route walked {Length(path):0.00} m where the corridor is 22.47 m");
+
+        // And the orbit itself, named: nothing on the ground floor may be placed on the circle the
+        // repair pushes onto, around a vertex three metres over its head. (8, 0, 0) is a funnel corner
+        // of this route and sits directly under that vertex at zero, which is why the circle is what is
+        // asserted rather than the distance.
+        foreach (Vector3 point in path)
+        {
+            if (point.Y > 1f)
+                continue;
+            float dx = point.X - 8f, dz = point.Z - 0f;
+            float away = MathF.Sqrt((dx * dx) + (dz * dz));
+            Assert.False(away > 0.4f && away < 0.5f,
+                $"({point.X:0.00}, {point.Y:0.00}, {point.Z:0.00}) is {away:0.00} m from the upper "
+                    + "floor's vertex at (8, 3, 0): the leg was bent around the storey above it");
+        }
+    }
+
+    // A wide floor with `count` THIN strips welded along its far edge, so the outermost boundary is a
+    // wall count * `sliver` metres beyond a shared edge that is not one. Baked tiles produce slivers
+    // like this along walls, and more than one of them where the tiles themselves meet.
+    private static BakedNavGraph FloorWithSliversAlongTheWall(float sliver, int count = 1)
+    {
+        var vertices = new List<Vector3>();
+        var triangles = new List<int>();
+        var rows = new List<float> { 0f, 20f };
+        for (int i = 1; i <= count; i++)
+            rows.Add(20f + (i * sliver));
 
         for (int x = 0; x <= 20; x++)
             foreach (float z in rows)
                 vertices.Add(new Vector3(x, 0f, z));
         for (int x = 0; x < 20; x++)
-            for (int r = 0; r < rows.Length - 1; r++)
+            for (int r = 0; r < rows.Count - 1; r++)
             {
-                int a = (x * rows.Length) + r, b = a + 1, c = a + rows.Length, d = c + 1;
+                int a = (x * rows.Count) + r, b = a + 1, c = a + rows.Count, d = c + 1;
                 triangles.AddRange(new[] { a, b, c, b, d, c });
             }
 
@@ -381,16 +682,141 @@ public class PathQualityTests
     // sliver beyond carries the actual boundary at z = 20.1.
     //
     // Checking only the faces walked through therefore accepts a line 0.2 m from a wall for a body that
-    // needs 0.45. The clearance test reaches one face further out for exactly this.
+    // needs 0.45. The clearance test reaches past the faces the walk enters for exactly this.
     [Fact]
     public void TheLineWalk_SeesWallsOnFacesItDoesNotEnter()
     {
-        BakedNavGraph graph = FloorWithASliverAlongTheWall(0.1f);
+        BakedNavGraph graph = FloorWithSliversAlongTheWall(0.1f);
 
         Assert.True(graph.HasClearLine(0, new Vector3(2, 0, 10), new Vector3(18, 0, 10)),
             "a line down the middle of a 20 m floor is clear");
         Assert.False(graph.HasClearLine(0, new Vector3(2, 0, 19.9f), new Vector3(18, 0, 19.9f)),
             "0.2 m from the sliver's outer wall is not clearance for a 0.4 m body");
+    }
+
+    // And a CHAIN of them, which is what a reach measured in RINGS cannot answer. The walk stays on
+    // the wide floor the whole way, the first sliver is one face out, and the wall on the far side of
+    // the last sliver is as many faces out as there are slivers.
+    //
+    // Measured with the one-face-further reach in place, sweeping a line over the wide floor towards
+    // the outermost wall and recording the tightest clearance still accepted, against the 0.45 m a
+    // 0.40 m body asks for:
+    //
+    //     1 sliver     tightest accepted 0.450 m   correct
+    //     2 slivers    ACCEPTED at       0.201 m   <- the shortest chain that hides its own wall
+    //     3 slivers    ACCEPTED at       0.301 m
+    //     4 slivers    ACCEPTED at       0.401 m
+    //
+    // Five and beyond cannot be caught out from the wide floor at all: its own far edge is by then
+    // 0.5 m from the outermost wall, which is clearance the body has. So the whole defect lives in
+    // chains of two to four, and it is a defect at every one of them.
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    public void TheLineWalk_SeesTheWallBehindAWholeChainOfSlivers(int slivers)
+    {
+        BakedNavGraph graph = FloorWithSliversAlongTheWall(0.1f, slivers);
+        float wall = 20f + (slivers * 0.1f);
+
+        Assert.True(
+            graph.HasClearLine(0, new Vector3(2, 0, wall - 0.5f), new Vector3(18, 0, wall - 0.5f)),
+            "0.5 m from the outermost wall is clearance a 0.4 m body has");
+        Assert.False(graph.HasClearLine(0, new Vector3(2, 0, 19.99f), new Vector3(18, 0, 19.99f)),
+            $"{wall - 19.99f:0.00} m from the outermost wall is not clearance for a 0.4 m body");
+    }
+
+    // `columns` x `rows` quads of side `cell`, from the origin.
+    private static BakedNavGraph Strip(int columns, int rows, float cell)
+    {
+        var vertices = new List<Vector3>();
+        var triangles = new List<int>();
+        for (int x = 0; x <= columns; x++)
+            for (int z = 0; z <= rows; z++)
+                vertices.Add(new Vector3(x * cell, 0f, z * cell));
+        for (int x = 0; x < columns; x++)
+            for (int z = 0; z < rows; z++)
+            {
+                int a = (x * (rows + 1)) + z, b = a + 1, c = a + rows + 1, d = c + 1;
+                triangles.AddRange(new[] { a, b, c, b, d, c });
+            }
+        var flag = new NavFlag
+        {
+            Center = new Vector3(columns * cell / 2f, 0, rows * cell / 2f),
+            Size = new Vector3((columns * cell) + 4f, 200f, (rows * cell) + 4f),
+            Vertices = vertices.ToArray(),
+            Triangles = triangles.ToArray(),
+        };
+        return BakedNavGraph.Build(new[] { flag });
+    }
+
+    // The reach that replaced the ring is bounded by DISTANCE — it spreads only through edges within
+    // the body's width of the segment — which bounds it on any mesh whose faces are the size of a body
+    // or larger. It does not bound it on a mesh tessellated finer than the body is wide, where
+    // thousands of faces fit inside the 0.9 m band around a segment, so the reach carries a ceiling.
+    //
+    // Both fixtures here are the SAME 5 x 2 m floor and the same 4 m line down the middle of it — 1 m
+    // from either side, 0.5 m from either end, clear for a 0.4 m body by any measure. Only the
+    // tessellation differs. At 0.25 m faces the line is clear; at 0.05 m faces the reach fills and the
+    // walk refuses, which is the safe direction: it costs a shortcut, exactly as an exhausted walk
+    // budget does, and can never accept one.
+    [Fact]
+    public void TheClearanceReach_RefusesRatherThanGuess_WhenAMeshFinerThanTheBodyFillsIt()
+    {
+        var from = new Vector3(0.5f, 0, 1f);
+        var to = new Vector3(4.5f, 0, 1f);
+
+        Assert.True(Strip(20, 8, 0.25f).HasClearLine(0, from, to),
+            "a 4 m line down the middle of a 5 x 2 m floor is clear");
+        Assert.False(Strip(100, 40, 0.05f).HasClearLine(0, from, to),
+            "the same line over 8000 faces of the same floor fills the reach, and a full reach refuses");
+    }
+
+    // A reach that FILLED is not an ordinary refusal, and it used to be treated as one. The walk
+    // spends ONE unit of the route's shortcut budget however far the flood ran, so on a mesh finer
+    // than the body the pass bought 2049 faces of spreading for one unit, then tried the next
+    // waypoint and the next anchor and paid it again. Measured on the same 5 x 2 m floor at 0.05 m
+    // faces, one public TryPath:
+    //
+    //     (0.1, 1.9) -> (4.1, 0.4)   before   11 584 faces spread over TWO filled reaches,  8 wp
+    //                                after     6 860 faces over one, which ends the pass,  10 wp
+    //
+    // Over the whole floor swept at 0.4 x 0.3 m (7056 queries) the spreading falls from 17 609 064
+    // faces to 15 009 315 and the filled reaches from 1285 to 1006, for 4.0337 mean waypoints
+    // becoming 4.2100. That is the trade and it is deliberate: where the reach refuses, the funnel's
+    // own route is already the answer, and giving up is what the ceiling exists to do — the same
+    // trade the walk budget makes in ARouteTooLongToSmooth_IsReturnedIntact.
+    //
+    // Two-sided on the tessellation, which is the only thing that differs: the same query on the
+    // same floor at 0.25 m faces never fills a reach, so the pass runs to the end and its route is
+    // untouched by any of this.
+    [Fact]
+    public void AFilledClearanceReach_EndsTheShortcutPass_InsteadOfBeingPaidForAgain()
+    {
+        var from = new Vector3(0.1f, 0, 1.9f);
+        var to = new Vector3(4.1f, 0, 0.4f);
+
+        var fine = new List<Vector3>();
+        Assert.True(Strip(100, 40, 0.05f).TryPath(from, to, fine));
+        Assert.Equal(10, fine.Count);
+        Assert.Equal(from, fine[0]);
+        Assert.Equal(to, fine[^1]);
+
+        var coarse = new List<Vector3>();
+        Assert.True(Strip(20, 8, 0.25f).TryPath(from, to, coarse));
+        Assert.Equal(5, coarse.Count);
+        Assert.Equal(from, coarse[0]);
+        Assert.Equal(to, coarse[^1]);
+
+        // Whatever the pass did or did not reach, the route stays a walk on the floor it was asked
+        // for: no repeats, no leaps, nothing off the 5 x 2 m mesh.
+        foreach (List<Vector3> route in new[] { fine, coarse })
+            for (int i = 1; i < route.Count; i++)
+            {
+                Assert.InRange(route[i - 1].DistanceTo(route[i]), 1e-4f, 5.5f);
+                Assert.InRange(route[i].X, 0f, 5f);
+                Assert.InRange(route[i].Z, 0f, 2f);
+            }
     }
 
     // An edge can carry more than two faces — the builder connects every pair that shares one. Taking
