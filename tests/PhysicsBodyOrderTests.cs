@@ -17,6 +17,27 @@ namespace UnturnedGodot.Tests;
 // hermetic suite can run (a physics space needs a live Godot runtime), so it is checked in the source.
 public class PhysicsBodyOrderTests
 {
+    // Hardcoded WASD has to ask for the PHYSICAL key, never the keycode. A keycode names the character
+    // the key prints, which moves with the layout: on AZERTY the "W" key sits where QWERTY has Z, and
+    // "A" where QWERTY has Q, so a free camera bound by keycode answers to a scattering of keys under
+    // nobody's fingers. This is one of the few assertions in this file that is about an API choice
+    // rather than a shape of text, so it survives reformatting.
+    //
+    // PlayerController is exempt on purpose: it reads the player's own Unturned binds, where the
+    // character IS the question being asked.
+    [Fact]
+    public void FreeCamera_ReadsPhysicalKeys_SoItWorksOffQwerty()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "UI", "FreeCamera.cs")) is not { } path)
+            return; // running from a package without the sources next to it
+
+        string source = File.ReadAllText(path);
+
+        Assert.DoesNotContain("Input.IsKeyPressed(", source);
+        foreach (string key in new[] { "Key.W", "Key.S", "Key.A", "Key.D", "Key.E", "Key.Q" })
+            Assert.Contains($"Input.IsPhysicalKeyPressed({key})", source);
+    }
+
     [Fact]
     public void InstancedStaticBody_AddsShapesBeforeJoiningTheSpace()
     {
