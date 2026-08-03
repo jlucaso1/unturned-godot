@@ -503,6 +503,56 @@ public class BakedNavGraphTests
         Assert.Equal(expected, actual);
     }
 
+    // Two halves of one continuous floor, meeting along x = 2. The left half spans the join with a
+    // SINGLE edge (2,0)-(2,2); the right half has a vertex at (2,1) on that line, so its side of the
+    // join is TWO edges. No pair of vertex indices matches across the seam, which is the only thing
+    // adjacency was keyed on, so all three edges were classified as walls and the halves were separate
+    // islands. Recast output does this wherever tiles meet at different subdivision.
+    private static NavFlag TJunction()
+    {
+        var vertices = new[]
+        {
+            new Vector3(0, 0, 0), // 0
+            new Vector3(0, 0, 2), // 1
+            new Vector3(2, 0, 0), // 2
+            new Vector3(2, 0, 2), // 3
+            new Vector3(2, 0, 1), // 4  the vertex that splits the left half's edge
+            new Vector3(4, 0, 0), // 5
+            new Vector3(4, 0, 1), // 6
+            new Vector3(4, 0, 2), // 7
+        };
+        var triangles = new[]
+        {
+            0, 1, 2, 1, 3, 2, // left half: its right side is the single edge 2-3
+            2, 4, 5, 4, 6, 5, // right half, lower: left side is edge 2-4
+            4, 3, 6, 3, 7, 6, // right half, upper: left side is edge 4-3
+        };
+        return new NavFlag
+        {
+            Center = new Vector3(2, 0, 1),
+            Size = new Vector3(6, 10, 4),
+            Vertices = vertices,
+            Triangles = triangles,
+        };
+    }
+
+    [Fact]
+    public void AFloorSplitByATJunction_IsStillOneWalkableSurface()
+    {
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { TJunction() });
+        var path = new List<Vector3>();
+        var from = new Vector3(0.5f, 0, 1);
+        var to = new Vector3(3.5f, 0, 1);
+
+        Assert.True(graph.TryPath(from, to, path), "the two halves of one floor were not connected");
+        Assert.True(path.Count >= 2);
+        float length = 0f;
+        for (int i = 0; i + 1 < path.Count; i++)
+            length += new Vector2(path[i + 1].X - path[i].X, path[i + 1].Z - path[i].Z).Length();
+        // Straight across: the seam is not an obstacle, so nothing should be routed around.
+        Assert.Equal(3f, length, 2);
+    }
+
     private static Vector3 Centre(NavFlag flag, int triangle) =>
         (flag.Vertices[flag.Triangles[triangle * 3]]
             + flag.Vertices[flag.Triangles[(triangle * 3) + 1]]
