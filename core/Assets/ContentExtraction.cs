@@ -16,7 +16,7 @@ public static class ContentExtraction
         public bool NeedsExtraction => Missing.Count > 0 || MissingTextures.Count > 0;
     }
 
-    // Every asset directory that could hold objects or trees, for the asset-database scan. First
+    // Every asset directory that could hold objects, trees or vehicles, for the asset-database scan. First
     // registration wins: Discover orders core before workshop content, matching asset resolution.
     public static ObjectAssetDatabase ScanAssets(IReadOnlyList<ContentSource> sources) =>
         ScanAssets(sources, ObjectAssetDatabase.ScanDirectory);
@@ -25,16 +25,23 @@ public static class ContentExtraction
     // unrelated to the map currently being loaded, so an unreadable or concurrently removed asset tree
     // must cost only that tree, never the whole installed library.
     internal static ObjectAssetDatabase ScanAssets(IReadOnlyList<ContentSource> sources,
-        Func<string, ObjectAssetDatabase> scanDirectory)
+        Func<string, IReadOnlyList<string>, ObjectAssetDatabase> scanDirectory)
     {
         var db = new ObjectAssetDatabase();
         foreach (ContentSource source in sources)
-            foreach (string directory in new[] { source.ObjectsDir, source.TreesDir })
+            // Vehicle redirectors ship as ".asset", so that tree needs the wider glob; see
+            // ObjectAssetDatabase.DatAndAsset.
+            foreach ((string directory, IReadOnlyList<string> patterns) in new[]
+            {
+                (source.ObjectsDir, ObjectAssetDatabase.DatOnly),
+                (source.TreesDir, ObjectAssetDatabase.DatOnly),
+                (source.VehiclesDir, ObjectAssetDatabase.DatAndAsset),
+            })
             {
                 ObjectAssetDatabase scanned;
                 try
                 {
-                    scanned = scanDirectory(directory);
+                    scanned = scanDirectory(directory, patterns);
                 }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException)
                 {

@@ -242,7 +242,7 @@ public class PhysicsBodyOrderTests
             < owner.LastIndexOf("_entries.Clear()", System.StringComparison.Ordinal));
         Assert.Contains("new MultiMeshRidRenderer { Name = \"Foliage\" }", foliage);
         Assert.Contains("rid.Add(multimesh", foliage);
-        Assert.Contains("new MultiMeshRidRenderer { Name = \"ObjectBatches\" }", objects);
+        Assert.Contains("new MultiMeshRidRenderer { Name = label + \"Batches\" }", objects);
         // Objects reach the shared RID owner through AddLevels, which emits either one batch or the
         // LOD-0/LOD-1 pair; either way the batch itself still goes through AddRenderBatch.
         Assert.Contains("AddLevels(root, render, renderMesh, lodMesh", objects);

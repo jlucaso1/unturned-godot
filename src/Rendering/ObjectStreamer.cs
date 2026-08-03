@@ -50,6 +50,9 @@ public partial class ObjectStreamer : Node
     // cold path can re-group them once the textures it built them without have landed.
     private MaterialTable _materials = new();
     private List<PlacedObject> _objects = new();
+    // The vehicles the map starts with, rolled from its own spawn tables. Placements like any other, so
+    // they join the same needed set, extraction plan and mesh library — only their scene root is separate.
+    private List<PlacedObject> _vehicles = new();
     private ObjectAssetDatabase _db = null!;
     private Dictionary<Guid, FoliageAsset.Owned> _foliageAssets = new();
     private LevelFoliageChunks? _foliage;
@@ -396,9 +399,15 @@ public partial class ObjectStreamer : Node
 
         Task.WaitAll(placements, assets, foliage);
 
+        // After the asset scan, which it resolves its vehicles through, and before the needed set below.
+        _vehicles = VehicleSpawnPlan.Load(_level, _sources, _db);
+        Log.Print($"[stream] vehicles: {_vehicles.Count} spawned");
+
         _neededGuids = new HashSet<Guid>();
         foreach (PlacedObject o in _objects)
             _neededGuids.Add(o.Guid);
+        foreach (PlacedObject v in _vehicles)
+            _neededGuids.Add(v.Guid);
         // Only the foliage types that actually resolved to an asset: an unresolved GUID has nothing to
         // extract, so counting it as needed would report the cache cold on every boot.
         foreach (Guid g in _foliageAssets.Keys)
@@ -482,6 +491,7 @@ public partial class ObjectStreamer : Node
         double buildMs = stage.Elapsed.TotalMilliseconds;
         stage.Restart();
         AddChild(root);
+        AddChild(WorldBuilder.BuildVehicles(_vehicles, _db, meshLibrary, colliderLibrary, lod1Library));
         double attachMs = stage.Elapsed.TotalMilliseconds;
         stage.Restart();
         Node3D foliageRoot = _foliageIndex != null
@@ -501,6 +511,7 @@ public partial class ObjectStreamer : Node
         _foliage = null;
         _foliageIndex = null;
         _objects = null!;
+        _vehicles = null!;
         _db = null!;
         _foliageAssets = new(); // consumed by the streaming worker / mesh extraction; drop it too
     }
@@ -558,16 +569,14 @@ public partial class ObjectStreamer : Node
                         + $"{plan.Missing.Count} meshes, {plan.MissingTextures.Count} textures, "
                         + $"{layers.ByContainerPath.Count} terrain layers and "
                         + $"{audio?.DefPaths.Count ?? 0} audio definitions…");
-                    ModelExtractor.StreamExtract(plan.Source.BundlePath, plan.Source.CacheTag,
-                        plan.Source.ObjectsDir, plan.Source.TreesDir, plan.Source.AssetsDir,
-                        plan.Needed, _cacheDir, _textureCacheDir, _db,
+                    ModelExtractor.StreamExtract(plan.Source, plan.Needed, _cacheDir, _textureCacheDir, _db,
                         onMeshesReady: () =>
                         {
                             if (Interlocked.Decrement(ref meshPhasesLeft) == 0)
                                 DeferUnlessStopped(OnMeshPhaseDone);
                         },
                         onTextureWritten: key => _readyKeys.Enqueue(key),
-                        foliageAssets: plan.Foliage, isCoreBundle: plan.Source.IsCore, audio: audio,
+                        foliageAssets: plan.Foliage, audio: audio,
                         layerWantsByPath: layers.ByContainerPath,
                         onLayerTexture: (material, texture) =>
                         {
@@ -646,6 +655,7 @@ public partial class ObjectStreamer : Node
         _foliage = null;
         _foliageIndex = null;
         _objects = null!;
+        _vehicles = null!;
         _db = null!;
         _level = null!;
         _cacheDir = "";

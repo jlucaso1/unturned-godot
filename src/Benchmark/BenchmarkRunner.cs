@@ -27,9 +27,11 @@ public static class BenchmarkRunner
         WorldBuildResult world = WorldBuilder.Build(unturnedPath, mapName);
         context.AddChild(world.Terrain);
         context.AddChild(world.Objects);
+        context.AddChild(world.Vehicles);
         context.AddChild(world.Foliage); // in the tree like the game runs it — and freed with the scene
 
-        SceneMetricsResult m = SceneMetrics.Collect(new Node[] { world.Terrain, world.Objects, world.Foliage });
+        SceneMetricsResult m = SceneMetrics.Collect(
+            new Node[] { world.Terrain, world.Objects, world.Vehicles, world.Foliage });
         BenchmarkReport report = BuildStructuralReport(m, world, mapName);
 
         Finish(report, mapName, new BaselineDiffOptions
@@ -97,6 +99,7 @@ public static class BenchmarkRunner
             WorldBuildResult w = WorldBuilder.Build(unturnedPath, mapName);
             w.Terrain.Free();
             w.Objects.Free();
+            w.Vehicles.Free();
             w.Foliage.Free(); // leaking this left ~1k MultiMesh RIDs per rebuild, poisoning long traces
             i++;
             Log.Print($"[benchmark] profile-loop: build {i} done at {sw.Elapsed.TotalSeconds:0.0}s");

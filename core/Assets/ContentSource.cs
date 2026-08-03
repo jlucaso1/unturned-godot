@@ -24,6 +24,13 @@ public sealed class ContentSource
     public string TreesDir { get; }
     public string AssetsDir { get; }
 
+    // Vehicle assets and their redirectors; their prefabs sit under "vehicles/<folder>" in this bundle.
+    public string VehiclesDir { get; }
+
+    // Spawn table assets. Every category's tables share one legacy id namespace, but each lives in its own
+    // subfolder, so a consumer scans the subtree it needs rather than the whole tree.
+    public string SpawnsDir { get; }
+
     // The game's own content, as opposed to a workshop item.
     public bool IsCore { get; }
 
@@ -32,7 +39,7 @@ public sealed class ContentSource
     public string CacheTag { get; }
 
     private ContentSource(string name, string root, string bundlePath, string objectsDir, string treesDir,
-        string assetsDir, bool isCore)
+        string assetsDir, string vehiclesDir, string spawnsDir, bool isCore)
     {
         Name = name;
         string nameTag = Unity.TextureKey.TagFor(name);
@@ -46,6 +53,8 @@ public sealed class ContentSource
         ObjectsDir = objectsDir;
         TreesDir = treesDir;
         AssetsDir = assetsDir;
+        VehiclesDir = vehiclesDir;
+        SpawnsDir = spawnsDir;
         IsCore = isCore;
     }
 
@@ -57,7 +66,8 @@ public sealed class ContentSource
     public bool Owns(string directory)
     {
         string full = Path.GetFullPath(directory);
-        return IsUnder(full, ObjectsDir) || IsUnder(full, TreesDir) || IsUnder(full, AssetsDir);
+        return IsUnder(full, ObjectsDir) || IsUnder(full, TreesDir) || IsUnder(full, AssetsDir)
+            || IsUnder(full, VehiclesDir);
     }
 
     private static bool IsUnder(string path, string root)
@@ -84,6 +94,8 @@ public sealed class ContentSource
                 Path.Combine(bundles, "Objects"),
                 Path.Combine(bundles, "Trees"),
                 Path.Combine(bundles, "Assets"),
+                Path.Combine(bundles, "Vehicles"),
+                Path.Combine(bundles, "Spawns"),
                 isCore: true));
         }
 
@@ -105,14 +117,18 @@ public sealed class ContentSource
         string objects = Path.Combine(itemDirectory, "Objects");
         string trees = Path.Combine(itemDirectory, "Resources"); // the game's Trees folder, mod-side name
         string assets = Path.Combine(itemDirectory, "Assets");
+        string vehicles = Path.Combine(itemDirectory, "Vehicles");
         // Asset-only bundles are valid sources too. Foliage, physics materials and landscapes are consumed
         // independently of Objects/Resources, and every one of those scanners starts from Discover's
         // result. Rejecting an item that contains only one of them silently drops otherwise valid content.
         bool hasSupportedAssets = Directory.Exists(Path.Combine(assets, "Landscapes"))
             || Directory.Exists(Path.Combine(assets, "Foliage"))
             || Directory.Exists(Path.Combine(assets, "PhysicsMaterials"));
-        if (!Directory.Exists(objects) && !Directory.Exists(trees) && !hasSupportedAssets)
+        if (!Directory.Exists(objects) && !Directory.Exists(trees) && !Directory.Exists(vehicles)
+            && !hasSupportedAssets)
+        {
             return null;
+        }
 
         string baseName = config.BundleName.EndsWith(".masterbundle", StringComparison.OrdinalIgnoreCase)
             ? config.BundleName[..^".masterbundle".Length]
@@ -125,6 +141,8 @@ public sealed class ContentSource
             objects,
             trees,
             assets,
+            vehicles,
+            Path.Combine(itemDirectory, "Spawns"),
             isCore: false);
     }
 

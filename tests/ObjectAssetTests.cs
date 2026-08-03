@@ -1,3 +1,4 @@
+using System;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Dat;
 using Xunit;
@@ -90,8 +91,45 @@ public class ObjectAssetTests
     [InlineData("Decal", EObjectType.Decal)]
     [InlineData("Resource", EObjectType.Resource)]
     [InlineData("Structure", EObjectType.Unknown)]
+    [InlineData("Vehicle", EObjectType.Vehicle)]
+    // Vehicles and their redirectors also name the runtime class in full, which is how a mod writes them.
+    [InlineData("SDG.Unturned.VehicleAsset, Assembly-CSharp, Version=0.0.0.0", EObjectType.Vehicle)]
+    [InlineData("SDG.Unturned.VehicleRedirectorAsset, Assembly-CSharp, Version=0.0.0.0",
+        EObjectType.VehicleRedirector)]
     public void ClassifyType(string raw, EObjectType expected)
     {
         Assert.Equal(expected, ObjectAsset.ClassifyType(raw));
+    }
+
+    [Fact]
+    public void TryParse_ReadsARedirectorsTargetVehicle()
+    {
+        DatDictionary root = DatParser.Parse("GUID a2f98d9b28ec40df9268d7d6c822cc14\n"
+            + "Type SDG.Unturned.VehicleRedirectorAsset, Assembly-CSharp\nID 57\n"
+            + "TargetVehicle 6f56dc58382349b79793f9ba8839774e\n");
+
+        Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset? asset));
+        Assert.Equal(EObjectType.VehicleRedirector, asset.Type);
+        Assert.Equal(Guid.Parse("6f56dc58382349b79793f9ba8839774e"), asset.RedirectTargetGuid);
+    }
+
+    [Fact]
+    public void TryParse_ReadsTheTypeFromTheMetadataBlockOfAV2File()
+    {
+        DatDictionary root = DatParser.Parse("""
+            Metadata
+            {
+                GUID 2e698a7b85e94c019b3f91ec8796a961
+                Type SDG.Unturned.VehicleAsset, Assembly-CSharp
+            }
+            Asset
+            {
+                ID 58
+            }
+            """);
+
+        Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset? asset));
+        Assert.Equal(EObjectType.Vehicle, asset.Type);
+        Assert.Equal((ushort)58, asset.Id);
     }
 }

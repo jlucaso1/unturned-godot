@@ -65,6 +65,9 @@ public readonly struct ColliderPart
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed class PrefabGraph
 {
+    // VehicleAsset loads its model from this prefab (bundle.loadDeferred("Vehicle", ...)).
+    private const string VehiclePrefabFile = "vehicle.prefab";
+
     // Unity class ids, as they appear in the SerializedFile's object table.
     private const int MeshFilterClassId = 33;
     private const int MeshRendererClassId = 23;
@@ -138,8 +141,11 @@ public sealed class PrefabGraph
                 int idx = path.IndexOf("objects/", StringComparison.Ordinal);
                 if (assetPrefix.Length == 0 && idx > 0)
                     assetPrefix = path[..idx];
+                // The three prefab names Unturned instantiates a placed asset from: ObjectAsset's
+                // Object.prefab, ResourceAsset's Resource.prefab and VehicleAsset's Vehicle.prefab.
                 if (path.EndsWith("/object.prefab", StringComparison.Ordinal) ||
-                    path.EndsWith("/resource.prefab", StringComparison.Ordinal))
+                    path.EndsWith("/resource.prefab", StringComparison.Ordinal) ||
+                    path.EndsWith("/" + VehiclePrefabFile, StringComparison.Ordinal))
                     pathByRootGo[assetId] = path;
             }
         }
@@ -194,6 +200,7 @@ public sealed class PrefabGraph
     {
         var lod0 = new Dictionary<string, List<MeshPart>>();
         var lod1 = new Dictionary<string, List<MeshPart>>();
+        var always = new Dictionary<string, List<MeshPart>>();
         var firstByKey = new Dictionary<string, MeshPart>();
         var nameCache = new Dictionary<long, string>();
 
@@ -232,17 +239,22 @@ public sealed class PrefabGraph
             string key = PrefabKey(path);
             var part = new MeshPart(meshId, MeshRendererMaterials(file, objectsByPathId, goId), localToRoot);
             string partName = GameObjectName(file, objectsByPathId, nameCache, goId);
-            if (partName.EndsWith("_0", StringComparison.Ordinal))
+            bool isVehicle = path.EndsWith("/" + VehiclePrefabFile, StringComparison.Ordinal);
+            switch (LevelOf(partName, isVehicle))
             {
-                if (!lod0.TryGetValue(key, out List<MeshPart>? list))
-                    lod0[key] = list = new List<MeshPart>();
-                list.Add(part);
-            }
-            else if (partName.EndsWith("_1", StringComparison.Ordinal))
-            {
-                if (!lod1.TryGetValue(key, out List<MeshPart>? list))
-                    lod1[key] = list = new List<MeshPart>();
-                list.Add(part);
+                case 0:
+                    Add(lod0, key, part);
+                    break;
+                case 1:
+                    Add(lod1, key, part);
+                    break;
+                case AlwaysLevel:
+                    // Rendered whatever the distance. Held aside rather than added to the lower level
+                    // here: a prefab with no authored lower level must not gain one made of nothing but
+                    // its seats and lights, which would then replace the whole vehicle at distance.
+                    Add(lod0, key, part);
+                    Add(always, key, part);
+                    break;
             }
             firstByKey.TryAdd(key, part);
         }
@@ -255,10 +267,48 @@ public sealed class PrefabGraph
             result[kv.Key] = authored ? parts! : new List<MeshPart> { kv.Value };
             // A lower level is only meaningful against an authored LOD-0 set. Where the fallback above
             // picked an unnamed first mesh, there is no level structure to switch between.
-            if (authored && lod1.TryGetValue(kv.Key, out List<MeshPart>? lower))
-                lod1ByKey[kv.Key] = lower;
+            if (!authored || !lod1.TryGetValue(kv.Key, out List<MeshPart>? lower))
+                continue;
+            if (always.TryGetValue(kv.Key, out List<MeshPart>? unlevelled))
+                lower.AddRange(unlevelled); // the parts that render at every distance, this one included
+            lod1ByKey[kv.Key] = lower;
         }
         return result;
+    }
+
+    private static void Add(Dictionary<string, List<MeshPart>> byKey, string key, MeshPart part)
+    {
+        if (!byKey.TryGetValue(key, out List<MeshPart>? list))
+            byKey[key] = list = new List<MeshPart>();
+        list.Add(part);
+    }
+
+    // Which detail level a prefab's renderable child belongs to, or AlwaysLevel for one that is drawn at
+    // every distance. Unturned names a levelled renderer "<something>_<n>" — Model_0/Model_1 overwhelmingly
+    // — and the port reads that suffix rather than the LODGroup component the editor also writes.
+    //
+    // A vehicle is the one prefab where that reading is wrong: VehicleAsset addresses a vehicle's parts by
+    // name (Seats/Seat_#, Headlights, Sirens), so Seat_0 and Seat_1 are the driver's and passenger's seat,
+    // not two levels of one seat. Take only the Model_<n> chain as levels there; everything else is a part
+    // of the vehicle that is always drawn.
+    private const int AlwaysLevel = -1;
+    private const int IgnoredLevel = -2;
+
+    private static int LevelOf(string partName, bool isVehicle)
+    {
+        if (!isVehicle)
+        {
+            if (partName.EndsWith("_0", StringComparison.Ordinal))
+                return 0;
+            return partName.EndsWith("_1", StringComparison.Ordinal) ? 1 : IgnoredLevel;
+        }
+
+        if (partName.StartsWith("Model_", StringComparison.Ordinal))
+            return partName is "Model_0" ? 0 : partName is "Model_1" ? 1 : IgnoredLevel;
+
+        // A depth mask writes depth only in Unity, hiding what is behind it rather than drawing itself;
+        // rendered as ordinary geometry it would be a solid slab through the vehicle.
+        return partName is "DepthMask" ? IgnoredLevel : AlwaysLevel;
     }
 
     // Each prefab's collision colliders, keyed like PartsByKey. Colliders on the server-only navmesh ("Nav")

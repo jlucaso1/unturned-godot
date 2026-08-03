@@ -64,7 +64,13 @@ public static class WorldPreview
         for (int i = 0; i < sources.Count; i++)
             assetsDirs[i] = sources[i].AssetsDir;
 
+        ObjectAssetDatabase assets = ContentExtraction.ScanAssets(sources);
         HashSet<Guid> needed = MapAssetSet.Collect(mapPath, assetsDirs);
+        // The map's vehicles need their prefabs cached too, and MapAssetSet cannot roll for them from a
+        // map folder alone — resolving a spawn table takes the installed sources and the asset database.
+        // Left out, the dock would call a map fully cached while every vehicle was still missing.
+        foreach (PlacedObject vehicle in VehicleSpawnPlan.Load(new LevelInfo(mapPath), sources, assets))
+            needed.Add(vehicle.Guid);
 
         var foliageGuids = LevelFoliageChunks.ReadAssetGuids(Path.Combine(mapPath, "Foliage.blob"));
         var foliage = foliageGuids is { } guids
@@ -74,7 +80,7 @@ public static class WorldPreview
         Dictionary<string, TerrainLayerPlan.BundleWants> terrainLayers = MissingTerrainLayers(mapPath, sources);
         var bundlesOwingLayers = new HashSet<string>(terrainLayers.Keys, StringComparer.Ordinal);
         List<ContentExtraction.BundlePlan> bundles = ContentExtraction.Plan(sources, CacheDir,
-            TextureCacheDir, needed, ContentExtraction.ScanAssets(sources), foliage, bundlesOwingLayers);
+            TextureCacheDir, needed, assets, foliage, bundlesOwingLayers);
         return new CachePlan(bundles, terrainLayers, needed.Count);
     }
 
@@ -118,9 +124,7 @@ public static class WorldPreview
         {
             if (plan.NeedsExtraction)
             {
-                meshes += ModelExtractor.ExtractMeshes(plan.Source.BundlePath, plan.Source.CacheTag,
-                    plan.Source.ObjectsDir, plan.Source.TreesDir, plan.Source.AssetsDir, plan.Needed,
-                    CacheDir, db, plan.Foliage);
+                meshes += ModelExtractor.ExtractMeshes(plan.Source, plan.Needed, CacheDir, db, plan.Foliage);
                 textures += ModelExtractor.ExtractTextures(plan.Source.BundlePath, plan.Source.CacheTag,
                     CacheDir, TextureCacheDir);
             }
