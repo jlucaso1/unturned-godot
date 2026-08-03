@@ -778,8 +778,10 @@ public static class Program
         // It is a lower bound because a real load also wants foliage, tree and terrain-layer textures that
         // are not reached from Level/Objects.dat. That is the useful direction: if even the lower bound
         // already runs to the end of the node, no larger set can end earlier.
-        HashSet<string>? mapWantKeys = MapScopedWantKeys(map, tag, path);
-        if (mapWantKeys != null && !AnyKeyMatches(declared, mapWantKeys))
+        HashSet<string>? mapWantKeys = MapScopedWantKeys(map, tag, path, out string why);
+        if (mapWantKeys == null)
+            Console.WriteLine($"  note: no map-scoped want set ({why})");
+        else if (!AnyKeyMatches(declared, mapWantKeys))
         {
             // Ids resolved against another bundle would otherwise filter every range away and be reported
             // as "nothing wanted" — a wrong answer that looks like a measured one.
@@ -788,9 +790,15 @@ public static class Program
             mapWantKeys = null;
         }
 
+        // Only a complete scan makes the declared set an upper bound. With a serialized file skipped, the
+        // textures it names — possibly in a later stream node — are absent, so the extent below can be
+        // SHORTER than the real load's and cannot bracket anything.
         Console.WriteLine(mapWantKeys == null
-            ? "  want set: every streamed Texture2D in the bundle (SUPERSET — an upper bound on the read "
-                + "extent, not the set a real load asks for)"
+            ? skippedSerialized > 0
+                ? "  want set: every streamed Texture2D the SCANNED serialized files declare (INCOMPLETE — "
+                    + "the skipped files may name ranges that push the real extent further out)"
+                : "  want set: every streamed Texture2D in the bundle (SUPERSET — an upper bound on the "
+                    + "read extent, not the set a real load asks for)"
             : $"  want set: {mapWantKeys.Count:N0} textures the mesh cache says this map's placed objects "
                 + "need (a LOWER bound — foliage, trees and terrain layers are wanted too but not counted)");
 
@@ -913,13 +921,17 @@ public static class Program
     private static long ReportNode(string name, long size, List<StreamRange> wants, int index,
         int lastForced, bool forMetadata)
     {
+        // `forMetadata` covers the node ITSELF, not just the ones before it: a serialized file sitting
+        // after this node has to be reached, so the decoder runs off its end either way. Testing only
+        // `index < lastForced` let the last such node report its own extent and understate the pass.
+        bool whole = index < lastForced || forMetadata;
         string reason = forMetadata ? "a later serialized file has to be reached" : "a later node is owed";
         Console.WriteLine($"\n  {name} {Mb(size)}");
         if (wants.Count == 0)
         {
             // A forward-only decoder cannot skip a node to reach the next one, so "nothing wanted here"
             // only means "free" once nothing after it is owed either.
-            if (index < lastForced)
+            if (whole)
             {
                 Console.WriteLine($"    nothing wanted here, but {reason} — all {Mb(size)} is decoded "
                     + "just to get past it");
@@ -930,7 +942,7 @@ public static class Program
             return 0;
         }
 
-        if (index < lastForced)
+        if (whole)
         {
             // Its own furthest range does not end the pass: something after it still has to be reached.
             long pixelsHere = 0;
@@ -1008,22 +1020,42 @@ public static class Program
 
         // A deferral is only worth anything where the wanted ranges thin out. The biggest gap in the last
         // quarter is the best single cut available anywhere near the tail.
+        //
+        // Swept in START order against a running maximum end, like UnionLength. `wants` is in END order,
+        // where one long range can follow ranges that begin after it — differencing neighbours there
+        // measures nothing in particular and can step straight over a real gap between clusters.
+        var byStart = new List<StreamRange>(wants);
+        byStart.Sort((a, b) => a.Offset.CompareTo(b.Offset));
+
         long quarter = extent - (size / 4);
-        long widest = 0;
-        int widestAt = 0;
-        for (int i = wants.Count - 1; i > 0; i--)
+        long widest = 0, widestCut = 0, reach = 0;
+        foreach (StreamRange want in byStart)
         {
-            if (wants[i].End < quarter)
-                break;
-            long gap = wants[i].Offset - wants[i - 1].End;
-            if (gap > widest)
+            if (want.Offset >= quarter && want.Offset - reach > widest)
             {
-                widest = gap;
-                widestAt = wants.Count - i;
+                widest = want.Offset - reach;
+                widestCut = want.Offset;
             }
+            reach = Math.Max(reach, want.End);
         }
-        Console.WriteLine($"    widest gap in the last quarter: {Bytes(widest)} — cutting there defers "
-            + $"{widestAt:N0} range(s)");
+
+        if (widest == 0)
+        {
+            Console.WriteLine("    widest gap in the last quarter: none — the wanted ranges are "
+                + "back to back there, so no cut is cheaper than any other");
+        }
+        else
+        {
+            // Cutting at that offset defers everything still unfinished there, counted once at the end
+            // rather than inside the sweep.
+            int widestAt = 0;
+            foreach (StreamRange want in wants)
+                if (want.End > widestCut)
+                    widestAt++;
+
+            Console.WriteLine($"    widest gap in the last quarter: {Bytes(widest)} — cutting there defers "
+                + $"{widestAt:N0} range(s)");
+        }
 
         ReportGroups(wants, size, extent);
         return extent;
@@ -1121,8 +1153,8 @@ public static class Program
         }
         timer.Stop();
         double rate = read / 1048576.0 / timer.Elapsed.TotalSeconds;
-        Console.WriteLine($"\n  decode rate: {rate:0.0} MB/s over a {Mb(read)} sample "
-            + $"({timer.Elapsed.TotalSeconds:0.00} s) — every 100 MB not read is ~{100 / rate:0.00} s");
+        Console.WriteLine($"\n  decode rate: {rate:0.0} MiB/s over a {Mb(read)} sample "
+            + $"({timer.Elapsed.TotalSeconds:0.00} s) — every 100 MiB not read is ~{100 / rate:0.00} s");
     }
 
     // Physical bytes covered by a set of ranges, counting shared regions once. The list arrives sorted by
@@ -1146,15 +1178,31 @@ public static class Program
     // The textures this map's placed objects depend on, taken from the mesh cache through the same index
     // the runtime uses to decide what a load still owes. Scoped to one map, unlike the texture cache
     // directory, which every map writes into and which therefore answers a different question.
-    private static HashSet<string>? MapScopedWantKeys(string? map, string tag, string bundlePath)
+    private static HashSet<string>? MapScopedWantKeys(string? map, string tag, string bundlePath,
+        out string why)
     {
-        string? meshCache = FindGodotUserDir() is { } user ? Path.Combine(user, "model_cache") : null;
-        if (map == null || meshCache == null || !Directory.Exists(meshCache))
+        // Every way this can come back empty is a different measurement, so the caller says which one it
+        // got rather than quietly reporting the superset as though it had been asked for.
+        why = string.Empty;
+        if (map == null)
+        {
+            why = "no map resolved";
             return null;
+        }
+
+        string? meshCache = FindGodotUserDir() is { } user ? Path.Combine(user, "model_cache") : null;
+        if (meshCache == null || !Directory.Exists(meshCache))
+        {
+            why = "no mesh cache on this machine — run the game once to populate it";
+            return null;
+        }
 
         string objects = Path.Combine(map, "Level", "Objects.dat");
         if (!File.Exists(objects))
+        {
+            why = $"{objects} is missing";
             return null;
+        }
 
         // Only GUIDs this bundle demonstrably extracted, at its current revision. The mesh cache is shared
         // between installs and survives a bundle update, and NeededTextureIds trusts any entry in the
@@ -1163,16 +1211,24 @@ public static class Program
         // reported extent, which is exactly the number the whole diagnostic turns on.
         long stamp = ExtractionIndex.StampFor(bundlePath);
 
+        // A map repeats one prefab GUID across thousands of placements and MeshBelongsTo reads files, so
+        // the distinct set comes first and each GUID is proved at most once.
+        var placed = new HashSet<Guid>();
+        foreach (PlacedObject entry in LevelObjects.Load(objects))
+            if (entry.Guid != Guid.Empty)
+                placed.Add(entry.Guid);
+
         var guids = new HashSet<Guid>();
-        foreach (PlacedObject placed in LevelObjects.Load(objects))
-            if (placed.Guid != Guid.Empty
-                && ExtractionIndex.MeshBelongsTo(meshCache, placed.Guid, bundlePath, stamp))
-            {
-                guids.Add(placed.Guid);
-            }
+        foreach (Guid guid in placed)
+            if (ExtractionIndex.MeshBelongsTo(meshCache, guid, bundlePath, stamp))
+                guids.Add(guid);
 
         if (guids.Count == 0)
+        {
+            why = $"none of the map's {placed.Count:N0} placed prefabs has a mesh this bundle extracted "
+                + "at its current revision";
             return null;
+        }
 
         // Back to full keys: a path id is unique only inside ONE serialized file, and this bundle may
         // carry several. The index reports ids owned by the base tag, so name them with that tag and let
@@ -1180,6 +1236,9 @@ public static class Program
         var keys = new HashSet<string>(StringComparer.Ordinal);
         foreach (long id in TextureDependencyIndex.NeededTextureIds(meshCache, tag, guids))
             keys.Add(TextureKey.For(tag, id));
+
+        if (keys.Count == 0)
+            why = $"the {guids.Count:N0} cached meshes for this map name no texture owned by '{tag}'";
         return keys.Count > 0 ? keys : null;
     }
 
@@ -1193,7 +1252,7 @@ public static class Program
         return slash >= 0 ? path[(slash + 1)..] : path;
     }
 
-    private static string Mb(long bytes) => $"{bytes / 1048576.0:N1} MB";
+    private static string Mb(long bytes) => $"{bytes / 1048576.0:N1} MiB";
 
     // Gaps between wanted ranges are the one figure that can land far below a megabyte, and rounding
     // those to "0.0 MB" would hide the difference between a thin tail and no tail at all.

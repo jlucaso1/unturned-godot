@@ -41,15 +41,18 @@ bundle declares. The **lower** bound is what the selected map's placed objects d
 scoped to one map, unlike the `texture_cache` directory, which every map writes into and which would
 hand back the union of everything ever extracted. It is a lower bound because a real load also wants
 foliage, tree and terrain-layer textures that `Level/Objects.dat` does not reach. That is the useful
-direction: if even the lower bound runs to the end of the node, no larger set ends earlier. With no mesh
-cache on the machine the suite says so and reports the superset alone.
+direction: if even the lower bound runs to the end of the node, no larger set ends earlier. When there is
+no map-scoped set to be had — no mesh cache, no `Level/Objects.dat`, no placed mesh this bundle extracted
+at its current revision — the suite prints which of those it hit and reports the upper bound alone. It
+also stops calling that set an upper bound if any serialized file went unscanned, since the ranges those
+name are missing from it.
 
 Measured on the game's own `core_linux.masterbundle` (superset of 5,360 streamed textures over a
-1,180 MB `.resS`): they are spread evenly end to end — the last tenth of the node is the second
-*densest* — and the widest gap anywhere in the final 295 MB is 48 KB. Deferring the last 64 ranges saves
-9.7 MB (~0.06 s); reading 10% less needs 11% of the want set deferred. So the bundle's layout has no
+1,180 MiB `.resS`): they are spread evenly end to end — the last tenth of the node is the second
+*densest* — and the widest gap anywhere in the final 295 MiB is 48 KB. Deferring the last 64 ranges saves
+9.7 MiB (~0.06 s); reading 10% less needs 11% of the want set deferred. So the bundle's layout has no
 sparse tail to trim. The per-folder table bounds each folder's subsets from above but does not settle
-them — only a real want set does that, which is what the texture cache is for.
+them — only a real want set does that, which is what the map-scoped lower bound is for.
 
 To A/B a candidate optimization: copy the current implementation into a local variant, `Bench()` both,
 and **gate on an output-equivalence check first**. A variant that skips work the real code does
