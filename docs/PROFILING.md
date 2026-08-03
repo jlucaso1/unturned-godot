@@ -211,7 +211,10 @@ a path (`UG_OBJECT_CHUNK_METRES`, `SCREENSHOT_PATH`, `TIME_OF_DAY`, …) are una
   opts into the dithered swap, and `UG_OBJECT_LOD_CHUNK_METRES` bounds the cells of levelled groups.
 - `UG_MESH_LOD_THRESHOLD=<pixels>` sets the viewport's mesh LOD threshold, which drives the levels
   Godot generates for every mesh itself; zero disables it and is the control for measuring what
-  automatic LOD contributes.
+  automatic LOD contributes. The value is clamped to 0..1024, and anything unparseable or non-finite
+  leaves the shipped default in place rather than disabling LOD — so a typo shows up as "no change"
+  instead of as a large and misleading win. `Main` holds that default, which is above the engine's;
+  see the LOD findings below for why.
 - `UG_COLLISION_CHUNK_METRES=0` disables physics-body partitioning for A/B comparisons.
 - `UG_FOLIAGE_CHUNK_TILES=<1..32>` changes the number of 32 m foliage tiles per render chunk;
   `UG_FOLIAGE_DISTANCE=<metres>` changes its fade range.
@@ -323,13 +326,15 @@ an authored level would take over, so which of the two answers first barely matt
 than a dead end, and how large it looks depends entirely on which map you measure. On a sparse map the
 ground poses barely move, because the vantage the harness picks there is open beach with nothing distant
 in frame — the near and aerial poses carry the whole effect. On a dense map the same setting takes a
-tenth or more off the ground view, which is the view that matters.
+meaningful share off the ground view, which is the view that matters: approaching a tenth at the value
+shipped here, and half again as much at the settings above it.
 
 The cost is visible too, and again only a dense map shows it: raising it far enough thins distant tree
 canopies and coarsens skyline landmarks, with the differing pixels concentrated in the horizon band.
 That cost is very unevenly distributed across the range. One step above the engine default is free by
-both measures — the differing pixels are a rounding error and nothing in the captures changes — while
-each step after that costs several times more pixels for progressively less geometry. So the shipped
+both measures — the differing pixels are around a hundredth of a percent of the frame and the captures
+are indistinguishable — while each step after that costs several times more pixels for progressively
+less geometry. So the shipped
 value takes the free step and stops; `UG_MESH_LOD_THRESHOLD` reaches the rest for anyone who wants to
 retrade it, and zero disables automatic mesh LOD entirely as the A/B control.
 

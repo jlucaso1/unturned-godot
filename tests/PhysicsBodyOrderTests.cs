@@ -556,9 +556,23 @@ public class PhysicsBodyOrderTests
         string source = File.ReadAllText(path);
         // The override used to be the only writer, so the shipped value was whatever the engine
         // defaulted to and dropping the assignment out of the unset path would silently restore it.
-        Assert.Contains("float thresholdPixels = DefaultMeshLodThreshold", source);
-        Assert.Contains("UG_MESH_LOD_THRESHOLD", source);
-        Assert.Contains("viewport.MeshLodThreshold = Mathf.Clamp(thresholdPixels, 0f, 1024f)", source);
+        // Ordering alone does not prove it: moving the write back inside the override block keeps the
+        // default, the lookup and the write in the same order. What distinguishes the two shapes is
+        // which side of the block's closing brace the write lands on, so find that brace and check.
+        // The value itself is deliberately not pinned — it is tuning, and a test that fails when it is
+        // retuned only teaches people to edit the test.
+        source = source.Replace("\r\n", "\n");
+        int fallback = source.IndexOf("float thresholdPixels = DefaultMeshLodThreshold", StringComparison.Ordinal);
+        int overridden = source.IndexOf("thresholdPixels = requestedThreshold", StringComparison.Ordinal);
+        Assert.True(fallback >= 0 && overridden > fallback,
+            "the default has to be in hand before the override can replace it");
+        // The block closes at method-body indentation, which the format check keeps stable.
+        int blockEnd = source.IndexOf("\n        }", overridden, StringComparison.Ordinal);
+        int applied = source.IndexOf("viewport.MeshLodThreshold = Mathf.Clamp(thresholdPixels, 0f, 1024f)",
+            StringComparison.Ordinal);
+        Assert.True(blockEnd >= 0 && applied > blockEnd,
+            "the viewport write has to sit after the override block, or an unset override leaves the "
+                + "engine default in place");
     }
 
     [Fact]
