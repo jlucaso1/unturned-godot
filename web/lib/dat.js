@@ -47,17 +47,23 @@ export class DatValues {
     }
 }
 
-// Three rules, each checked by running the game's own parser rather than reasoned from the source:
+// Brackets are their own tokens, so they are peeled off the front of a line rather than treated as a
+// property of the line. Every rule below was checked by running the game's own parser:
 //
-//   Nested {      ->  [Nested] = "{", and a following `Name Leak` is STILL top-level. A brace is only
+//   Nested {      ->  [Nested] = "{", and a following `Name Leak` is STILL top-level. A bracket is only
 //   Name Leak         structural where the tokenizer would start a token, and after a key it is just
 //   }                 the value; the `}` then closes a block nothing opened, which ends the document.
 //
 //   Nested        ->  [Nested] is not a value at all. A block opening on the next line replaces the
 //   {                 inline value the key would otherwise have had, and its contents are one level in.
 //
-// The second is why the game's files put braces on their own line, and the first is why a hand-edited
-// file that does not can hide the rest of its keys — from the desktop and from here alike.
+//   { Name X      ->  [Name] = "X". ParseDictionaryBody(root: true) consumes the root dictionary's own
+//                     opening brace and keeps tokenizing the same line.
+//
+//   [             ->  a root LIST, not a tolerated root brace: its contents are values, not keys, and
+//   Name Fake         the `]` returns to the root rather than ending the document — a `Name Real` after
+//   ]                 it is read normally.
+//   Name Real
 export function parseDatTopLevel(text) {
     const values = new DatValues();
     let depth = 0;
@@ -65,38 +71,50 @@ export function parseDatTopLevel(text) {
     let pending = null;
 
     for (const rawLine of logicalLines(String(text ?? ""))) {
-        const line = rawLine.trim();
-        if (line === "") continue;
+        let rest = rawLine.trim();
+        if (rest === "") continue;
+        if (rest[0] === "/") continue; // comment to end of line
 
-        const first = line[0];
-        if (first === "/") continue; // comment to end of line
+        let documentEnded = false;
+        while (rest !== "") {
+            const first = rest[0];
 
-        if (first === "{" || first === "[") {
-            // A brace at the top with no key in front of it is the *root* dictionary's own opening
-            // brace, which ParseDictionaryBody(root: true) tolerates — the keys inside it are still
-            // top-level. Only a brace that follows a key opens a nested block (and takes that key's
-            // inline value back over).
-            if (depth === 0 && pending === null) continue;
-            if (depth === 0) values.delete(pending);
-            depth++;
-            pending = null;
+            if (first === "{" || first === "[") {
+                // Only a brace, and only with no key in front of it, is the root dictionary's own —
+                // tolerated, leaving whatever follows on the line still top-level. A bracket always
+                // opens a list, whose contents are values rather than keys.
+                const tolerated = first === "{" && depth === 0 && pending === null;
+                if (!tolerated) {
+                    if (depth === 0) values.delete(pending);
+                    depth++;
+                    pending = null;
+                }
+                rest = rest.slice(1).trim();
+                continue;
+            }
+
+            if (first === "}" || first === "]") {
+                // A close with nothing open ends the root dictionary, and with it the document.
+                if (depth === 0) {
+                    documentEnded = true;
+                    break;
+                }
+                depth--;
+                pending = null;
+                rest = rest.slice(1).trim();
+                continue;
+            }
+
+            break;
+        }
+
+        if (documentEnded) break;
+        if (rest === "" || depth > 0) {
+            if (depth > 0) pending = null;
             continue;
         }
 
-        if (first === "}" || first === "]") {
-            // A close with nothing open ends the root dictionary, and with it the document.
-            if (depth === 0) break;
-            depth--;
-            pending = null;
-            continue;
-        }
-
-        if (depth > 0) {
-            pending = null;
-            continue;
-        }
-
-        const { key, value } = splitKeyValue(line);
+        const { key, value } = splitKeyValue(rest);
         if (key === null) continue;
         values.set(key, value);
         pending = key;

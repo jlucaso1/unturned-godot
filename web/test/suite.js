@@ -133,6 +133,7 @@ export async function runSuite(manifest) {
     await phase("rangeReads", () => rangeReads(manifest));
     await phase("tileNaming", tileNaming);
     await phase("relaxedConfigJson", relaxedConfigJson);
+    await phase("bomDecoding", bomDecoding);
     await phase("menuOrdering", menuOrdering);
     await phase("caseFolding", caseFolding);
     await phase("blankLocalizedName", blankLocalizedName);
@@ -221,6 +222,40 @@ async function relaxedConfigJson() {
         { platform: "linux" },
     );
     equal("relaxing json leaves string contents alone", stringy.maps[0]?.category, "a // b, ");
+
+    // A removed block comment separates tokens, so it leaves a space. Collapsing `1/*c*/2` to `12`
+    // would accept a document JsonDocument rejects, and read a different number out of it.
+    const merged = await probeInstall(
+        syntheticFs({
+            "Bundles/core_linux.masterbundle": "",
+            "Maps/Merged/Level.dat": "",
+            "Maps/Merged/Config.json": '{ "Category": "Curated", "X": 1/*c*/2 }',
+        }),
+        { platform: "linux" },
+    );
+    equal("a comment between tokens does not merge them into valid json", merged.maps[0]?.category, null);
+}
+
+// File.ReadAllText picks the encoding from a byte-order mark; File.text() is UTF-8 whatever the bytes
+// say. A map author's UTF-16 English.dat has to read the same in both.
+async function bomDecoding() {
+    const utf16le = new Uint8Array([0xff, 0xfe, ...[..."Name Ilha"].flatMap((c) => [c.charCodeAt(0), 0])]);
+    const fs = syntheticFs({
+        "Bundles/core_linux.masterbundle": "",
+        "Maps/Bom/Level.dat": "",
+    });
+    equal("plain utf-8 text still reads", await fs.readText("Maps/Bom/Level.dat"), "");
+
+    const withBom = new ListingFs(
+        [
+            fileFor("Bundles/core_linux.masterbundle", "Unturned", ""),
+            fileFor("Maps/Bom/Level.dat", "Unturned", ""),
+            fileFor("Maps/Bom/English.dat", "Unturned", utf16le),
+        ],
+        { caseInsensitive: false },
+    );
+    const result = await probeInstall(withBom, { platform: "linux" });
+    equal("a utf-16 English.dat still yields its name", result.maps[0]?.displayName, "Ilha");
 }
 
 // CompareForMenu sorts with OrdinalIgnoreCase, not locale collation: "Åland" sorts after "Zeta".
@@ -235,6 +270,17 @@ function menuOrdering() {
         order.map((map) => map.displayName).join(","),
         "Alpha,Zeta,Åland",
     );
+
+    // OrdinalIgnoreCase upcases one code point at a time and leaves anything whose uppercase is longer
+    // alone: ToUpperInvariant('ß') is 'ß', so .NET does not equate "ß" with "SS" — string.Compare returns
+    // 140. JavaScript's toUpperCase does the full mapping and would have made them identical.
+    const named = (displayName) => ({ supported: true, source: "Official", displayName });
+    check(
+        "ordinal comparison does not expand ß to SS",
+        compareForMenu(named("ß"), named("SS")) !== 0,
+        "compared equal",
+    );
+    equal("but ASCII case is still folded", compareForMenu(named("alpha"), named("ALPHA")), 0);
 }
 
 // MapCatalog.Read falls back to the folder name on IsNullOrWhiteSpace, so a name of spaces must not
@@ -340,6 +386,25 @@ async function workshopNameCollisions() {
         }),
         { platform: "linux" },
     );
+    // The game's own copy under Bundles/Workshop/Maps is a placeholder a subscribed map replaces. On a
+    // case-insensitive host the fallback backend can hand back the stored spelling — `Bundles/workshop/
+    // maps` — and MapCatalog.IsBundledWorkshopCopy folds case there, so a case-sensitive prefix test
+    // would miss it and list the map twice.
+    const oddlyCasedCopy = {
+        "steamapps/common/Unturned/Bundles/core_linux.masterbundle": "",
+        ...mapTree("steamapps/common/Unturned/Bundles/workshop/maps/Ireland", ["Tile_0_0_Source.heightmap"]),
+        ...mapTree("steamapps/workshop/content/304930/111/Ireland", ["Tile_0_0_Source.heightmap"]),
+    };
+    const folded = await probeInstall(syntheticFs(oddlyCasedCopy, "Unturned", { caseInsensitive: true }), {
+        platform: "windows",
+    });
+    equal("a bundled copy is recognised through case folding", folded.maps.length, 1);
+    check(
+        "and it is the subscribed map that survives",
+        folded.maps[0]?.path.includes("steamapps/workshop/content"),
+        folded.maps[0]?.path,
+    );
+
     equal("a placeholder is replaced, not stacked", replaced.maps.length, 2);
     check(
         "and the replacement releases the name",
@@ -545,6 +610,16 @@ function dat() {
     const wrapped = parseDatTopLevel("{\nName Wrapped\nDescription Inside\n}");
     equal("a root brace does not hide the keys inside it", wrapped.get("Name"), "Wrapped");
     equal("and the rest of them either", wrapped.get("Description"), "Inside");
+
+    // The root brace is consumed as a token, so the rest of its line is still tokenized.
+    const inlineRoot = parseDatTopLevel("{ Name SameLine\nDescription After\n}");
+    equal("a key on the root brace's own line is read", inlineRoot.get("Name"), "SameLine");
+    equal("and so is the line after it", inlineRoot.get("Description"), "After");
+
+    // A root *list* is not a tolerated root brace: its contents are values, and its close returns to the
+    // root instead of ending the document.
+    const rootList = parseDatTopLevel("[\nName Fake\n]\nName Real");
+    equal("a root list does not expose its contents as keys", rootList.get("Name"), "Real");
 
     // A brace is structural only where the tokenizer would start a token. These three were read off the
     // game's own parser rather than reasoned from its source, and they do not all agree with intuition.

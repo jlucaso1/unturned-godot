@@ -9,7 +9,7 @@
 
 import { parseDatTopLevel } from "./dat.js";
 import { normalize } from "./paths.js";
-import { currentPlatform } from "./platform.js";
+import { currentPlatform, isCaseInsensitiveFilesystem } from "./platform.js";
 
 export { currentPlatform };
 
@@ -162,9 +162,12 @@ async function readCategory(fs, mapPath) {
 // — in two string-preserving passes rather than one, because a trailing comma can be separated from its
 // bracket by the very comment the other pass removes.
 function relaxJson(text) {
+    // A removed comment leaves a space behind, not nothing. `{"X":1/*c*/2}` collapsing to `{"X":12}`
+    // would turn a document JsonDocument rejects into one JSON.parse accepts — and with a different
+    // value, which is worse than failing the way the desktop does.
     const withoutComments = text.replace(
         /("(?:\\.|[^"\\])*")|\/\/[^\n\r]*|\/\*[\s\S]*?\*\//g,
-        (match, string) => string ?? "",
+        (match, string) => string ?? " ",
     );
     return withoutComments.replace(/("(?:\\.|[^"\\])*")|,(?=\s*[}\]])/g, (match, string) => string ?? "");
 }
@@ -217,9 +220,22 @@ export function compareForMenu(a, b) {
 // carries an accent: locale rules file "Åland" next to "Aland", ordinal rules file it after "Zeta", and
 // the browser is supposed to be previewing the menu the game will show.
 function compareOrdinalIgnoreCase(a, b) {
-    const left = a.toUpperCase();
-    const right = b.toUpperCase();
+    const left = simpleUpperCase(a);
+    const right = simpleUpperCase(b);
     return left < right ? -1 : left > right ? 1 : 0;
+}
+
+// The upcase OrdinalIgnoreCase performs is one code point at a time, and a code point whose uppercase
+// is longer than itself is left alone: ToUpperInvariant('ß') is 'ß', not "SS". JavaScript's toUpperCase
+// does the full Unicode mapping, which would make "ß" and "SS" compare equal here and not on the
+// desktop — so anything that expands keeps its original form.
+function simpleUpperCase(text) {
+    let out = "";
+    for (const character of text) {
+        const upper = character.toUpperCase();
+        out += upper.length === character.length ? upper : character;
+    }
+    return out;
 }
 
 // The whole probe: what was picked, whether it is an install, what content it carries and which maps are
@@ -240,7 +256,7 @@ export async function probeInstall(fs, { platform = currentPlatform() } = {}) {
 
     const { installPath, workshopPath } = located;
     const masterBundle = await findMasterBundle(fs, installPath, platform);
-    const maps = await scanMaps(fs, located);
+    const maps = await scanMaps(fs, located, { platform });
 
     return {
         ok: masterBundle !== null,
@@ -262,7 +278,7 @@ export async function probeInstall(fs, { platform = currentPlatform() } = {}) {
 
 // MapCatalog.Scan: official folders, the game's own Workshop/Maps copies, and Steam's workshop content,
 // with a workshop item's map allowed to sit one folder deeper.
-export async function scanMaps(fs, located) {
+export async function scanMaps(fs, located, { platform = currentPlatform() } = {}) {
     const maps = [];
     const seenPaths = new Set();
     // Folder name -> index of a *placeholder* entry a real subscribed map may replace. Only placeholders
@@ -271,6 +287,11 @@ export async function scanMaps(fs, located) {
     // belong in the list. Deduplication is by path.
     const placeholderByName = new Map();
     const bundledWorkshopRoot = join(located.installPath, "Bundles/Workshop/Maps");
+    // MapCatalog.IsBundledWorkshopCopy compares this prefix with PathComparison, which folds case on
+    // Windows. The fallback backend resolves `bundles/workshop/maps` there, so a case-sensitive test
+    // would classify the game's own stale copy as an ordinary workshop map and list it twice.
+    const foldPathCase = isCaseInsensitiveFilesystem(platform);
+    const bundledPrefix = foldPathCase ? `${bundledWorkshopRoot}/`.toLowerCase() : `${bundledWorkshopRoot}/`;
 
     for (const { path, source } of searchDirectories(located)) {
         for (const candidate of await safe(fs.listDirectories(path), [])) {
@@ -301,7 +322,7 @@ export async function scanMaps(fs, located) {
 
         // An unsupported official folder, and the game's own copy under Bundles/Workshop/Maps, can both
         // be stale stand-ins for a map the player is actually subscribed to.
-        const bundledCopy = entry.path.startsWith(`${bundledWorkshopRoot}/`);
+        const bundledCopy = (foldPathCase ? entry.path.toLowerCase() : entry.path).startsWith(bundledPrefix);
         const placeholder = bundledCopy || (entry.source === MapSource.Official && !entry.supported);
         const key = entry.folderName.toLowerCase();
         const index = placeholderByName.get(key);

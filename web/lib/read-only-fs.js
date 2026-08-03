@@ -8,6 +8,21 @@
 // each backend implements only what it actually does differently: `file`, `listDir`, `stat`, `walk`,
 // `invalidate` and its own construction.
 
+// The encodings File.ReadAllText recognises from a byte-order mark. Anything without one is UTF-8,
+// which is what every file the game ships actually is; this is for the hand-edited exceptions.
+export function decodeText(bytes) {
+    if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+        return new TextDecoder("utf-8").decode(bytes.subarray(3));
+    }
+    if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+        return new TextDecoder("utf-16le").decode(bytes.subarray(2));
+    }
+    if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+        return new TextDecoder("utf-16be").decode(bytes.subarray(2));
+    }
+    return new TextDecoder("utf-8").decode(bytes);
+}
+
 export class ReadOnlyFs {
     // Subclasses must provide:
     //   file(path)     -> File | null
@@ -38,9 +53,14 @@ export class ReadOnlyFs {
         return new Uint8Array(await file.slice(start, end).arrayBuffer());
     }
 
+    // Decoded by byte-order mark, not always as UTF-8. `File.text()` is UTF-8 only, while the desktop's
+    // File.ReadAllText detects a BOM and picks the encoding from it — so an English.dat a map author
+    // saved as UTF-16 (which Windows editors did by default for years) reads fine there and would come
+    // back here as replacement characters and embedded NULs, losing the map's name and blurb.
     async readText(path) {
         const file = await this.file(path);
-        return file === null ? null : file.text();
+        if (file === null) return null;
+        return decodeText(new Uint8Array(await file.arrayBuffer()));
     }
 
     // A blob: URL for an <img>. The caller owns it and must URL.revokeObjectURL it.
