@@ -100,10 +100,21 @@ async function onPick() {
     } catch {
         remembered = false;
     }
+    // A failed overwrite leaves whatever was stored before intact, and that older folder is what a
+    // reload will restore — so Forget still has something to forget, and hiding it would strand it.
+    const stored = remembered || (await loadHandle().catch(() => null)) !== null;
     if (!isCurrent(token)) return;
-    ui.forget.hidden = !remembered;
+    ui.forget.hidden = !stored;
     ui.reconnect.hidden = true;
-    await probe(new HandleFs(handle), remembered ? null : "This browser will not remember the pick.", token);
+    await probe(
+        new HandleFs(handle),
+        remembered
+            ? null
+            : stored
+              ? "This browser would not save the pick; a reload will restore the folder saved before it."
+              : "This browser will not remember the pick.",
+        token,
+    );
 }
 
 async function onReconnect() {
@@ -121,7 +132,14 @@ async function onReconnect() {
 async function onForget() {
     // Retire any scan still in flight, so it cannot repaint the listing this is about to clear.
     claim();
-    await forgetHandle().catch(() => {});
+    try {
+        await forgetHandle();
+    } catch (error) {
+        // "Forget" is the privacy-facing control on this page: reporting success while the handle is
+        // still in IndexedDB, and still restorable on the next load, is the one lie it must not tell.
+        setStatus(`Could not forget the saved folder: ${error?.message ?? error}. It is still stored.`);
+        return;
+    }
     ui.forget.hidden = true;
     ui.reconnect.hidden = true;
     ui.summary.hidden = true;
@@ -150,10 +168,16 @@ async function probe(fs, note = null, token = null) {
     try {
         result = await probeInstall(fs);
     } catch (error) {
-        if (scan === generation) setStatus(`Could not read that folder: ${error?.message ?? error}`);
+        if (!isCurrent(scan)) return;
+        // The listing on screen belongs to the folder that was scanned before this one. Leaving it under
+        // an error about the new folder reads as "here is what we found in it", which is the opposite of
+        // what happened.
+        ui.summary.hidden = true;
+        clearMaps();
+        setStatus(`Could not read that folder: ${error?.message ?? error}`);
         return;
     }
-    if (scan !== generation) return;
+    if (!isCurrent(scan)) return;
     render(fs, result, performance.now() - started, note);
 }
 

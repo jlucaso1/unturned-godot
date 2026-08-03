@@ -32,38 +32,63 @@ export class DatValues {
         return this.#values.has(String(key).toLowerCase());
     }
 
+    delete(key) {
+        this.#values.delete(String(key).toLowerCase());
+    }
+
     get size() {
         return this.#values.size;
     }
 }
 
+// Three rules, each checked by running the game's own parser rather than reasoned from the source:
+//
+//   Nested {      ->  [Nested] = "{", and a following `Name Leak` is STILL top-level. A brace is only
+//   Name Leak         structural where the tokenizer would start a token, and after a key it is just
+//   }                 the value; the `}` then closes a block nothing opened, which ends the document.
+//
+//   Nested        ->  [Nested] is not a value at all. A block opening on the next line replaces the
+//   {                 inline value the key would otherwise have had, and its contents are one level in.
+//
+// The second is why the game's files put braces on their own line, and the first is why a hand-edited
+// file that does not can hide the rest of its keys — from the desktop and from here alike.
 export function parseDatTopLevel(text) {
     const values = new DatValues();
     let depth = 0;
+    // The last key set at the top level, which a block opening on the next line takes back over.
+    let pending = null;
 
     for (const rawLine of String(text ?? "").split(/\r\n|\r|\n/)) {
         const line = rawLine.trim();
         if (line === "") continue;
 
-        // Structural characters only count where the tokenizer would be looking for a token, which for
-        // this subset means the start of a line. Inside a value they are ordinary text: `Nested {` reads
-        // as the key `Nested` with the value `{`, which is why the game's own files put the brace on its
-        // own line.
         const first = line[0];
         if (first === "/") continue; // comment to end of line
+
         if (first === "{" || first === "[") {
+            if (depth === 0 && pending !== null) values.delete(pending);
             depth++;
-            continue;
-        }
-        if (first === "}" || first === "]") {
-            depth = Math.max(0, depth - 1);
+            pending = null;
             continue;
         }
 
-        const { key, value, opensBlock } = splitKeyValue(line);
-        if (depth === 0 && !opensBlock && key !== null) values.set(key, value);
-        // An inline brace opens a block whose keys are not top-level, even though this line was.
-        if (opensBlock) depth++;
+        if (first === "}" || first === "]") {
+            // A close with nothing open ends the root dictionary, and with it the document.
+            if (depth === 0) break;
+            depth--;
+            pending = null;
+            continue;
+        }
+
+        if (depth > 0) {
+            pending = null;
+            continue;
+        }
+
+        const { key, value } = splitKeyValue(line);
+        if (key === null) continue;
+        values.set(key, value);
+        pending = key;
     }
 
     return values;
@@ -73,14 +98,14 @@ export function datString(text, key) {
     return parseDatTopLevel(text).get(key) ?? null;
 }
 
-// The key is the first whitespace-delimited word, or a quoted string; the value is everything after it
-// on the line. `opensBlock` marks the inline-brace form, whose contents belong to a nested block.
+// The key is the first whitespace-delimited word, or a quoted string; the value is everything after it on
+// the line, brace or not — ReadStringValue is reached unconditionally once a key has been read.
 function splitKeyValue(line) {
     let key;
     let rest;
     if (line.startsWith('"')) {
         const end = findClosingQuote(line, 1);
-        if (end === -1) return { key: unescape(line.slice(1)), value: "", opensBlock: false };
+        if (end === -1) return { key: unescape(line.slice(1)), value: "" };
         key = unescape(line.slice(1, end));
         // ReadQuoted swallows one comma that immediately follows the closing quote, which is what makes
         // `"Name", "Map Name"` a key and a value rather than a key and a value starting with a comma.
@@ -90,14 +115,12 @@ function splitKeyValue(line) {
         rest = line.slice(after).replace(/^[ \t]+/, "");
     } else {
         const space = line.search(/[ \t]/);
-        if (space === -1) return { key: line, value: "", opensBlock: false };
+        if (space === -1) return { key: line, value: "" };
         key = line.slice(0, space);
         rest = line.slice(space + 1).replace(/^[ \t]+/, "");
     }
 
-    if (rest === "") return { key, value: "", opensBlock: false };
-    if (rest[0] === "{" || rest[0] === "[") return { key, value: "", opensBlock: true };
-    return { key, value: readValue(rest), opensBlock: false };
+    return { key, value: rest === "" ? "" : readValue(rest) };
 }
 
 // DatParser.ReadStringValue: a quoted value ends at its closing quote, an unquoted one at end of line.

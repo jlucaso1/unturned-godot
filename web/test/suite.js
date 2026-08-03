@@ -473,12 +473,21 @@ function dat() {
         ', "Map Name"',
     );
 
-    // `Key {` reads as a key whose value is a brace, so its contents are not top-level either.
-    equal(
-        "dat skips an inline-brace block",
-        parseDatTopLevel(["Nested {", "    Name Leak", "}", "Name Kept"].join("\n")).get("Name"),
-        "Kept",
-    );
+    // A brace is structural only where the tokenizer would start a token. These three were read off the
+    // game's own parser rather than reasoned from its source, and they do not all agree with intuition.
+
+    // On its own line it opens a block, and takes back the inline value the key line would have had.
+    const block = parseDatTopLevel(["Nested", "{", "    Name Inside", "}", "Description After"].join("\n"));
+    equal("a block on the next line replaces the key's value", block.get("Nested"), undefined);
+    equal("keys inside a block are not top-level", block.get("Name"), undefined);
+    equal("and parsing continues after it closes", block.get("Description"), "After");
+
+    // Trailing a key it is just the value, so the next line is still top-level...
+    const inline = parseDatTopLevel(["Nested {", "    Name Leak", "}", "Description After"].join("\n"));
+    equal("an inline brace is the key's value", inline.get("Nested"), "{");
+    equal("so the following line stays top-level", inline.get("Name"), "Leak");
+    // ...and the unmatched close then ends the root dictionary, hiding everything after it.
+    equal("an unmatched close ends the document", inline.get("Description"), undefined);
 }
 
 async function installLayout(manifest) {
