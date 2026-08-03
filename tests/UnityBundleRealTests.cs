@@ -39,15 +39,17 @@ public class UnityBundleRealTests
         foreach (SerializedObject o in file.Objects)
             counts[o.ClassId] = counts.GetValueOrDefault(o.ClassId) + 1;
 
-        // Asserted as ONE tuple rather than three statements, so a mismatch reports every class at
-        // once. Separately, the first failing Assert.Equal ended the test, and a content update that
-        // moved more than one count could only be discovered one CI round at a time — which is exactly
-        // how this was found: GameObject went 24341 -> 24342 while Mesh and MeshFilter never got read.
+        // Pinned against the depot the fetch script downloads, which is always the current one, so these
+        // move when Valve ships an update — that is the drift the weekly schedule exists to surface, and
+        // the object table is what a parser change would move instead. Last updated 2026-08-03, when the
+        // masterbundle went from 116,304,494 to 116,312,980 bytes and gained one GameObject (24,341 ->
+        // 24,342, and 103,549 -> 103,554 objects in total) with the mesh side unchanged.
         //
-        // A moving count here is normally the game, not the parser: these are counts OF the shipped
-        // bundle, and the fetch job re-downloads precisely when Valve's depot manifest changes. The
-        // signature to check before touching a number is whether the others held — a parser regression
-        // has no reason to miscount one class and get the neighbouring two exactly right.
+        // Asserted as ONE tuple rather than three statements, so a mismatch reports every class at once.
+        // Separately, the first failing Assert.Equal ended the test, and an update that moved more than
+        // one count could only be discovered a round at a time — which is how this drift was met: CI
+        // reported GameObject while Mesh and MeshFilter were never read, and establishing that those two
+        // still held, the signature that says content rather than parser, took another run to learn.
         var actual = (Mesh: counts.GetValueOrDefault(43),
             GameObject: counts.GetValueOrDefault(1),
             MeshFilter: counts.GetValueOrDefault(33));
