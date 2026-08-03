@@ -24,10 +24,16 @@ public sealed class RemotePlayer
     public bool Moving { get; private set; }
     public bool Grounded { get; private set; } = true;
 
-    public RemotePlayer(string name, in PoseSnapshot initial, double now, uint knownAtVersion = 0)
+    public RemotePlayer(string name, in PoseSnapshot initial, double now, uint knownAtVersion = 0,
+        uint spawnedAtTick = 0)
     {
         Name = name;
         KnownAtVersion = knownAtVersion;
+        // The gesture floor starts at the newest server tick we had heard when this avatar appeared.
+        // Player ids are RECYCLED, and a gesture names only an id: without a floor, a swing thrown by
+        // the previous holder of this one and retransmitted late would play on whoever holds it now.
+        // Nothing that happened before we knew this player belongs to them.
+        _lastGestureTick = spawnedAtTick;
         _buffer.UpdateLastSnapshot(initial, now);
         _lastUpdatePos = initial.Position;
     }
@@ -55,16 +61,16 @@ public sealed class RemotePlayer
     public UnturnedGodot.Player.EPlayerGesture PendingGesture { get; private set; }
 
     private uint _lastGestureTick;
-    private bool _hasGestureTick;
 
-    // Accepts a gesture only if it is newer than the last one heard. Reliable delivery retransmits but
-    // does not order, so an early swing re-sent late can arrive behind a later one; wrap-safe signed
-    // comparison, the same rule the server's own input freshness guard uses.
+    // Accepts a gesture only if it is newer than the last one heard — which starts as the tick this
+    // avatar was learned at, so the guard covers a recycled id as well as a stale retransmission.
+    // Reliable delivery retransmits but does not order, so an early swing re-sent late can arrive behind
+    // a later one; wrap-safe signed comparison, the same rule the server's own input freshness guard
+    // uses.
     public void PushGesture(uint tick, UnturnedGodot.Player.EPlayerGesture gesture)
     {
-        if (_hasGestureTick && unchecked((int)(tick - _lastGestureTick)) <= 0)
+        if (unchecked((int)(tick - _lastGestureTick)) <= 0)
             return;
-        _hasGestureTick = true;
         _lastGestureTick = tick;
         PendingGesture = gesture;
     }
@@ -195,10 +201,11 @@ public sealed class NetClient
                         break;
                     }
 
-                    (byte id, _, uint rosterVersion, List<PlayerListing> players) = welcome;
+                    (byte id, uint welcomeTick, uint rosterVersion, List<PlayerListing> players) = welcome;
                     PlayerId = id;
                     Joined = true;
                     _lastStateAt = now;
+                    ObserveServerTick(welcomeTick);
 
                     // The roster is COMPLETE — "everyone already here" as of rosterVersion — so it
                     // replaces what we hold rather than adding to it. A second Welcome is ordinary (an
@@ -304,8 +311,9 @@ public sealed class NetClient
                         break;
                     }
 
-                    (_, List<PlayerSnapshotState> states) = update;
+                    (uint stateTick, List<PlayerSnapshotState> states) = update;
                     _lastStateAt = now;
+                    ObserveServerTick(stateTick);
                     foreach (PlayerSnapshotState s in states)
                     {
                         if (s.PlayerId == PlayerId)
@@ -354,9 +362,20 @@ public sealed class NetClient
     private static readonly Func<byte[], (uint Tick, List<PlayerSnapshotState> States)> ReadStateUpdate =
         NetMessages.ReadStateUpdate;
 
-    private static RemotePlayer SpawnRemote(PlayerListing p, double now, uint knownAtTick)
+    // The newest server tick heard, from any message that carries one. State updates are unreliable and
+    // unordered, so newest-wins rather than last-wins; wrap-safe like every other sequence comparison.
+    private uint _serverTick;
+
+    private void ObserveServerTick(uint tick)
     {
-        var remote = new RemotePlayer(p.Name, Pose(p.Position, p.Pitch, p.Yaw), now, knownAtTick);
+        if (unchecked((int)(tick - _serverTick)) > 0)
+            _serverTick = tick;
+    }
+
+    private RemotePlayer SpawnRemote(PlayerListing p, double now, uint knownAtTick)
+    {
+        var remote = new RemotePlayer(p.Name, Pose(p.Position, p.Pitch, p.Yaw), now, knownAtTick,
+            _serverTick);
         remote.Push(Pose(p.Position, p.Pitch, p.Yaw), p.Stance, moving: false, grounded: true, now);
         return remote;
     }

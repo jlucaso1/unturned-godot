@@ -121,10 +121,11 @@ public sealed class ServerSimulation
         // here — same rule, same cooldown, run on the server's tick.
         public readonly Player.PlayerEquipment Equipment = new();
 
-        // Attack edges rescued from input frames the jitter buffer had to drop, handed to the next
-        // frame that plays. See the trim in QueueInput.
-        public Player.EAttackInputFlags CarriedPrimary;
-        public Player.EAttackInputFlags CarriedSecondary;
+        // The swing a dropped input frame turned out to be owed, waiting for a tick to announce it on.
+        // The DECISION is carried rather than the raw edge: it was made in that frame's own stance and
+        // frame number, which are the only context in which it is the right answer. See the trim in
+        // QueueInput.
+        public EPlayerGesture CarriedGesture;
 
         // Trusted-position bookkeeping: the budget rate-limits CONSECUTIVE client claims, so it needs the
         // last claim we accepted and when. Before any claim exists there is nothing to rate-limit against —
@@ -245,12 +246,22 @@ public sealed class ServerSimulation
         while (entry.Inputs.Count > MaxQueuedInputs)
         {
             // Movement survives a dropped frame because a later one restates it — an attack edge does
-            // not. Simulate reads the tick a button went DOWN, so the discarded frame was the only
-            // carrier of that swing, and losing it means a punch only its own thrower ever saw. Carry
-            // the edges forward instead; the cooldown then decides the swing exactly as it would have.
+            // not. Simulate reads the frame a button went DOWN, so the discarded frame was the only
+            // carrier of that swing, and losing it means a punch only its own thrower ever saw.
+            //
+            // So the frame is JUDGED here rather than having its edge handed to a later one. An edge is
+            // only meaningful beside the stance and frame number it arrived with: attach it to a later
+            // frame and the gate reads that frame's stance and the cooldown measures from its number,
+            // so the same press can be answered differently from how the owner answered it. Judging it
+            // now uses exactly what Step would have used — the client-claimed stance Step also assigns
+            // — and only the verdict travels. Frames reach Simulate in order either way: the trim and
+            // the tick loop both take the oldest first, and QueueInput admits none that is not newer.
             InputCommand stale = entry.Inputs.Dequeue();
-            entry.CarriedPrimary |= stale.AttackPrimary;
-            entry.CarriedSecondary |= stale.AttackSecondary;
+            EPlayerGesture owed = entry.Equipment.Simulate(stale.Frame,
+                stale.AttackPrimary, stale.AttackSecondary,
+                new HandState { Stance = stale.Stance });
+            if (owed != EPlayerGesture.None)
+                entry.CarriedGesture = owed;
         }
     }
 
@@ -301,11 +312,15 @@ public sealed class ServerSimulation
             // forward here. An edge rescued from a trimmed frame is played on a later one and dates the
             // cooldown from that, which delays the NEXT swing slightly rather than letting one through.
             EPlayerGesture gesture = entry.Equipment.Simulate(input.Frame,
-                input.AttackPrimary | entry.CarriedPrimary,
-                input.AttackSecondary | entry.CarriedSecondary,
+                input.AttackPrimary, input.AttackSecondary,
                 new HandState { Stance = entry.State.Stance });
-            entry.CarriedPrimary = EAttackInputFlags.None;
-            entry.CarriedSecondary = EAttackInputFlags.None;
+
+            // A swing owed by a frame the jitter buffer dropped goes out first: it happened earlier.
+            if (entry.CarriedGesture != EPlayerGesture.None)
+            {
+                _gestures.Add(new PlayerGestureEvent(id, entry.CarriedGesture));
+                entry.CarriedGesture = EPlayerGesture.None;
+            }
             if (gesture != EPlayerGesture.None)
                 _gestures.Add(new PlayerGestureEvent(id, gesture));
 

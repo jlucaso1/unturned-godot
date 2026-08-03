@@ -213,6 +213,47 @@ public class PunchReplicationTests
         Assert.Equal(1, swings);
     }
 
+    // A rescued edge is judged in the frame it arrived on, not in the one it happens to be announced
+    // beside. Attaching the bare edge to a later frame would let that frame's stance answer the press.
+    [Fact]
+    public void Server_JudgesARescuedEdgeInItsOwnFramesStance()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        sim.QueueInput(1, Attack()); // thrown standing, and about to fall off the stale end
+        for (int i = 0; i < ServerSimulation.MaxQueuedInputs; i++)
+            sim.QueueInput(1, Idle(EPlayerStance.Prone)); // and the player drops prone right after
+
+        int swings = 0;
+        for (int i = 0; i < ServerSimulation.MaxQueuedInputs; i++)
+        {
+            sim.Step();
+            swings += sim.Gestures.Count;
+        }
+
+        // The swing was legal when it was thrown, so it still is. Going prone afterwards does not
+        // retract a punch already in flight.
+        Assert.Equal(1, swings);
+    }
+
+    [Fact]
+    public void Server_ARescuedEdgeThrownProneStaysRefused()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        sim.QueueInput(1, Attack(EPlayerStance.Prone)); // refused where it was thrown
+        for (int i = 0; i < ServerSimulation.MaxQueuedInputs; i++)
+            sim.QueueInput(1, Idle()); // and standing up afterwards must not resurrect it
+
+        for (int i = 0; i < ServerSimulation.MaxQueuedInputs; i++)
+        {
+            sim.Step();
+            Assert.Empty(sim.Gestures);
+        }
+    }
+
     // Reliable delivery retransmits but does not order, so a lost early gesture can be re-sent late
     // enough to arrive behind a newer one.
     [Fact]
@@ -227,6 +268,23 @@ public class PunchReplicationTests
         // A genuinely newer one still lands.
         remote.PushGesture(30, EPlayerGesture.PunchRight);
         Assert.Equal(EPlayerGesture.PunchRight, remote.TakeGesture());
+    }
+
+    // Player ids are recycled, and a gesture names only an id. A swing the PREVIOUS holder of this id
+    // threw, retransmitted late, must not play on whoever holds it now.
+    [Fact]
+    public void AGestureFromBeforeAnAvatarExistedIsNotTheirs()
+    {
+        // Spawned knowing the server had reached tick 100 — everything before that predates them.
+        var remote = new RemotePlayer("A", new PoseSnapshot(Spawn, 90f, 0f), 0, knownAtVersion: 3,
+            spawnedAtTick: 100);
+
+        remote.PushGesture(80, EPlayerGesture.PunchLeft);
+        Assert.Equal(EPlayerGesture.None, remote.PendingGesture);
+
+        // Their own swings still land.
+        remote.PushGesture(104, EPlayerGesture.PunchLeft);
+        Assert.Equal(EPlayerGesture.PunchLeft, remote.PendingGesture);
     }
 
     [Fact]
