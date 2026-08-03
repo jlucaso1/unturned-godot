@@ -321,7 +321,16 @@ public sealed class ZombieSystem
         _detectTimer += dt;
         if (_detectTimer >= ZombieDetection.DetectInterval)
         {
-            _detectTimer = 0f;
+            // Carry the overshoot rather than dropping it. The tick is 0.08 s and the interval 0.1 s, so
+            // the timer never lands on the interval: it arrives at 0.16, and zeroing threw the extra 0.06
+            // away every time, stretching a 0.1 s cadence into 0.16 s. Measured at 62 scans per 10 s
+            // where the documented rate is 100 — zombies noticed a player at 62% of the rate the game
+            // does, which is a third of a second of extra grace on every approach.
+            _detectTimer -= ZombieDetection.DetectInterval;
+            // Still at most one scan per tick: a dt longer than the interval must not bank credit for a
+            // burst of scans later, so the leftover is capped at a single interval's worth.
+            if (_detectTimer > ZombieDetection.DetectInterval)
+                _detectTimer = ZombieDetection.DetectInterval;
             Detect(players);
         }
 

@@ -188,6 +188,35 @@ public class ZombieSystemTests
         Assert.Equal(EZombieState.Chase, zombie.State);
     }
 
+    // The one above proves a scan happens; it cannot see the RATE, because it only ever fires once.
+    // The rate is what a player feels, and at the server's real tick it was wrong: 0.08 does not divide
+    // 0.1, so the timer arrives at 0.16 and zeroing it discarded the 0.06 overshoot every single time.
+    // A 0.1 s cadence became 0.16 s — 62 scans where the game runs 100, a third of a second of extra
+    // grace on every approach.
+    //
+    // Counted through VisionBlocked, which Detect calls once per (player, zombie) pair: it observes the
+    // scan without touching anything the brain reads, so the measurement cannot perturb what it measures.
+    [Fact]
+    public void DetectionHoldsItsCadenceAtTheServerTickRate()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        int scans = 0;
+        system.VisionBlocked = (from, to) => { scans++; return false; };
+
+        var players = new[] { Player(1, new Vector3(3, 5, 0)) };
+        const float dt = UnturnedGodot.Net.ServerSimulation.TickRate; // 0.08, what ZombieHost passes
+        const int seconds = 10;
+        for (int i = 0; i < (int)(seconds / dt); i++)
+        {
+            zombie.State = EZombieState.Idle; // stay a candidate: Detect skips a zombie already on us
+            zombie.TargetPlayer = byte.MaxValue;
+            system.Tick(players, dt);
+        }
+
+        int expected = (int)(seconds / ZombieDetection.DetectInterval);
+        Assert.InRange(scans, expected - 2, expected + 2); // 99..100 in practice; 62 before the fix
+    }
+
     [Fact]
     public void CrouchedPlayer_HasSmallerRadius()
     {
