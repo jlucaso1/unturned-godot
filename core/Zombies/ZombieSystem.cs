@@ -435,11 +435,15 @@ public sealed class ZombieSystem
         zombie.LeaveDelay = 0f; // isLeaving = false
         zombie.Path = RollPath(zombie, player.Id);
         zombie.RepathTimer = 0f; // fresh target: path on the next move
-        zombie.PathPoints.Clear();
-        zombie.BlockedRouteTime = 0f;
-        zombie.CurrentWaypointIndex = 0;
-        zombie.TargetReached = false;
-        zombie.PathIsPartial = false;
+
+        // The ROUTE deliberately survives the retarget. Changing a destination in the original only
+        // schedules a Seeker query; vectorPath is written in OnPathComplete and nowhere else, so the
+        // component keeps following the route it has while the replacement computes. Clearing it here
+        // made Move() take its "no route has ever succeeded: stand" branch, and the replacement is not
+        // instant — it waits for one of the MaxRepathsPerTick tokens. When a horde re-targets together
+        // the queue is longer than the budget, so zombies stood still mid-chase for up to 0.8 s and then
+        // sprinted off again; clients derive move/idle from the replicated motion, so that renders as
+        // the zombie dropping aggro and immediately picking it back up.
         AdjustAgro(player.Id, +1);
         if (zombie.State is EZombieState.Idle or EZombieState.Return)
             zombie.State = EZombieState.Chase;

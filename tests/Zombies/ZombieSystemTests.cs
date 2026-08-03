@@ -1217,6 +1217,65 @@ public class ZombieSystemTests
         Assert.Equal(4f, destinations[1].X, 1f);
     }
 
+    [Fact]
+    public void Retargeting_KeepsTheCurrentRouteUntilTheReplacementArrives()
+    {
+        // Changing a destination in the original only SCHEDULES a Seeker query: vectorPath is written
+        // in OnPathComplete and nowhere else, so LegacyAIPathNoRedist keeps following the route it has
+        // while the replacement computes. Dropping the route instead parks the zombie on Move()'s "no
+        // route: stand" branch, and the replacement is not free — it waits for one of the
+        // MaxRepathsPerTick tokens. A horde re-targets on ONE detect scan, so the queue is longer than
+        // the budget and the surplus stands still mid-chase. Clients read move/idle off the replicated
+        // motion, so those zombies visibly drop aggro and pick it straight back up.
+        const int Horde = 12; // > MaxRepathsPerTick: the budget has to be the binding constraint
+        var system = new ZombieSystem(new[] { Table() }, TwoBounds(), FlatGround);
+        var spawns = new List<ZombieSpawnpointData>();
+        for (int i = 0; i < Horde * 4; i++)
+            spawns.Add(At((i % Horde) - (Horde / 2f), 0));
+        system.Spawn(spawns, new Random(5));
+        Assert.Equal(Horde, system.Zombies.Count);
+        foreach (ZombieInstance z in system.Zombies)
+        {
+            z.Speciality = EZombieSpeciality.Normal;
+            z.Yaw = 180f; // facing +Z, toward the first target
+        }
+        int queries = 0;
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            queries++;
+            path.Add(from);
+            path.Add(to);
+            return true;
+        };
+
+        // Everyone locks onto the sprinting player 1 and gets a live route.
+        var first = Player(1, new Vector3(0, 5, 20), UnturnedGodot.Player.EPlayerStance.Sprint, moving: true);
+        for (int t = 0; t < 8; t++)
+            system.Tick(new[] { first }, UnturnedGodot.Net.ServerSimulation.TickRate);
+        Assert.All(system.Zombies, z => Assert.Equal(EZombieState.Chase, z.State));
+        Assert.All(system.Zombies, z => Assert.NotEmpty(z.PathPoints));
+
+        // Player 2 steps in on the other side, closer than player 1: the whole horde re-targets on the
+        // same detect scan, and only MaxRepathsPerTick of them can be served this tick.
+        var before = system.Zombies.Select(z => z.Position).ToList();
+        queries = 0;
+        var second = Player(2, new Vector3(0, 5, -12), UnturnedGodot.Player.EPlayerStance.Sprint, moving: true);
+        system.Tick(new[] { first, second }, UnturnedGodot.Net.ServerSimulation.TickRate);
+
+        Assert.All(system.Zombies, z => Assert.Equal(2, z.TargetPlayer));
+        Assert.Equal(ZombieSystem.MaxRepathsPerTick, queries); // the queue really did overflow
+        int routeless = 0, frozen = 0;
+        for (int i = 0; i < system.Zombies.Count; i++)
+        {
+            if (system.Zombies[i].PathPoints.Count == 0)
+                routeless++;
+            if (system.Zombies[i].Position == before[i])
+                frozen++;
+        }
+        Assert.Equal(0, routeless); // Horde - MaxRepathsPerTick of them, when the route is discarded
+        Assert.Equal(0, frozen);
+    }
+
     private static List<NavFlag> OneTriangle(float halfExtent, float y) => new()
     {
         new()
