@@ -168,10 +168,14 @@ public sealed class NetClient
         {
             // The server stopped talking to us (session dropped, host restarted): rejoin from scratch.
             // The tombstones go too — a host that restarted counts its roster versions from zero, and
-            // stale ones would refuse every listing in the fresh roster it sends us.
+            // stale ones would refuse every listing in the fresh roster it sends us. The tick floor is
+            // the same kind of thing and goes for the same reason: a restarted host counts ticks from
+            // zero as well, and a floor left at the old host's uptime would silence every gesture in the
+            // new session until the new host had run at least as long as the old one.
             Joined = false;
             _remotes.Clear();
             Array.Clear(_leftAtVersion);
+            _serverTick = 0;
             _lastHello = double.NegativeInfinity;
         }
     }

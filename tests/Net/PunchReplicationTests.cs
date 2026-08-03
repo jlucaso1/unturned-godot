@@ -254,6 +254,29 @@ public class PunchReplicationTests
         }
     }
 
+    // A tick that resolves both an owed swing and one of its own announces ONE, and it is the newer.
+    // Two events under the same tick number would look like a retransmission of each other on arrival.
+    [Fact]
+    public void Server_AnnouncesOneSwingPerTick_AndItIsTheNewest()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        // A left at frame 0 falls off the stale end and is owed; a right at frame 6 — legal, a full
+        // cooldown later — is the oldest frame left, so this one tick resolves both.
+        sim.QueueInput(1, AttackAt(0));
+        sim.QueueInput(1, new InputCommand(6, 0, 0, jump: false, sprint: false, yaw: 0, pitch: 90,
+            EPlayerStance.Stand, grounded: true, attackSecondary: EAttackInputFlags.Start));
+        for (uint f = 7; f <= 9; f++)
+            sim.QueueInput(1, new InputCommand(f, 0, 0, jump: false, sprint: false, yaw: 0, pitch: 90,
+                EPlayerStance.Stand, grounded: true));
+
+        sim.Step();
+
+        PlayerGestureEvent only = Assert.Single(sim.Gestures);
+        Assert.Equal(EPlayerGesture.PunchRight, only.Gesture);
+    }
+
     // Reliable delivery retransmits but does not order, so a lost early gesture can be re-sent late
     // enough to arrive behind a newer one.
     [Fact]
@@ -285,6 +308,45 @@ public class PunchReplicationTests
         // Their own swings still land.
         remote.PushGesture(104, EPlayerGesture.PunchLeft);
         Assert.Equal(EPlayerGesture.PunchLeft, remote.PendingGesture);
+    }
+
+    // The tick floor is session state, and a restarted host counts ticks from zero. Left at the old
+    // host's uptime it would silence every swing in the new session until the new host had run at least
+    // as long as the old one — hours, on a server that had been up a while.
+    [Fact]
+    public void ARestartedServerDoesNotInheritTheOldOnesTickFloor()
+    {
+        var serverTransport = new LoopbackServerTransport();
+        LoopbackClientTransport ct = serverTransport.CreateClient();
+        Assert.True(serverTransport.TryReceive(out ServerTransportEvent connected));
+        ITransportConnection conn = connected.Connection;
+        var client = new NetClient(ct, "A", Level);
+
+        var other = new PlayerListing { PlayerId = 9, Name = "B" };
+        void Deliver(byte[] payload, double now)
+        {
+            conn.Send(payload, ESendType.Reliable);
+            client.Update(now);
+        }
+
+        // A host that has been up a long while: tick 900000, and we hold B.
+        double now = 1000.0;
+        Deliver(NetMessages.WriteWelcome(1, 900_000, 1, new[] { other }), now);
+        Assert.True(client.Joined);
+
+        // It goes away. Past StateTimeout the client tears the session down and re-Hellos.
+        now += NetClient.StateTimeout + 1.0;
+        client.Update(now);
+        Assert.False(client.Joined);
+
+        // It comes back counting from the beginning, and B is with it.
+        Deliver(NetMessages.WriteWelcome(1, 3, 1, new[] { other }), now);
+        Assert.True(client.Joined);
+
+        // B swings on the new server's fifth tick. Judged against the old server's clock this is
+        // ancient history and never plays.
+        Deliver(NetMessages.WritePlayerGesture(9, 5, EPlayerGesture.PunchLeft), now);
+        Assert.Equal(EPlayerGesture.PunchLeft, client.Remotes[9].PendingGesture);
     }
 
     [Fact]

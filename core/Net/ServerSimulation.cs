@@ -260,6 +260,8 @@ public sealed class ServerSimulation
             EPlayerGesture owed = entry.Equipment.Simulate(stale.Frame,
                 stale.AttackPrimary, stale.AttackSecondary,
                 new HandState { Stance = stale.Stance });
+            // A burst deep enough to trim two legal swings at once overwrites rather than queues: they
+            // would both be owed to the same tick, which can announce one. See Step.
             if (owed != EPlayerGesture.None)
                 entry.CarriedGesture = owed;
         }
@@ -315,14 +317,18 @@ public sealed class ServerSimulation
                 input.AttackPrimary, input.AttackSecondary,
                 new HandState { Stance = entry.State.Stance });
 
-            // A swing owed by a frame the jitter buffer dropped goes out first: it happened earlier.
-            if (entry.CarriedGesture != EPlayerGesture.None)
-            {
-                _gestures.Add(new PlayerGestureEvent(id, entry.CarriedGesture));
-                entry.CarriedGesture = EPlayerGesture.None;
-            }
-            if (gesture != EPlayerGesture.None)
-                _gestures.Add(new PlayerGestureEvent(id, gesture));
+            // At most one gesture per player per tick, and the NEWEST when a tick resolves more than one
+            // — this tick's own swing ahead of any a dropped frame left owed. An avatar cannot throw two
+            // punches inside one 0.08 s tick, so only one of them can ever be shown; the client holds a
+            // single pending swing for that reason and keeps the newest of a burst. Announcing both
+            // would put two events on the wire under the same tick number, where the second reads as a
+            // retransmission of the first and is refused — the newer swing lost to say the older one
+            // twice. This is also why the carry is one slot rather than a queue: anything a second slot
+            // could hold is, by construction, older than what is already going out.
+            EPlayerGesture announced = gesture != EPlayerGesture.None ? gesture : entry.CarriedGesture;
+            entry.CarriedGesture = EPlayerGesture.None;
+            if (announced != EPlayerGesture.None)
+                _gestures.Add(new PlayerGestureEvent(id, announced));
 
             states.Add(new PlayerSnapshotState(id, entry.State.Position,
                 NetAngles.QuantizePitch(entry.State.Pitch), NetAngles.QuantizeYaw(entry.State.Yaw),
