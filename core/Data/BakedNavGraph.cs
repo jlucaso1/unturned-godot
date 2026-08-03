@@ -44,7 +44,10 @@ public sealed class BakedNavGraph
         return new BakedNavGraph(built);
     }
 
-    public bool TryPath(Vector3 from, Vector3 to, List<Vector3> path)
+    // `radius` is the body the route is FOR. It defaults to the ordinary zombie so a caller that has no
+    // particular body in mind still gets a usable route, but a mega is nearly twice as wide and a route
+    // built for 0.40 walks its capsule 0.30 m into every jamb it passes.
+    public bool TryPath(Vector3 from, Vector3 to, List<Vector3> path, float radius = AgentRadius)
     {
         // Navigation flags are separate authored graphs. The start must belong to the graph, but a target
         // may stand in Bounds.dat's 64 m expansion around it and snap to the nearest reachable face. If the
@@ -80,7 +83,7 @@ public sealed class BakedNavGraph
                 bestScore = fromScore + toScore;
             }
         }
-        return best != null && best.FindPath(bestFrom, bestTo, from, bestDestination, path);
+        return best != null && best.FindPath(bestFrom, bestTo, from, bestDestination, path, radius);
     }
 
     private static bool ContainsExpandedXZ(NavFlag flag, Vector3 point, float margin) =>
@@ -105,10 +108,11 @@ public sealed class BakedNavGraph
 
     // Test seam: the shortcut's line walk. From outside it is only ever visible as waypoints that did
     // or did not disappear, which says nothing about WHY one survived.
-    internal bool HasClearLine(int flag, Vector3 from, Vector3 to, int budget = int.MaxValue)
+    internal bool HasClearLine(int flag, Vector3 from, Vector3 to,
+        float radius = AgentRadius, int budget = int.MaxValue)
     {
         FlagGraph graph = _flags[flag];
-        return graph.HasClearLine(graph.ClosestTriangle(from, out _), from, to, ref budget);
+        return graph.HasClearLine(graph.ClosestTriangle(from, out _), from, to, radius, ref budget);
     }
 
     public (int Connections, long Bytes) AdjacencyStorage
@@ -707,7 +711,8 @@ public sealed class BakedNavGraph
             }
         }
 
-        public bool FindPath(int start, int goal, Vector3 from, Vector3 to, List<Vector3> output)
+        public bool FindPath(int start, int goal, Vector3 from, Vector3 to, List<Vector3> output,
+            float radius)
         {
             if (start < 0 || goal < 0)
                 return false;
@@ -801,14 +806,14 @@ public sealed class BakedNavGraph
                                 ? (edge.VertexB, edge.VertexA)
                                 : (edge.VertexA, edge.VertexB);
                             portals.Add(Inset(current, left, right, leftVertex, rightVertex,
-                                _borderVertex[leftVertex], _borderVertex[rightVertex]));
+                                _borderVertex[leftVertex], _borderVertex[rightVertex], radius));
                             break;
                         }
                     }
                 }
                 portals.Add(new Portal(destination, destination));
                 AppendFunnel(output, portals, destination);
-                Shortcut(output, begin, start, workspace.Shortcut);
+                Shortcut(output, begin, start, workspace.Shortcut, radius);
                 return true;
             }
             finally
@@ -841,7 +846,7 @@ public sealed class BakedNavGraph
         // it; a gap narrower than the body degrades to its midpoint, which is the best a body can aim at
         // anyway — whether it physically fits is the collision resolver's call, not the graph's.
         private Portal Inset(int triangle, Vector3 left, Vector3 right,
-            int leftVertex, int rightVertex, bool insetLeft, bool insetRight)
+            int leftVertex, int rightVertex, bool insetLeft, bool insetRight, float radius)
         {
             if (!insetLeft && !insetRight)
                 return new Portal(left, right);
@@ -852,8 +857,8 @@ public sealed class BakedNavGraph
             if (length <= 1e-4f)
                 return new Portal(left, right);
 
-            float leftInset = insetLeft ? InsetFor(triangle, leftVertex, along, length) : 0f;
-            float rightInset = insetRight ? InsetFor(triangle, rightVertex, along, length) : 0f;
+            float leftInset = insetLeft ? InsetFor(triangle, leftVertex, along, length, radius) : 0f;
+            float rightInset = insetRight ? InsetFor(triangle, rightVertex, along, length, radius) : 0f;
 
             // Share the portal when the two ends want more of it than there is, rather than halving
             // both unconditionally. Equal demands still get half each, and a single moving end still
@@ -881,11 +886,11 @@ public sealed class BakedNavGraph
         // radius. Applying the radius flat, as this used to, is only right at 90 degrees: at 10 degrees
         // it leaves 0.078 m and a 0.40 m body is still inside the wall. Measured on a plain 1 m doorway
         // with an angled approach, the flat inset left the route 0.318 m from a jamb.
-        private float InsetFor(int triangle, int vertex, Vector3 along, float length)
+        private float InsetFor(int triangle, int vertex, Vector3 along, float length, float radius)
         {
             Span<Vector2> walls = stackalloc Vector2[MaxWallsPerVertex];
             int count = WallsAt(triangle, vertex, walls);
-            float wanted = AgentRadius + Clearance;
+            float wanted = radius + Clearance;
             if (count == 0)
                 return wanted; // a border with no wall edge in reach of the fan: the flat inset is all there is
 
@@ -998,7 +1003,8 @@ public sealed class BakedNavGraph
         // every wall it passes. Each replacement is a triangle inequality, so the route can only get
         // shorter, and it can only use mesh the walk itself verified — it cannot invent a shortcut
         // through a wall the corridor was avoiding.
-        private void Shortcut(List<Vector3> output, int begin, int startTriangle, List<Vector3> scratch)
+        private void Shortcut(List<Vector3> output, int begin, int startTriangle,
+            List<Vector3> scratch, float radius)
         {
             if (output.Count - begin < 3)
                 return;
@@ -1022,7 +1028,7 @@ public sealed class BakedNavGraph
             bool Reaches(int probe, out int end)
             {
                 end = -1;
-                if (!TryLine(anchorTriangle, output[anchor], output[probe], ref budget,
+                if (!TryLine(anchorTriangle, output[anchor], output[probe], radius, ref budget,
                     out int reached, out float surface))
                     return false;
                 float replaced = 0f;
@@ -1099,7 +1105,7 @@ public sealed class BakedNavGraph
         // route it replaces. It is in fact a stronger test: the portal inset runs ALONG the portal and so
         // yields only radius * sin(angle) away from the wall the portal meets, while this measures the
         // real distance from the segment to the wall.
-        private bool TryLine(int startTriangle, Vector3 from, Vector3 to, ref int budget,
+        private bool TryLine(int startTriangle, Vector3 from, Vector3 to, float radius, ref int budget,
             out int endTriangle, out float surface)
         {
             endTriangle = startTriangle;
@@ -1123,7 +1129,7 @@ public sealed class BakedNavGraph
                 int i0 = Source.Triangles[current * 3];
                 int i1 = Source.Triangles[(current * 3) + 1];
                 int i2 = Source.Triangles[(current * 3) + 2];
-                if (!ClearOfWalls(current, i0, i1, i2, from, to))
+                if (!ClearOfWalls(current, i0, i1, i2, from, to, radius))
                     return false;
 
                 // The edge to leave by is one the direction points OUT through — decided against the
@@ -1224,8 +1230,8 @@ public sealed class BakedNavGraph
             }
         }
 
-        public bool HasClearLine(int start, Vector3 from, Vector3 to, ref int budget) =>
-            TryLine(start, from, to, ref budget, out _, out _);
+        public bool HasClearLine(int start, Vector3 from, Vector3 to, float radius, ref int budget) =>
+            TryLine(start, from, to, radius, ref budget, out _, out _);
 
         private static float Rise(float ax, float az, float ay, float bx, float bz, float by)
         {
@@ -1289,9 +1295,10 @@ public sealed class BakedNavGraph
         // thinner than the radius still hides its far wall; catching that needs a query against
         // boundary geometry near the segment rather than a walk, which is a different structure. One
         // ring covers a sliver welded to the floor the line is on, which is the shape this data has.
-        private bool ClearOfWalls(int triangle, int i0, int i1, int i2, Vector3 from, Vector3 to)
+        private bool ClearOfWalls(int triangle, int i0, int i1, int i2, Vector3 from, Vector3 to,
+            float radius)
         {
-            if (!FaceClearOfWalls(triangle, i0, i1, i2, from, to))
+            if (!FaceClearOfWalls(triangle, i0, i1, i2, from, to, radius))
                 return false;
             for (int at = _edgeStart[triangle]; at < _edgeStart[triangle + 1]; at++)
             {
@@ -1299,7 +1306,7 @@ public sealed class BakedNavGraph
                 if (!_enabled[c.To])
                     continue;
                 if (!FaceClearOfWalls(c.To, Source.Triangles[c.To * 3],
-                    Source.Triangles[(c.To * 3) + 1], Source.Triangles[(c.To * 3) + 2], from, to))
+                    Source.Triangles[(c.To * 3) + 1], Source.Triangles[(c.To * 3) + 2], from, to, radius))
                     return false;
             }
             return true;
@@ -1307,16 +1314,17 @@ public sealed class BakedNavGraph
 
         // The walls one face carries: its border EDGES, and its border VERTICES, since a wall corner
         // can belong to a face further out than this test reaches.
-        private bool FaceClearOfWalls(int triangle, int i0, int i1, int i2, Vector3 from, Vector3 to)
+        private bool FaceClearOfWalls(int triangle, int i0, int i1, int i2, Vector3 from, Vector3 to,
+            float radius)
         {
-            const float Squared = (AgentRadius + Clearance) * (AgentRadius + Clearance);
+            float squared = (radius + Clearance) * (radius + Clearance);
             for (int e = 0; e < 3; e++)
             {
                 int va = e == 0 ? i0 : e == 1 ? i1 : i2;
                 int vb = e == 0 ? i1 : e == 1 ? i2 : i0;
                 if (StillShared(triangle, va, vb))
                     continue; // an interior edge is not a wall
-                if (SegmentsDistanceSquaredXZ(from, to, Source.Vertices[va], Source.Vertices[vb]) < Squared)
+                if (SegmentsDistanceSquaredXZ(from, to, Source.Vertices[va], Source.Vertices[vb]) < squared)
                     return false;
             }
             return !(TooClose(i0) || TooClose(i1) || TooClose(i2));
@@ -1326,7 +1334,7 @@ public sealed class BakedNavGraph
                 if (!_borderVertex[vertex])
                     return false;
                 Vector3 v = Source.Vertices[vertex];
-                return PointSegmentDistanceSquaredXZ(v.X, v.Z, from.X, from.Z, to.X, to.Z) < Squared;
+                return PointSegmentDistanceSquaredXZ(v.X, v.Z, from.X, from.Z, to.X, to.Z) < squared;
             }
         }
 

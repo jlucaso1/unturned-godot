@@ -127,7 +127,10 @@ public delegate Vector3 ZombieMoveResolver(Vector3 from, Vector3 to, float radiu
 // Finds a walkable route over the level's pre-baked navmesh (the Seeker's A* + funnel). Fills
 // waypoints from start to destination and returns whether any path exists. Null means no navmesh
 // (maps without nav data); a ready graph returning false is authoritative and never grants wall travel.
-public delegate bool ZombiePathQuery(Vector3 from, Vector3 to, List<Vector3> path);
+// `radius` is the body asking. Megas are nearly twice as wide as everyone else, and a route built for
+// the narrow one walks their capsule into every jamb it passes, so the width cannot be a property of
+// the graph — it has to travel with the request.
+public delegate bool ZombiePathQuery(Vector3 from, Vector3 to, List<Vector3> path, float radius);
 
 // Samples the REAL walking surface near a position — object floors, sidewalks, stairs — the way a
 // CharacterController's grounding does, using the current height as the reference so stacked floors
@@ -599,7 +602,7 @@ public sealed class ZombieSystem
                     queryFrom = snappedFrom;
             }
             _scratchPath.Clear();
-            if (pathQuery(queryFrom, queryTo, _scratchPath) && _scratchPath.Count > 0)
+            if (pathQuery(queryFrom, queryTo, _scratchPath, zombie.Radius) && _scratchPath.Count > 0)
             {
                 float newError = HorizontalDistanceSquared(_scratchPath[^1], queryTo);
                 float fromError = HorizontalDistanceSquared(queryFrom, queryTo);

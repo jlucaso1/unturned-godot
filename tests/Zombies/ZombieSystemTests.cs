@@ -480,7 +480,7 @@ public class ZombieSystemTests
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         zombie.Yaw = -90f;
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             path.Add(from);
             path.Add(to);
@@ -563,7 +563,7 @@ public class ZombieSystemTests
         bool ready = false;
         int queries = 0;
         system.PathReady = () => ready;
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             queries++;
             path.Add(from);
@@ -592,7 +592,7 @@ public class ZombieSystemTests
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         system.PathReady = () => true;
-        system.PathQuery = (from, to, path) => false;
+        system.PathQuery = (from, to, path, radius) => false;
 
         Vector3 spawn = zombie.Position;
         var player = Player(1, new Vector3(10, 5, 0));
@@ -612,7 +612,7 @@ public class ZombieSystemTests
         // first leg — a repath from beyond it routes straight.
         var corner = new Vector3(0, 5, 6);
         int queries = 0;
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             queries++;
             path.Add(from);
@@ -659,7 +659,7 @@ public class ZombieSystemTests
         system.MoveResolver = (from, to, radius) => from; // freeze in place
 
         var perZombie = new Dictionary<(float, float), int>();
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             (float, float) key = (from.X, from.Z);
             perZombie.TryGetValue(key, out int n);
@@ -702,7 +702,7 @@ public class ZombieSystemTests
         // of the player, never exactly on them (until inside 2 m, where steering goes direct).
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         var destinations = new List<Vector3>();
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             destinations.Add(to);
             path.Add(from);
@@ -731,7 +731,7 @@ public class ZombieSystemTests
         // An L-route with the corner at (6, 0, 6): proper polyline following passes NEAR the
         // corner instead of cutting the diagonal through the "wall".
         var corner = new Vector3(6, 5, 6);
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             path.Add(from);
             if (new Vector2(from.X - corner.X, from.Z - corner.Z).Length() > 1.2f && from.Z < 5f)
@@ -765,7 +765,7 @@ public class ZombieSystemTests
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         zombie.Yaw = -90f;
         int calls = 0;
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             calls++;
             if (calls > 1)
@@ -792,7 +792,7 @@ public class ZombieSystemTests
         // without any movement. It should advance as far as the graph safely allows.
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         zombie.Yaw = -90f;
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             path.Add(from);
             path.Add(new Vector3(4, 5, 0)); // connected island ends 6 m short of the target
@@ -816,7 +816,7 @@ public class ZombieSystemTests
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         zombie.Yaw = -90f;
         int queries = 0;
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             queries++;
             path.Add(from);
@@ -843,7 +843,7 @@ public class ZombieSystemTests
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         zombie.Yaw = -90f;
         int query = 0;
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             path.Add(from);
             path.Add(new Vector3(query++ == 0 ? 7f : 3f, 5, 0));
@@ -867,7 +867,7 @@ public class ZombieSystemTests
         // player, so the stop lands inside the 1 m attack reach.
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         zombie.Yaw = -90f;
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             path.Add(from);
             path.Add(to);
@@ -891,7 +891,7 @@ public class ZombieSystemTests
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         Vector3 here = zombie.Position;
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             path.Add(here); // a route collapsed onto the zombie itself (degenerate segment)
             path.Add(here);
@@ -910,7 +910,7 @@ public class ZombieSystemTests
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         zombie.Yaw = -90f;
         int calls = 0;
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             calls++;
             path.Add(from);
@@ -939,7 +939,7 @@ public class ZombieSystemTests
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         zombie.Yaw = -90f;
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             path.Add(from);
             path.Add(to);
@@ -974,7 +974,7 @@ public class ZombieSystemTests
     public void FullyWalledIn_HoldsStillWithoutTeleporting()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             path.Add(from);
             path.Add(to);
@@ -1017,7 +1017,7 @@ public class ZombieSystemTests
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         zombie.Yaw = -90f;
         int queries = 0;
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             queries++;
             path.Add(from);
@@ -1060,7 +1060,7 @@ public class ZombieSystemTests
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         zombie.Yaw = -90f;
         int queries = 0, blockedSteps = 0;
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             queries++;
             if (queries > 1)
@@ -1089,7 +1089,7 @@ public class ZombieSystemTests
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         zombie.Yaw = -90f;
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             path.Add(from);
             path.Add(to);
@@ -1150,7 +1150,7 @@ public class ZombieSystemTests
         // the follower without dividing by zero or moving anyone anywhere strange.
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         zombie.Yaw = -90f;
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             path.Add(to); // single-point route
             return true;
@@ -1172,7 +1172,7 @@ public class ZombieSystemTests
         // sqrHorizontal == 0: inside 2 m the steer direction is the zero vector — RotateTowards
         // must ignore it (the original's dir == Vector3.zero check).
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             path.Add(from);
             path.Add(to);
@@ -1201,7 +1201,7 @@ public class ZombieSystemTests
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         var destinations = new List<Vector3>();
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             destinations.Add(to);
             path.Add(to);
@@ -1244,7 +1244,7 @@ public class ZombieSystemTests
         zombie.Yaw = 0f;
 
         var origins = new List<Vector3>();
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             origins.Add(from);
             path.Add(from);
@@ -1281,7 +1281,7 @@ public class ZombieSystemTests
         zombie.Yaw = 0f;
 
         var destinations = new List<Vector3>();
-        system.PathQuery = (from, to, path) =>
+        system.PathQuery = (from, to, path, radius) =>
         {
             destinations.Add(to);
             path.Add(from);

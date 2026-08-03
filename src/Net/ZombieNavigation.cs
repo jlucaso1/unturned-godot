@@ -120,13 +120,16 @@ public sealed class ZombieNavigation
 
         Rid map = _map;
         bool debug = EnvFlag.IsOn(OS.GetEnvironment("NAV_DEBUG"), whenUnset: false);
-        Query = (Vector3 from, Vector3 to, List<Vector3> path) =>
+        Query = (Vector3 from, Vector3 to, List<Vector3> path, float radius) =>
         {
             if (_useBakedGraph)
-                return _bakedGraph?.TryPath(from, to, path) == true;
+                return _bakedGraph?.TryPath(from, to, path, radius) == true;
 
             if (!EnsureReady())
-                return _progressGraph?.TryPath(from, to, path) == true;
+                return _progressGraph?.TryPath(from, to, path, radius) == true;
+            // NavigationServer bakes one agent radius into the map, so the body cannot travel with the
+            // request there. It is the small-map path only — the baked graph above is what large maps
+            // use, and it is where megas actually walk through doorways.
             _progressGraph = null; // NavigationServer now owns funnel-quality routing
             Vector3[] points = NavigationServer3D.MapGetPath(map, from, to, optimize: true);
             if (points.Length < 2)

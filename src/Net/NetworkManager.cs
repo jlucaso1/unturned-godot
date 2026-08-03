@@ -256,7 +256,7 @@ public partial class NetworkManager : Node
             void Probe()
             {
                 var waypoints = new System.Collections.Generic.List<Vector3>();
-                bool ok = zombies.PathQuery!(from, to, waypoints);
+                bool ok = zombies.PathQuery!(from, to, waypoints, BakedNavGraph.AgentRadius);
                 Log.Print($"[nav] path probe t={Now - startedAt:F1}s {from} -> {to}: " +
                     $"found={ok} waypoints={waypoints.Count}");
                 foreach (Vector3 w in waypoints)
@@ -357,7 +357,8 @@ public partial class NetworkManager : Node
                 // our collision refusing is the divergence. If it routes the long way round, the
                 // original sends its zombies round too and the collision is right.
                 var route = new List<Vector3>();
-                if (zombies.PathQuery != null && zombies.PathQuery(at, goal, route))
+                if (zombies.PathQuery != null
+                    && zombies.PathQuery(at, goal, route, BakedNavGraph.AgentRadius))
                 {
                     float walked = 0f;
                     for (int i = 1; i < route.Count; i++)
