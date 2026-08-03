@@ -120,14 +120,30 @@ public sealed class ZombieNavigation
 
         Rid map = _map;
         bool debug = EnvFlag.IsOn(OS.GetEnvironment("NAV_DEBUG"), whenUnset: false);
-        Query = (Vector3 from, Vector3 to, List<Vector3> path) =>
+        Query = (Vector3 from, Vector3 to, List<Vector3> path, float radius) =>
         {
             if (_useBakedGraph)
-                return _bakedGraph?.TryPath(from, to, path) == true;
+                return _bakedGraph?.TryPath(from, to, path, radius) == true;
 
-            if (!EnsureReady())
-                return _progressGraph?.TryPath(from, to, path) == true;
-            _progressGraph = null; // NavigationServer now owns funnel-quality routing
+            // NavigationServer bakes ONE agent radius into its map, so it cannot serve a body wider
+            // than the default however the query asks. That is not a corner case: this branch covers
+            // every map at or under MaxGodotTriangles, which is most of them, so leaving it would mean
+            // a mega reverts to a 0.40 m route the moment the map finishes synchronizing.
+            //
+            // So the CPU graph is kept rather than discarded once the server is ready, and the wider
+            // bodies are routed on it. Collision reconciliation already writes to whichever graph is
+            // live, so it does not go stale, and it is only retained on maps small enough that the
+            // server took them in the first place.
+            bool ready = EnsureReady();
+            if (!ready || radius > BakedNavGraph.AgentRadius)
+            {
+                if (_progressGraph != null)
+                    return _progressGraph.TryPath(from, to, path, radius);
+                if (!ready)
+                    return false;
+                // Nothing built to serve the wider body. The server's route for the default one beats
+                // no route at all, so fall through rather than refuse.
+            }
             Vector3[] points = NavigationServer3D.MapGetPath(map, from, to, optimize: true);
             if (points.Length < 2)
                 return false; // live graph, no route: the brain keeps its old route or stands

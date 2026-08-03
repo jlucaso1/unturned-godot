@@ -319,7 +319,7 @@ public class ZombieHostTests
         zombie.Yaw = 90f; // face -X, directly toward the player at the origin
         int prematureQueries = 0;
         h.System.PathReady = () => false;
-        h.System.PathQuery = (from, to, path) =>
+        h.System.PathQuery = (from, to, path, radius) =>
         {
             prematureQueries++;
             return false;
@@ -345,7 +345,7 @@ public class ZombieHostTests
         zombie.Position = zombie.Home = new Vector3(8, 10, 0);
         zombie.Yaw = 90f; // face -X, toward the player at the origin
         h.System.PathReady = () => true;
-        h.System.PathQuery = (from, to, path) =>
+        h.System.PathQuery = (from, to, path, radius) =>
         {
             path.Add(from);
             path.Add(new Vector3(4, 10, 0)); // the player's navmesh island begins beyond this edge
@@ -374,7 +374,7 @@ public class ZombieHostTests
         zombie.Position = zombie.Home = new Vector3(8, 10, 0);
         zombie.Yaw = 90f;
         h.System.PathReady = () => true;
-        h.System.PathQuery = (from, to, path) =>
+        h.System.PathQuery = (from, to, path, radius) =>
         {
             path.Add(from);
             path.Add(new Vector3(4, 10, 0));

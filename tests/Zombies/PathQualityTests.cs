@@ -463,6 +463,59 @@ public class PathQualityTests
             "0.2 m inside the edge of the navmesh is not clearance for a 0.4 m body");
     }
 
+    // A wall with an opening `openQuads` metres wide, centred on z = 7. Wide enough that a mega, which
+    // is nearly twice a normal zombie's width, physically fits through it.
+    private static BakedNavGraph WideDoorway(int openQuads)
+    {
+        const int Quads = 20;
+        NavFlag flag = FlatField(Quads);
+        var blocked = new HashSet<int>();
+        for (int z = 0; z < Quads; z++)
+        {
+            if (z >= (int)DoorMinZ && z < (int)DoorMinZ + openQuads)
+                continue;
+            int quad = (10 * Quads) + z;
+            blocked.Add(quad * 2);
+            blocked.Add((quad * 2) + 1);
+        }
+        return BakedNavGraph.Build(new[] { flag },
+            new Dictionary<NavFlag, HashSet<int>> { [flag] = blocked });
+    }
+
+    // The graph built every route for a 0.40 m body while ZombieInstance.Radius is 0.75 for megas, so a
+    // mega was handed a route that keeps a NORMAL zombie's width off the wall and walks its own capsule
+    // 0.30 m into the jamb. The opening here is 3 m, so the body genuinely fits — the route just was not
+    // aimed for it.
+    [Theory]
+    [InlineData(BakedNavGraph.AgentRadius)]
+    [InlineData(0.75f)] // EZombieSpeciality.Mega
+    public void ARouteKeepsTheWidthOfTheBodyThatAskedForIt(float radius)
+    {
+        BakedNavGraph graph = WideDoorway(3);
+        var path = new List<Vector3>();
+        Assert.True(graph.TryPath(new Vector3(4, 0, 2), new Vector3(16, 0, 15), path, radius));
+
+        float worst = float.MaxValue;
+        Vector3 worstAt = Vector3.Zero;
+        for (int i = 1; i < path.Count; i++)
+            for (int step = 0; step <= 64; step++)
+            {
+                Vector3 point = path[i - 1].Lerp(path[i], step / 64f);
+                float clearance = MathF.Min(
+                    DistanceToWall(point, -100f, DoorMinZ),
+                    DistanceToWall(point, DoorMinZ + 3f, 100f));
+                if (clearance < worst)
+                {
+                    worst = clearance;
+                    worstAt = point;
+                }
+            }
+
+        Assert.True(worst >= radius,
+            $"a {radius:0.00} m body is routed {worst:0.000} m from a wall at "
+            + $"({worstAt.X:0.00}, {worstAt.Z:0.00})");
+    }
+
     // A flag with no faces snaps to no triangle, and the walk has to answer that rather than index it.
     [Fact]
     public void AFlagWithNoFaces_HasNoClearLines()
@@ -558,7 +611,7 @@ public class PathQualityTests
         zombie.Speciality = EZombieSpeciality.Normal;
         zombie.Position = new Vector3(5, 0, 6);
 
-        system.PathQuery = (Vector3 a, Vector3 b, List<Vector3> p) => graph.TryPath(a, b, p);
+        system.PathQuery = (Vector3 a, Vector3 b, List<Vector3> p, float radius) => graph.TryPath(a, b, p);
         system.PathReady = () => true;
         system.MoveResolver = WallWithDoorway();
 
