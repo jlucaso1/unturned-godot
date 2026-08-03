@@ -39,7 +39,8 @@ public partial class DedicatedServer : Node
         };
 
         UnturnedGodot.Zombies.ZombieSystem? zombies = UnturnedGodot.Zombies.ZombieWorld.Load(
-            level.Path, ground, new System.Random());
+            level.Path, ground,
+            UnturnedGodot.Repro.ReproRandom.ForSession(OS.GetEnvironment("ZOMBIE_SEED"), out _));
         if (zombies != null)
         {
             node._zombieNavigation = ZombieNavigation.Build(zombies.Navmesh);

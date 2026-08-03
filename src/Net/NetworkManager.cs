@@ -94,8 +94,11 @@ public partial class NetworkManager : Node
     {
         if (_server == null)
             return;
+        // A generator whose whole state is one integer, so a bug-repro dump can carry the sequence the
+        // session was on rather than re-rolling from scratch (Repro.ReproRandom). ZOMBIE_SEED pins it.
+        var random = Repro.ReproRandom.ForSession(OS.GetEnvironment("ZOMBIE_SEED"), out ulong seed);
         UnturnedGodot.Zombies.ZombieSystem? zombies =
-            UnturnedGodot.Zombies.ZombieWorld.Load(levelDir, _ground, new System.Random());
+            UnturnedGodot.Zombies.ZombieWorld.Load(levelDir, _ground, random);
         if (zombies == null)
         {
             Log.PushWarning("[zombies] level ships no zombie data; skipping");
@@ -456,7 +459,8 @@ public partial class NetworkManager : Node
             AddChild(repro);
         }
 
-        Log.Print($"[zombies] {zombies.Zombies.Count} zombies spawned from the level's spawnpoints");
+        Log.Print($"[zombies] {zombies.Zombies.Count} zombies spawned from the level's spawnpoints "
+            + $"(ZOMBIE_SEED={seed})");
     }
 
     // Raycasts our collision world down onto every Nth navmesh vertex and reports the height error.

@@ -15,6 +15,18 @@ namespace UnturnedGodot.Repro;
 // from Random so it drops straight into the existing call sites.
 public sealed class ReproRandom : Random
 {
+    // The generator a session's simulation runs on, seeded once per session. ZOMBIE_SEED pins it (the
+    // same seed spawns the same population in the same places, which is what makes a bug someone hit
+    // on their machine reachable on yours); otherwise it is picked once and logged, so a dump taken
+    // later can still say which world it was.
+    public static ReproRandom ForSession(string? seedText, out ulong seed)
+    {
+        seed = ulong.TryParse(seedText, out ulong pinned)
+            ? pinned
+            : (ulong)DateTime.UtcNow.Ticks;
+        return new ReproRandom(seed);
+    }
+
     // The LCG constants PCG uses: Knuth's 64-bit multiplier and an odd increment.
     private const ulong Multiplier = 6364136223846793005UL;
     private const ulong Increment = 1442695040888963407UL;

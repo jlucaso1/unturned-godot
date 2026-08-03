@@ -137,4 +137,22 @@ public class ReproRandomTests
         Assert.Contains(a, value => value != 0);
         Assert.Throws<ArgumentNullException>(() => new ReproRandom(1).NextBytes((byte[])null!));
     }
+
+    // The session's seed: pinned by ZOMBIE_SEED so the same population spawns in the same places, and
+    // otherwise picked once and reported so a dump can still say which world it was.
+    [Fact]
+    public void ASessionSeedIsPinnedWhenAskedAndReportedWhenNot()
+    {
+        ReproRandom pinned = ReproRandom.ForSession("20260803", out ulong seed);
+        Assert.Equal(20260803UL, seed);
+        Assert.Equal(new ReproRandom(20260803).NextSingle(), pinned.NextSingle());
+
+        ReproRandom rolled = ReproRandom.ForSession(null, out ulong picked);
+        Assert.NotEqual(0UL, picked);
+        Assert.Equal(new ReproRandom(picked).NextSingle(), rolled.NextSingle());
+
+        // Anything that is not a number is not a seed, and is not silently treated as one.
+        ReproRandom.ForSession("not-a-seed", out ulong fallback);
+        Assert.NotEqual(0UL, fallback);
+    }
 }

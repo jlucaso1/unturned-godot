@@ -155,6 +155,22 @@ public class ReproCaptureTests
             warning => warning.Contains("no recorder", StringComparison.Ordinal));
     }
 
+    // A capture taken away from every authored navigation flag is a real situation (a map's own player
+    // spawn can be hundreds of metres from one), and the dump says why it has no routes.
+    [Fact]
+    public void AFocusOutsideEveryNavFlagIsCalledOut()
+    {
+        var geometry = new ReproWorlds.Geometry().Ground();
+        (ZombieSystem system, _, _) = ReproWorlds.Session(geometry);
+        ReproDump dump = ReproCapture.Build(
+            ReproWorlds.Request(geometry, new Vector3(5000f, 0f, 5000f)), system, recorder: null,
+            ReproWorlds.FlatGround);
+        Assert.True(dump.World.HasNavmesh);
+        Assert.Equal(0, dump.World.SlicedTriangleCount);
+        Assert.Contains(dump.Meta.Warnings,
+            warning => warning.Contains("outside every navigation flag", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void AMapWithNoNavmeshSaysSo()
     {

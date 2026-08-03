@@ -47,6 +47,7 @@ jobs:
         run: |
           dotnet restore unturned-godot.sln
           dotnet restore tools/PerfHarness/PerfHarness.csproj
+          dotnet restore tools/ReproHarness/ReproHarness.csproj
 
       # Analyzers + .editorconfig style are build-enforced (Directory.Build.props), so a warning here
       # is a failure worth seeing.
@@ -59,6 +60,7 @@ jobs:
         run: |
           dotnet build unturned-godot.sln -c Release --no-restore -warnaserror
           dotnet build tools/PerfHarness/PerfHarness.csproj -c Release --no-restore -warnaserror
+          dotnet build tools/ReproHarness/ReproHarness.csproj -c Release --no-restore -warnaserror
 
       # Deliberately without --no-restore. The Godot SDK references GodotSharpEditor only in Debug, and
       # NuGet keeps one assets file per project rather than per configuration, so the Release restore above
@@ -91,6 +93,7 @@ jobs:
         run: |
           dotnet format unturned-godot.sln --verify-no-changes
           dotnet format tools/PerfHarness/PerfHarness.csproj --verify-no-changes
+          dotnet format tools/ReproHarness/ReproHarness.csproj --verify-no-changes
 
   audit:
     # The project already carries a hand-applied CVE mitigation (the Microsoft.Bcl.Memory pin in

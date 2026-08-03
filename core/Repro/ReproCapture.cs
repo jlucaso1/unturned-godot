@@ -140,6 +140,12 @@ public static class ReproCapture
         if (system.Navmesh != null)
             foreach (NavFlag flag in system.Navmesh)
                 world.NavFlags.Add(Slice(flag, request.Focus, request.NavmeshRadius));
+        // A focus outside every authored navigation flag is worth saying out loud: the replay will have
+        // no routes there, and the reason is where the capture was taken rather than anything missing
+        // from the dump. (It happens: PEI's own player spawn is 200 m from the nearest flag.)
+        if (world.HasNavmesh && world.SlicedTriangleCount == 0)
+            request.Warnings.Add("the focus is outside every navigation flag, so the dump carries no "
+                + "navmesh: a replay there has no routes");
         return world;
     }
 
