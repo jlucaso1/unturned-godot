@@ -709,7 +709,11 @@ public sealed class ZombieSystem
     {
         if (current.Count == 0 || current.Count != replacement.Count)
             return false;
-        for (int i = 1; i < current.Count; i++)
+        // A one-point route has no start-versus-plan split to make: that sole waypoint IS the plan, and
+        // skipping it would call any two single-point routes equal however far apart their destinations
+        // are — handing a fresh route the old one's evidence in the one shape that carries no other
+        // point to disagree on.
+        for (int i = current.Count == 1 ? 0 : 1; i < current.Count; i++)
             if (HorizontalDistanceSquared(current[i], replacement[i])
                 > SameRouteTolerance * SameRouteTolerance)
                 return false;

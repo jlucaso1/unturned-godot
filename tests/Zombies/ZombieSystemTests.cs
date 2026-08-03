@@ -1261,6 +1261,47 @@ public class ZombieSystemTests
         Assert.Equal(8f, zombie.PathPoints[1].Z, 1);
     }
 
+    // Codex review, fourth finding. A single-point route is a supported shape (see
+    // SinglePointRoutes_AndZeroDeltaTicks_AreHandled), and it is the one shape with no second waypoint
+    // to disagree on — so skipping index 0 made every pair of them compare equal.
+    [Fact]
+    public void TwoSinglePointRoutesToDifferentPlaces_AreNotTheSameRoute()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        bool moved = false;
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            path.Add(moved ? new Vector3(8f, 5f, 2f) : new Vector3(6f, 5f, 0f));
+            return true;
+        };
+        bool blocked = true;
+        system.MoveResolver = (from, to, radius) => blocked ? from : to;
+
+        var player = Player(1, new Vector3(10, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
+        int guard = 0;
+        while (zombie.BlockedRouteTime + ImpassableDt + 1e-4f < ZombieSystem.BlockedRouteTimeout)
+        {
+            system.Tick(new[] { player }, ImpassableDt);
+            Assert.True(++guard < 100, "never accumulated blocked evidence");
+        }
+        float carried = zombie.BlockedRouteTime;
+        Assert.True(carried > 0f);
+        Assert.Single(zombie.PathPoints);
+
+        // A single-point route somewhere else entirely must arrive with a clean record.
+        moved = true;
+        zombie.RepathTimer = 0f;
+        zombie.RepathGranted = true;
+        system.Tick(new[] { player }, ImpassableDt);
+
+        // Asserting the ROUTE survived, not the counter: the invalidation path zeroes the counter too,
+        // so a discarded route also reads as "evidence dropped" and would hide the defect.
+        Assert.Single(zombie.PathPoints);
+        Assert.Equal(2f, zombie.PathPoints[0].Z, 1);
+        Assert.True(zombie.BlockedRouteTime <= ImpassableDt + 1e-4f);
+    }
+
     private const float ImpassableDt = 0.1f;
 
     private readonly record struct ImpassableRun(int FirstBlockedTick, int InvalidatedAtTick,
