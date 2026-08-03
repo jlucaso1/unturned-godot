@@ -24,6 +24,7 @@ and checked byte-for-byte against the game's own data, using
 | **Player** | Port of `PlayerMovement`/`PlayerLook`/`PlayerStance` with the game's own constants; real character model, skeleton and animations; first/third person |
 | **Audio** | Footsteps/landings resolved through the terrain splat like `PhysicsTool.GetTerrainMaterialName`, clips extracted from the master bundle's FSB5 banks |
 | **Zombies** | Spawn tables, navigation bounds and the pre-baked navmeshes; detection, hunting and the `Zombie.cs` animation set |
+| **Vehicles** | The map's own `Spawns/Vehicles.dat` rolled through its spawn tables and redirectors, as many as the level's size allows, each drawn from its real `Vehicle.prefab`. Parked scenery for now: no driving, physics or damage |
 | **Multiplayer** | Authoritative server + snapshot-interpolated clients over UDP; singleplayer is the same stack over loopback. Listen server, dedicated server and join-by-address all work |
 
 Goal order is **parity first, then performance**, and a performance HUD (`F3`) is on hand so the numbers stay
@@ -34,8 +35,10 @@ in view.
 - **Stream-data meshes**: vertex data kept in the `.resS` stream is not decoded, so those meshes fall back
   to boxes. Quantized geometry (`m_CompressedMesh`), which workshop bundles lean on heavily, *is* decoded,
   as are texture pixels in `.resS`.
-- **Gameplay**: no items, inventory, vehicles, building, damage or survival stats. Zombies exist and hunt,
-  but you cannot fight back.
+- **Gameplay**: no items, inventory, building, damage or survival stats. Zombies exist and hunt, but you
+  cannot fight back. Vehicles spawn and render, but they are scenery: nothing drives, collides with or
+  damages them, and a vehicle sits at the height its spawnpoint was authored at instead of settling onto
+  the ground as its rigidbody would.
 - **Old road bundles**: maps built before Unity 2018 (Alpha Valley, Washington, Yukon, and many workshop
   maps) keep `Environment/Roads.unity3d` in a SerializedFile version this reader does not decode yet, so
   their roads fall back to the procedural asphalt/dirt material. Terrain layers are unaffected: those come

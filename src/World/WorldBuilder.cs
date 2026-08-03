@@ -5,6 +5,7 @@ using System.Linq;
 using Godot;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Data;
+using UnturnedGodot.Unity;
 
 namespace UnturnedGodot;
 
@@ -17,6 +18,7 @@ public sealed record WorldBuildResult(
     HeightmapSampler Heights,
     Node3D Objects,
     Node3D Foliage,
+    Node3D Vehicles,
     int TileCount,
     int PlacedObjectCount,
     int ObjectsWithMesh,
@@ -42,12 +44,12 @@ public static class WorldBuilder
         terrainSw.Stop();
 
         var objectsSw = Stopwatch.StartNew();
-        (Node3D objects, Node3D foliage, int placed, int withMesh, int unique) =
+        (Node3D objects, Node3D foliage, Node3D vehicles, int placed, int withMesh, int unique) =
             BuildObjects(level, unturnedPath);
         objectsSw.Stop();
 
-        return new WorldBuildResult(terrain, heights, objects, foliage, tileCount, placed, withMesh, unique,
-            terrainSw.Elapsed.TotalMilliseconds, objectsSw.Elapsed.TotalMilliseconds);
+        return new WorldBuildResult(terrain, heights, objects, foliage, vehicles, tileCount, placed,
+            withMesh, unique, terrainSw.Elapsed.TotalMilliseconds, objectsSw.Elapsed.TotalMilliseconds);
     }
 
     // Interactive-load variant of BuildTerrain: the pure-CPU tile/LOD generation runs on the thread pool
@@ -152,8 +154,8 @@ public static class WorldBuilder
         return layers;
     }
 
-    private static (Node3D root, Node3D foliage, int placed, int withMesh, int unique) BuildObjects(
-        LevelInfo level, string unturnedPath)
+    private static (Node3D root, Node3D foliage, Node3D vehicles, int placed, int withMesh, int unique)
+        BuildObjects(LevelInfo level, string unturnedPath)
     {
         // The game's bundle plus any workshop mod that ships one: a workshop map places objects whose
         // prefabs live in the mod's bundle, not the game's.
@@ -198,9 +200,17 @@ public static class WorldBuilder
             ? FoliageAsset.ScanSources(sources, new HashSet<Guid>(foliageGuids))
             : new Dictionary<Guid, FoliageAsset.Owned>();
 
+        // The vehicles the map starts with, rolled from its own tables. A spawned vehicle is a GUID and a
+        // transform like any other placement, so its mesh joins the same needed set, the same extraction
+        // plan and the same batching — only the scene root is its own.
+        List<PlacedObject> vehicles = VehicleSpawnPlan.Load(level, sources, dbTask.Result);
+        Log.Print($"[unturned-godot] Vehicles: {vehicles.Count} spawned");
+
         var neededGuids = new HashSet<Guid>();
         foreach (PlacedObject o in objects)
             neededGuids.Add(o.Guid);
+        foreach (PlacedObject v in vehicles)
+            neededGuids.Add(v.Guid);
         foreach (Guid g in foliageAssets.Keys) // resolved foliage types only (see ObjectStreamer)
             neededGuids.Add(g);
 
@@ -221,9 +231,8 @@ public static class WorldBuilder
             // fall back to boxes and everything else still builds.
             try
             {
-                int extracted = ModelExtractor.ExtractMeshes(plan.Source.BundlePath, plan.Source.CacheTag,
-                    plan.Source.ObjectsDir, plan.Source.TreesDir, plan.Source.AssetsDir, plan.Needed,
-                    cacheDir, dbTask.Result, plan.Foliage);
+                int extracted = ModelExtractor.ExtractMeshes(plan.Source, plan.Needed, cacheDir,
+                    dbTask.Result, plan.Foliage);
                 ModelExtractor.ExtractTextures(plan.Source.BundlePath, plan.Source.CacheTag, cacheDir,
                     textureCacheDir);
                 Log.Print($"[unturned-godot] Extracted {extracted} meshes from {plan.Source.Name}");
@@ -256,12 +265,32 @@ public static class WorldBuilder
             Log.Print($"[world] object LOD levels: {lod1Library.Count} of {meshLibrary.Count} meshes "
                 + "have an authored lower level");
 
+        Node3D vehiclesRoot = BuildVehicles(vehicles, db, meshLibrary, colliderLibrary, lod1Library);
+
         Node3D foliageRoot = foliageIndex != null
             ? FoliageBuilder.Build(foliageIndex, meshLibrary)
             : FoliageBuilder.Build(foliageData, meshLibrary);
         registry.ApplyAllAvailable();
         Log.Print($"[unturned-godot] Rendered {withMesh}/{objects.Count} objects with real meshes " +
             $"({meshLibrary.Count} unique)");
-        return (objectsRoot, foliageRoot, objects.Count, withMesh, meshLibrary.Count);
+        return (objectsRoot, foliageRoot, vehiclesRoot, objects.Count, withMesh, meshLibrary.Count);
+    }
+
+    // Shared by both build paths so a vehicle is batched exactly like a placed object. The collider
+    // library is handed straight through: ObjectsBuilder only builds bodies for LARGE/MEDIUM objects and
+    // resources, so a vehicle's own colliders are cached but not turned into static world collision —
+    // vehicles are rigidbodies in Unturned, and nothing drives them here yet.
+    public static Node3D BuildVehicles(IReadOnlyList<PlacedObject> vehicles, ObjectAssetDatabase db,
+        IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary,
+        IReadOnlyDictionary<Guid, List<CachedCollider>> colliderLibrary,
+        IReadOnlyDictionary<Guid, ArrayMesh>? lod1Library)
+    {
+        if (vehicles.Count == 0)
+            return new Node3D { Name = "Vehicles" };
+
+        Node3D root = ObjectsBuilder.Build(vehicles, db, meshLibrary, colliderLibrary, out int withMesh,
+            lod1Library, label: "Vehicles");
+        Log.Print($"[unturned-godot] Rendered {withMesh}/{vehicles.Count} vehicles with real meshes");
+        return root;
     }
 }

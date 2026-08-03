@@ -69,13 +69,18 @@ public static class ObjectsBuilder
     // CollisionLayers.World — the only geometry a downward navmesh probe can hit. Recording it here rather
     // than re-deriving it later is what lets navmesh reconciliation run off the physics thread without the
     // two worlds being able to drift apart. See CollisionField.
+    //
+    // `label` names the roots and the log lines. Vehicles come through here too: a spawned vehicle is a
+    // GUID and a transform like everything else the map places, so it wants the same per-GUID batching,
+    // authored lower levels and placeholder boxes rather than a second renderer beside them. They pass no
+    // navigation field: a vehicle builds no static body here, so it contributes nothing a probe could hit.
     public static Node3D Build(IReadOnlyList<PlacedObject> objects, ObjectAssetDatabase db,
         IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary,
         IReadOnlyDictionary<Guid, List<CachedCollider>> colliderLibrary, out int withMesh,
         IReadOnlyDictionary<Guid, ArrayMesh>? lod1Library = null,
-        CollisionFieldBuilder? navigationField = null)
+        CollisionFieldBuilder? navigationField = null, string label = "Objects")
     {
-        var root = new Node3D { Name = "Objects" };
+        var root = new Node3D { Name = label };
 
         var byMesh = new Dictionary<Guid, List<Transform3D>>();
         var fallback = new List<(Transform3D transform, Color color)>();
@@ -95,12 +100,12 @@ public static class ObjectsBuilder
             }
         }
 
-        var collision = new Node3D { Name = "ObjectCollision" };
+        var collision = new Node3D { Name = label + "Collision" };
         InstancedStaticBodies? collisionOwner = EnvFlag.IsOn(OS.GetEnvironment("UG_NODE_PHYSICS"), whenUnset: false)
-            ? null : new InstancedStaticBodies { Name = "ObjectBodies" };
+            ? null : new InstancedStaticBodies { Name = label + "Bodies" };
         int collisionBodyCount = 0;
         MultiMeshRidRenderer? render = EnvFlag.IsOn(OS.GetEnvironment("UG_NODE_MULTIMESH"), whenUnset: false)
-            ? null : new MultiMeshRidRenderer { Name = "ObjectBatches" };
+            ? null : new MultiMeshRidRenderer { Name = label + "Batches" };
         var collisionShapes = new CollisionShapePool(navigationField);
         withMesh = 0;
         int renderBatches = 0, sparseGroups = 0, sparseExtraBatches = 0;
@@ -176,8 +181,8 @@ public static class ObjectsBuilder
                     transforms, layer, collisionShapes);
             }
         }
-        if (CollisionChunkMetres > 0f)
-            Log.Print($"[unturned-godot] Object collision bodies: {collisionBodyCount} "
+        if (CollisionChunkMetres > 0f && collisionBodyCount > 0)
+            Log.Print($"[unturned-godot] {label} collision bodies: {collisionBodyCount} "
                 + $"({CollisionChunkMetres:0} m cells, min {MinChunkedCollisionShapes} shapes, "
                 + $"{collisionShapes.Shapes.Count} shared shapes, "
                 + $"{collisionShapes.PrimitiveAliases} primitive + {collisionShapes.MeshAliases} mesh aliases)");
@@ -188,10 +193,10 @@ public static class ObjectsBuilder
         root.AddChild(collision);
 
         if (fallback.Count > 0)
-            root.AddChild(BuildFallbackBoxes(fallback));
+            root.AddChild(BuildFallbackBoxes(fallback, label));
 
         if (ObjectChunkMetres > 0f)
-            Log.Print($"[unturned-godot] Object render batches: {renderBatches} " +
+            Log.Print($"[unturned-godot] {label} render batches: {renderBatches} " +
                 $"({ObjectChunkMetres:0} m cells, min {MinChunkedInstances} instances / " +
                 $"{ObjectChunkMinTriangles:N0} placement tris, coarsen below {MinCellTriangles:N0} " +
                 $"tris/cell, require spread={ObjectChunkRequireSpread}, " +
@@ -875,9 +880,9 @@ public static class ObjectsBuilder
             });
     }
 
-    private static Node3D BuildFallbackBoxes(List<(Transform3D transform, Color color)> items)
+    private static Node3D BuildFallbackBoxes(List<(Transform3D transform, Color color)> items, string label)
     {
-        var root = new Node3D { Name = "ObjectPlaceholders" };
+        var root = new Node3D { Name = label + "Placeholders" };
         var mesh = new BoxMesh { Size = new Vector3(2, 2, 2) };
         var material = new StandardMaterial3D { VertexColorUseAsAlbedo = true };
 

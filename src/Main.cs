@@ -203,6 +203,7 @@ public partial class Main : Node3D
             WorldBuildResult world = WorldBuilder.Build(unturnedPath, _mapName);
             AddChild(world.Terrain);
             AddChild(world.Objects);
+            AddChild(world.Vehicles);
             AddChild(world.Foliage);
             AddSubsystem("roads", () => RoadsBuilder.Build(environmentDir, world.Heights));
             StandardMaterial3D water = AddWater(lighting);

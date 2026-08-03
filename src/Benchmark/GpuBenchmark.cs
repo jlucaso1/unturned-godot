@@ -37,6 +37,7 @@ public static class GpuBenchmark
             WorldBuildResult world = WorldBuilder.Build(unturnedPath, mapName);
             context.AddChild(world.Terrain);
             context.AddChild(world.Objects);
+            context.AddChild(world.Vehicles);
             context.AddChild(world.Foliage);
             AddEnvironment(context);
 
@@ -109,7 +110,8 @@ public static class GpuBenchmark
             // Snapshot the final sampled pose before an optional screenshot moves the camera elsewhere.
             // Residency metrics therefore describe the same pose regardless of UG_SHOT.
             bool foliageSettled = await FoliageBenchmarkSettling.WaitAsync(context, tree);
-            SceneMetricsResult sm = SceneMetrics.Collect(new Node[] { world.Terrain, world.Objects, world.Foliage });
+            SceneMetricsResult sm = SceneMetrics.Collect(
+                new Node[] { world.Terrain, world.Objects, world.Vehicles, world.Foliage });
             BenchmarkReport report = BuildReport(mapName, frameMs, processMs, drawCalls, primitives,
                 renderObjects, sm, poses.Count, perPose);
             AddFoliageMetrics(tree, report.Metrics, foliageSettled);

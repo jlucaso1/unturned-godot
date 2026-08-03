@@ -41,13 +41,13 @@ public class ContentExtractionTests
         IReadOnlyList<ContentSource> sources = BuildSources(dir);
         ContentSource mod = Assert.Single(sources, source => source.Name == "california2.masterbundle");
 
-        ObjectAssetDatabase db = ContentExtraction.ScanAssets(sources, path =>
+        ObjectAssetDatabase db = ContentExtraction.ScanAssets(sources, (path, patterns) =>
         {
             if (path == mod.ObjectsDir)
                 throw unauthorized
                     ? new UnauthorizedAccessException("test tree is unreadable")
                     : new IOException("test tree disappeared");
-            return ObjectAssetDatabase.ScanDirectory(path);
+            return ObjectAssetDatabase.ScanDirectory(path, patterns);
         });
 
         Assert.NotNull(db.ResolveByGuid(CoreGuid));

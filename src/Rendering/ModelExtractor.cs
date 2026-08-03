@@ -107,11 +107,12 @@ public static class ModelExtractor
     // Phase 1 (file based): decode only the SerializedFile and build the per-GUID meshes, recording each
     // submesh's texture key without touching the .resS pixel stream. Used by the synchronous/benchmark
     // build; the interactive cold load uses StreamExtract instead.
-    public static int ExtractMeshes(string bundlePath, string bundleTag, string objectBundlesDir,
-        string treeBundlesDir, string assetsDir, HashSet<Guid> neededGuids, string cacheDir,
+    public static int ExtractMeshes(ContentSource source, HashSet<Guid> neededGuids, string cacheDir,
         ObjectAssetDatabase db, IReadOnlyList<FoliageAsset>? foliageAssets = null,
         CancellationToken cancellationToken = default)
     {
+        string bundlePath = source.BundlePath;
+        string bundleTag = source.CacheTag;
         if (cancellationToken.IsCancellationRequested)
             return 0;
         byte[] raw = File.ReadAllBytes(bundlePath);
@@ -130,9 +131,8 @@ public static class ModelExtractor
                 continue;
 
             string fileTag = serializedFile++ == 0 ? bundleTag : $"{bundleTag}-{serializedFile}";
-            extracted += ExtractMeshesFromSerializedFile(f.Value, fileTag, objectBundlesDir, treeBundlesDir,
-                assetsDir, neededGuids, cacheDir, db, neededTextures: null, foliageAssets, produced,
-                staleLevelGuids: staleLevels);
+            extracted += ExtractMeshesFromSerializedFile(f.Value, source, fileTag, neededGuids, cacheDir,
+                db, neededTextures: null, foliageAssets, produced, staleLevelGuids: staleLevels);
         }
         if (!cancellationToken.IsCancellationRequested)
             RecordMisses(bundlePath, cacheDir, neededGuids, foliageAssets, produced, staleLevels);
@@ -178,16 +178,17 @@ public static class ModelExtractor
     // writing each referenced texture as its bytes arrive — so textures appear progressively while the map
     // is already playable, and the 171 MB SerializedFile is never re-decompressed. Falls back to the
     // two-decode path if the bundle is not the expected single-LZMA-block shape.
-    public static void StreamExtract(string bundlePath, string bundleTag, string objectBundlesDir,
-        string treeBundlesDir, string assetsDir, HashSet<Guid> neededGuids, string cacheDir,
+    public static void StreamExtract(ContentSource source, HashSet<Guid> neededGuids, string cacheDir,
         string textureCacheDir,
         ObjectAssetDatabase db, Action onMeshesReady, Action<string> onTextureWritten,
-        IReadOnlyList<FoliageAsset>? foliageAssets = null, bool isCoreBundle = false,
+        IReadOnlyList<FoliageAsset>? foliageAssets = null,
         IReadOnlyDictionary<string, Guid[]>? layerWantsByPath = null,
         Action<Guid, CachedTexture>? onLayerTexture = null,
         AudioExtractor.Request? audio = null,
         CancellationToken cancellationToken = default)
     {
+        string bundlePath = source.BundlePath;
+        string bundleTag = source.CacheTag;
         IReadOnlyDictionary<string, Guid[]> layerWants =
             layerWantsByPath ?? new Dictionary<string, Guid[]>(StringComparer.Ordinal);
         long textureSourceStamp = ExtractionIndex.StampFor(bundlePath);
@@ -198,8 +199,7 @@ public static class ModelExtractor
         if (stream == null)
         {
             AppShutdown.PrintUnlessQuitting("[extract] bundle not single-block; falling back to two-pass decode.");
-            ExtractMeshes(bundlePath, bundleTag, objectBundlesDir, treeBundlesDir, assetsDir, neededGuids,
-                cacheDir, db, foliageAssets, cancellationToken);
+            ExtractMeshes(source, neededGuids, cacheDir, db, foliageAssets, cancellationToken);
             if (cancellationToken.IsCancellationRequested)
                 return;
             TextureDependencyIndex.RemoveStaleTextures(cacheDir, textureCacheDir, bundleTag, neededGuids,
@@ -276,9 +276,8 @@ public static class ModelExtractor
                 string fileTag = readSerialized == 0 ? bundleTag : $"{bundleTag}-{readSerialized + 1}";
                 readSerialized++;
 
-                audioPlan = ReadSerializedNode(stream, (int)node.Size, bundlePath,
-                    fileTag, objectBundlesDir, treeBundlesDir, assetsDir, neededGuids, cacheDir, db,
-                    neededTextures, layerTextures, foliageAssets, isCoreBundle, layerWants, onLayerTexture,
+                audioPlan = ReadSerializedNode(stream, (int)node.Size, source, fileTag, neededGuids,
+                    cacheDir, db, neededTextures, layerTextures, foliageAssets, layerWants, onLayerTexture,
                     produced, staleLevels, audio, audioPlan);
 
                 // Settle what needs no stream at all, once per texture: pixels stored inline are in hand
@@ -516,18 +515,17 @@ public static class ModelExtractor
     // The SerializedFile phase, kept in its own frame so the decoded file is unreachable when it returns.
     // Returns the audio this file owes, if any: the plan holds offsets and names only, never the file.
     private static AudioExtractor.StreamPlan? ReadSerializedNode(MasterBundleStream stream, int size,
-        string bundlePath, string bundleTag, string objectBundlesDir, string treeBundlesDir, string assetsDir,
+        ContentSource source, string bundleTag,
         HashSet<Guid> neededGuids, string cacheDir, ObjectAssetDatabase db,
         Dictionary<(string Tag, long Id), UnityTexture> neededTextures, Dictionary<string, UnityTexture> layerTextures,
-        IReadOnlyList<FoliageAsset>? foliageAssets, bool isCoreBundle,
+        IReadOnlyList<FoliageAsset>? foliageAssets,
         IReadOnlyDictionary<string, Guid[]> layerWants, Action<Guid, CachedTexture>? onLayerTexture,
         HashSet<Guid> produced, HashSet<Guid> staleLevels, AudioExtractor.Request? audio,
         AudioExtractor.StreamPlan? audioPlan)
     {
         SerializedFile file = SerializedFile.Read(stream.Read(size));
-        ExtractMeshesFrom(file, bundleTag, objectBundlesDir, treeBundlesDir, assetsDir, neededGuids,
-            cacheDir, db, neededTextures, foliageAssets, produced, isCoreBundle ? bundlePath : null,
-            staleLevels);
+        ExtractMeshesFrom(file, source, bundleTag, neededGuids, cacheDir, db, neededTextures, foliageAssets,
+            produced, source.IsCore ? source.BundlePath : null, staleLevels);
 
         // Meshes land before the potentially long texture tail. If shutdown interrupted that tail, the
         // next load sees current meshes and ExtractFoliageMeshes/Object extraction correctly skips them;
@@ -686,19 +684,18 @@ public static class ModelExtractor
     // it is filled with the metadata of every referenced texture so a caller can stream in the pixels.
     // producedGuids, when supplied, collects every GUID that ended up with a cached mesh — the complement
     // of the needed set is what RecordMisses blacklists.
-    private static int ExtractMeshesFromSerializedFile(byte[] sfBytes, string bundleTag,
-        string objectBundlesDir, string treeBundlesDir, string assetsDir, HashSet<Guid> neededGuids,
+    private static int ExtractMeshesFromSerializedFile(byte[] sfBytes, ContentSource source,
+        string bundleTag, HashSet<Guid> neededGuids,
         string cacheDir, ObjectAssetDatabase db, Dictionary<(string Tag, long Id), UnityTexture>? neededTextures,
         IReadOnlyList<FoliageAsset>? foliageAssets = null, HashSet<Guid>? producedGuids = null,
         string? typeTreeCacheFor = null, HashSet<Guid>? staleLevelGuids = null) =>
-        ExtractMeshesFrom(SerializedFile.Read(sfBytes), bundleTag, objectBundlesDir, treeBundlesDir,
-            assetsDir, neededGuids, cacheDir, db, neededTextures, foliageAssets, producedGuids,
-            typeTreeCacheFor, staleLevelGuids);
+        ExtractMeshesFrom(SerializedFile.Read(sfBytes), source, bundleTag, neededGuids, cacheDir, db,
+            neededTextures, foliageAssets, producedGuids, typeTreeCacheFor, staleLevelGuids);
 
     // Same, for a caller that already holds the decoded file (the streaming pass reads it once and then
     // uses it for the meshes, the type trees and the terrain layers alike).
-    private static int ExtractMeshesFrom(SerializedFile file, string bundleTag, string objectBundlesDir,
-        string treeBundlesDir, string assetsDir, HashSet<Guid> neededGuids, string cacheDir,
+    private static int ExtractMeshesFrom(SerializedFile file, ContentSource source, string bundleTag,
+        HashSet<Guid> neededGuids, string cacheDir,
         ObjectAssetDatabase db, Dictionary<(string Tag, long Id), UnityTexture>? neededTextures,
         IReadOnlyList<FoliageAsset>? foliageAssets = null, HashSet<Guid>? producedGuids = null,
         string? typeTreeCacheFor = null, HashSet<Guid>? staleLevelGuids = null)
@@ -710,33 +707,18 @@ public static class ModelExtractor
         if (typeTreeCacheFor != null)
             WriteTypeTreeCache(typeTreeCacheFor, file.TypeTreesByClassId);
         PrefabGraph graph = PrefabGraph.Read(file);
-        MaterialResolver materials = MaterialResolver.Read(graph, assetsDir, bundleTag);
+        MaterialResolver materials = MaterialResolver.Read(graph, source.AssetsDir, bundleTag);
 
         Directory.CreateDirectory(cacheDir);
 
-        // Objects and trees (Unturned "resources") share this pipeline; each asset maps to a prefab in
-        // the masterbundle under objects/<folder>/object.prefab or trees/<folder>/resource.prefab.
-        // Reuse the caller's already-scanned asset DB (built from the same object + tree bundle dirs)
-        // instead of re-scanning both trees here. Object vs tree — which sets the prefab-key prefix — is
-        // recovered from each asset's directory (they have disjoint GUID spaces, so the merged DB loses
-        // nothing).
-        // The prefab key is the asset's folder path inside the bundle, so its first segment is the name of
-        // the bundle's own asset folder — "trees" for the game, "resources" for a workshop mod that keeps
-        // its harvestables there. Deriving it from the directory keeps both working.
-        string objectsRoot = RootKey(objectBundlesDir);
-        string treesRoot = RootKey(treeBundlesDir);
-
+        // Objects, trees (Unturned "resources") and vehicles share this pipeline; each asset maps to a
+        // prefab in the masterbundle under objects/<folder>/object.prefab, trees/<folder>/resource.prefab
+        // or vehicles/<folder>/vehicle.prefab. Reuse the caller's already-scanned asset DB (built from the
+        // same bundle dirs) instead of re-scanning them here. Which of the three an asset is — which sets
+        // the prefab-key prefix — is recovered from its directory.
         var work = new List<(ObjectAsset asset, string key)>();
         foreach (ObjectAsset a in db.All)
-        {
-            bool isTree = !Path.GetRelativePath(treeBundlesDir, a.Directory).StartsWith("..");
-            string key = isTree
-                ? treesRoot + "/" + FolderKey(a.Directory, treeBundlesDir)
-                : a.BundleOverridePath is { Length: > 0 } ovr
-                    ? OverrideKey(ovr)
-                    : objectsRoot + "/" + FolderKey(a.Directory, objectBundlesDir);
-            work.Add((a, key));
-        }
+            work.Add((a, PrefabKeyFor(a, source)));
 
         var mappedGuids = new HashSet<Guid>();
         int extracted = 0;
@@ -1141,6 +1123,27 @@ public static class ModelExtractor
             && int.TryParse(owner.AsSpan(prefix.Length), out int fileNumber)
             && fileNumber >= 2;
     }
+
+    // The prefab key is the asset's folder path inside the bundle, so its first segment is the name of the
+    // bundle's own asset folder — "trees" for the game, "resources" for a workshop mod that keeps its
+    // harvestables there. Deriving it from the directory keeps every layout working.
+    //
+    // An override path is checked only after trees and vehicles, matching where it is honoured: it is an
+    // ObjectAsset field (a holiday variant reusing a base object's mesh), and neither of the other two
+    // categories declares one.
+    private static string PrefabKeyFor(ObjectAsset asset, ContentSource source)
+    {
+        if (IsUnder(asset.Directory, source.TreesDir))
+            return RootKey(source.TreesDir) + "/" + FolderKey(asset.Directory, source.TreesDir);
+        if (IsUnder(asset.Directory, source.VehiclesDir))
+            return RootKey(source.VehiclesDir) + "/" + FolderKey(asset.Directory, source.VehiclesDir);
+        if (asset.BundleOverridePath is { Length: > 0 } overridePath)
+            return OverrideKey(overridePath);
+        return RootKey(source.ObjectsDir) + "/" + FolderKey(asset.Directory, source.ObjectsDir);
+    }
+
+    private static bool IsUnder(string directory, string root) =>
+        !Path.GetRelativePath(root, directory).StartsWith("..", StringComparison.Ordinal);
 
     private static string FolderKey(string directory, string bundlesDir) =>
         Path.GetRelativePath(bundlesDir, directory).Replace('\\', '/').ToLowerInvariant();

@@ -140,6 +140,50 @@ public class ContentSourceTests
         Assert.EndsWith(Path.Combine("5002", "Assets"), mod.AssetsDir, StringComparison.Ordinal);
     }
 
+    // A vehicle mod, and an item that adds nothing but spawn tables. The tables a map's vehicle table
+    // resolves through are found only on the sources Discover returns, so rejecting either left every
+    // spawnpoint using them empty.
+    [Theory]
+    [InlineData("Vehicles")]
+    [InlineData("Spawns")]
+    public void Discover_AcceptsAnItemThatOnlyShipsVehiclesOrSpawnTables(string tree)
+    {
+        using var dir = new TempDir();
+        string install = BuildLibrary(dir);
+        string item = Path.Combine("steamapps", "workshop", "content", "304930", "5003");
+        dir.Write(Path.Combine(item, "MasterBundle.dat"), ModConfig);
+        dir.Write(Path.Combine(item, "california2_linux.masterbundle"), new byte[] { 1 });
+        dir.Write(Path.Combine(item, tree, "CA_Car", "CA_Car.dat"), "GUID x\nType Vehicle\n");
+
+        ContentSource mod = Assert.Single(ContentSource.Discover(install,
+            UnturnedInstall.Platform.Linux), source => !source.IsCore);
+
+        Assert.EndsWith(Path.Combine("5003", "Vehicles"), mod.VehiclesDir, StringComparison.Ordinal);
+        Assert.EndsWith(Path.Combine("5003", "Spawns"), mod.SpawnsDir, StringComparison.Ordinal);
+    }
+
+    // A vehicle asset belongs to the item that ships it, so its prefab is looked for in that item's
+    // bundle rather than the game's.
+    [Fact]
+    public void Owns_ClaimsTheItemsOwnVehicleTree()
+    {
+        using var dir = new TempDir();
+        string install = BuildLibrary(dir);
+        string item = Path.Combine("steamapps", "workshop", "content", "304930", "5004");
+        dir.Write(Path.Combine(item, "MasterBundle.dat"), ModConfig);
+        dir.Write(Path.Combine(item, "california2_linux.masterbundle"), new byte[] { 1 });
+        dir.Write(Path.Combine(item, "Vehicles", "CA_Car", "CA_Car.dat"), "GUID x\nType Vehicle\n");
+
+        IReadOnlyList<ContentSource> sources = ContentSource.Discover(install,
+            UnturnedInstall.Platform.Linux);
+        ContentSource core = Assert.Single(sources, source => source.IsCore);
+        ContentSource mod = Assert.Single(sources, source => !source.IsCore);
+
+        Assert.True(mod.Owns(Path.Combine(mod.VehiclesDir, "CA_Car")));
+        Assert.False(core.Owns(Path.Combine(mod.VehiclesDir, "CA_Car")));
+        Assert.True(core.Owns(Path.Combine(core.VehiclesDir, "Offroader")));
+    }
+
     // Still not a source: a bundle declaration with no content of any kind behind it.
     [Fact]
     public void Discover_RejectsAnItemWithNoContentAtAll()

@@ -76,4 +76,7 @@ public sealed class DatDictionary : DatNode
 
     public bool TryGetUInt16(string key, out ushort value) =>
         ushort.TryParse(GetString(key), NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
+
+    public bool TryGetInt32(string key, out int value) =>
+        int.TryParse(GetString(key), NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
 }

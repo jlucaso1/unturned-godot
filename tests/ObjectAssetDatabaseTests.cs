@@ -200,6 +200,78 @@ public class ObjectAssetDatabaseTests
     }
 
     [Fact]
+    public void ResolveVehicle_KeepsTheVehicleIdSpaceApartFromTheObjectOne()
+    {
+        // Vehicle 40 and object 40 are unrelated assets in Unturned (EAssetType.VEHICLE has its own
+        // legacy id namespace), so neither may answer the other's lookup.
+        var db = new ObjectAssetDatabase();
+        ObjectAsset crate = Make("2e698a7b85e94c019b3f91ec8796a961", 40, "Small");
+        ObjectAsset offroader = Make("0517b7a03b844929856fc4f72701fca9", 40, "Vehicle");
+        db.Add(crate);
+        db.Add(offroader);
+
+        Assert.Same(crate, db.ResolveById(40));
+        Assert.Same(offroader, db.ResolveVehicle(Guid.Empty, 40));
+        Assert.Same(crate, db.Resolve(Guid.Empty, 40));
+    }
+
+    [Fact]
+    public void ResolveVehicle_FollowsARedirectorToTheVehicleThatOwnsThePrefab()
+    {
+        var db = new ObjectAssetDatabase();
+        ObjectAsset vehicle = Make("0517b7a03b844929856fc4f72701fca9", 0, "Vehicle");
+        db.Add(vehicle);
+        db.Add(Redirector("2e698a7b85e94c019b3f91ec8796a961", 30, vehicle.Guid));
+
+        Assert.Same(vehicle, db.ResolveVehicle(Guid.Empty, 30));
+        Assert.Same(vehicle, db.ResolveVehicle(vehicle.Guid, 0));
+        // A redirector pointing at nothing resolves to nothing rather than to itself.
+        db.Add(Redirector("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 31, Guid.NewGuid()));
+        Assert.Null(db.ResolveVehicle(Guid.Empty, 31));
+    }
+
+    [Fact]
+    public void ResolveVehicle_GivesUpOnARedirectorCycle()
+    {
+        var db = new ObjectAssetDatabase();
+        Guid first = Guid.Parse("2e698a7b85e94c019b3f91ec8796a961");
+        Guid second = Guid.Parse("0517b7a03b844929856fc4f72701fca9");
+        db.Add(Redirector(first.ToString("N"), 1, second));
+        db.Add(Redirector(second.ToString("N"), 2, first));
+
+        Assert.Null(db.ResolveVehicle(first, 0));
+    }
+
+    [Fact]
+    public void ScanDirectory_ReadsVehicleRedirectorsWhichShipAsAssetFiles()
+    {
+        using var dir = new TempDir();
+        dir.Write("Off_Roader/Off_Roader.dat", "GUID 0517b7a03b844929856fc4f72701fca9\nType Vehicle\n");
+        dir.Write("Redirectors/Off_Roader/Off_Roader_Red.asset",
+            "GUID 2e698a7b85e94c019b3f91ec8796a961\n"
+            + "Type SDG.Unturned.VehicleRedirectorAsset, Assembly-CSharp\nID 6\n"
+            + "TargetVehicle 0517b7a03b844929856fc4f72701fca9\n");
+
+        // The default glob keeps to .dat, so the redirector is only seen with the wider one.
+        Assert.Equal(1, ObjectAssetDatabase.ScanDirectory(dir.Path).Count);
+
+        ObjectAssetDatabase db = ObjectAssetDatabase.ScanDirectory(dir.Path,
+            ObjectAssetDatabase.DatAndAsset);
+        Assert.Equal(2, db.Count);
+        Assert.Equal(Guid.Parse("0517b7a03b844929856fc4f72701fca9"),
+            db.ResolveVehicle(Guid.Empty, 6)!.Guid);
+    }
+
+    private static ObjectAsset Redirector(string guid, ushort id, Guid target)
+    {
+        DatDictionary root = DatParser.Parse($"GUID {guid}\n"
+            + "Type SDG.Unturned.VehicleRedirectorAsset, Assembly-CSharp\n"
+            + $"ID {id}\nTargetVehicle {target:N}\n");
+        Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset? asset));
+        return asset;
+    }
+
+    [Fact]
     public void ReadLocalizedName_NullDirectory_And_MissingFile()
     {
         Assert.Null(ObjectAssetDatabase.ReadLocalizedName(null));

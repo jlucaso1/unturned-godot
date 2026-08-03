@@ -64,7 +64,13 @@ public static class WorldPreview
         for (int i = 0; i < sources.Count; i++)
             assetsDirs[i] = sources[i].AssetsDir;
 
+        ObjectAssetDatabase assets = ContentExtraction.ScanAssets(sources);
         HashSet<Guid> needed = MapAssetSet.Collect(mapPath, assetsDirs);
+        // The map's vehicles need their prefabs cached too, and MapAssetSet cannot roll for them from a
+        // map folder alone — resolving a spawn table takes the installed sources and the asset database.
+        // Left out, the dock would call a map fully cached while every vehicle was still missing.
+        foreach (PlacedObject vehicle in VehicleSpawnPlan.Load(new LevelInfo(mapPath), sources, assets))
+            needed.Add(vehicle.Guid);
 
         var foliageGuids = LevelFoliageChunks.ReadAssetGuids(Path.Combine(mapPath, "Foliage.blob"));
         var foliage = foliageGuids is { } guids
@@ -74,7 +80,7 @@ public static class WorldPreview
         Dictionary<string, TerrainLayerPlan.BundleWants> terrainLayers = MissingTerrainLayers(mapPath, sources);
         var bundlesOwingLayers = new HashSet<string>(terrainLayers.Keys, StringComparer.Ordinal);
         List<ContentExtraction.BundlePlan> bundles = ContentExtraction.Plan(sources, CacheDir,
-            TextureCacheDir, needed, ContentExtraction.ScanAssets(sources), foliage, bundlesOwingLayers);
+            TextureCacheDir, needed, assets, foliage, bundlesOwingLayers);
         return new CachePlan(bundles, terrainLayers, needed.Count);
     }
 
@@ -118,9 +124,7 @@ public static class WorldPreview
         {
             if (plan.NeedsExtraction)
             {
-                meshes += ModelExtractor.ExtractMeshes(plan.Source.BundlePath, plan.Source.CacheTag,
-                    plan.Source.ObjectsDir, plan.Source.TreesDir, plan.Source.AssetsDir, plan.Needed,
-                    CacheDir, db, plan.Foliage);
+                meshes += ModelExtractor.ExtractMeshes(plan.Source, plan.Needed, CacheDir, db, plan.Foliage);
                 textures += ModelExtractor.ExtractTextures(plan.Source.BundlePath, plan.Source.CacheTag,
                     CacheDir, TextureCacheDir);
             }
@@ -244,8 +248,8 @@ public static class WorldPreview
     }
 
     // The map's placed objects plus everything needed to turn them into nodes, all read off disk.
-    private sealed record Placements(List<PlacedObject> Objects, ObjectAssetDatabase Db,
-        LevelFoliage? Foliage, HashSet<Guid> Needed);
+    private sealed record Placements(List<PlacedObject> Objects, List<PlacedObject> Vehicles,
+        ObjectAssetDatabase Db, LevelFoliage? Foliage, HashSet<Guid> Needed);
 
     private static Placements ReadPlacements(string unturnedPath, LevelInfo level)
     {
@@ -253,18 +257,23 @@ public static class WorldPreview
         foreach (PlacedTree t in LevelTrees.Load(Path.Combine(level.Path, "Terrain", "Trees.dat")))
             objects.Add(new PlacedObject(t.Position, t.EulerDegrees, t.Scale, 0, t.Guid));
 
-        ObjectAssetDatabase db = ContentExtraction.ScanAssets(ContentSource.Discover(unturnedPath));
+        IReadOnlyList<ContentSource> sources = ContentSource.Discover(unturnedPath);
+        ObjectAssetDatabase db = ContentExtraction.ScanAssets(sources);
         LevelFoliage? foliage = LevelFoliage.Load(Path.Combine(level.Path, "Foliage.blob"));
+        // The roll is seeded, so the preview shows the same vehicles a session would.
+        List<PlacedObject> vehicles = VehicleSpawnPlan.Load(level, sources, db);
 
         var needed = new HashSet<Guid>();
         foreach (PlacedObject o in objects)
             needed.Add(o.Guid);
+        foreach (PlacedObject v in vehicles)
+            needed.Add(v.Guid);
         if (foliage != null)
             foreach (Guid guid in foliage.AssetGuids)
                 needed.Add(guid);
         needed.Remove(Guid.Empty);
 
-        return new Placements(objects, db, foliage, needed);
+        return new Placements(objects, vehicles, db, foliage, needed);
     }
 
     private static async System.Threading.Tasks.Task BuildObjectsAsync(Node3D root, Placements placements,
@@ -316,6 +325,12 @@ public static class WorldPreview
                 int missing = placements.Objects.Count - withMesh;
                 report.Add($"  {withMesh}/{placements.Objects.Count} objects, {meshLibrary.Count} unique meshes" +
                     (missing > 0 ? $" ({missing} as fallback boxes — warm the cache to fill them in)" : ""));
+
+                // Under the objects toggle, because that is what they are here: static placements sharing
+                // the same library, the same batching and the same fallback boxes.
+                root.AddChild(WorldBuilder.BuildVehicles(placements.Vehicles, placements.Db, meshLibrary,
+                    noColliders, lod1Library));
+                report.Add($"  {placements.Vehicles.Count} vehicles");
             });
 
         if (options.Foliage)

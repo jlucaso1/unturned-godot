@@ -10,6 +10,14 @@ public sealed class ObjectAssetDatabase
 {
     private readonly Dictionary<Guid, ObjectAsset> _byGuid = new();
     private readonly Dictionary<ushort, ObjectAsset> _byId = new();
+    // Vehicles and their redirectors carry legacy ids from their own namespace (EAssetType.VEHICLE), which
+    // overlaps the object one freely — vehicle 40 and object 40 are unrelated. Keeping them out of _byId
+    // is what lets both live in this one GUID-keyed table.
+    private readonly Dictionary<ushort, ObjectAsset> _vehiclesById = new();
+
+    // How far a redirector chain is followed before giving up. One hop is all the shipped content uses;
+    // the bound is only here so a self-referencing mod asset cannot spin.
+    private const int MaxRedirectDepth = 8;
 
     public int Count => _byGuid.Count;
 
@@ -25,12 +33,33 @@ public sealed class ObjectAssetDatabase
     public ObjectAsset? Resolve(Guid guid, ushort id) =>
         guid != Guid.Empty ? ResolveByGuid(guid) ?? ResolveById(id) : ResolveById(id);
 
+    // A vehicle by either identifier, following the redirector chain to the asset that owns the prefab.
+    // A map's vehicle tables and the spawn tables reference redirectors far more often than vehicles
+    // themselves, so resolving through them is the normal path, not the exception.
+    public ObjectAsset? ResolveVehicle(Guid guid, ushort id)
+    {
+        ObjectAsset? asset = guid != Guid.Empty ? ResolveByGuid(guid) : null;
+        asset ??= id != 0 && _vehiclesById.TryGetValue(id, out ObjectAsset? byId) ? byId : null;
+
+        for (int depth = 0; depth < MaxRedirectDepth && asset is { Type: EObjectType.VehicleRedirector }; depth++)
+            asset = ResolveByGuid(asset.RedirectTargetGuid);
+
+        return asset is { Type: EObjectType.Vehicle } ? asset : null;
+    }
+
     public void Add(ObjectAsset asset)
     {
         _byGuid[asset.Guid] = asset;
-        if (asset.Id != 0)
+        if (asset.Id == 0)
+            return;
+        if (IsVehicleCategory(asset))
+            _vehiclesById[asset.Id] = asset;
+        else
             _byId[asset.Id] = asset;
     }
+
+    private static bool IsVehicleCategory(ObjectAsset asset) =>
+        asset.Type is EObjectType.Vehicle or EObjectType.VehicleRedirector;
 
     // Adds only what nothing has claimed yet, so a merge of several bundles keeps whichever registered
     // first. Sources are merged with the game's own content first: a workshop item is free to reuse an
@@ -40,11 +69,23 @@ public sealed class ObjectAssetDatabase
     public void AddIfAbsent(ObjectAsset asset)
     {
         _byGuid.TryAdd(asset.Guid, asset);
-        if (asset.Id != 0)
+        if (asset.Id == 0)
+            return;
+        if (IsVehicleCategory(asset))
+            _vehiclesById.TryAdd(asset.Id, asset);
+        else
             _byId.TryAdd(asset.Id, asset);
     }
 
-    public static ObjectAssetDatabase ScanDirectory(string root)
+    // Vehicle redirectors are ".asset" files rather than ".dat", so the vehicle tree is scanned for both.
+    // The object and tree trees stay on ".dat" alone: nothing in them ships as ".asset", and widening the
+    // glob there would pull unrelated files into the by-id index.
+    public static IReadOnlyList<string> DatOnly { get; } = new[] { "*.dat" };
+    public static IReadOnlyList<string> DatAndAsset { get; } = new[] { "*.dat", "*.asset" };
+
+    public static ObjectAssetDatabase ScanDirectory(string root) => ScanDirectory(root, DatOnly);
+
+    public static ObjectAssetDatabase ScanDirectory(string root, IReadOnlyList<string> searchPatterns)
     {
         var db = new ObjectAssetDatabase();
         if (!Directory.Exists(root))
@@ -53,7 +94,9 @@ public sealed class ObjectAssetDatabase
         // Read + parse the (typically thousands of tiny) .dat files across cores — each file is independent
         // and the parse is pure CPU. Results are merged serially afterwards in file order, so the by-GUID /
         // by-id last-write-wins index is identical to a sequential scan (Add is not thread-safe).
-        var files = new List<string>(Directory.EnumerateFiles(root, "*.dat", SearchOption.AllDirectories));
+        var files = new List<string>();
+        foreach (string pattern in searchPatterns)
+            files.AddRange(Directory.EnumerateFiles(root, pattern, SearchOption.AllDirectories));
         return ScanFiles(files, File.ReadAllText);
     }
 
