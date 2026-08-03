@@ -259,6 +259,91 @@ public class PathQualityTests
         Assert.False(graph.HasClearLine(0, new Vector3(2, 0, 2), new Vector3(9, 0, 9), budget: 3));
     }
 
+    // A building whose upper floor sits over its ground floor, joined only by a ramp at the far end.
+    // The two levels overlap in XZ from x = 3 to x = 10, which is the case that breaks an XZ-only walk.
+    //
+    //   Y=3          +--------------------+   upper floor, x in [3, 13]
+    //                                    /
+    //   Y=0  +--------------------------+     ground floor x in [0, 10], ramp x in [10, 13]
+    private static BakedNavGraph TwoStoreys()
+    {
+        var vertices = new List<Vector3>();
+        var triangles = new List<int>();
+        const int Rows = 5; // z = 0..4
+
+        int Column(float x, float y)
+        {
+            int first = vertices.Count;
+            for (int z = 0; z < Rows; z++)
+                vertices.Add(new Vector3(x, y, z));
+            return first;
+        }
+
+        void Quads(int left, int right)
+        {
+            for (int z = 0; z < Rows - 1; z++)
+            {
+                int a = left + z, b = a + 1, c = right + z, d = c + 1;
+                triangles.AddRange(new[] { a, b, c, b, d, c });
+            }
+        }
+
+        // Ground floor out to x = 10, then a ramp climbing to Y = 3 at x = 13.
+        int previous = Column(0f, 0f);
+        for (int x = 1; x <= 13; x++)
+        {
+            int current = Column(x, MathF.Max(0f, x - 10f));
+            Quads(previous, current);
+            previous = current;
+        }
+        // The upper floor folds back over the ground floor, joined ONLY at the ramp's top column, whose
+        // vertex indices it reuses — the graph welds on shared indices, so this is the single doorway
+        // between the two levels.
+        for (int x = 12; x >= 3; x--)
+        {
+            int current = Column(x, 3f);
+            Quads(previous, current);
+            previous = current;
+        }
+
+        var flag = new NavFlag
+        {
+            Center = new Vector3(6.5f, 0, 2),
+            Size = new Vector3(40, 200, 40),
+            Vertices = vertices.ToArray(),
+            Triangles = triangles.ToArray(),
+        };
+        return BakedNavGraph.Build(new[] { flag });
+    }
+
+    // The walk is in XZ, so "the segment ends inside this face" says nothing about which STOREY that
+    // face is. Downstairs at (1, 0, 2), upstairs at (4, 3, 2): the straight XZ line between them lies
+    // entirely over the ground floor, so a walk that never left it arrives under the upstairs waypoint
+    // and would report the segment clear. Taking that shortcut replaces the whole trip up the ramp with
+    // a 3 m vertical jump through the ceiling — and nothing downstream would catch it, since
+    // CalculateVelocity discards Y and the body ground-snaps, so the zombie just stays downstairs.
+    [Fact]
+    public void AShortcut_DoesNotJumpBetweenStoreysThatOverlapInPlan()
+    {
+        BakedNavGraph graph = TwoStoreys();
+        var downstairs = new Vector3(1, 0, 2);
+        var upstairs = new Vector3(4, 3, 2);
+
+        Assert.False(graph.HasClearLine(0, downstairs, upstairs),
+            "the ground floor does not carry an upstairs waypoint just because it is under it");
+
+        var path = new List<Vector3>();
+        Assert.True(graph.TryPath(downstairs, upstairs, path));
+
+        // The route has to go the long way: out to the ramp and back. A straight line is 3 m.
+        Assert.True(Length(path) > 18f,
+            $"the route only walked {Length(path):0.0} m, so it took the shortcut through the ceiling");
+        // It went out to the ramp. Collapsing the flat run AND the ramp into one leg is fine and does
+        // happen — the surface is continuous, and the body ground-snaps along it — so what is asserted
+        // is that the route passes through the only place the two levels actually join.
+        Assert.Contains(path, point => point.X >= 12f);
+    }
+
     // A flag with no faces snaps to no triangle, and the walk has to answer that rather than index it.
     [Fact]
     public void AFlagWithNoFaces_HasNoClearLines()

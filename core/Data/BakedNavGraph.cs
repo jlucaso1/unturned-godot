@@ -1013,8 +1013,17 @@ public sealed class BakedNavGraph
 
                 if (exit > 1f)
                 {
+                    // The segment ends inside this face in XZ — which says nothing about WHICH storey
+                    // the face is. The walk follows adjacency, so inside a building whose upper floor
+                    // overlaps the ground floor, a walk that never left the ground floor still arrives
+                    // under an upstairs waypoint and would call the segment clear. Accepting that turns
+                    // a route up the stairs into a straight line through the ceiling, and the movement
+                    // code cannot notice: CalculateVelocity discards Y and the body ground-snaps, so the
+                    // zombie simply stays downstairs and counts the target as reached below it.
+                    if (!CarriesPoint(current, to))
+                        return false;
                     endTriangle = current;
-                    return true; // the segment ends inside this face
+                    return true;
                 }
 
                 // `exit` is only ever set together with the pair, so past here a crossing was found.
@@ -1041,6 +1050,27 @@ public sealed class BakedNavGraph
 
         public bool HasClearLine(int start, Vector3 from, Vector3 to, ref int budget) =>
             TryLine(start, from, to, ref budget, out _);
+
+        // Storeys are metres apart; a ramp or a kerb is not. Anything under this is the same surface
+        // seen from slightly the wrong height — a target standing a little off the mesh, or a waypoint
+        // on the far side of a slope — and anything over it is a different floor.
+        private const float StoreyTolerance = 1f;
+
+        // Is the point ON this face, rather than a floor above or below it? Barycentric in XZ, which is
+        // the same interpolation LevelNavmesh.SnapXZ uses to decide the very same question.
+        private bool CarriesPoint(int triangle, Vector3 point)
+        {
+            Vector3 a = Source.Vertices[Source.Triangles[triangle * 3]];
+            Vector3 b = Source.Vertices[Source.Triangles[(triangle * 3) + 1]];
+            Vector3 c = Source.Vertices[Source.Triangles[(triangle * 3) + 2]];
+            float area2 = ((b.X - a.X) * (c.Z - a.Z)) - ((c.X - a.X) * (b.Z - a.Z));
+            if (MathF.Abs(area2) < 1e-6f)
+                return false; // a zero-area face carries nothing; it would divide by its own degeneracy
+            float w1 = (((b.Z - c.Z) * (point.X - c.X)) + ((c.X - b.X) * (point.Z - c.Z))) / area2;
+            float w2 = (((c.Z - a.Z) * (point.X - c.X)) + ((a.X - c.X) * (point.Z - c.Z))) / area2;
+            float height = (w1 * a.Y) + (w2 * b.Y) + ((1f - w1 - w2) * c.Y);
+            return MathF.Abs(height - point.Y) <= StoreyTolerance;
+        }
 
         // Is a straight segment far enough from every wall this face carries? Both the face's border
         // EDGES and its border VERTICES are tested: a wall corner can belong to a neighbour the segment
