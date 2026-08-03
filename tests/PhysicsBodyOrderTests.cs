@@ -1198,6 +1198,15 @@ public class PhysicsBodyOrderTests
     }
 
     // Walks up from the test assembly to the repository root (the folder holding the solution).
+    //
+    // Null means one thing only: the repository root itself could not be found, which is a run from
+    // outside the tree with genuinely nothing to check. A file missing UNDER a located root is the
+    // opposite situation — the thing this test guards was renamed or deleted — and that is precisely
+    // when it has to fail. Returning null there made every caller's `is not { } path) return;` into a
+    // pass, so the tests failed open on exactly the refactor most likely to break the invariant.
+    //
+    // Measured before changing it: renaming src/World/InstancedStaticBody.cs left all 67 tests in this
+    // file green, including the one that exists to read it.
     private static string? FindRepositoryFile(string relativePath)
     {
         var directory = new DirectoryInfo(Directory.GetCurrentDirectory());
@@ -1206,7 +1215,11 @@ public class PhysicsBodyOrderTests
             if (File.Exists(Path.Combine(directory.FullName, "unturned-godot.sln")))
             {
                 string candidate = Path.Combine(directory.FullName, relativePath);
-                return File.Exists(candidate) ? candidate : null;
+                Assert.True(File.Exists(candidate),
+                    $"'{relativePath}' does not exist. This test reads that file and asserts on its "
+                    + "contents, so it cannot pass without it: either update the path to where the code "
+                    + "moved, or delete this test along with the thing it was guarding.");
+                return candidate;
             }
 
             directory = directory.Parent;
