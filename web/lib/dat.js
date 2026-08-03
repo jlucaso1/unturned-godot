@@ -65,55 +65,74 @@ export class DatValues {
 //   Name Fake         the `]` returns to the root rather than ending the document — a `Name Real` after
 //   ]                 it is read normally.
 //   Name Real
+//
+//   ]             ->  [Name] = "Real". The two closers are not symmetric: ParseDictionaryBody returns
+//   Name Real         only on CloseDict, so an unmatched `]` is skipped as a stray token while an
+//                     unmatched `}` ends the document.
 export function parseDatTopLevel(text) {
     const values = new DatValues();
-    let depth = 0;
-    // The last key set at the top level, which a block opening on the next line takes back over.
+    // One entry per open bracket, true for a list. Depth alone is not enough: inside a *dictionary*
+    // `Name "Inside"` is a key with a quoted value, so a `}` after it is still a token, while inside a
+    // *list* the whole of `Name "Inside" ]` is one value running to the end of the line.
+    const open = [];
+    // The last key set at the top level, which a block opening next takes back over.
     let pending = null;
+    let documentEnded = false;
 
     for (const rawLine of logicalLines(String(text ?? ""))) {
-        let rest = rawLine.trim();
-        if (rest === "") continue;
-        if (rest[0] === "/") continue; // comment to end of line
+        // One loop, not a pass per token kind: what a quoted value leaves behind goes back through the
+        // bracket handling rather than straight to the next pair. `Name "Temporary" {` is a key whose
+        // block *replaces* its scalar — [Name] stops being a value — and sending that `{` to
+        // splitKeyValue would make it a key of its own and leave the block's contents at the top level.
+        let rest = trimTokenGap(rawLine);
 
-        // One loop, not two passes: what a quoted value leaves behind goes back through the bracket
-        // handling rather than straight to the next pair. `Name "Temporary" {` is a key whose block
-        // *replaces* its scalar — [Name] stops being a value — and sending that `{` to splitKeyValue
-        // would make it a key of its own and leave the block's contents at the top level.
-        let documentEnded = false;
         while (rest !== "") {
             const first = rest[0];
 
+            // A comment, but only here: after a key ReadStringValue is entered directly, so the '/' in
+            // `Name / note` is the start of the value rather than a comment.
+            if (first === "/") break;
+
             if (first === "{" || first === "[") {
-                // Only a brace, and only with no key in front of it, is the root dictionary's own —
-                // tolerated, leaving whatever follows on the line still top-level. A bracket always
-                // opens a list, whose contents are values rather than keys.
-                const tolerated = first === "{" && depth === 0 && pending === null;
-                if (!tolerated) {
-                    if (depth === 0) values.delete(pending);
-                    depth++;
+                // ParseDictionaryBody(root: true) skips a stray OpenDict like any other token it did
+                // not expect, so a brace with no key in front of it opens nothing and whatever follows
+                // is still top-level. Anything else opens a block — and one opening after a key
+                // replaces the inline value that key would otherwise have had.
+                const stray = first === "{" && open.length === 0 && pending === null;
+                if (!stray) {
+                    if (open.length === 0 && pending !== null) values.delete(pending);
+                    open.push(first === "[");
                     pending = null;
                 }
-                rest = rest.slice(1).trim();
+                rest = trimTokenGap(rest.slice(1));
                 continue;
             }
 
             if (first === "}" || first === "]") {
-                // A close with nothing open ends the root dictionary, and with it the document.
-                if (depth === 0) {
-                    documentEnded = true;
-                    break;
+                if (open.length === 0) {
+                    // Only CloseDict returns from the root body. A stray CloseList is skipped like any
+                    // other unexpected token, so a hand-edited file with an unmatched ']' above its
+                    // metadata still yields the Name and Description below it.
+                    if (first === "}") {
+                        documentEnded = true;
+                        break;
+                    }
+                    pending = null;
+                    rest = trimTokenGap(rest.slice(1));
+                    continue;
                 }
-                depth--;
+                open.pop();
                 pending = null;
-                rest = rest.slice(1).trim();
+                rest = trimTokenGap(rest.slice(1));
                 continue;
             }
 
-            // Inside a block the contents are not top-level, and this subset does not read them.
-            if (depth > 0) {
-                pending = null;
-                break;
+            // Inside a block the contents are not top-level, and this subset does not read them — but it
+            // still has to find where each one ENDS, because that is where a closing bracket later on
+            // the same line becomes visible again.
+            if (open.length > 0) {
+                rest = skipNested(rest, open[open.length - 1]);
+                continue;
             }
 
             // A line can hold more than one pair. ReadQuoted stops at its closing quote and the
@@ -126,13 +145,45 @@ export function parseDatTopLevel(text) {
             pending = key;
             // Defensive: a remainder that did not shrink would spin here forever.
             if (remainder.length >= rest.length) break;
-            rest = remainder;
+            rest = trimTokenGap(remainder);
         }
 
         if (documentEnded) break;
     }
 
     return values;
+}
+
+// The gap between two tokens. The tokenizer's whitespace branch takes commas with it, so `Name "Map" ,
+// Description "Blurb"` is two pairs and a line may open with a comma.
+function trimTokenGap(text) {
+    return text.replace(/^[ \t\r\n,]+/, "");
+}
+
+// One token's worth of a block's contents, returning what is left of the line. Only where the token ends
+// matters here: a quoted run ends at its closing quote and the tokenizer carries on, while an unquoted
+// one runs to the end of the line and swallows any bracket on the way. That is the whole reason
+// `{ Name "Inside" }` closes on its line and `{ Name Inside }` does not.
+function skipNested(rest, inList) {
+    if (rest[0] === '"') {
+        // In a list that run was a value and the next token starts after it. In a dictionary it was a
+        // key, whose value follows on the same line.
+        const end = findClosingQuote(rest, 1);
+        if (end === -1) return "";
+        return inList ? afterQuotedValue(rest, end) : skipNestedValue(afterQuotedKey(rest, end));
+    }
+    // An unquoted list value is read by ReadStringValue, which stops only at the newline.
+    if (inList) return "";
+    const space = rest.search(/[ \t]/);
+    if (space === -1) return "";
+    return skipNestedValue(rest.slice(space + 1).replace(/^[ \t]+/, ""));
+}
+
+// The value of a key inside a block. Only a quoted one ends before the newline does.
+function skipNestedValue(rest) {
+    if (rest === "" || rest[0] !== '"') return "";
+    const end = findClosingQuote(rest, 1);
+    return end === -1 ? "" : afterQuotedValue(rest, end);
 }
 
 export function datString(text, key) {
@@ -171,8 +222,12 @@ function* logicalLines(text) {
                 i++; // an escaped character, including \" , is not a delimiter
             else if (c === '"') {
                 quoted = false;
-                // The run just closed; whatever token it was, the next one starts after it.
-                where = where === BEFORE_KEY ? BEFORE_VALUE : IN_VALUE;
+                // The run just closed. A quoted KEY is followed by its value; a quoted VALUE returns
+                // control to the tokenizer loop, where the next token is a fresh key — so the state has
+                // to go all the way back, not to IN_VALUE. Stopping short left `Name "Map" Description
+                // "First<newline>Second"` unable to see the second opening quote, splitting a value the
+                // game reads whole.
+                where = where === BEFORE_KEY ? BEFORE_VALUE : BEFORE_KEY;
             }
             continue;
         }
@@ -202,6 +257,8 @@ function* logicalLines(text) {
             continue;
         }
 
+        // Between tokens the tokenizer treats a comma as whitespace, so it does not start a key.
+        if (c === "," && where === BEFORE_KEY) continue;
         // ReadQuoted swallows one comma right after a closing quote, so it does not start the value.
         if (c === "," && where === BEFORE_VALUE && text[i - 1] === '"') continue;
 

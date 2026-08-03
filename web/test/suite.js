@@ -474,6 +474,25 @@ async function workshopNameCollisions() {
         replaced.maps.every((map) => map.supported && map.source === "Workshop"),
         replaced.maps.map((map) => `${map.path}:${map.supported}`).join(", "),
     );
+
+    // The name slot is a Dictionary keyed with StringComparer.OrdinalIgnoreCase, which folds by an
+    // invariant upcase. Greek final sigma is where that parts company with JavaScript's lowercase:
+    // "Νησος" and "Νησοσ" upcase alike, so the subscribed map takes the placeholder's slot rather than
+    // claiming one of its own and leaving the stale folder in the menu beside it.
+    const sigma = await probeInstall(
+        syntheticFs({
+            "steamapps/common/Unturned/Bundles/core_linux.masterbundle": "",
+            ...mapTree("steamapps/common/Unturned/Maps/Νησος", []),
+            ...mapTree("steamapps/workshop/content/304930/111/Νησοσ", ["Tile_0_0_Source.heightmap"]),
+        }),
+        { platform: "linux" },
+    );
+    equal("names differing only by final sigma are one slot", sigma.maps.length, 1);
+    check(
+        "and the subscribed map is the one kept",
+        sigma.maps[0]?.path.includes("steamapps/workshop/content"),
+        sigma.maps[0]?.path,
+    );
 }
 
 // One unreadable map folder is one missing entry, not a folder that failed to open — LevelInfo's own
@@ -750,6 +769,58 @@ function dat() {
     equal("so the following line stays top-level", inline.get("Name"), "Leak");
     // ...and the unmatched close then ends the root dictionary, hiding everything after it.
     equal("an unmatched close ends the document", inline.get("Description"), undefined);
+
+    // The two closers are not symmetric. ParseDictionaryBody returns only on CloseDict, so a stray ']'
+    // is skipped like any other token it did not expect and the metadata under it is still read.
+    const strayList = parseDatTopLevel("Name First\n]\nDescription After");
+    equal("a stray ] does not end the document", strayList.get("Description"), "After");
+    equal("and what came before it is kept", strayList.get("Name"), "First");
+
+    // A second quoted pair on the same line still opens its own multi-line run. Both halves of this were
+    // already covered separately; their combination was what truncated the value at the newline.
+    const pairThenMultiline = parseDatTopLevel('Name "Map" Description "First\nSecond"');
+    equal("a later quoted value can span a newline", pairThenMultiline.get("Description"), "First\nSecond");
+    equal("without disturbing the pair before it", pairThenMultiline.get("Name"), "Map");
+
+    // A comma is whitespace between tokens, so it can lead a line as well as separate pairs.
+    equal("a leading comma is not part of the key", parseDatTopLevel(",Name Map").get("Name"), "Map");
+
+    // A '/' opens a comment only where a token starts. After a key ReadStringValue is entered directly,
+    // so it belongs to the value; after a quoted value the tokenizer loop is back, so it is a comment.
+    const slashes = parseDatTopLevel('Name "Map" / note\nDescription After');
+    equal("a comment after a quoted value hides the rest of its line", slashes.get("Name"), "Map");
+    equal("and the next line is still read", slashes.get("Description"), "After");
+    equal(
+        "a slash in value position is not a comment",
+        parseDatTopLevel("Name / note").get("Name"),
+        "/ note",
+    );
+
+    // Inside a block, where a value ends decides whether a closing bracket on the same line is ever seen.
+    // A quoted value ends at its quote, so the block closes and the document carries on...
+    const inlineClose = parseDatTopLevel('Nested\n{ Name "Inside" }\nDescription After');
+    equal("a block closing inline releases the top level", inlineClose.get("Description"), "After");
+    equal("its contents still do not leak", inlineClose.get("Name"), undefined);
+    // ...while an unquoted one runs to the end of the line and swallows the brace with it.
+    const swallowed = parseDatTopLevel("Nested\n{ Name Inside }\nDescription After");
+    equal("an unquoted value swallows the closing brace", swallowed.get("Description"), undefined);
+    // A list is not a dictionary: a bare word in one is a value, not a key with a value after it.
+    equal(
+        "a bare word in an inline list swallows the bracket",
+        parseDatTopLevel("Nested\n[ a ]\nDescription After").get("Description"),
+        undefined,
+    );
+    equal(
+        "a quoted one in an inline list does not",
+        parseDatTopLevel('Nested\n[ "a" ]\nDescription After').get("Description"),
+        "After",
+    );
+    // And what follows the close on that same line is top-level again.
+    equal(
+        "a pair after an inline close is top-level",
+        parseDatTopLevel('Nested\n{ Name "A" } Description After').get("Description"),
+        "After",
+    );
 }
 
 async function installLayout(manifest) {

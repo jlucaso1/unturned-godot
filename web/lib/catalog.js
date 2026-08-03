@@ -340,7 +340,12 @@ export async function scanMaps(fs, located, { platform = currentPlatform() } = {
         // be stale stand-ins for a map the player is actually subscribed to.
         const bundledCopy = (foldPathCase ? entry.path.toLowerCase() : entry.path).startsWith(bundledPrefix);
         const placeholder = bundledCopy || (entry.source === MapSource.Official && !entry.supported);
-        const key = entry.folderName.toLowerCase();
+        // preferredByName is a Dictionary keyed with StringComparer.OrdinalIgnoreCase, which folds by
+        // an invariant upcase — not by JavaScript's lowercase. The two disagree wherever a lowercase
+        // pair does not round-trip, Greek final sigma most visibly: "Νησος" and "Νησοσ" upcase alike and
+        // are one key on the desktop, so a subscribed map replaces the stale placeholder there, and
+        // would have been two keys here, leaving both in the menu.
+        const key = simpleUpperCase(entry.folderName);
         const index = placeholderByName.get(key);
 
         if (index === undefined) {

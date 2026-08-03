@@ -1101,10 +1101,13 @@ public class PhysicsBodyOrderTests
         // Asserted per job rather than by counting across the file. Totals are the weaker check: a job
         // that drops its save while another grows a duplicate step keeps every count intact, and the
         // point of this gate is that each job which restores the tree carries its own whole contract.
+        // A consumer is identified by the path it caches, not by a step's display name. A rename, or a
+        // new job that spells its step differently, would drop out of a name-based filter -- and since
+        // the only count here is a lower bound, the job would then go unchecked while this still passed.
         IReadOnlyList<(string Name, string Body)> jobs = WorkflowJobs(source);
         var consumers = new List<(string Name, string Body)>();
         foreach ((string name, string body) in jobs)
-            if (body.Contains("- name: Restore the game content", StringComparison.Ordinal))
+            if (body.Contains("path: build/game-data", StringComparison.Ordinal))
                 consumers.Add((name, body));
 
         Assert.True(consumers.Count >= 2,
