@@ -983,7 +983,7 @@ public sealed class BakedNavGraph
                 //
                 // The outward test also excludes the edge just entered by, since the direction points
                 // inward there, so nothing has to remember where the walk came from.
-                int exitA = -1, exitB = -1;
+                int exitA = -1, exitB = -1, exitR = -1;
                 float exit = float.MaxValue;
                 for (int e = 0; e < 3; e++)
                 {
@@ -1009,6 +1009,7 @@ public sealed class BakedNavGraph
                     exit = along;
                     exitA = va;
                     exitB = vb;
+                    exitR = vr;
                 }
 
                 if (exit > 1f)
@@ -1027,20 +1028,34 @@ public sealed class BakedNavGraph
                 }
 
                 // `exit` is only ever set together with the pair, so past here a crossing was found.
+                //
+                // An edge can carry more than two faces, and taking the first match would happily pick
+                // one on the side the walk is already on — a coplanar duplicate, say. The next iteration
+                // then finds the same exit at the same parameter and steps back, and the two faces
+                // trade the walk between them until the whole budget is gone, so an otherwise clear
+                // route that crosses one non-manifold edge loses all of its shortcutting.
+                //
+                // The face to cross to is the one whose opposite vertex lies on the far side of the
+                // edge from this face's.
                 int next = -1;
+                float here = SideOfEdge(exitA, exitB, exitR);
                 for (int at = _edgeStart[current]; at < _edgeStart[current + 1] && next < 0; at++)
                 {
                     Connection c = _edges[at];
                     if (!_enabled[c.To])
                         continue;
-                    if ((c.VertexA == exitA && c.VertexB == exitB)
-                        || (c.VertexA == exitB && c.VertexB == exitA))
+                    if ((c.VertexA != exitA || c.VertexB != exitB)
+                        && (c.VertexA != exitB || c.VertexB != exitA))
+                        continue;
+                    int opposite = OppositeVertex(c.To, exitA, exitB);
+                    if (opposite >= 0 && here * SideOfEdge(exitA, exitB, opposite) < 0f)
                         next = c.To;
                 }
-                // Unreachable while the clearance test above runs first: an edge with no enabled face
-                // across it is a wall, the clearance test measures the distance to it, and a segment
-                // leaving through it is zero away. It stands so the walk cannot step to -1 if that ever
-                // stops being true.
+                // No face across it: either a wall, or nothing on the far side that the walk can tell
+                // apart from where it already is. The first is unreachable while the clearance test
+                // above runs first — an edge with no enabled face across it IS a wall, and a segment
+                // leaving through it is zero away from it. The second is a fold this cannot resolve, and
+                // refusing costs a shortcut where guessing would cost the budget.
                 if (next < 0)
                     return false;
 
@@ -1050,6 +1065,26 @@ public sealed class BakedNavGraph
 
         public bool HasClearLine(int start, Vector3 from, Vector3 to, ref int budget) =>
             TryLine(start, from, to, ref budget, out _);
+
+        // Which side of the directed edge a vertex falls on, by sign. Used to tell the face across an
+        // edge from another face sharing it on this side.
+        private float SideOfEdge(int edgeA, int edgeB, int vertex)
+        {
+            Vector3 p = Source.Vertices[edgeA], q = Source.Vertices[edgeB], v = Source.Vertices[vertex];
+            return ((q.X - p.X) * (v.Z - p.Z)) - ((q.Z - p.Z) * (v.X - p.X));
+        }
+
+        // The vertex of `triangle` that is not on the given edge, or -1 if the edge is not one of its.
+        private int OppositeVertex(int triangle, int edgeA, int edgeB)
+        {
+            for (int e = 0; e < 3; e++)
+            {
+                int v = Source.Triangles[(triangle * 3) + e];
+                if (v != edgeA && v != edgeB)
+                    return v;
+            }
+            return -1;
+        }
 
         // Storeys are metres apart; a ramp or a kerb is not. Anything under this is the same surface
         // seen from slightly the wrong height — a target standing a little off the mesh, or a waypoint
@@ -1072,10 +1107,35 @@ public sealed class BakedNavGraph
             return MathF.Abs(height - point.Y) <= StoreyTolerance;
         }
 
-        // Is a straight segment far enough from every wall this face carries? Both the face's border
-        // EDGES and its border VERTICES are tested: a wall corner can belong to a neighbour the segment
-        // never enters, and then only the vertex is in reach of a test that walks faces.
+        // Is a straight segment far enough from every wall around this face? A wall does not have to
+        // belong to a face the line enters: a sliver welded along a wall — which baked tiles produce —
+        // puts the boundary a fraction of a metre beyond a shared edge that is NOT one, and neither
+        // that edge nor the vertices on it are borders. Measured on a 0.1 m sliver, a line 0.2 m from
+        // its outer wall was accepted for a body needing 0.45.
+        //
+        // So the test reaches one face further out. The ring is one deep, so a CHAIN of slivers each
+        // thinner than the radius still hides its far wall; catching that needs a query against
+        // boundary geometry near the segment rather than a walk, which is a different structure. One
+        // ring covers a sliver welded to the floor the line is on, which is the shape this data has.
         private bool ClearOfWalls(int triangle, int i0, int i1, int i2, Vector3 from, Vector3 to)
+        {
+            if (!FaceClearOfWalls(triangle, i0, i1, i2, from, to))
+                return false;
+            for (int at = _edgeStart[triangle]; at < _edgeStart[triangle + 1]; at++)
+            {
+                Connection c = _edges[at];
+                if (!_enabled[c.To])
+                    continue;
+                if (!FaceClearOfWalls(c.To, Source.Triangles[c.To * 3],
+                    Source.Triangles[(c.To * 3) + 1], Source.Triangles[(c.To * 3) + 2], from, to))
+                    return false;
+            }
+            return true;
+        }
+
+        // The walls one face carries: its border EDGES, and its border VERTICES, since a wall corner
+        // can belong to a face further out than this test reaches.
+        private bool FaceClearOfWalls(int triangle, int i0, int i1, int i2, Vector3 from, Vector3 to)
         {
             const float Squared = (AgentRadius + Clearance) * (AgentRadius + Clearance);
             for (int e = 0; e < 3; e++)

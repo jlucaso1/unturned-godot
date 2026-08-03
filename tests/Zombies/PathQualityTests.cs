@@ -344,6 +344,89 @@ public class PathQualityTests
         Assert.Contains(path, point => point.X >= 12f);
     }
 
+    // A wide floor with a THIN strip welded along its far edge, so the strip's outer boundary is a wall
+    // 0.1 m beyond a shared edge that is not one. Baked tiles produce slivers like this along walls.
+    private static BakedNavGraph FloorWithASliverAlongTheWall(float sliver)
+    {
+        var vertices = new List<Vector3>();
+        var triangles = new List<int>();
+        float[] rows = { 0f, 20f, 20f + sliver };
+
+        for (int x = 0; x <= 20; x++)
+            foreach (float z in rows)
+                vertices.Add(new Vector3(x, 0f, z));
+        for (int x = 0; x < 20; x++)
+            for (int r = 0; r < rows.Length - 1; r++)
+            {
+                int a = (x * rows.Length) + r, b = a + 1, c = a + rows.Length, d = c + 1;
+                triangles.AddRange(new[] { a, b, c, b, d, c });
+            }
+
+        var flag = new NavFlag
+        {
+            Center = new Vector3(10, 0, 10),
+            Size = new Vector3(60, 200, 60),
+            Vertices = vertices.ToArray(),
+            Triangles = triangles.ToArray(),
+        };
+        return BakedNavGraph.Build(new[] { flag });
+    }
+
+    // A wall does not have to belong to a face the line walks through. Here the line stays inside the
+    // wide floor the whole way, so every face it enters has no border edge at all and no border vertex
+    // — the shared edge at z = 20 is interior, and the vertices ON it are interior too, because the
+    // sliver beyond carries the actual boundary at z = 20.1.
+    //
+    // Checking only the faces walked through therefore accepts a line 0.2 m from a wall for a body that
+    // needs 0.45. The clearance test reaches one face further out for exactly this.
+    [Fact]
+    public void TheLineWalk_SeesWallsOnFacesItDoesNotEnter()
+    {
+        BakedNavGraph graph = FloorWithASliverAlongTheWall(0.1f);
+
+        Assert.True(graph.HasClearLine(0, new Vector3(2, 0, 10), new Vector3(18, 0, 10)),
+            "a line down the middle of a 20 m floor is clear");
+        Assert.False(graph.HasClearLine(0, new Vector3(2, 0, 19.9f), new Vector3(18, 0, 19.9f)),
+            "0.2 m from the sliver's outer wall is not clearance for a 0.4 m body");
+    }
+
+    // An edge can carry more than two faces — the builder connects every pair that shares one. Taking
+    // the first CSR match to cross by can pick a face on the side the walk is already on: the next
+    // iteration finds the same exit at the same parameter and steps back, and the two trade the walk
+    // between them until the budget is gone. An otherwise clear route that crosses one such edge then
+    // loses ALL of its shortcutting, silently, because the pass just gives up.
+    //
+    // The duplicate is inserted directly AFTER the face it copies and BEFORE that face's true
+    // neighbour. Order is what decides this: appended at the end of the mesh it sorts last in the
+    // adjacency and first-match happens to pick correctly, which is a coincidence and not a guarantee.
+    // Here first-match picks the duplicate from the original and the original from the duplicate.
+    //
+    // The duplicate changes nothing about the walkable region, which is what makes it a clean probe:
+    // the same line over the same floor, and only the budget can tell the difference.
+    [Fact]
+    public void TheLineWalk_CrossesANonManifoldEdgeInsteadOfBouncingOnIt()
+    {
+        NavFlag field = FlatField(32);
+        const int Side = 33;
+        int original = (((16 * 32) + 16) * 2) * 3; // quad (16, 16)'s first face, in index positions
+        int a = (16 * Side) + 16;
+
+        var triangles = new List<int>(field.Triangles);
+        triangles.InsertRange(original + 3, new[] { a, a + 1, a + Side });
+        var flag = new NavFlag
+        {
+            Center = field.Center,
+            Size = field.Size,
+            Vertices = field.Vertices,
+            Triangles = triangles.ToArray(),
+        };
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { flag });
+
+        // 28 m over 1 m quads is a little over 60 faces; 200 is ample unless the walk is going nowhere.
+        Assert.True(graph.HasClearLine(0, new Vector3(2, 0, 16.3f), new Vector3(30, 0, 16.3f), budget: 200),
+            "the walk spent its budget without crossing the floor");
+    }
+
     // A flag with no faces snaps to no triangle, and the walk has to answer that rather than index it.
     [Fact]
     public void AFlagWithNoFaces_HasNoClearLines()
