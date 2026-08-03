@@ -29,15 +29,23 @@ dotnet run -c Release --project tools/PerfHarness -- ress
 RESS_BUNDLE=/path/to/some_linux.masterbundle dotnet run -c Release --project tools/PerfHarness -- ress
 ```
 
-The want set comes from `user://texture_cache` when a previous run left one behind — those `.tex` names
-are exactly the textures a cold load asks for. Without that cache it falls back to every streamed
-`Texture2D` in the bundle, which is a superset and can only overstate the read extent.
+The cache tag is resolved through `ContentSource`, not from the file name: the game keys the core
+bundle's caches by its declared name (`core.masterbundle` → `core`), while the file on disk is
+`core_linux.masterbundle`, and a workshop bundle also carries a per-item discriminator. For a bundle
+outside the install, name it with `RESS_TAG` — the suite refuses to guess, because a wrong tag misses
+every cache key and reports that nothing is wanted.
 
-Measured on the game's own `core_linux.masterbundle` (5,360 streamed textures over a 1,180 MB `.resS`):
-they are spread evenly end to end — the last tenth of the node is the second *densest* — and the widest
-gap anywhere in the final 295 MB is 48 KB. Deferring the last 64 ranges saves 9.7 MB (~0.06 s);
-reading 10% less needs 11% of the want set deferred. There is no tail to trim, so deferring late
-textures is not a cold-load optimization on this data.
+The want set comes from `user://texture_cache` when a previous run left one behind. Two caveats it
+prints for itself: that cache is shared by every map, so it is the union of what past runs needed rather
+than one cold load; and when it holds no entry for this bundle's tag the suite says so and falls back to
+every streamed `Texture2D` in the bundle, which is a superset and can only overstate the read extent.
+
+Measured on the game's own `core_linux.masterbundle` (superset of 5,360 streamed textures over a
+1,180 MB `.resS`): they are spread evenly end to end — the last tenth of the node is the second
+*densest* — and the widest gap anywhere in the final 295 MB is 48 KB. Deferring the last 64 ranges saves
+9.7 MB (~0.06 s); reading 10% less needs 11% of the want set deferred. So the bundle's layout has no
+sparse tail to trim. The per-folder table bounds each folder's subsets from above but does not settle
+them — only a real want set does that, which is what the texture cache is for.
 
 To A/B a candidate optimization: copy the current implementation into a local variant, `Bench()` both,
 and **gate on an output-equivalence check first**. A variant that skips work the real code does

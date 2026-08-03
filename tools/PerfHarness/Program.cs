@@ -712,8 +712,18 @@ public static class Program
             return;
         }
 
-        string tag = Environment.GetEnvironmentVariable("RESS_TAG")
-            ?? TextureKey.TagFor(Path.GetFileName(path));
+        // The cache tag has to be the one the game writes with, not one derived from the file name: the
+        // runtime takes it from the bundle's declared name ("core.masterbundle" -> "core"), while the file
+        // on disk is core_linux.masterbundle, whose name would give "core-linux-<hash>". Getting this
+        // wrong does not fail loudly — it makes every cache key miss and reports that nothing is wanted.
+        string? tag = Environment.GetEnvironmentVariable("RESS_TAG") ?? CacheTagFor(unturned, path);
+        if (tag == null)
+        {
+            Console.WriteLine($"== ress: SKIP (no content source in {unturned ?? "(no install)"} ships "
+                + $"{Path.GetFileName(path)}, so its cache tag is unknown — set RESS_TAG to name it) ==\n");
+            return;
+        }
+
         Console.WriteLine($"== ress: forward-pass read extent over {Path.GetFileName(path)} ==");
         Console.WriteLine($"  bundle: {path}");
         Console.WriteLine($"  {Mb(new FileInfo(path).Length)} on disk, {Mb(stream.TotalSize)} decompressed, "
@@ -762,11 +772,25 @@ public static class Program
         // .tex per wanted texture, named <tag>_<hex path id>. Without that cache every streamed texture
         // in the bundle is the honest stand-in — a superset, which can only overstate the read extent.
         HashSet<string>? cachedKeys = ReadTextureCacheKeys();
-        string wantSource = cachedKeys == null
-            ? "every streamed Texture2D in the bundle (no texture cache on this machine — SUPERSET)"
-            : $"texture cache ({cachedKeys.Count:N0} .tex entries)";
-        Console.WriteLine($"  want set: {wantSource}");
+        if (cachedKeys != null && !AnyKeyMatches(declared, cachedKeys))
+        {
+            // A cache holding only other bundles' tags would otherwise filter every range away and be
+            // reported as "nothing wanted" — a wrong answer that looks like a measured one.
+            Console.WriteLine($"  note: the texture cache holds {cachedKeys.Count:N0} entries but none for "
+                + $"tag '{tag}', so it says nothing about this bundle; falling back to the superset");
+            cachedKeys = null;
+        }
 
+        Console.WriteLine(cachedKeys == null
+            ? "  want set: every streamed Texture2D in the bundle (SUPERSET — an upper bound on the "
+                + "read extent, not the set a real load asks for)"
+            : $"  want set: texture cache ({cachedKeys.Count:N0} .tex entries). NOTE: the cache is shared "
+                + "by every map, so this is the union of what past runs needed, not one cold load.");
+
+        // The pass cannot seek, so a node with nothing wanted in it is still decoded in full when a LATER
+        // node is owed something. Which node is last decides that, so it has to be known before reporting.
+        var streamNodes = new List<(string Name, long Size, List<StreamRange> Wants)>();
+        int lastWanted = -1;
         foreach (MasterBundleStream.Node node in ordered)
         {
             if (!IsResSNode(node.Path))
@@ -782,9 +806,20 @@ public static class Program
                     wants.Add(range);
                 }
 
-            ReportNode(name, node.Size, wants);
+            if (wants.Count > 0)
+                lastWanted = streamNodes.Count;
+            streamNodes.Add((name, node.Size, wants));
         }
 
+        long totalRead = 0;
+        for (int i = 0; i < streamNodes.Count; i++)
+        {
+            (string name, long size, List<StreamRange> wants) = streamNodes[i];
+            totalRead += ReportNode(name, size, wants, i, lastWanted);
+        }
+
+        Console.WriteLine($"\n  whole pass: {Mb(totalRead)} of the {Mb(stream.TotalSize - ordered[0].Size)} "
+            + "of stream nodes is decoded");
         MeasureDecodeRate(stream, ordered);
         Console.WriteLine();
     }
@@ -847,14 +882,35 @@ public static class Program
     }
 
     // The whole point of the diagnostic: read extent is set by the single furthest range, so the curve
-    // below says how much of the file the tail alone is responsible for.
-    private static void ReportNode(string name, long size, List<StreamRange> wants)
+    // below says how much of the file the tail alone is responsible for. Returns the bytes this node
+    // costs the pass, which is not the same as what is wanted from it — see the traversal cases.
+    private static long ReportNode(string name, long size, List<StreamRange> wants, int index, int lastWanted)
     {
         Console.WriteLine($"\n  {name} {Mb(size)}");
         if (wants.Count == 0)
         {
-            Console.WriteLine("    nothing wanted here — the pass never touches this node");
-            return;
+            // A forward-only decoder cannot skip a node to reach the next one, so "nothing wanted here"
+            // only means "free" once nothing after it is owed either.
+            if (index < lastWanted)
+            {
+                Console.WriteLine($"    nothing wanted here, but a later node is owed — all {Mb(size)} "
+                    + "is decoded just to reach it");
+                return size;
+            }
+
+            Console.WriteLine("    nothing wanted here, and nothing after it — the pass never touches it");
+            return 0;
+        }
+
+        if (index < lastWanted)
+        {
+            // Its own furthest range does not end the pass: a later node still has to be reached.
+            long pixelsHere = 0;
+            foreach (StreamRange want in wants)
+                pixelsHere += want.Size;
+            Console.WriteLine($"    wanted: {wants.Count:N0} ranges, {Mb(pixelsHere)} of pixels — but a "
+                + $"later node is owed, so all {Mb(size)} is decoded regardless");
+            return size;
         }
 
         wants.Sort((a, b) => a.End.CompareTo(b.End));
@@ -891,19 +947,29 @@ public static class Program
             }
         }
 
-        // The decision numbers: how few ranges have to move for the pass to read materially less.
+        // The decision numbers: how few ranges have to move for the pass to read materially less. A node
+        // whose ranges all end early cannot reach the larger targets at all — deferring every one of them
+        // only saves `extent`, so those targets have to be reported as unreachable rather than as a count.
         foreach (int target in new[] { 10, 25, 50 })
         {
             int k = 0;
+            bool reached = false;
             while (k < wants.Count)
             {
                 long remaining = k + 1 == wants.Count ? 0 : wants[^(k + 2)].End;
                 k++;
                 if ((extent - remaining) * 100 >= (long)target * size)
+                {
+                    reached = true;
                     break;
+                }
             }
-            Console.WriteLine($"    reading {target}% less of the node needs the last {k:N0} range(s) "
-                + $"deferred ({Percent(k, wants.Count)} of what is wanted)");
+
+            Console.WriteLine(reached
+                ? $"    reading {target}% less of the node needs the last {k:N0} range(s) deferred "
+                    + $"({Percent(k, wants.Count)} of what is wanted)"
+                : $"    reading {target}% less of the node is unreachable — deferring all {wants.Count:N0} "
+                    + $"ranges saves only {Mb(extent)} ({Percent(extent, size)})");
         }
 
         // A deferral is only worth anything where the wanted ranges thin out. The biggest gap in the last
@@ -926,11 +992,14 @@ public static class Program
             + $"{widestAt:N0} range(s)");
 
         ReportGroups(wants, size, extent);
+        return extent;
     }
 
-    // What the pass would read if only ONE asset folder were wanted. The real want set is a subset of the
-    // bundle drawn from the folders a map places, so a folder whose own extent is already the whole node
-    // is proof that no realistic subset of it has a short tail to trim.
+    // What the pass would read if a whole asset folder were wanted. This is an UPPER bound on the folder's
+    // subsets and nothing more: a map placing only some of a folder's assets can still stop much earlier,
+    // so a folder spanning the node does not prove that every subset of it does. What the table does show
+    // is which folders are spread rather than contiguous — where a clustered subset is even possible.
+    // Only the real want set (the texture cache above) settles it for an actual load.
     private static void ReportGroups(List<StreamRange> wants, long size, long extent)
     {
         var byGroup = new Dictionary<string, (int Count, long Pixels, long First, long Extent)>(
@@ -954,8 +1023,39 @@ public static class Program
         }
         if (groups.Count > 12)
             Console.WriteLine($"      ... {groups.Count - 12} more");
-        Console.WriteLine($"    (the full want set's extent is {Mb(extent)}; a folder's own extent is what "
-            + "the pass would read if only that folder were wanted)");
+        Console.WriteLine($"    (the full want set's extent is {Mb(extent)}; a folder's extent is an upper "
+            + "bound on its subsets — a map placing only part of a folder can still stop earlier)");
+    }
+
+    // The tag the game's caches actually use for this bundle, taken from the content source that ships it
+    // — the game's own bundle is keyed by its declared name ("core.masterbundle" -> "core") and a workshop
+    // bundle additionally by its item directory, neither of which the file name on disk reproduces.
+    private static string? CacheTagFor(string? unturned, string bundlePath)
+    {
+        if (unturned == null)
+            return null;
+
+        string full = Path.GetFullPath(bundlePath);
+        foreach (ContentSource source in ContentSource.Discover(unturned))
+            if (source.BundlePath.Length > 0
+                && string.Equals(Path.GetFullPath(source.BundlePath), full, StringComparison.Ordinal))
+            {
+                return source.CacheTag;
+            }
+
+        return null;
+    }
+
+    // Whether the cache says anything at all about this bundle. It is shared by every bundle and map, so
+    // "has entries" and "has entries for these ranges" are different questions.
+    private static bool AnyKeyMatches(Dictionary<string, List<StreamRange>> declared, HashSet<string> keys)
+    {
+        foreach (List<StreamRange> ranges in declared.Values)
+            foreach (StreamRange range in ranges)
+                if (keys.Contains(range.Key))
+                    return true;
+
+        return false;
     }
 
     // LZMA decode rate on this machine, from the head of the first stream node — what turns the megabytes
