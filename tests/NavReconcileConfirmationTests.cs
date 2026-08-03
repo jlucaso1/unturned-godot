@@ -291,6 +291,79 @@ public class NavReconcileConfirmationTests
     }
 
     [Fact]
+    public void AFaceThatOnlyBecomesDroppableAfterConfirmationIsCaught()
+    {
+        // Confirming a face changes what its NEIGHBOURS are measured against. Two faces sampled at the
+        // same height need no confirming — neither is near the threshold relative to the other — but if
+        // the server then puts one of them on the ground, the other is suddenly a step and a bit above it
+        // and would be dropped on a height nobody measured. UnverifiedDrops is what names it.
+        NavFlag flag = FlatGrid(4);
+        int faces = flag.Triangles.Length / 3;
+        var surface = new float[faces];
+        var known = new bool[faces];
+        Array.Fill(known, true); // every face level with the navmesh, and so with every other face
+        var slack = new float[faces];
+        var uncertain = new bool[faces];
+
+        HashSet<int> planned = NavmeshReachability.NeedsConfirmation(flag, StepOffset, surface, known,
+            slack, uncertain, margin: 0.05f);
+        Assert.Empty(planned); // nothing near the threshold, nothing droppable: nothing to settle
+
+        // The server measures face 1 (flagged for some other reason) and finds the ground well below.
+        var verified = new HashSet<int> { 1 };
+        surface[1] = -0.54f;
+
+        HashSet<int> again = NavmeshReachability.UnverifiedDrops(flag, StepOffset, surface, known,
+            verified);
+
+        // Face 1's neighbours now stand 0.54 m over it — past the 0.5 m step — on their own unmeasured
+        // heights, so they have to be measured before that verdict stands.
+        Assert.NotEmpty(again);
+        foreach (int t in NavmeshReachability.Unreachable(flag, StepOffset, surface, known))
+            Assert.True(again.Contains(t) || verified.Contains(t),
+                $"face {t} would be dropped without anyone having measured it");
+    }
+
+    [Fact]
+    public void NoDropSurvivesOnAnUnmeasuredHeight()
+    {
+        // The loop's invariant, stated directly: keep confirming what UnverifiedDrops names until it
+        // names nothing, and every dropped face rests on measured ground — its own, and the neighbour it
+        // was measured against.
+        NavFlag flag = FlatGrid(6);
+        int faces = flag.Triangles.Length / 3;
+        var sampled = new float[faces];
+        var truth = new float[faces];
+        var known = new bool[faces];
+        Array.Fill(known, true);
+        var random = new Random(4242);
+        for (int t = 0; t < faces; t++)
+        {
+            sampled[t] = (float)(random.NextDouble() * 1.2);
+            // The server's answer differs from the sampler's by up to a whole step in places.
+            truth[t] = MathF.Max(0f, sampled[t] + (float)((random.NextDouble() - 0.5) * 1.0));
+        }
+        float[] surface = (float[])sampled.Clone();
+
+        var verified = new HashSet<int>();
+        HashSet<int> round = NavmeshReachability.NeedsConfirmation(flag, StepOffset, surface, known,
+            new float[faces], new bool[faces], margin: 0.05f);
+        int rounds = 0;
+        while (round.Count > 0)
+        {
+            foreach (int t in round)
+                surface[t] = truth[t];
+            verified.UnionWith(round);
+            round = NavmeshReachability.UnverifiedDrops(flag, StepOffset, surface, known, verified);
+            Assert.True(++rounds < 50, "the confirmation loop must converge");
+        }
+
+        Assert.NotEmpty(NavmeshReachability.Unreachable(flag, StepOffset, surface, known));
+        Assert.Empty(NavmeshReachability.UnverifiedDrops(flag, StepOffset, surface, known, verified));
+        Assert.True(verified.Count < faces, "the whole point is that this stops short of every face");
+    }
+
+    [Fact]
     public void ConfirmationIsWhatMakesTheDropSetExact()
     {
         // Re-probing the named faces against the truth and leaving the rest as the field sampled them

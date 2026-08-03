@@ -371,6 +371,18 @@ public sealed class CollisionField
         t = float.MaxValue;
         bool found = false;
 
+        // Containment is tested against the WHOLE capsule before any of its three pieces is. The pieces
+        // overlap, so a ray starting inside the cylinder is still outside each cap sphere, and the cap
+        // would happily report the ray entering its upper hemisphere — a surface buried inside the solid,
+        // reported as ground, and agreed on by the grown and shrunk tests alike so nothing would flag it.
+        // A ray beginning inside a shape reports no crossing; that is the whole shape's business, not a
+        // piece's.
+        if (Inside(radius, halfSegment, origin))
+        {
+            t = 0f;
+            return false;
+        }
+
         float ox = origin.X, oz = origin.Z, dx = direction.X, dz = direction.Z;
         float a = (dx * dx) + (dz * dz);
         float c = (ox * ox) + (oz * oz) - (radius * radius);
@@ -392,10 +404,6 @@ public sealed class CollisionField
                 }
             }
         }
-        else if (c < 0f)
-        {
-            // Parallel to the axis and inside the cylinder's radius: only the caps can be entered.
-        }
 
         for (int side = 0; side < 2; side++)
         {
@@ -410,6 +418,14 @@ public sealed class CollisionField
         if (!found)
             t = 0f;
         return found;
+    }
+
+    // Inside the capsule as a whole: within `radius` of the segment between the two cap centres.
+    private static bool Inside(float radius, float halfSegment, Vector3 point)
+    {
+        float y = Math.Clamp(point.Y, -halfSegment, halfSegment);
+        float dy = point.Y - y;
+        return (point.X * point.X) + (dy * dy) + (point.Z * point.Z) < radius * radius;
     }
 
     // Bilinear cell of a heightfield, triangulated both ways. Godot's heightfield and this one need not

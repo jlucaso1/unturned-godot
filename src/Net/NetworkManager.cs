@@ -539,7 +539,14 @@ public partial class NetworkManager : Node
         Data.CollisionFieldBuilder? collision = null)
     {
         if (_zombieNavigation == null || _navigationReconcile != null)
+        {
+            // Nothing will reconcile — this session joined someone else's server, or the map has no
+            // navmesh to prune. What the builder holds is the whole map's collision geometry, recorded
+            // during the load for this one pass, so on those sessions it would otherwise sit there for
+            // the rest of the game with no consumer at all.
+            collision?.Release();
             return;
+        }
         // With the PhysicsServer on its own thread, DirectSpaceState is intentionally unavailable from
         // ObjectStreamer.Finished (an idle-frame signal). Enter the next physics notification first;
         // the same path also works in the default single-threaded mode.
@@ -552,11 +559,15 @@ public partial class NetworkManager : Node
     {
         await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame);
         if (AppShutdown.IsShuttingDown || _zombieNavigation == null)
+        {
+            collision?.Release();
             return;
+        }
         PhysicsDirectSpaceState3D? space = GetViewport()?.World3D?.DirectSpaceState;
         if (space == null)
         {
             Log.PushWarning("[nav] physics space unavailable; collision reconciliation skipped");
+            collision?.Release();
             return;
         }
         await _zombieNavigation.PruneAgainstCollisionAsync(

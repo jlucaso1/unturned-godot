@@ -157,6 +157,45 @@ public static class NavmeshReachability
         return confirm;
     }
 
+    // The faces that would be dropped by surfaces the physics server has not measured — the ones that
+    // would still be dropped, and the ones that only became droppable BECAUSE it measured something else.
+    //
+    // Confirming a face changes its neighbours' arithmetic, not just its own. A face sitting a hair under
+    // the threshold against a neighbour the sampler read at the same height needs no confirming, until the
+    // server replaces that neighbour with a lower one and pushes the comparison over — at which point the
+    // face is dropped on a height nobody verified. So this is asked again after each confirmation pass,
+    // and the answer feeds the next one, until it comes back empty. It terminates because `verified` only
+    // grows, and in the limit it is every face — which is the behaviour this replaced.
+    //
+    // Only the neighbour holding the MINIMUM matters. A neighbour the sampler read too high hides a lower
+    // true surface and so hides a drop, which is the safe direction; one read too low invents a drop, and
+    // that one is by definition the minimum.
+    public static HashSet<int> UnverifiedDrops(NavFlag flag, float stepOffset, float[] surface,
+        bool[] known, IReadOnlySet<int> verified)
+    {
+        int count = flag.Triangles.Length / 3;
+        var unverified = new HashSet<int>();
+        if (count == 0)
+            return unverified;
+
+        Context context = Analyse(flag, surface, known, count);
+        for (int t = 0; t < count; t++)
+        {
+            if (!known[t] || !Drops(in context, t, surface, stepOffset))
+                continue;
+            if (!verified.Contains(t))
+                unverified.Add(t);
+            if (context.LowestNeighbour[t] >= float.MaxValue
+                || surface[t] - context.LowestNeighbour[t] <= stepOffset)
+                continue; // dropped by its own authored envelope; no neighbour's height is in the verdict
+            foreach (int other in context.Neighbours[t])
+                if (known[other] && surface[other] <= context.LowestNeighbour[t]
+                    && !verified.Contains(other))
+                    unverified.Add(other);
+        }
+        return unverified;
+    }
+
     private readonly struct Context
     {
         public required float[] LowestNeighbour { get; init; }

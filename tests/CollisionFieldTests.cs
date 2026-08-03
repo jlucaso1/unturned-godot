@@ -558,6 +558,30 @@ public class CollisionFieldTests
     }
 
     [Fact]
+    public void ARayStartingInsideACapsule_FindsNoSurfaceInsideIt()
+    {
+        // A capsule is three overlapping pieces, and a point inside its cylinder is outside both cap
+        // spheres — so testing the pieces separately let a cap report the ray entering its own upper
+        // hemisphere, buried inside the solid. Both the grown and the shrunk test agree on that invented
+        // surface, so nothing would have marked it uncertain either.
+        var builder = new CollisionFieldBuilder();
+        AddFlatGround(builder, cells: 20, cell: 1f, height: 0f);
+        int capsule = builder.AddCapsuleShape(0.5f, 4f);
+        builder.AddInstance(capsule, new Transform3D(Basis.Identity, new Vector3(5f, 5f, 5f)));
+        CollisionField field = builder.Build();
+
+        // From the capsule's own centre, straight down: inside the cylinder the whole way.
+        SurfaceSample inside = field.Probe(5f, 5f, topY: 5f, bottomY: 4f);
+        Assert.False(inside.Hit);
+
+        // From inside the lower cap, likewise.
+        Assert.False(field.Probe(5f, 5f, topY: 3.4f, bottomY: 3f).Hit);
+
+        // And from above it, the capsule is still a surface.
+        Assert.Equal(7f, field.Probe(5f, 5f, topY: 9f, bottomY: 0f).Y, 0.001f);
+    }
+
+    [Fact]
     public void TheFieldIsSafeToProbeFromManyThreadsAtOnce()
     {
         var builder = new CollisionFieldBuilder();

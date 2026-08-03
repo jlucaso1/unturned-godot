@@ -466,6 +466,9 @@ public partial class ObjectStreamer : Node
         var stage = Stopwatch.StartNew();
         Node3D root = ObjectsBuilder.Build(_objects, _db, meshLibrary, colliderLibrary, out int withMesh,
             lod1Library, NavigationField);
+        // Handed on to reconciliation by whoever set it; this node has no further use for it and must not
+        // be what keeps a map-sized collision mirror alive for the session.
+        NavigationField = null;
         if (lod1Library.Count > 0)
             Log.Print($"[stream] object LOD levels: {lod1Library.Count} of {meshLibrary.Count} meshes "
                 + "have an authored lower level");

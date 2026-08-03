@@ -389,6 +389,10 @@ public sealed class ZombieNavigation
         string? cachePath = null;
         string? fingerprint = null;
         bool partialCheckpoints = EnvFlag.IsOn(OS.GetEnvironment("UG_PARTIAL_NAV_CACHE"), whenUnset: true);
+        // The audit exists to probe every face both ways and say where the two disagree. A cache hit
+        // returns before any of that happens, and the common run is a warm one — so an audit that
+        // honoured the cache would silently report nothing on exactly the runs someone would use it on.
+        bool audit = EnvFlag.IsOn(OS.GetEnvironment("UG_NAV_PROBE_AUDIT"), whenUnset: false);
         int[] triangleCounts = new int[_flags.Count];
         for (int i = 0; i < _flags.Count; i++)
             triangleCounts[i] = _flags[i].Triangles.Length / 3;
@@ -405,7 +409,7 @@ public sealed class ZombieNavigation
                     return (fp, System.IO.Path.Combine(reconcileCache,
                         NavReconcileCache.MapKey(_levelDir) + ".cache"));
                 });
-                if (System.IO.File.Exists(cachePath))
+                if (System.IO.File.Exists(cachePath) && !audit)
                 {
                     using System.IO.FileStream input = System.IO.File.OpenRead(cachePath);
                     if (NavReconcileCache.TryReadPartial(input, fingerprint, triangleCounts, out var cached))
@@ -556,6 +560,7 @@ public sealed class ZombieNavigation
         public long CpuUncertain;
         public long ServerSamples;
         public long Confirmed;
+        public long Reconfirmed; // faces the post-confirmation rounds added to the planned set
         public long Triangles;
         public long AuditDisagreements;
         public long AuditUnescalated;
@@ -577,8 +582,8 @@ public sealed class ZombieNavigation
                 + $"{_probeTally.AuditDropped:N0} dropped faces)"
             : "";
         return $"{_probeTally.CpuSamples:N0} CPU probes, {_probeTally.ServerSamples:N0} on the physics "
-            + $"server for {_probeTally.Confirmed:N0}/{_probeTally.Triangles:N0} faces "
-            + $"({_probeTally.CpuUncertain:N0} uncertain){audit}; "
+            + $"server for {_probeTally.Confirmed:N0}(+{_probeTally.Reconfirmed:N0})/"
+            + $"{_probeTally.Triangles:N0} faces ({_probeTally.CpuUncertain:N0} uncertain){audit}; "
             + $"sample+plan {_probeTally.SampleMs:0} ms, server {_probeTally.ServerMs:0} ms, "
             + $"verdict {_probeTally.VerdictMs:0} ms";
     }
@@ -606,6 +611,7 @@ public sealed class ZombieNavigation
         bool audit = EnvFlag.IsOn(OS.GetEnvironment("UG_NAV_PROBE_AUDIT"), whenUnset: false);
         HashSet<int> confirm = audit ? AllTriangles(count) : plan.Confirm;
 
+
         float[] before = audit ? (float[])surface.Clone() : System.Array.Empty<float>();
         bool[] knownBefore = audit ? (bool[])known.Clone() : System.Array.Empty<bool>();
 
@@ -614,13 +620,30 @@ public sealed class ZombieNavigation
         _probeTally.Triangles += count;
         _probeTally.Confirmed += plan.Confirm.Count;
 
+        // Confirm, then look again, until nothing droppable is left resting on a height the server did not
+        // measure. One pass is not enough: replacing a face's surface changes what its NEIGHBOURS compare
+        // against, so a face that needed no confirming before the pass can be droppable after it — and
+        // dropping it would use its own, still unmeasured, height. Rounds after the first are small (the
+        // planned set already contains everything droppable by the sampled surfaces), and the loop ends
+        // because the verified set only ever grows.
         var phase = Stopwatch.StartNew();
-        if (confirm.Count > 0
-            && !await ProbeOnServerAsync(owner, space, ray, flag, stepOffset, confirm, surface, known,
-                frameBudgetMs))
-            return null;
+        var verified = new HashSet<int>();
+        HashSet<int> round = confirm;
+        while (round.Count > 0)
+        {
+            if (!await ProbeOnServerAsync(owner, space, ray, flag, stepOffset, round, surface, known,
+                    frameBudgetMs))
+                return null;
+            verified.UnionWith(round);
+            round = NavmeshReachability.UnverifiedDrops(flag, stepOffset, surface, known, verified);
+            _probeTally.Reconfirmed += round.Count;
+        }
         _probeTally.ServerMs += phase.Elapsed.TotalMilliseconds;
 
+        // The audit is judged against the PLANNED set, not everything the loop ended up verifying: in
+        // audit mode round one already confirms every face, so the later rounds cannot be observed. That
+        // makes the reported "a normal run would not have confirmed" figure an over-estimate of the risk,
+        // which is the direction an audit should err in.
         if (audit)
             ReportAudit(flag, before, knownBefore, surface, known, sampled, plan.Confirm, stepOffset);
 
