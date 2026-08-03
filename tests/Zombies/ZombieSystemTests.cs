@@ -1012,6 +1012,330 @@ public class ZombieSystemTests
         Assert.Equal(first.Trace, second.Trace);
     }
 
+    // PersistentlyBlockedCompleteRoute covers the case where the REPLACEMENT is rejected — a partial
+    // route with a worse endpoint loses to the stale one, so nothing touches the blocked-route
+    // evidence and the timeout fires. The case that stayed broken is the opposite one: a graph that
+    // has not been reconciled against the collision world answers every query with the same
+    // geometrically perfect line, so the replacement is ACCEPTED. Resetting the evidence on accept
+    // restarted the counter every RepathRate, which is shorter than BlockedRouteTimeout, so the
+    // counter could never reach the timeout and the zombie re-adopted the wall route forever.
+    [Fact]
+    public void AnImpassableRoute_IsInvalidatedEvenWhenEveryRepathReadoptsItVerbatim()
+    {
+        ImpassableRun run = RunAgainstAnImpassableCompleteRoute();
+
+        Assert.True(run.InvalidatedAtTick > 0, "the impassable route was never invalidated");
+        // Derived from the constants, not from observation: the counter must run uninterrupted from
+        // the first blocked tick to the timeout. FirstBlockedTick already carries one tick of
+        // evidence, so the remaining distance is one tick shorter than the whole timeout.
+        int ticksToTimeout = (int)MathF.Ceiling(ZombieSystem.BlockedRouteTimeout / ImpassableDt);
+        Assert.Equal(ticksToTimeout - 1, run.InvalidatedAtTick - run.FirstBlockedTick);
+        // ...and at least one repath happened inside that window, re-adopting the same route. Without
+        // it the run would prove nothing: a window with no repath in it never exercised the reset.
+        Assert.True(ZombieSystem.RepathRate < ZombieSystem.BlockedRouteTimeout);
+        Assert.True(run.QueriesAtInvalidation > run.QueriesAtFirstBlock,
+            $"no repath inside the blocked window: {run.QueriesAtFirstBlock} -> {run.QueriesAtInvalidation}");
+        // Invalidation asks for a replacement immediately, and drops the state that described the
+        // route it just threw away.
+        Assert.Equal(0f, run.RepathTimerAfter);
+        Assert.Equal(0, run.WaypointIndexAfter);
+        Assert.False(run.PartialAfter);
+    }
+
+    // The same rule against the target the game actually has: one that MOVES. The route to a runner
+    // is re-derived every repath with a final waypoint that has travelled metres, while the body stays
+    // pinned against the same obstruction. Any route identity that reads the destination as part of the
+    // plan therefore calls every reissue a NEW route and hands it a clean record — and because
+    // RepathRate (0.5 s) is shorter than BlockedRouteTimeout (0.75 s), that clears the evidence
+    // strictly faster than it can accumulate. The wall route then survives forever: the exact
+    // disarmament AnImpassableRoute_IsInvalidatedEvenWhenEveryRepathReadoptsItVerbatim exists to
+    // prevent, reintroduced for the only case that matters. A stationary target cannot catch this.
+    [Fact]
+    public void AnImpassableRoute_IsInvalidatedWhileTheTargetKeepsMoving()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            path.Add(from);
+            path.Add(to); // ends exactly on the target: always "complete", so always accepted
+            return true;
+        };
+        system.MoveResolver = (from, to, radius) => from; // and always refused by the physics world
+
+        // 0.6 m/tick is a sprint: ~3 m of destination travel between repaths, far beyond any tolerance
+        // a waypoint comparison could sanely use, and the zombie never leaves its spot.
+        const float MetresPerTick = 0.6f;
+        int budget = (int)MathF.Ceiling(ZombieSystem.BlockedRouteTimeout / ImpassableDt) * 6;
+        float worstEvidence = 0f;
+        for (int tick = 1; tick <= budget; tick++)
+        {
+            var player = Player(1, new Vector3(10f, 5f, tick * MetresPerTick),
+                UnturnedGodot.Player.EPlayerStance.Sprint, moving: true);
+            system.Tick(new[] { player }, ImpassableDt);
+            worstEvidence = MathF.Max(worstEvidence, zombie.BlockedRouteTime);
+            if (zombie.State == EZombieState.Chase && zombie.PathPoints.Count == 0 && worstEvidence > 0f)
+                return; // invalidated: the physics world got its say, as it does for a still target
+        }
+
+        Assert.Fail("the impassable route was never invalidated while the target moved; evidence "
+            + $"peaked at {worstEvidence:0.###} s against a {ZombieSystem.BlockedRouteTimeout} s timeout");
+    }
+
+    [Fact]
+    public void ImpassableRouteInvalidation_IsDeterministicAcrossIndependentSimulations()
+    {
+        ImpassableRun first = RunAgainstAnImpassableCompleteRoute();
+        ImpassableRun second = RunAgainstAnImpassableCompleteRoute();
+
+        Assert.Equal(first, second);
+    }
+
+    // The other side of the same rule: evidence is about DELIVERED motion, so a route that keeps
+    // moving the body must never accumulate any, however many times it is repathed.
+    [Fact]
+    public void ARouteThatKeepsDeliveringMotion_NeverAccumulatesBlockedEvidence()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        int queries = 0;
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            queries++;
+            path.Add(from);
+            path.Add(to);
+            return true;
+        };
+        system.MoveResolver = (from, to, radius) => to; // open ground
+
+        var player = Player(1, new Vector3(10, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
+        float worstEvidence = 0f;
+        int chaseTicks = 0, routelessTicks = 0;
+        for (int tick = 0; tick < 40; tick++)
+        {
+            system.Tick(new[] { player }, ImpassableDt);
+            if (zombie.State != EZombieState.Chase)
+                continue;
+            chaseTicks++;
+            worstEvidence = MathF.Max(worstEvidence, zombie.BlockedRouteTime);
+            if (zombie.PathPoints.Count == 0)
+                routelessTicks++;
+        }
+
+        Assert.True(chaseTicks > (int)MathF.Ceiling(ZombieSystem.RepathRate / ImpassableDt),
+            $"the chase was too short to span a repath: {chaseTicks} ticks");
+        Assert.Equal(0f, worstEvidence);
+        Assert.Equal(0, routelessTicks);
+        Assert.True(queries >= 2, "the run never repathed, so it never exercised the accept path");
+        Assert.True(zombie.Position.X > 3f, $"never made progress: {zombie.Position}");
+    }
+
+    // The boundary from the other direction: stopping one tick short of the timeout must leave the
+    // route intact, and the first tick that delivers motion must wipe the evidence. This is what
+    // stops the stricter rule from turning ordinary crowd jostling into a route discard.
+    [Fact]
+    public void EvidenceOneTickShortOfTheTimeout_IsWipedByTheFirstTickTheBodyMoves()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            path.Add(from);
+            path.Add(to);
+            return true;
+        };
+        bool blocked = true;
+        system.MoveResolver = (from, to, radius) => blocked ? from : to;
+
+        var player = Player(1, new Vector3(10, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
+        // Stop on the last tick from which one more blocked tick would fire the timeout. Driven off
+        // the evidence itself, because the pre-aggro ticks also go through the resolver.
+        int guard = 0;
+        while (zombie.BlockedRouteTime + ImpassableDt + 1e-4f < ZombieSystem.BlockedRouteTimeout)
+        {
+            system.Tick(new[] { player }, ImpassableDt);
+            Assert.True(++guard < 100, "the zombie never started accumulating blocked evidence");
+        }
+
+        Assert.NotEmpty(zombie.PathPoints); // one tick short: still trusted
+        Assert.True(zombie.BlockedRouteTime > 0f, "the near-miss never accumulated anything");
+        blocked = false;
+
+        system.Tick(new[] { player }, ImpassableDt);
+
+        Assert.Equal(0f, zombie.BlockedRouteTime);
+        Assert.NotEmpty(zombie.PathPoints);
+    }
+
+    // Codex review, P2. Keeping the route across a retarget must not keep the JUDGEMENT of it. The
+    // blocked-route evidence says "this body is not delivering motion toward where it was going", and
+    // a retarget changes where it is going. Carried over near the timeout, one blocked tick on the
+    // replacement discards it before the zombie has even turned — the mid-chase freeze that keeping
+    // the route exists to prevent, reintroduced through the back door.
+    [Fact]
+    public void Retargeting_DropsTheBlockedEvidenceEarnedAgainstTheOldTarget()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            path.Add(from);
+            path.Add(to);
+            return true;
+        };
+        bool blocked = true;
+        system.MoveResolver = (from, to, radius) => blocked ? from : to;
+
+        // Walk the evidence up to one tick short of the timeout against the first target.
+        var first = Player(1, new Vector3(10, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
+        int guard = 0;
+        while (zombie.BlockedRouteTime + ImpassableDt + 1e-4f < ZombieSystem.BlockedRouteTimeout)
+        {
+            system.Tick(new[] { first }, ImpassableDt);
+            Assert.True(++guard < 100, "never accumulated blocked evidence");
+        }
+        Assert.True(zombie.BlockedRouteTime > 0f);
+        Assert.NotEmpty(zombie.PathPoints);
+
+        // A closer player steals the target. The evidence belonged to the old destination.
+        var second = Player(2, new Vector3(-6, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint, moving: true);
+        system.Tick(new[] { first, second }, ImpassableDt);
+
+        Assert.Equal(2, zombie.TargetPlayer);
+        // The retargeting tick also moves, and the body is still blocked, so ONE tick of fresh
+        // evidence is expected. What must not happen is the old total carrying over: 0.70 + 0.08 is
+        // past the timeout, and the replacement would be thrown away on the tick it arrived.
+        Assert.True(zombie.BlockedRouteTime <= ImpassableDt + 1e-4f,
+            $"evidence carried across the retarget: {zombie.BlockedRouteTime}");
+        Assert.NotEmpty(zombie.PathPoints); // and the route itself still survives, as intended
+    }
+
+    // Codex review, P1. The kept route is still scored as the incumbent a replacement has to beat, but
+    // its endpoint was chosen for someone else. When the new target is only reachable partially, an old
+    // endpoint that happens to sit nearer the new player rejects every replacement forever — and if it
+    // sits within EndReachedDistance of that player the step goes to zero, so no blocked evidence
+    // accumulates and even the timeout cannot rescue it.
+    [Fact]
+    public void ARouteBuiltForAnotherTarget_DoesNotVetoTheFirstReplacement()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        zombie.Position = new Vector3(0f, 5f, 0f);
+        bool retargeted = false;
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            path.Add(from);
+            // Before the steal: a complete route, ending on the target. After: the new target is only
+            // reachable partially, and the best endpoint the graph can offer stops well short of it.
+            path.Add(retargeted ? new Vector3(3f, 5f, 0f) : to);
+            return true;
+        };
+        // Frozen: the geometry that decides the scoring must not drift while the test runs.
+        system.MoveResolver = (from, to, radius) => from;
+
+        // Target 1 sits just BEYOND target 2, so the route built for it ends close to target 2 — much
+        // closer than anything reachable for target 2 itself.
+        var first = Player(1, new Vector3(10f, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
+        for (int tick = 0; tick < 2; tick++)
+            system.Tick(new[] { first }, ImpassableDt);
+        Assert.Equal(1, zombie.TargetPlayer);
+        Vector3 stale = Assert.IsType<List<Vector3>>(zombie.PathPoints)[^1];
+
+        // Target 2 is nearer the zombie, so it steals; its own reachable endpoint (2,5,0) is 3 m from
+        // it, while the inherited endpoint is under a metre away and would win on score alone.
+        retargeted = true;
+        var second = Player(2, new Vector3(9f, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint, moving: true);
+        for (int tick = 0; tick < 2; tick++)
+            system.Tick(new[] { first, second }, ImpassableDt);
+
+        Assert.Equal(2, zombie.TargetPlayer);
+        Assert.True(zombie.BlockedRouteTime < ZombieSystem.BlockedRouteTimeout); // not a timeout rescue
+        Assert.False(zombie.RouteServedAnotherTarget, "the inherited route was never replaced");
+        Assert.NotEqual(stale, zombie.PathPoints[^1]);
+        Assert.Equal(3f, zombie.PathPoints[^1].X, 1);
+    }
+
+    // CalculateTargetPoint divides by the active segment's length, and the comment above it claimed a
+    // degenerate segment could not reach it because "the final segment short-circuits to the
+    // destination". That short-circuit is conditional: it only fires when the route's end is within 4 m
+    // of the destination. A stale route whose end sits ON the body — Leave falls back to the current
+    // position when neither retreat direction navigates, and a query from a point to itself answers with
+    // that point — outlives the retarget deliberately (routes survive a target change so a horde does
+    // not freeze mid-chase), and the new target is nowhere near it. Then a == b, the divisor is zero,
+    // and the NaN reaches Yaw and Position through SteerDirection and the step.
+    [Fact]
+    public void ARouteThatEndsOnTheBody_DoesNotPoisonItWithNaN()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        system.MoveResolver = (from, to, radius) => to;
+        system.PathQuery = (from, to, path, radius) => false; // no route of its own to interfere
+
+        var near = Player(1, new Vector3(10f, 5f, 0f), UnturnedGodot.Player.EPlayerStance.Sprint);
+        int guard = 0;
+        while (zombie.State != EZombieState.Chase)
+        {
+            system.Tick(new[] { near }, 0.1f);
+            Assert.True(++guard < 100, "never entered Chase");
+        }
+
+        // Still well inside MaxChaseDistanceSquared, so the chase holds, but far past the 4 m the
+        // direct-to-destination short-circuit needs.
+        var player = Player(1, new Vector3(30f, 5f, 0f), UnturnedGodot.Player.EPlayerStance.Sprint);
+
+        // The stale route: one waypoint, exactly where the body stands, with the target 30 m off.
+        zombie.PathPoints.Clear();
+        zombie.PathPoints.Add(zombie.Position);
+        zombie.CurrentWaypointIndex = 0;
+        zombie.TargetReached = false;
+        zombie.RepathTimer = 1f; // and this tick is not one it may repath on
+
+        system.Tick(new[] { player }, 0.05f);
+
+        Assert.False(float.IsNaN(zombie.Position.X) || float.IsNaN(zombie.Position.Y)
+            || float.IsNaN(zombie.Position.Z), $"position went NaN: {zombie.Position}");
+        Assert.False(float.IsNaN(zombie.Yaw), "yaw went NaN");
+    }
+
+    private const float ImpassableDt = 0.1f;
+
+    private readonly record struct ImpassableRun(int FirstBlockedTick, int InvalidatedAtTick,
+        int QueriesAtFirstBlock, int QueriesAtInvalidation, float RepathTimerAfter,
+        int WaypointIndexAfter, bool PartialAfter);
+
+    private static ImpassableRun RunAgainstAnImpassableCompleteRoute()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        int queries = 0;
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            queries++;
+            path.Add(from);
+            path.Add(to); // ends exactly on the target: always "complete", so always accepted
+            return true;
+        };
+        system.MoveResolver = (from, to, radius) => from; // and always refused by the physics world
+
+        var player = Player(1, new Vector3(10, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
+        int firstBlocked = -1, queriesAtBlock = 0;
+        // Generous enough that a counter reset by even one repath would run out of ticks here.
+        int budget = (int)MathF.Ceiling(ZombieSystem.BlockedRouteTimeout / ImpassableDt) * 6;
+        for (int tick = 1; tick <= budget; tick++)
+        {
+            system.Tick(new[] { player }, ImpassableDt);
+            if (firstBlocked < 0 && zombie.PathPoints.Count > 0 && zombie.BlockedRouteTime > 0f)
+            {
+                firstBlocked = tick;
+                queriesAtBlock = queries;
+            }
+            if (firstBlocked > 0 && zombie.PathPoints.Count == 0)
+                return new ImpassableRun(firstBlocked, tick, queriesAtBlock, queries,
+                    zombie.RepathTimer, zombie.CurrentWaypointIndex, zombie.PathIsPartial);
+        }
+        return new ImpassableRun(firstBlocked, -1, queriesAtBlock, queries,
+            zombie.RepathTimer, zombie.CurrentWaypointIndex, zombie.PathIsPartial);
+    }
+
     private static (List<Vector3> Trace, int Queries, EZombieState State) RunWindowRecovery()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
@@ -1215,6 +1539,65 @@ public class ZombieSystemTests
         system.Tick(new[] { Player(1, new Vector3(10, 5, 0)), Player(2, new Vector3(4, 5, 0)) }, 0.1f);
         Assert.Equal(2, destinations.Count);
         Assert.Equal(4f, destinations[1].X, 1f);
+    }
+
+    [Fact]
+    public void Retargeting_KeepsTheCurrentRouteUntilTheReplacementArrives()
+    {
+        // Changing a destination in the original only SCHEDULES a Seeker query: vectorPath is written
+        // in OnPathComplete and nowhere else, so LegacyAIPathNoRedist keeps following the route it has
+        // while the replacement computes. Dropping the route instead parks the zombie on Move()'s "no
+        // route: stand" branch, and the replacement is not free — it waits for one of the
+        // MaxRepathsPerTick tokens. A horde re-targets on ONE detect scan, so the queue is longer than
+        // the budget and the surplus stands still mid-chase. Clients read move/idle off the replicated
+        // motion, so those zombies visibly drop aggro and pick it straight back up.
+        const int Horde = 12; // > MaxRepathsPerTick: the budget has to be the binding constraint
+        var system = new ZombieSystem(new[] { Table() }, TwoBounds(), FlatGround);
+        var spawns = new List<ZombieSpawnpointData>();
+        for (int i = 0; i < Horde * 4; i++)
+            spawns.Add(At((i % Horde) - (Horde / 2f), 0));
+        system.Spawn(spawns, new Random(5));
+        Assert.Equal(Horde, system.Zombies.Count);
+        foreach (ZombieInstance z in system.Zombies)
+        {
+            z.Speciality = EZombieSpeciality.Normal;
+            z.Yaw = 180f; // facing +Z, toward the first target
+        }
+        int queries = 0;
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            queries++;
+            path.Add(from);
+            path.Add(to);
+            return true;
+        };
+
+        // Everyone locks onto the sprinting player 1 and gets a live route.
+        var first = Player(1, new Vector3(0, 5, 20), UnturnedGodot.Player.EPlayerStance.Sprint, moving: true);
+        for (int t = 0; t < 8; t++)
+            system.Tick(new[] { first }, UnturnedGodot.Net.ServerSimulation.TickRate);
+        Assert.All(system.Zombies, z => Assert.Equal(EZombieState.Chase, z.State));
+        Assert.All(system.Zombies, z => Assert.NotEmpty(z.PathPoints));
+
+        // Player 2 steps in on the other side, closer than player 1: the whole horde re-targets on the
+        // same detect scan, and only MaxRepathsPerTick of them can be served this tick.
+        var before = system.Zombies.Select(z => z.Position).ToList();
+        queries = 0;
+        var second = Player(2, new Vector3(0, 5, -12), UnturnedGodot.Player.EPlayerStance.Sprint, moving: true);
+        system.Tick(new[] { first, second }, UnturnedGodot.Net.ServerSimulation.TickRate);
+
+        Assert.All(system.Zombies, z => Assert.Equal(2, z.TargetPlayer));
+        Assert.Equal(ZombieSystem.MaxRepathsPerTick, queries); // the queue really did overflow
+        int routeless = 0, frozen = 0;
+        for (int i = 0; i < system.Zombies.Count; i++)
+        {
+            if (system.Zombies[i].PathPoints.Count == 0)
+                routeless++;
+            if (system.Zombies[i].Position == before[i])
+                frozen++;
+        }
+        Assert.Equal(0, routeless); // Horde - MaxRepathsPerTick of them, when the route is discarded
+        Assert.Equal(0, frozen);
     }
 
     private static List<NavFlag> OneTriangle(float halfExtent, float y) => new()

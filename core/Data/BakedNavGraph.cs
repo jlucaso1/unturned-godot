@@ -882,9 +882,28 @@ public sealed class BakedNavGraph
             float total = leftInset + rightInset;
             if (total > budget && total > 0f)
             {
-                float share = budget / total;
-                leftInset *= share;
-                rightInset *= share;
+                if (leftInset > 0f && rightInset > 0f)
+                {
+                    float half = budget * 0.5f;
+                    float leftCapped = MathF.Min(leftInset, half);
+                    float rightCapped = MathF.Min(rightInset, half);
+                    float spare = budget - leftCapped - rightCapped;
+                    if (spare > 0f)
+                    {
+                        if (leftCapped < leftInset)
+                            leftCapped = MathF.Min(leftInset, leftCapped + spare);
+                        else if (rightCapped < rightInset)
+                            rightCapped = MathF.Min(rightInset, rightCapped + spare);
+                    }
+                    leftInset = leftCapped;
+                    rightInset = rightCapped;
+                }
+                else
+                {
+                    float share = budget / total;
+                    leftInset *= share;
+                    rightInset *= share;
+                }
             }
             if (leftInset <= 0f && rightInset <= 0f)
                 return new Portal(left, right);
