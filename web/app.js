@@ -24,8 +24,6 @@ const ui = {
 
 // Object URLs for map artwork, revoked whenever the listing is replaced.
 let artwork = [];
-// The folder currently being shown, so the artwork can be read back out of it lazily.
-let current = null;
 
 start();
 
@@ -66,10 +64,19 @@ async function restoreSaved() {
 async function onPick() {
     const handle = await pickDirectory({ id: "unturned-install" });
     if (handle === null) return;
-    await saveHandle(handle);
-    ui.forget.hidden = false;
+
+    // Remembering the pick is a convenience; being able to read the folder the player just granted is
+    // the point. A browser with storage blocked (private windows, enterprise policy) rejects the write,
+    // and that must cost the reconnect button, not the scan.
+    let remembered = true;
+    try {
+        await saveHandle(handle);
+    } catch {
+        remembered = false;
+    }
+    ui.forget.hidden = !remembered;
     ui.reconnect.hidden = true;
-    await probe(new HandleFs(handle));
+    await probe(new HandleFs(handle), remembered ? null : "This browser will not remember the pick.");
 }
 
 async function onReconnect() {
@@ -83,7 +90,9 @@ async function onReconnect() {
 }
 
 async function onForget() {
-    await forgetHandle();
+    // Retire any scan still in flight, so it cannot repaint the listing this is about to clear.
+    generation++;
+    await forgetHandle().catch(() => {});
     ui.forget.hidden = true;
     ui.reconnect.hidden = true;
     ui.summary.hidden = true;
@@ -98,21 +107,28 @@ async function onFallbackPick(event) {
     await probe(new ListingFs(files));
 }
 
-async function probe(fs) {
+// Scans overlap: restoring a saved folder starts one on load, and the player can pick a different folder
+// while it is still running. Without a generation, whichever finishes last wins — so a slow restored
+// Steam-library scan could paint over the install the player just chose, and its artwork would be read
+// out of the wrong folder. Only the newest scan is allowed to render.
+let generation = 0;
+
+async function probe(fs, note = null) {
+    const scan = ++generation;
     setStatus("Scanning...");
-    current = fs;
     const started = performance.now();
     let result;
     try {
         result = await probeInstall(fs);
     } catch (error) {
-        setStatus(`Could not read that folder: ${error?.message ?? error}`);
+        if (scan === generation) setStatus(`Could not read that folder: ${error?.message ?? error}`);
         return;
     }
-    render(result, performance.now() - started);
+    if (scan !== generation) return;
+    render(fs, result, performance.now() - started, note);
 }
 
-function render(result, elapsedMs) {
+function render(fs, result, elapsedMs, note) {
     clearMaps();
 
     if (result.kind === PickKind.Unknown) {
@@ -124,7 +140,8 @@ function render(result, elapsedMs) {
     const playable = result.maps.filter((map) => map.supported).length;
     setStatus(
         `Scanned "${result.rootName}" in ${elapsedMs.toFixed(0)} ms — ` +
-            `${result.maps.length} map folder${result.maps.length === 1 ? "" : "s"}, ${playable} with Landscape tiles.`,
+            `${result.maps.length} map folder${result.maps.length === 1 ? "" : "s"}, ${playable} with Landscape tiles.` +
+            (note === null ? "" : ` ${note}`),
     );
 
     ui.summary.hidden = false;
@@ -146,17 +163,17 @@ function render(result, elapsedMs) {
               : "outside the granted folder — pick the Steam library instead to include them",
     );
 
-    for (const map of result.maps) ui.maps.append(mapCard(map));
+    for (const map of result.maps) ui.maps.append(mapCard(fs, map));
 }
 
-function mapCard(map) {
+function mapCard(fs, map) {
     const card = document.createElement("article");
     card.className = "card" + (map.supported ? "" : " unsupported");
 
     const image = document.createElement("div");
     image.className = "art";
     card.append(image);
-    void showArtwork(image, map);
+    void showArtwork(fs, image, map);
 
     const body = document.createElement("div");
     body.className = "body";
@@ -189,11 +206,13 @@ function mapCard(map) {
     return card;
 }
 
-// The map's own artwork, read straight off the player's disk as a blob: URL.
-async function showArtwork(container, map) {
+// The map's own artwork, read straight off the player's disk as a blob: URL. The folder is passed in
+// rather than read from module state, so a card always loads its image out of the folder it came from
+// even if another scan has started since.
+async function showArtwork(fs, container, map) {
     const source = map.previewPath ?? map.chartPath ?? map.iconPath;
-    if (source === null || source === undefined || current === null) return;
-    const url = await current.objectUrl(source);
+    if (source === null || source === undefined) return;
+    const url = await fs.objectUrl(source).catch(() => null);
     if (url === null) return;
     artwork.push(url);
     const image = document.createElement("img");

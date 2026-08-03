@@ -14,7 +14,10 @@ import { normalize } from "./paths.js";
 const TILE_SIZE = 1024;
 // The game's Steam app id, which is also its workshop content folder.
 const WORKSHOP_APP_ID = "304930";
-const TILE_PATTERN = /^Tile_(-?\d+)_(-?\d+)(?:_Source)?\.heightmap$/i;
+// core/Data/LevelInfo.cs's TileRegex, copied exactly — including its case sensitivity and its refusal of
+// the suffixless form. A map holding Tile_0_0.heightmap has no tiles the desktop can load, so counting
+// it here would advertise a map as playable that is not.
+const TILE_PATTERN = /^Tile_(-?\d+)_(-?\d+)_Source\.heightmap$/;
 
 export const MapSource = Object.freeze({ Official: "Official", Workshop: "Workshop" });
 
@@ -63,7 +66,7 @@ export async function findMasterBundle(fs, installPath, platform = currentPlatfo
     const bundles = join(installPath, "Bundles");
     for (const suffix of suffixesFor(platform)) {
         const path = join(bundles, `core${suffix}.masterbundle`);
-        const stat = await fs.stat(path);
+        const stat = await safe(fs.stat(path), null);
         if (stat !== null) return { path, size: stat.size, suffix: suffix || "(windows)" };
     }
     return null;
@@ -97,7 +100,7 @@ export function searchDirectories({ installPath, workshopPath }) {
 // Reads one map folder, or null when it is not a map. Level.dat is what every map has — same test as
 // MapCatalog.Read.
 export async function readMap(fs, mapPath, source) {
-    if (!(await fs.isFile(join(mapPath, "Level.dat")))) return null;
+    if (!(await safe(fs.isFile(join(mapPath, "Level.dat")), false))) return null;
 
     const folder = normalize(mapPath).split("/").pop() ?? "";
     const localization = await readLocalization(fs, mapPath);
@@ -115,21 +118,39 @@ export async function readMap(fs, mapPath, source) {
         // Pre-2020 maps store terrain as one legacy heightmap instead of Landscape tiles; this port does
         // not read those, so they are listed and marked rather than hidden.
         supported: count > 0,
-        iconPath: (await fs.isFile(join(mapPath, "Icon.png"))) ? join(mapPath, "Icon.png") : null,
-        previewPath: (await fs.isFile(join(mapPath, "Preview.png"))) ? join(mapPath, "Preview.png") : null,
-        chartPath: (await fs.isFile(join(mapPath, "Chart.png"))) ? join(mapPath, "Chart.png") : null,
+        iconPath: await existingFile(fs, mapPath, "Icon.png"),
+        previewPath: await existingFile(fs, mapPath, "Preview.png"),
+        chartPath: await existingFile(fs, mapPath, "Chart.png"),
     };
 }
 
+async function existingFile(fs, mapPath, name) {
+    const path = join(mapPath, name);
+    return (await safe(fs.isFile(path), false)) ? path : null;
+}
+
+// One unreadable file must not take down the catalogue with it. Every read in core/ that feeds the map
+// browser is already guarded this way — TryReadAllText swallows IOException, LevelInfo.EnumerateTiles
+// turns an unlistable directory into zero tiles, SafeEnumerateDirectories into no entries — because a
+// map the player cannot read is one missing entry, not a folder that failed to open. A picked directory
+// is live: files move, permissions change, and a removable drive can vanish mid-scan.
+async function safe(promise, fallback) {
+    try {
+        return await promise;
+    } catch {
+        return fallback;
+    }
+}
+
 async function readLocalization(fs, mapPath) {
-    const text = await fs.readText(join(mapPath, "English.dat"));
+    const text = await safe(fs.readText(join(mapPath, "English.dat")), null);
     if (text === null) return { name: null, description: null };
     const values = parseDatTopLevel(text);
     return { name: values.get("Name") ?? null, description: values.get("Description") ?? null };
 }
 
 async function readCategory(fs, mapPath) {
-    const text = await fs.readText(join(mapPath, "Config.json"));
+    const text = await safe(fs.readText(join(mapPath, "Config.json")), null);
     if (text === null) return null;
     try {
         const config = JSON.parse(stripJsonComments(text));
@@ -152,7 +173,7 @@ function stripJsonComments(text) {
 // Tile count and the edge of the square they span, in metres — MapCatalog.MeasureLandscape over
 // LevelInfo.EnumerateTiles.
 async function measureLandscape(fs, mapPath) {
-    const entries = await fs.listFiles(join(mapPath, "Landscape/Heightmaps"));
+    const entries = await safe(fs.listFiles(join(mapPath, "Landscape/Heightmaps")), []);
     let minX = Infinity;
     let maxX = -Infinity;
     let minY = Infinity;
@@ -210,7 +231,8 @@ export async function probeInstall(fs, { platform = currentPlatform() } = {}) {
         rootName: fs.name,
         installPath,
         // The workshop content directory is only inside the grant when a Steam library was picked.
-        workshopPath: workshopPath !== null && (await fs.isDirectory(workshopPath)) ? workshopPath : null,
+        workshopPath:
+            workshopPath !== null && (await safe(fs.isDirectory(workshopPath), false)) ? workshopPath : null,
         workshopReachable: workshopPath !== null,
         masterBundle,
         reason:
@@ -225,10 +247,16 @@ export async function probeInstall(fs, { platform = currentPlatform() } = {}) {
 // with a workshop item's map allowed to sit one folder deeper.
 export async function scanMaps(fs, located) {
     const maps = [];
-    const seen = new Set();
+    const seenPaths = new Set();
+    // Folder name -> index of a *placeholder* entry a real subscribed map may replace. Only placeholders
+    // ever claim a name, which is the part that matters: folder names are not unique across Steam
+    // workshop items, so two subscribed maps both called "Ireland" are two independent maps and both
+    // belong in the list. Deduplication is by path.
+    const placeholderByName = new Map();
+    const bundledWorkshopRoot = join(located.installPath, "Bundles/Workshop/Maps");
 
     for (const { path, source } of searchDirectories(located)) {
-        for (const candidate of await fs.listDirectories(path)) {
+        for (const candidate of await safe(fs.listDirectories(path), [])) {
             const entry = await readMap(fs, candidate.path, source);
             if (entry !== null) {
                 add(entry);
@@ -237,7 +265,7 @@ export async function scanMaps(fs, located) {
             if (source !== MapSource.Workshop) continue;
 
             // A workshop item wraps its map in one more folder level, and may hold a mod and no map.
-            for (const nested of await fs.listDirectories(candidate.path)) {
+            for (const nested of await safe(fs.listDirectories(candidate.path), [])) {
                 const nestedEntry = await readMap(fs, nested.path, source);
                 if (nestedEntry !== null) add(nestedEntry);
             }
@@ -247,18 +275,28 @@ export async function scanMaps(fs, located) {
     maps.sort(compareForMenu);
     return maps;
 
+    // MapCatalog.Scan's Add, including the part that is easy to lose: after a subscribed map replaces a
+    // placeholder, the name slot is *released*, so the next item that happens to use the same folder
+    // name is listed on its own instead of being folded into the first.
     function add(entry) {
-        if (seen.has(entry.path)) return;
-        seen.add(entry.path);
-        // A folder name can appear both as a stale official placeholder and as the real subscribed
-        // item; prefer whichever one actually has tiles, as MapCatalog does.
-        const existing = maps.findIndex(
-            (map) => map.folderName.toLowerCase() === entry.folderName.toLowerCase(),
-        );
-        if (existing === -1) {
+        if (seenPaths.has(entry.path)) return;
+        seenPaths.add(entry.path);
+
+        // An unsupported official folder, and the game's own copy under Bundles/Workshop/Maps, can both
+        // be stale stand-ins for a map the player is actually subscribed to.
+        const bundledCopy = entry.path.startsWith(`${bundledWorkshopRoot}/`);
+        const placeholder = bundledCopy || (entry.source === MapSource.Official && !entry.supported);
+        const key = entry.folderName.toLowerCase();
+        const index = placeholderByName.get(key);
+
+        if (index === undefined) {
+            if (placeholder) placeholderByName.set(key, maps.length);
             maps.push(entry);
-        } else if (entry.supported && !maps[existing].supported) {
-            maps[existing] = entry;
+        } else if (entry.source === MapSource.Workshop && !bundledCopy) {
+            maps[index] = entry;
+            placeholderByName.delete(key);
+        } else if (entry.supported && !maps[index].supported) {
+            maps[index] = entry;
         }
     }
 }

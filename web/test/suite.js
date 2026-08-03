@@ -53,9 +53,39 @@ function base64ToBytes(base64) {
 function fileListFrom(manifest, rootName) {
     return manifest.entries.map((entry) => {
         const bytes = entry.data === null ? new Uint8Array(0) : base64ToBytes(entry.data);
-        const file = new File([bytes], entry.path.split("/").pop());
-        Object.defineProperty(file, "webkitRelativePath", { value: `${rootName}/${entry.path}` });
-        return file;
+        return fileFor(entry.path, rootName, bytes);
+    });
+}
+
+function fileFor(path, rootName, contents) {
+    const file = new File([contents], path.split("/").pop());
+    Object.defineProperty(file, "webkitRelativePath", { value: `${rootName}/${path}` });
+    return file;
+}
+
+// A hand-built install, for the layouts no real download contains: same-named workshop maps, tiles named
+// the way the engine will not accept, a map folder that cannot be read. ListingFs is a real
+// implementation of the filesystem interface, so the probe runs against it unmodified.
+function syntheticFs(tree, rootName = "Unturned") {
+    return new ListingFs(
+        Object.entries(tree).map(([path, contents]) => fileFor(path, rootName, contents ?? "")),
+    );
+}
+
+// Wraps a filesystem so one directory listing fails the way a removed folder or a revoked permission
+// would, leaving every other read working.
+function withUnreadableDirectory(fs, unreadable) {
+    return new Proxy(fs, {
+        get(target, property) {
+            const value = Reflect.get(target, property);
+            if (property !== "listFiles" && property !== "listDir" && property !== "listDirectories") {
+                return typeof value === "function" ? value.bind(target) : value;
+            }
+            return async (path, ...rest) => {
+                if (String(path) === unreadable) throw new DOMException("simulated", "NotReadableError");
+                return value.call(target, path, ...rest);
+            };
+        },
     });
 }
 
@@ -70,8 +100,153 @@ export async function runSuite(manifest) {
     await steamLibraryLayout(manifest);
     await fallbackParity(manifest);
     await rangeReads(manifest);
+    await tileNaming();
+    await workshopNameCollisions();
+    await unreadableMapIsolation();
+    await walkParity(manifest);
 
     return results;
+}
+
+// A map folder with the given tiles, plus the files every map has.
+function mapTree(prefix, tiles) {
+    const tree = { [`${prefix}/Level.dat`]: "", [`${prefix}/English.dat`]: "Name A Map" };
+    for (const tile of tiles) tree[`${prefix}/Landscape/Heightmaps/${tile}`] = "";
+    return tree;
+}
+
+// LevelInfo.TileRegex accepts only Tile_<x>_<y>_Source.heightmap. Counting anything else would advertise
+// a map as playable that the desktop cannot load a single tile of.
+async function tileNaming() {
+    const accepted = await probeInstall(
+        syntheticFs({
+            "Bundles/core_linux.masterbundle": "",
+            ...mapTree("Maps/Good", ["Tile_0_0_Source.heightmap", "Tile_-1_2_Source.heightmap"]),
+        }),
+        { platform: "linux" },
+    );
+    equal("engine-named tiles count", accepted.maps[0]?.tileCount, 2);
+    equal("engine-named tiles make a map playable", accepted.maps[0]?.supported, true);
+
+    const rejected = await probeInstall(
+        syntheticFs({
+            "Bundles/core_linux.masterbundle": "",
+            ...mapTree("Maps/Bad", [
+                "Tile_0_0.heightmap",
+                "tile_1_1_source.heightmap",
+                "Tile_x_y_Source.heightmap",
+            ]),
+        }),
+        { platform: "linux" },
+    );
+    equal("suffixless tiles do not count", rejected.maps[0]?.tileCount, 0);
+    equal("a map with no engine-readable tiles is not playable", rejected.maps[0]?.supported, false);
+}
+
+// Folder names are not unique across Steam workshop items, so two subscribed maps that both use one are
+// two maps. Only a *placeholder* claims a name, and a subscribed map that replaces one releases it.
+async function workshopNameCollisions() {
+    const distinct = await probeInstall(
+        syntheticFs({
+            "steamapps/common/Unturned/Bundles/core_linux.masterbundle": "",
+            ...mapTree("steamapps/workshop/content/304930/111/Ireland", ["Tile_0_0_Source.heightmap"]),
+            ...mapTree("steamapps/workshop/content/304930/222/Ireland", ["Tile_0_0_Source.heightmap"]),
+        }),
+        { platform: "linux" },
+    );
+    equal("two workshop maps sharing a folder name are both listed", distinct.maps.length, 2);
+    check(
+        "and keep their own paths",
+        new Set(distinct.maps.map((map) => map.path)).size === 2,
+        distinct.maps.map((map) => map.path).join(", "),
+    );
+
+    // An unsupported official folder is a stand-in: the first subscribed map replaces it, and the second
+    // is still its own entry rather than being folded into the first.
+    const replaced = await probeInstall(
+        syntheticFs({
+            "steamapps/common/Unturned/Bundles/core_linux.masterbundle": "",
+            ...mapTree("steamapps/common/Unturned/Maps/Ireland", []),
+            ...mapTree("steamapps/workshop/content/304930/111/Ireland", ["Tile_0_0_Source.heightmap"]),
+            ...mapTree("steamapps/workshop/content/304930/222/Ireland", ["Tile_0_0_Source.heightmap"]),
+        }),
+        { platform: "linux" },
+    );
+    equal("a placeholder is replaced, not stacked", replaced.maps.length, 2);
+    check(
+        "and the replacement releases the name",
+        replaced.maps.every((map) => map.supported && map.source === "Workshop"),
+        replaced.maps.map((map) => `${map.path}:${map.supported}`).join(", "),
+    );
+}
+
+// One unreadable map folder is one missing entry, not a folder that failed to open — LevelInfo's own
+// catch turns an unlistable Heightmaps directory into zero tiles.
+async function unreadableMapIsolation() {
+    const fs = withUnreadableDirectory(
+        syntheticFs({
+            "Bundles/core_linux.masterbundle": "",
+            ...mapTree("Maps/Broken", ["Tile_0_0_Source.heightmap"]),
+            ...mapTree("Maps/Fine", ["Tile_0_0_Source.heightmap"]),
+        }),
+        "Maps/Broken/Landscape/Heightmaps",
+    );
+
+    let result;
+    try {
+        result = await probeInstall(fs, { platform: "linux" });
+    } catch (error) {
+        check("an unreadable map does not abort the scan", false, String(error));
+        return;
+    }
+
+    check("an unreadable map does not abort the scan", true);
+    equal("both maps are still listed", result.maps.length, 2);
+    equal(
+        "the readable map stays playable",
+        result.maps.find((m) => m.folderName === "Fine")?.supported,
+        true,
+    );
+    equal(
+        "the unreadable map is marked unplayable",
+        result.maps.find((m) => m.folderName === "Broken")?.supported,
+        false,
+    );
+}
+
+// The two backends are advertised as interchangeable, so walk has to mean the same thing in both:
+// `filter` selects files, `prune` stops a directory from being descended into.
+async function walkParity(manifest) {
+    const root = await seed(manifest, "install");
+    const handles = new HandleFs(root);
+    const listing = new ListingFs(fileListFrom(manifest, "Unturned"));
+
+    const isDat = (entry) => entry.name.endsWith(".dat");
+    const isLandscape = (entry) => entry.name === "Landscape";
+
+    for (const [name, options] of [
+        ["unfiltered", {}],
+        ["with a file filter", { filter: isDat }],
+        ["with a pruned directory", { prune: isLandscape }],
+        ["with both", { filter: isDat, prune: isLandscape }],
+    ]) {
+        const viaHandles = (await handles.walk("Maps", options)).sort();
+        const viaListing = (await listing.walk("Maps", options)).sort();
+        equal(`walk agrees across backends ${name}`, viaListing.join("|"), viaHandles.join("|"));
+    }
+
+    const filtered = await handles.walk("Maps", { filter: isDat });
+    check(
+        "a file filter selects files rather than pruning",
+        filtered.length > 0 && filtered.every((path) => path.endsWith(".dat")),
+        `${filtered.length} results`,
+    );
+    const pruned = await handles.walk("Maps", { prune: isLandscape });
+    check(
+        "a directory prune drops that subtree",
+        pruned.length > 0 && !pruned.some((path) => path.includes("/Landscape/")),
+        `${pruned.length} results`,
+    );
 }
 
 function paths() {
@@ -107,6 +282,48 @@ function dat() {
     );
     check("dat skips nested blocks", values.get("Name") === "Prince Edward Island", "nested Name leaked out");
     equal("dat unquotes values", values.get("Quoted_Key"), "quoted value");
+
+    // The three rules copied from DatParser rather than approximated. Each of these was wrong once, and
+    // each way of being wrong shows the browser a different map than the catalogue does.
+
+    // ReadStringValue takes the rest of the line: '/' only opens a comment where a token would start.
+    equal(
+        "dat keeps slashes inside a value",
+        parseDatTopLevel("Description See https://example.com/maps for more").get("Description"),
+        "See https://example.com/maps for more",
+    );
+    equal(
+        "dat still honours a whole-line comment",
+        parseDatTopLevel(["   / not a key", "Name Kept"].join("\n")).get("Name"),
+        "Kept",
+    );
+
+    // DatDictionary compares keys with OrdinalIgnoreCase, and the last spelling wins.
+    equal("dat matches keys case-insensitively", parseDatTopLevel("nAmE Cased").get("Name"), "Cased");
+    equal(
+        "dat keeps the last duplicate key",
+        parseDatTopLevel(["Name First", "NAME Second"].join("\n")).get("name"),
+        "Second",
+    );
+
+    // DatParser.Unescape: n and t become control characters, everything else keeps the escaped char.
+    equal(
+        "dat decodes escapes in an unquoted value",
+        parseDatTopLevel("Description One\\nTwo\\tThree\\\\Four").get("Description"),
+        "One\nTwo\tThree\\Four",
+    );
+    equal(
+        "dat decodes escapes in a quoted value",
+        parseDatTopLevel('Name "a \\"quoted\\" name"').get("Name"),
+        'a "quoted" name',
+    );
+
+    // `Key {` reads as a key whose value is a brace, so its contents are not top-level either.
+    equal(
+        "dat skips an inline-brace block",
+        parseDatTopLevel(["Nested {", "    Name Leak", "}", "Name Kept"].join("\n")).get("Name"),
+        "Kept",
+    );
 }
 
 async function installLayout(manifest) {

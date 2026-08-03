@@ -122,16 +122,28 @@ export class ListingFs {
         return file === null ? null : URL.createObjectURL(file);
     }
 
-    async walk(path = "", { filter = null, maxEntries = Infinity } = {}) {
-        const head = normalize(path) === "" ? "" : `${normalize(path)}/`;
+    // Same contract as HandleFs.walk: `filter` selects files, `prune` skips directories. There is no
+    // tree to stop descending here, so pruning is answered by testing each of a file's ancestors — the
+    // result has to match what a real traversal would have produced, not merely be cheap.
+    async walk(path = "", { filter = null, prune = null, maxEntries = Infinity } = {}) {
+        const root = normalize(path);
+        const head = root === "" ? "" : `${root}/`;
         const found = [];
         for (const key of this.#files.keys()) {
             if (!key.startsWith(head)) continue;
+            if (prune !== null && this.#isPruned(key, root, prune)) continue;
             if (filter !== null && !filter({ name: baseName(key), kind: "file", path: key })) continue;
             found.push(key);
             if (found.length >= maxEntries) break;
         }
         return found;
+    }
+
+    #isPruned(filePath, root, prune) {
+        for (let dir = dirName(filePath); dir !== root && dir !== ""; dir = dirName(dir)) {
+            if (prune({ name: baseName(dir), kind: "directory", path: dir })) return true;
+        }
+        return false;
     }
 
     // The listing is a snapshot taken when the player picked the folder; there is nothing to invalidate

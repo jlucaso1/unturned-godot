@@ -187,22 +187,26 @@ export class HandleFs {
         return file === null ? null : URL.createObjectURL(file);
     }
 
-    // Every file under a subtree, as { path, size }. This is what builds the index the engine bridge
-    // needs up front; `filter` keeps a scan of a whole Steam library from walking into Bundles/ (tens of
-    // thousands of entries) when only Maps/ is wanted.
-    async walk(path = "", { filter = null, maxEntries = Infinity } = {}) {
+    // Every file path under a subtree. This is what builds the index the engine bridge needs up front.
+    //
+    // `filter` decides which *files* are returned and `prune` decides which *directories* are not
+    // descended into — the second is what keeps a scan of a whole Steam library out of Bundles/ (tens of
+    // thousands of entries) when only Maps/ is wanted. They are two options rather than one predicate
+    // because ListingFs has to answer the same questions from a flat listing, and one predicate applied
+    // to both kinds means the two backends build different indexes from the same install.
+    async walk(path = "", { filter = null, prune = null, maxEntries = Infinity } = {}) {
         const found = [];
         const queue = [normalize(path)];
         while (queue.length > 0 && found.length < maxEntries) {
             const current = queue.shift();
             for (const entry of await this.listDir(current)) {
-                if (filter !== null && !filter(entry)) continue;
                 if (entry.kind === "directory") {
-                    queue.push(entry.path);
-                } else {
-                    found.push(entry.path);
-                    if (found.length >= maxEntries) break;
+                    if (prune === null || !prune(entry)) queue.push(entry.path);
+                    continue;
                 }
+                if (filter !== null && !filter(entry)) continue;
+                found.push(entry.path);
+                if (found.length >= maxEntries) break;
             }
         }
         return found;
