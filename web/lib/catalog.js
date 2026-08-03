@@ -198,7 +198,12 @@ async function measureLandscape(fs, mapPath) {
     }
 
     if (count === 0) return { count: 0, sizeMetres: 0 };
-    const span = Math.max(maxX - minX, maxY - minY) + 1;
+    // MeasureLandscape does this in 32-bit integers, so a span between coordinates at opposite ends of
+    // the range wraps rather than growing. `| 0` reproduces that: without it a map with tiles at both
+    // int extremes would be described here as trillions of metres across and as 1024 on the desktop.
+    const spanX = (maxX - minX) | 0;
+    const spanY = (maxY - minY) | 0;
+    const span = (Math.max(spanX, spanY) + 1) | 0;
     return { count, sizeMetres: span * TILE_SIZE };
 }
 

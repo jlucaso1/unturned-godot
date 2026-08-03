@@ -24,6 +24,9 @@ const ui = {
 
 // Object URLs for map artwork, revoked whenever the listing is replaced.
 let artwork = [];
+// Cards waiting to come near the viewport before their artwork is read, and the observer watching them.
+let artObserver = null;
+const artQueue = new Map();
 
 // Work overlaps: restoring a saved folder starts on load, the player can pick a different one while it
 // is still running, and both paths write the same status line and listing. Without a generation whichever
@@ -195,10 +198,10 @@ async function probe(fs, note = null, token = null) {
         return;
     }
     if (!isCurrent(scan)) return;
-    render(fs, result, performance.now() - started, note);
+    render(fs, result, performance.now() - started, note, scan);
 }
 
-function render(fs, result, elapsedMs, note) {
+function render(fs, result, elapsedMs, note, scan) {
     clearMaps();
 
     if (result.kind === PickKind.Unknown) {
@@ -233,17 +236,17 @@ function render(fs, result, elapsedMs, note) {
               : "outside the granted folder — pick the Steam library instead to include them",
     );
 
-    for (const map of result.maps) ui.maps.append(mapCard(fs, map));
+    for (const map of result.maps) ui.maps.append(mapCard(fs, map, scan));
 }
 
-function mapCard(fs, map) {
+function mapCard(fs, map, token) {
     const card = document.createElement("article");
     card.className = "card" + (map.supported ? "" : " unsupported");
 
     const image = document.createElement("div");
     image.className = "art";
     card.append(image);
-    void showArtwork(fs, image, map);
+    observeArtwork(fs, image, map, token);
 
     const body = document.createElement("div");
     body.className = "body";
@@ -276,21 +279,58 @@ function mapCard(fs, map) {
     return card;
 }
 
+// Artwork loads when its card comes near the viewport, not when the card is created. A Steam library
+// can hold hundreds of maps, and decoding every full-size preview at once is enough to stall the page —
+// `<img loading="lazy">` used to give this for free, and stopped applying once the decode moved ahead
+// of attaching the element (which is what proves a fallback candidate is really an image).
+function observeArtwork(fs, container, map, token) {
+    if (typeof IntersectionObserver !== "function") {
+        void showArtwork(fs, container, map, token);
+        return;
+    }
+    if (artObserver === null) {
+        artObserver = new IntersectionObserver(
+            (entries, observer) => {
+                for (const entry of entries) {
+                    if (!entry.isIntersecting) continue;
+                    observer.unobserve(entry.target);
+                    const pending = artQueue.get(entry.target);
+                    artQueue.delete(entry.target);
+                    if (pending !== undefined) void pending();
+                }
+            },
+            // Start a little before the card is actually on screen, so scrolling does not show gaps.
+            { rootMargin: "600px" },
+        );
+    }
+    artQueue.set(container, () => showArtwork(fs, container, map, token));
+    artObserver.observe(container);
+}
+
 // The map's own artwork, read straight off the player's disk as a blob: URL. The folder is passed in
 // rather than read from module state, so a card always loads its image out of the folder it came from
-// even if another scan has started since.
+// even if another scan has started since — and the scan's token is checked after every await, so a load
+// that outlives its listing revokes what it made instead of leaking it into the next one.
 //
 // The candidates are tried until one actually decodes, not until one merely exists. MapPicker.cs does
 // `LoadTexture(map.PreviewPath) ?? LoadTexture(map.ChartPath)` for the same reason: a Preview.png that
 // is empty, truncated or in a format the browser will not decode should fall through to the chart, not
 // leave a broken image where the desktop shows a picture.
-async function showArtwork(fs, container, map) {
+async function showArtwork(fs, container, map, token) {
     for (const source of [map.previewPath, map.chartPath, map.iconPath]) {
         if (source === null || source === undefined) continue;
+        if (!isCurrent(token)) return;
+
         const url = await fs.objectUrl(source).catch(() => null);
         if (url === null) continue;
+        if (!isCurrent(token)) {
+            URL.revokeObjectURL(url);
+            return;
+        }
         artwork.push(url);
+
         const image = await decode(url);
+        if (!isCurrent(token)) return; // clearMaps owns this URL now and has already revoked it
         if (image === null) continue;
         image.alt = "";
         container.append(image);
@@ -317,6 +357,9 @@ function addFact(label, value) {
 }
 
 function clearMaps() {
+    artObserver?.disconnect();
+    artObserver = null;
+    artQueue.clear();
     for (const url of artwork) URL.revokeObjectURL(url);
     artwork = [];
     ui.maps.innerHTML = "";

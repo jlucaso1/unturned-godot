@@ -114,10 +114,20 @@ export function parseDatTopLevel(text) {
             continue;
         }
 
-        const { key, value } = splitKeyValue(rest);
-        if (key === null) continue;
-        values.set(key, value);
-        pending = key;
+        // A line can hold more than one pair. ReadQuoted stops at its closing quote and the tokenizer
+        // picks up right after it, so `Name "Map" Description "Blurb"` is two keys — while an *unquoted*
+        // value runs to the end of the line, so `Name Map Description Blurb` is one key whose value is
+        // "Map Description Blurb". Only a quoted value leaves anything to keep reading.
+        let cursor = rest;
+        while (cursor !== "") {
+            const { key, value, remainder } = splitKeyValue(cursor);
+            if (key === null) break;
+            values.set(key, value);
+            pending = key;
+            // Defensive: a remainder that did not shrink would spin here forever.
+            if (remainder.length >= cursor.length) break;
+            cursor = remainder;
+        }
     }
 
     return values;
@@ -199,37 +209,45 @@ function* logicalLines(text) {
     if (start < text.length) yield text.slice(start);
 }
 
-// The key is the first whitespace-delimited word, or a quoted string; the value is everything after it on
-// the line, brace or not — ReadStringValue is reached unconditionally once a key has been read.
+// One key/value pair off the front of a line, plus whatever is left to keep reading. The key is the
+// first whitespace-delimited word or a quoted string; the value is everything after it on the line,
+// brace or not — ReadStringValue is reached unconditionally once a key has been read.
 function splitKeyValue(line) {
     let key;
     let rest;
     if (line.startsWith('"')) {
         const end = findClosingQuote(line, 1);
-        if (end === -1) return { key: unescape(line.slice(1)), value: "" };
+        if (end === -1) return { key: unescape(line.slice(1)), value: "", remainder: "" };
         key = unescape(line.slice(1, end));
-        // ReadQuoted swallows one comma that immediately follows the closing quote, which is what makes
-        // `"Name", "Map Name"` a key and a value rather than a key and a value starting with a comma.
-        // Only immediately: a space before the comma leaves it in the value, there as here.
-        let after = end + 1;
-        if (line[after] === ",") after++;
-        rest = line.slice(after).replace(/^[ \t]+/, "");
+        rest = afterQuote(line, end);
     } else {
         const space = line.search(/[ \t]/);
-        if (space === -1) return { key: line, value: "" };
+        if (space === -1) return { key: line, value: "", remainder: "" };
         key = line.slice(0, space);
         rest = line.slice(space + 1).replace(/^[ \t]+/, "");
     }
 
-    return { key, value: rest === "" ? "" : readValue(rest) };
+    if (rest === "") return { key, value: "", remainder: "" };
+    const { value, remainder } = readValue(rest);
+    return { key, value, remainder };
 }
 
-// DatParser.ReadStringValue: a quoted value ends at its closing quote, an unquoted one at end of line.
-// Either way the escapes are decoded.
+// DatParser.ReadStringValue: a quoted value ends at its closing quote and the tokenizer carries on from
+// there; an unquoted one runs to the end of the line and leaves nothing behind. Either way escapes are
+// decoded.
 function readValue(rest) {
-    if (rest[0] !== '"') return unescape(rest);
+    if (rest[0] !== '"') return { value: unescape(rest), remainder: "" };
     const end = findClosingQuote(rest, 1);
-    return unescape(end === -1 ? rest.slice(1) : rest.slice(1, end));
+    if (end === -1) return { value: unescape(rest.slice(1)), remainder: "" };
+    return { value: unescape(rest.slice(1, end)), remainder: afterQuote(rest, end) };
+}
+
+// What follows a closing quote at `end`, with the one comma ReadQuoted swallows taken off. Only
+// immediately: a space before the comma leaves it in whatever comes next, there as here.
+function afterQuote(text, end) {
+    let after = end + 1;
+    if (text[after] === ",") after++;
+    return text.slice(after).replace(/^[ \t]+/, "");
 }
 
 // The closing quote of a run that started at `from`, skipping escaped quotes.

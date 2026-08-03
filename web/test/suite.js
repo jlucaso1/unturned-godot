@@ -192,6 +192,20 @@ async function tileNaming() {
         { platform: "linux" },
     );
     equal("out-of-range tile coordinates do not count", overflowing.maps[0]?.tileCount, 1);
+
+    // Both endpoints are valid Int32, but their difference is not: MeasureLandscape does the span in
+    // 32-bit integers, so it wraps to -1 and the map measures 1024 m rather than trillions.
+    const wrapping = await probeInstall(
+        syntheticFs({
+            "Bundles/core_linux.masterbundle": "",
+            ...mapTree("Maps/Wrap", [
+                "Tile_-2147483648_0_Source.heightmap",
+                "Tile_2147483647_0_Source.heightmap",
+            ]),
+        }),
+        { platform: "linux" },
+    );
+    equal("a span that overflows Int32 wraps as the desktop's does", wrapping.maps[0]?.sizeMetres, 1024);
 }
 
 // MapCatalog.ReadCategory parses Config.json with CommentHandling.Skip *and* AllowTrailingCommas, both
@@ -610,6 +624,19 @@ function dat() {
     const wrapped = parseDatTopLevel("{\nName Wrapped\nDescription Inside\n}");
     equal("a root brace does not hide the keys inside it", wrapped.get("Name"), "Wrapped");
     equal("and the rest of them either", wrapped.get("Description"), "Inside");
+
+    // A quoted value ends at its closing quote and tokenizing continues from there, so one line can hold
+    // several pairs. An unquoted value runs to the end of the line, so it cannot.
+    const pairs = parseDatTopLevel('Name "Map" Description "Blurb"');
+    equal("a line can hold two quoted pairs", pairs.get("Name"), "Map");
+    equal("and the second one is read", pairs.get("Description"), "Blurb");
+    const commaPairs = parseDatTopLevel('"Name", "Map", "Description", "Blurb"');
+    equal("the comma-separated form too", commaPairs.get("Description"), "Blurb");
+    equal(
+        "but an unquoted value still takes the whole line",
+        parseDatTopLevel("Name Map Description Blurb").get("Name"),
+        "Map Description Blurb",
+    );
 
     // The root brace is consumed as a token, so the rest of its line is still tokenized.
     const inlineRoot = parseDatTopLevel("{ Name SameLine\nDescription After\n}");
