@@ -37,7 +37,7 @@ jobs:
 
       # setup-dotnet's built-in cache wants a lock file, which this repo does not have; key on the
       # project files instead, which is what actually decides the resolved graph.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'Directory.Build.props', 'nuget.config') }}
