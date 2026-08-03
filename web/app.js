@@ -145,11 +145,18 @@ async function onReconnect() {
 async function onForget() {
     // Retire any scan still in flight, so it cannot repaint the listing this is about to clear — and
     // keep the token, because the delete is itself an await the player can outrun by picking a folder.
+    const previous = generation;
     const token = claim();
     try {
         await forgetHandle();
     } catch (error) {
         if (!isCurrent(token)) return;
+        // Nothing was cleared, so put the generation back. The cards are still on screen and every
+        // lazy artwork task queued against them carries the old token — leaving them retired would
+        // mean scrolling the listing produced permanently blank artwork while the status says the
+        // folder is still stored and the maps are still usable. Restoring is exact rather than
+        // approximate: isCurrent(token) just proved nothing else claimed in between.
+        generation = previous;
         // "Forget" is the privacy-facing control on this page: reporting success while the handle is
         // still in IndexedDB, and still restorable on the next load, is the one lie it must not tell.
         setStatus(`Could not forget the saved folder: ${error?.message ?? error}. It is still stored.`);

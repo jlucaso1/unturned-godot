@@ -180,6 +180,9 @@ node web/test/run.mjs
 
 # The browser's .dat port against core/Dat/DatParser.cs, over generated documents.
 node web/test/differential.mjs
+
+# The browser's casing tables against the BCL, over every code point.
+node web/test/casing.mjs
 ```
 
 Style and analyzers are enforced via `.editorconfig` + `Directory.Build.props` (`EnableNETAnalyzers`,

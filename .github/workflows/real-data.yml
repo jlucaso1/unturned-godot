@@ -219,6 +219,19 @@ jobs:
             exit 1
           fi
 
+      # The casing tables are exceptions to JavaScript's built-ins, so they rot when either runtime's
+      # Unicode version moves. This compares them against the BCL over every code point. It runs under
+      # Node rather than in the browser on purpose: Chromium's ICU is behind, and does not know some of
+      # the mappings the table exists to override.
+      - name: Check the casing tables against the BCL
+        run: |
+          set -o pipefail
+          node web/test/casing.mjs | tee "$RUNNER_TEMP/casing.log"
+          if grep -q 'skipped' "$RUNNER_TEMP/casing.log"; then
+            echo "The casing check skipped; it was supposed to run."
+            exit 1
+          fi
+
   structural:
     # The tests prove the parsers read the right bytes; nothing proves the world they build keeps its
     # shape. This runs the structural benchmark tier and gates its counts — meshes and materials

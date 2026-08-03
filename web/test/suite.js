@@ -325,7 +325,7 @@ async function bomDecoding() {
         equal(
             `a truncated ${label} tail becomes a replacement character`,
             (await probeInstall(truncated, { platform: "linux" })).maps[0]?.displayName,
-            "Ilha�",
+            "Ilha\uFFFD",
         );
     }
 }
@@ -379,8 +379,8 @@ async function blankLocalizedName() {
     // U+0085 NEXT LINE and JavaScript's trim() does not, and JavaScript strips U+FEFF while .NET does
     // not. Trusting trim() would render a control character as one map's name and drop another's.
     for (const [label, name, expected] of [
-        ["U+0085 is whitespace to .NET", "", "Riverside"],
-        ["U+FEFF is not", "﻿", "﻿"],
+        ["U+0085 is whitespace to .NET", "\u0085", "Riverside"],
+        ["U+FEFF is not", "\uFEFF", "\uFEFF"],
     ]) {
         const probed = await probeInstall(
             syntheticFs({
@@ -540,6 +540,24 @@ async function workshopNameCollisions() {
         { platform: "linux" },
     );
     equal("long s does not fold to S, so both are listed", longS.maps.length, 2);
+
+    // Above the BMP the fold is not simply skipped. A sweep of U+10000..U+10FFFF finds 260 code points
+    // OrdinalIgnoreCase does fold — Deseret among them — so treating every surrogate pair as unfoldable
+    // would be its own divergence. Both directions are pinned: Deseret folds, and the two ranges the
+    // ordinal table has not taken up do not.
+    const deseret = await probeInstall(
+        syntheticFs({
+            "steamapps/common/Unturned/Bundles/core_linux.masterbundle": "",
+            ...mapTree("steamapps/common/Unturned/Maps/\u{10428}", []),
+            ...mapTree("steamapps/workshop/content/304930/111/\u{10400}", ["Tile_0_0_Source.heightmap"]),
+        }),
+        { platform: "linux" },
+    );
+    equal("an astral case pair folds, as it does on the desktop", deseret.maps.length, 1);
+    // The other direction — the two ranges the ordinal table has not taken up — is deliberately not
+    // asserted here. Chromium's ICU does not know those mappings yet either, so a map-count assertion
+    // would pass whether or not the exclusion exists. web/test/casing.mjs checks the table against .NET
+    // directly, under Node, whose ICU is current enough for the question to mean something.
 }
 
 // One unreadable map folder is one missing entry, not a folder that failed to open — LevelInfo's own

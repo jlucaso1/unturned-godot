@@ -10,7 +10,7 @@
 // Skips when the .NET SDK is absent, like the rest of the suite skips without content or a browser.
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,16 +56,23 @@ const PIECES = [
 
 // A deterministic generator: the same documents on every run and every machine, so a failure is a bug
 // report rather than a story about a seed.
+//
+// Math.imul rather than `*`, because the plain multiply is where this quietly stopped being an LCG:
+// `state * 1103515245` exceeds 2^53 for most of the state space, so the low bits round away and the
+// sequence degenerates. It still looked random enough to pass, while leaving three of the thirty pieces
+// unreachable — the corpus was smaller than it claimed to be, which is exactly the failure a generated
+// corpus is supposed to rule out. Taking the *high* bits for the output is the other half: the low bits
+// of an LCG have short periods, so `state % 30` is much weaker than a shift down first.
 function* documents(count) {
     let state = 0x2f6e2b1;
-    const next = () => {
-        state = (state * 1103515245 + 12345) & 0x7fffffff;
-        return state;
+    const next = (bound) => {
+        state = (Math.imul(state, 1103515245) + 12345) >>> 0;
+        return (state >>> 16) % bound;
     };
     for (let n = 0; n < count; n++) {
         const lines = [];
-        const length = 1 + (next() % 6);
-        for (let k = 0; k < length; k++) lines.push(PIECES[next() % PIECES.length]);
+        const length = 1 + next(6);
+        for (let k = 0; k < length; k++) lines.push(PIECES[next(PIECES.length)]);
         yield lines.join("\n");
     }
 }
@@ -75,6 +82,16 @@ function run() {
     // Outside the repo on purpose: Directory.Build.props points every project's output at build/, so a
     // scratch project living there would have its own sources excluded from the compile.
     const project = mkdtempSync(join(tmpdir(), "dat-differential-"));
+    try {
+        compare(cases, project);
+    } finally {
+        // In finally, not on the success path: a build failure or a bad parse would otherwise leave the
+        // scratch project behind in the system temp directory on every run.
+        rmSync(project, { recursive: true, force: true });
+    }
+}
+
+function compare(cases, project) {
     writeFileSync(
         join(project, "dat-differential.csproj"),
         `<Project Sdk="Microsoft.NET.Sdk">
@@ -106,16 +123,28 @@ foreach (string text in cases)
         ["Description"] = parsed.GetString("Description"),
     });
 }
-Console.Write(JsonSerializer.Serialize(outcomes));
+File.WriteAllText(args[0], JsonSerializer.Serialize(outcomes));
 `,
     );
 
-    const stdout = execFileSync(
+    // The outcomes go to a file, not stdout. `dotnet run` writes build diagnostics to the same stream,
+    // so any restore line or warning carrying a '[' would land in the JSON and surface as a parse error
+    // that reads like a harness crash rather than the build message it is.
+    const outcomes = join(project, "outcomes.json");
+    execFileSync(
         "dotnet",
-        ["run", "--project", join(project, "dat-differential.csproj"), "--verbosity", "quiet"],
+        [
+            "run",
+            "--project",
+            join(project, "dat-differential.csproj"),
+            "--verbosity",
+            "quiet",
+            "--",
+            outcomes,
+        ],
         { input: JSON.stringify(cases), encoding: "utf8", maxBuffer: 64 * 1024 * 1024, cwd: repo },
     );
-    const expected = JSON.parse(stdout.slice(stdout.indexOf("[")));
+    const expected = JSON.parse(readFileSync(outcomes, "utf8"));
 
     let checked = 0;
     const failures = [];
@@ -134,7 +163,6 @@ Console.Write(JsonSerializer.Serialize(outcomes));
         }
     }
 
-    rmSync(project, { recursive: true, force: true });
     if (failures.length > 0) {
         console.error(failures.slice(0, 10).join("\n\n"));
         console.error(`\n${failures.length} of ${checked} comparisons disagree.`);

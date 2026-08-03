@@ -208,6 +208,7 @@ npx http-server web -p 8080     # or: python3 -m http.server -d web 8080
 node web/test/run.mjs            # uses UNTURNED_PATH, or build/game-data
 node web/test/run.mjs --keep-open
 node web/test/differential.mjs   # the .dat port against core/Dat/DatParser.cs
+node web/test/casing.mjs         # the casing tables against the BCL
 ```
 
 The suite seeds Chromium's origin-private filesystem from real game content and runs the shipping modules
@@ -216,7 +217,7 @@ the same type `showDirectoryPicker()` returns — so `HandleFs` is exercised on 
 mock. It then drives the demo page end to end with the picker stubbed to hand back that same handle,
 because the one thing no automation can click is the native folder dialog.
 
-165 assertions, covering path handling, the `.dat` reader, install detection (both the install folder and
+166 assertions, covering path handling, the `.dat` reader, install detection (both the install folder and
 the Steam-library layout), map discovery against PEI's real `Level.dat`/`English.dat`/`Config.json` and
 its 16 Landscape tiles, range reads and their clamping, and parity between the two filesystem backends.
 It self-skips when the content or Playwright is missing, like the C# suite's data-backed tests. Files
