@@ -103,6 +103,14 @@ public sealed class BakedNavGraph
     // if it never changes that answer, and the answer is invisible from the outside otherwise.
     internal int ClosestTriangleOf(int flag, Vector3 point) => _flags[flag].ClosestTriangle(point, out _);
 
+    // Test seam: the shortcut's line walk. From outside it is only ever visible as waypoints that did
+    // or did not disappear, which says nothing about WHY one survived.
+    internal bool HasClearLine(int flag, Vector3 from, Vector3 to, int budget = int.MaxValue)
+    {
+        FlagGraph graph = _flags[flag];
+        return graph.HasClearLine(graph.ClosestTriangle(from, out _), from, to, ref budget);
+    }
+
     public (int Connections, long Bytes) AdjacencyStorage
     {
         get
@@ -196,6 +204,7 @@ public sealed class BakedNavGraph
             public readonly PriorityQueue<int, float> Frontier = new();
             public readonly List<int> Reverse = new();
             public readonly List<Portal> Portals = new();
+            public readonly List<Vector3> Shortcut = new();
 
             public SearchWorkspace(int count)
             {
@@ -209,6 +218,7 @@ public sealed class BakedNavGraph
                 Frontier.Clear();
                 Reverse.Clear();
                 Portals.Clear();
+                Shortcut.Clear();
                 if (++_generation == int.MaxValue)
                 {
                     Array.Clear(_generationByTriangle);
@@ -695,6 +705,7 @@ public sealed class BakedNavGraph
         {
             if (start < 0 || goal < 0)
                 return false;
+            int begin = output.Count;
             // Every route starts at the position it was asked from. NavigationServer's paths do, and the
             // movement code reads index 0 as "where I am" and steers towards index 1 — handing it a route
             // that begins at the first portal made it skip that portal and cut the corner through whatever
@@ -791,6 +802,7 @@ public sealed class BakedNavGraph
                 }
                 portals.Add(new Portal(destination, destination));
                 AppendFunnel(output, portals, destination);
+                Shortcut(output, begin, start, workspace.Shortcut);
                 return true;
             }
             finally
@@ -844,6 +856,240 @@ public sealed class BakedNavGraph
 
             Vector3 step = along / length * inset;
             return new Portal(insetLeft ? left + step : left, insetRight ? right - step : right);
+        }
+
+        // Triangles the shortcut pass may walk over one route. It is a ceiling on pathological input, not
+        // a working budget: the case this exists for — open ground, where the destination is visible from
+        // the start — spends one walk and stops. A corridor that admits no shortcut at all is what burns
+        // it, and there the funnel's own route is already the answer, so stopping early costs nothing.
+        private const int ShortcutBudget = 2048;
+
+        // The funnel returns the shortest route INSIDE the corridor A* handed it, and that corridor is
+        // chosen on centre-to-centre cost. Over a tessellated floor that cost is essentially Manhattan:
+        // "north, then east" scores the same as the diagonal, so the tie is arbitrary and the route
+        // wanders with nothing in its way — measured at 1.174x the direct distance over 14 waypoints on
+        // an empty field, leaving the start almost due north before cutting back across.
+        //
+        // Fixing the metric means an any-angle search over the whole graph. Shortcutting the RESULT
+        // reaches the same route far more cheaply: replace a run of waypoints with the straight segment
+        // between its ends whenever that segment stays on enabled mesh and keeps the body's width off
+        // every wall it passes. Each replacement is a triangle inequality, so the route can only get
+        // shorter, and it can only use mesh the walk itself verified — it cannot invent a shortcut
+        // through a wall the corridor was avoiding.
+        private void Shortcut(List<Vector3> output, int begin, int startTriangle, List<Vector3> scratch)
+        {
+            if (output.Count - begin < 3)
+                return;
+
+            int budget = ShortcutBudget;
+            scratch.Clear();
+            scratch.Add(output[begin]);
+            int anchor = begin;
+            int anchorTriangle = startTriangle;
+
+            while (anchor < output.Count - 1)
+            {
+                int last = output.Count - 1;
+                int furthest = anchor + 1;
+                int reached = -1;
+
+                // Double the reach while it keeps working, then bisect what is left. Trying the
+                // destination first and counting back would find the same answer, but it costs a walk
+                // per waypoint on the routes that have no shortcut at all — and those are exactly the
+                // routes where the funnel is already the answer, because a corner it emitted is by
+                // definition something the corridor forced. Here that case costs ONE failed walk per
+                // waypoint, which stops at the first wall.
+                int reach = 2;
+                int limit = last;
+                while (anchor + reach <= last)
+                {
+                    if (!TryLine(anchorTriangle, output[anchor], output[anchor + reach],
+                        ref budget, out int end))
+                    {
+                        limit = anchor + reach - 1;
+                        break;
+                    }
+                    furthest = anchor + reach;
+                    reached = end;
+                    reach *= 2;
+                }
+                for (int low = furthest + 1, high = limit; low <= high;)
+                {
+                    int middle = low + ((high - low) / 2);
+                    if (TryLine(anchorTriangle, output[anchor], output[middle], ref budget, out int end))
+                    {
+                        furthest = middle;
+                        reached = end;
+                        low = middle + 1;
+                    }
+                    else
+                    {
+                        high = middle - 1;
+                    }
+                }
+
+                scratch.Add(output[furthest]);
+                anchor = furthest;
+                // A kept waypoint that no walk reached is a funnel corner, which sits on the mesh; the
+                // grid lookup is the same one the endpoints use and only runs when a shortcut failed.
+                anchorTriangle = reached >= 0 ? reached : ClosestTriangle(output[anchor], out _);
+                if (anchorTriangle < 0 || budget <= 0)
+                {
+                    for (int i = anchor + 1; i < output.Count; i++)
+                        scratch.Add(output[i]);
+                    break;
+                }
+            }
+
+            output.RemoveRange(begin, output.Count - begin);
+            output.AddRange(scratch);
+        }
+
+        // Walks the mesh along an XZ segment, face to face through the edge it leaves each one by — the
+        // navmesh raycast, with a clearance test on top. It refuses the moment the segment leaves the
+        // walkable region, comes within the body's radius of a wall, or exhausts the budget.
+        //
+        // It asks for the same width the portals inset by, so a shortcut can never be tighter than the
+        // route it replaces. It is in fact a stronger test: the portal inset runs ALONG the portal and so
+        // yields only radius * sin(angle) away from the wall the portal meets, while this measures the
+        // real distance from the segment to the wall.
+        private bool TryLine(int startTriangle, Vector3 from, Vector3 to, ref int budget, out int endTriangle)
+        {
+            endTriangle = startTriangle;
+            if (startTriangle < 0)
+                return false;
+
+            float ax = from.X, az = from.Z;
+            float dx = to.X - ax, dz = to.Z - az;
+            int current = startTriangle;
+
+            while (true)
+            {
+                if (--budget < 0 || !_enabled[current])
+                    return false;
+
+                int i0 = Source.Triangles[current * 3];
+                int i1 = Source.Triangles[(current * 3) + 1];
+                int i2 = Source.Triangles[(current * 3) + 2];
+                if (!ClearOfWalls(current, i0, i1, i2, from, to))
+                    return false;
+
+                // The edge to leave by is one the direction points OUT through — decided against the
+                // opposite vertex, so it needs no winding convention. Testing "furthest along so far"
+                // instead is what a first draft did, and it is wrong at t = 0: a segment starting exactly
+                // on a face boundary, which is where funnel corners sit, has its only exit at t = 0. That
+                // exit was skipped, no crossing was found, and the walk concluded the segment ended
+                // inside the face and reported it clear — straight through a wall.
+                //
+                // The outward test also excludes the edge just entered by, since the direction points
+                // inward there, so nothing has to remember where the walk came from.
+                int exitA = -1, exitB = -1;
+                float exit = float.MaxValue;
+                for (int e = 0; e < 3; e++)
+                {
+                    int va = e == 0 ? i0 : e == 1 ? i1 : i2;
+                    int vb = e == 0 ? i1 : e == 1 ? i2 : i0;
+                    int vr = e == 0 ? i2 : e == 1 ? i0 : i1;
+                    Vector3 p = Source.Vertices[va], q = Source.Vertices[vb];
+                    float ex = q.X - p.X, ez = q.Z - p.Z;
+                    float outward = (ex * dz) - (ez * dx);
+                    float inward = (ex * (Source.Vertices[vr].Z - p.Z))
+                        - (ez * (Source.Vertices[vr].X - p.X));
+                    float denominator = (dx * ez) - (dz * ex);
+                    if (MathF.Abs(denominator) < 1e-9f)
+                        continue; // parallel to this edge: it cannot be the one crossed
+                    float px = p.X - ax, pz = p.Z - az;
+                    float along = ((px * ez) - (pz * ex)) / denominator;
+                    float across = ((px * dz) - (pz * dx)) / denominator;
+                    if (across < -1e-4f || across > 1f + 1e-4f)
+                        continue; // crosses the edge's line, but past its ends
+                    // The direction has to point away from the opposite vertex for this to be the way out.
+                    if (outward * inward >= 0f || along < -1e-4f || along >= exit)
+                        continue;
+                    exit = along;
+                    exitA = va;
+                    exitB = vb;
+                }
+
+                if (exit > 1f)
+                {
+                    endTriangle = current;
+                    return true; // the segment ends inside this face
+                }
+
+                // `exit` is only ever set together with the pair, so past here a crossing was found.
+                int next = -1;
+                for (int at = _edgeStart[current]; at < _edgeStart[current + 1] && next < 0; at++)
+                {
+                    Connection c = _edges[at];
+                    if (!_enabled[c.To])
+                        continue;
+                    if ((c.VertexA == exitA && c.VertexB == exitB)
+                        || (c.VertexA == exitB && c.VertexB == exitA))
+                        next = c.To;
+                }
+                // Unreachable while the clearance test above runs first: an edge with no enabled face
+                // across it is a wall, the clearance test measures the distance to it, and a segment
+                // leaving through it is zero away. It stands so the walk cannot step to -1 if that ever
+                // stops being true.
+                if (next < 0)
+                    return false;
+
+                current = next;
+            }
+        }
+
+        public bool HasClearLine(int start, Vector3 from, Vector3 to, ref int budget) =>
+            TryLine(start, from, to, ref budget, out _);
+
+        // Is a straight segment far enough from every wall this face carries? Both the face's border
+        // EDGES and its border VERTICES are tested: a wall corner can belong to a neighbour the segment
+        // never enters, and then only the vertex is in reach of a test that walks faces.
+        private bool ClearOfWalls(int triangle, int i0, int i1, int i2, Vector3 from, Vector3 to)
+        {
+            const float Squared = (AgentRadius + Clearance) * (AgentRadius + Clearance);
+            for (int e = 0; e < 3; e++)
+            {
+                int va = e == 0 ? i0 : e == 1 ? i1 : i2;
+                int vb = e == 0 ? i1 : e == 1 ? i2 : i0;
+                if (StillShared(triangle, va, vb))
+                    continue; // an interior edge is not a wall
+                if (SegmentsDistanceSquaredXZ(from, to, Source.Vertices[va], Source.Vertices[vb]) < Squared)
+                    return false;
+            }
+            return !(TooClose(i0) || TooClose(i1) || TooClose(i2));
+
+            bool TooClose(int vertex)
+            {
+                if (!_borderVertex[vertex])
+                    return false;
+                Vector3 v = Source.Vertices[vertex];
+                return PointSegmentDistanceSquaredXZ(v.X, v.Z, from.X, from.Z, to.X, to.Z) < Squared;
+            }
+        }
+
+        private static float PointSegmentDistanceSquaredXZ(float px, float pz,
+            float ax, float az, float bx, float bz)
+        {
+            float dx = bx - ax, dz = bz - az;
+            float lengthSquared = (dx * dx) + (dz * dz);
+            float t = lengthSquared <= 1e-12f
+                ? 0f
+                : Math.Clamp((((px - ax) * dx) + ((pz - az) * dz)) / lengthSquared, 0f, 1f);
+            float cx = px - (ax + (dx * t)), cz = pz - (az + (dz * t));
+            return (cx * cx) + (cz * cz);
+        }
+
+        // Crossing segments are zero apart; otherwise the minimum is attained at one of the four ends.
+        private static float SegmentsDistanceSquaredXZ(Vector3 a, Vector3 b, Vector3 c, Vector3 d)
+        {
+            if (Area2(a, b, c) > 0f != Area2(a, b, d) > 0f
+                && Area2(c, d, a) > 0f != Area2(c, d, b) > 0f)
+                return 0f;
+            float best = PointSegmentDistanceSquaredXZ(a.X, a.Z, c.X, c.Z, d.X, d.Z);
+            best = MathF.Min(best, PointSegmentDistanceSquaredXZ(b.X, b.Z, c.X, c.Z, d.X, d.Z));
+            best = MathF.Min(best, PointSegmentDistanceSquaredXZ(c.X, c.Z, a.X, a.Z, b.X, b.Z));
+            return MathF.Min(best, PointSegmentDistanceSquaredXZ(d.X, d.Z, a.X, a.Z, b.X, b.Z));
         }
 
         private static void AppendFunnel(List<Vector3> output, List<Portal> portals, Vector3 destination)

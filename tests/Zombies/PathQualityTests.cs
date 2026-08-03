@@ -129,17 +129,26 @@ public class PathQualityTests
 
     // SYMPTOM: "over open ground they trace a path that goes around when there is no obstacle."
     //
-    // Measured on flat, empty ground: runs along either axis were already exactly 1.000, so whatever is
-    // wrong is specific to diagonals. This pins that open ground is never made WORSE — the failure mode
-    // an agent-radius inset introduces if it is applied to interior portals as well as walls, which was
-    // measured at 1.254 and 43 waypoints before being narrowed to borders only.
+    // The funnel returns the shortest route INSIDE the corridor A* handed it, and that corridor is
+    // chosen on centre-to-centre cost, which over a tessellated floor is essentially Manhattan: "north
+    // then east" ties with the diagonal and the tie is arbitrary. So the wander was never in the string
+    // pulling, it was in the corridor, and no amount of funnel work could reach it.
+    //
+    // Measured on flat, EMPTY ground before the shortcut pass, with nothing whatsoever in the way:
+    //
+    //     along X    1.001x over  4 waypoints
+    //     along Z    1.001x over  4 waypoints
+    //     shallow    1.040x over  6 waypoints
+    //     diagonal   1.174x over 14 waypoints   <- leaves the start heading nearly due north
+    //
+    // A straight line between two points on an empty field is two waypoints and 1.000x, and that is
+    // now what every one of them is.
     [Theory]
-    [InlineData(2f, 16f, 30f, 16f, 1.001f, 4)]   // straight along X
-    [InlineData(16f, 2f, 16f, 30f, 1.001f, 4)]   // straight along Z
-    [InlineData(2f, 2f, 30f, 5f, 1.04f, 6)]      // a shallow angle
-    [InlineData(2f, 2f, 30f, 30f, 1.18f, 14)]    // the diagonal
-    public void OpenGround_IsNotMadeWorse(float fromX, float fromZ, float toX, float toZ,
-        float maxRatio, int maxWaypoints)
+    [InlineData(2f, 16f, 30f, 16f)]   // straight along X
+    [InlineData(16f, 2f, 16f, 30f)]   // straight along Z
+    [InlineData(2f, 2f, 30f, 5f)]     // a shallow angle
+    [InlineData(2f, 2f, 30f, 30f)]    // the diagonal
+    public void OpenGround_IsWalkedStraight(float fromX, float fromZ, float toX, float toZ)
     {
         BakedNavGraph graph = BakedNavGraph.Build(new[] { FlatField(32) });
         var from = new Vector3(fromX, 0, fromZ);
@@ -149,8 +158,150 @@ public class PathQualityTests
         Assert.True(graph.TryPath(from, to, path));
 
         float ratio = Length(path) / from.DistanceTo(to);
-        Assert.True(ratio <= maxRatio, $"walked {ratio:0.000}x the direct distance (limit {maxRatio})");
-        Assert.True(path.Count <= maxWaypoints, $"{path.Count} waypoints (limit {maxWaypoints})");
+        Assert.True(ratio <= 1.001f, $"walked {ratio:0.000}x the direct distance over empty ground");
+        Assert.Equal(new[] { from, to }, path);
+    }
+
+    // Shortening a route must never be allowed to shorten it THROUGH something. A body walks the
+    // segments, not the waypoints, so this samples the whole polyline rather than its corners: nothing
+    // anywhere along it may enter the wall, or even come nearer to it than the body's own radius.
+    //
+    // This is the test that caught the walk's real defect. A first version decided the exit edge by
+    // "the first crossing strictly ahead of where we entered", which skips a crossing at t = 0 — and a
+    // segment starting exactly on a face boundary, which is where every funnel corner sits, has its
+    // only exit at t = 0. The walk found no crossing, concluded the segment ended inside the face and
+    // reported it clear, and the doorway route collapsed to a straight line through the wall.
+    [Fact]
+    public void NoPartOfARoute_EntersOrGrazesAWall()
+    {
+        (NavFlag _, BakedNavGraph graph) = Doorway();
+        (Vector3 From, Vector3 To)[] queries =
+        {
+            (new Vector3(4, 0, 2), new Vector3(16, 0, 15)),
+            (new Vector3(5, 0, 6), new Vector3(13, 0, 9)),
+            (new Vector3(2, 0, 18), new Vector3(18, 0, 2)),
+            (new Vector3(15, 0, 3), new Vector3(3, 0, 14)),
+            (new Vector3(9, 0, 7.5f), new Vector3(12, 0, 7.5f)),
+        };
+
+        // That last one lies down the middle of the doorway with nothing in the way, so the whole route
+        // is a single shortcut segment. What the pass ITSELF emits is held to the full width.
+        var straight = new List<Vector3>();
+        Assert.True(graph.TryPath(queries[^1].From, queries[^1].To, straight));
+        Assert.Equal(2, straight.Count);
+        for (int step = 0; step <= 64; step++)
+        {
+            Vector3 point = straight[0].Lerp(straight[1], step / 64f);
+            Assert.True(MathF.Min(DistanceToWall(point, -100f, DoorMinZ),
+                DistanceToWall(point, DoorMaxZ, 100f)) >= BakedNavGraph.AgentRadius,
+                "a segment this pass created must keep the body's full width off the wall");
+        }
+
+        float worst = float.MaxValue;
+        Vector3 worstAt = Vector3.Zero;
+        foreach ((Vector3 from, Vector3 to) in queries)
+        {
+            var path = new List<Vector3>();
+            Assert.True(graph.TryPath(from, to, path));
+            for (int i = 1; i < path.Count; i++)
+                for (int step = 0; step <= 64; step++)
+                {
+                    Vector3 point = path[i - 1].Lerp(path[i], step / 64f);
+                    float clearance = MathF.Min(
+                        DistanceToWall(point, -100f, DoorMinZ),
+                        DistanceToWall(point, DoorMaxZ, 100f));
+                    if (clearance < worst)
+                    {
+                        worst = clearance;
+                        worstAt = point;
+                    }
+                }
+        }
+
+        Assert.True(worst > 0f,
+            $"the route enters a wall at ({worstAt.X:0.00}, {worstAt.Z:0.00})");
+
+        // The residual, which this pass neither causes nor cures — measured at 0.318 m either way, at
+        // the same point, (9.78, 7.78). It is the known limit of insetting a portal end ALONG its own
+        // portal: that buys full clearance AT the corner but not on the segment ARRIVING at it, which
+        // can still cut across the jamb behind it. Closing it means offsetting against the wall edges
+        // incident to the vertex, which a per-vertex flag cannot express. Pinned rather than described
+        // so that the change which does close it has a number to move.
+        Assert.InRange(worst, 0.30f, 0.33f);
+    }
+
+    // Distance in XZ from a point to one of the two wall slabs; zero when the point is inside it.
+    private static float DistanceToWall(Vector3 point, float minZ, float maxZ)
+    {
+        float dx = MathF.Max(MathF.Max(WallMinX - point.X, point.X - WallMaxX), 0f);
+        float dz = MathF.Max(MathF.Max(minZ - point.Z, point.Z - maxZ), 0f);
+        return MathF.Sqrt((dx * dx) + (dz * dz));
+    }
+
+    // The walk itself, which the routes above only exercise where a shortcut happened to be tried.
+    // A wall stops it, the body's width stops it short of a wall it would otherwise slip past, and an
+    // exhausted budget stops it regardless.
+    [Fact]
+    public void TheLineWalk_RefusesWalls_ClosePasses_AndAnExhaustedBudget()
+    {
+        (NavFlag _, BakedNavGraph graph) = Doorway();
+
+        Assert.True(graph.HasClearLine(0, new Vector3(2, 0, 2), new Vector3(9, 0, 9)));
+        Assert.True(graph.HasClearLine(0, new Vector3(9, 0, 7.5f), new Vector3(12, 0, 7.5f)),
+            "straight down the middle of a 1 m doorway must be walkable by a 0.4 m body");
+
+        Assert.False(graph.HasClearLine(0, new Vector3(9, 0, 8.5f), new Vector3(12, 0, 8.5f)),
+            "a line through the wall itself must be refused");
+        // Geometrically inside the opening, but 0.1 m from the jamb — a 0.4 m body does not fit there.
+        Assert.False(graph.HasClearLine(0, new Vector3(9, 0, 7.9f), new Vector3(12, 0, 7.9f)),
+            "a line that shaves a jamb must be refused");
+        // Same clear line as above, with no budget to walk it.
+        Assert.False(graph.HasClearLine(0, new Vector3(2, 0, 2), new Vector3(9, 0, 9), budget: 3));
+    }
+
+    // A flag with no faces snaps to no triangle, and the walk has to answer that rather than index it.
+    [Fact]
+    public void AFlagWithNoFaces_HasNoClearLines()
+    {
+        var empty = new NavFlag { Center = Vector3.Zero, Size = new Vector3(64, 64, 64) };
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { empty });
+        Assert.False(graph.HasClearLine(0, Vector3.Zero, new Vector3(4, 0, 4)));
+    }
+
+    // A route long and hemmed-in enough to exhaust the shortcut pass's walking budget must come back
+    // whole. Giving up partway is the designed behaviour — the pass is an improvement on the funnel's
+    // answer, never a precondition for it — so what has to hold is that the tail it did not reach is
+    // still there, still starts where it was asked from, and still ends at the destination.
+    [Fact]
+    public void ARouteTooLongToSmooth_IsReturnedIntact()
+    {
+        const int Quads = 96;
+        NavFlag flag = FlatField(Quads);
+        // Walls every 6 m with staggered gaps: a switchback corridor with no long sightlines.
+        var blocked = new HashSet<int>();
+        for (int x = 6; x < Quads; x += 6)
+            for (int z = 0; z < Quads; z++)
+            {
+                if (z == (x / 6 % 2 == 0 ? 1 : Quads - 2))
+                    continue;
+                blocked.Add((((x * Quads) + z) * 2) + 0);
+                blocked.Add((((x * Quads) + z) * 2) + 1);
+            }
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { flag },
+            new Dictionary<NavFlag, HashSet<int>> { [flag] = blocked });
+
+        var from = new Vector3(2, 0, 48);
+        var to = new Vector3(94, 0, 48);
+        var path = new List<Vector3>();
+        Assert.True(graph.TryPath(from, to, path));
+
+        Assert.Equal(from, path[0]);
+        Assert.Equal(to, path[^1]);
+        Assert.True(path.Count > 32, $"expected a long switchback route, got {path.Count} waypoints");
+        // Whatever the pass did or did not reach, the route stays a walk: no repeated points, and every
+        // leg short enough to belong to this corridor rather than to a jump across it.
+        for (int i = 1; i < path.Count; i++)
+            Assert.InRange(path[i - 1].DistanceTo(path[i]), 1e-4f, 96f);
     }
 
     // SYMPTOM: "in houses and tight spaces they sometimes stop pressed against the walls."
