@@ -303,6 +303,107 @@ public class PhysicsBodyOrderTests
         }
     }
 
+    // The spawn burst is the emergency path's largest single contribution: the first plan runs on the
+    // frame the player appears, so every chunk already inside its visibility radius is decoded and
+    // uploaded synchronously right then. The warm pass moves that work behind the loading screen, and is
+    // only worth having while it keeps the properties that make it cheaper than the burst it replaces:
+    // decodes off the main thread, uploads paced against a frame budget, and the steady loop held off
+    // until it is done.
+    [Fact]
+    public void FoliagePrewarmDecodesOffThreadAndPacesItsUploadsBehindTheLoadingScreen()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "World", "FoliageStreamingRenderer.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("public async Task PrewarmAsync(CancellationToken loadCancellation = default)", source);
+        // The caller's load token, linked with the lifetime one. This node cannot leave the tree — and so
+        // cannot cancel its own token — until the load teardown that waits on this pass has finished, so
+        // without the caller's token a cancelled load sits through every remaining decode and upload.
+        Assert.Contains("CreateLinkedTokenSource(_lifetimeCancellation.Token, loadCancellation)", source);
+        // Batched decode on a worker, never DecodeChunk on the main thread the way the emergency path has to.
+        Assert.Contains("_index.DecodeChunks(indices, token)", source);
+        Assert.Contains("Task<WarmBatch> batch = Task.Run(", source);
+        // Half the cap per batch: the batch being uploaded still holds its transforms while the next one
+        // decodes, so it is the pair that has to fit the bound the pass claims to respect. A chunk larger
+        // than half the cap gets a batch of its own, and its successor is serialized behind it rather
+        // than pipelined over the bound — hence the exact pair check, not just the halved budget.
+        string normalized = source.Replace("\r\n", "\n");
+        Assert.Contains("FoliageResidencyPlanner.WarmBatches(plan, ExpectedDecodedBytes,\n"
+            + "                Math.Max(1, _decodedByteLimit / 2));", normalized);
+        Assert.Contains("held + BatchBytes(batches[batch + 1]) <= _decodedByteLimit", source);
+        Assert.Contains("decoded = null;\n                if (more && !overlapped)", normalized);
+        // What the pass holds is decoded-and-waiting like any other in-flight decode, so it belongs in
+        // the counter maxDecodedBytes reports — otherwise a warm pass that answered the whole ring lets
+        // the benchmark report a peak of zero while it was holding two batches — and anything it never
+        // uploaded has to be given back, since the steady loop reads that counter before decoding.
+        Assert.Contains("UpdateMaximum(ref _maxDecodedBytes, Interlocked.Add(ref _decodedBytes, bytes))",
+            source);
+        // Charged when the decode starts, not when it lands: an overlapped batch is already holding its
+        // transforms while the previous one uploads, and accounting on arrival — after the previous
+        // batch has been released chunk by chunk — would record one batch where two were held.
+        Assert.Contains("private (Task<WarmBatch> Decoding, long Bytes) StartWarmDecode(", source);
+        Assert.DoesNotContain("decoding = overlapped ? DecodeBatch(", source);
+        Assert.Contains("Interlocked.Add(ref _decodedBytes, -uploaded);", source);
+        Assert.Contains("Interlocked.Add(ref _decodedBytes, -carried);", source);
+        Assert.Contains("if (outstandingBytes != 0)\n                Interlocked.Add(ref _decodedBytes, "
+            + "-outstandingBytes);", normalized);
+        // Worker wall time is not main-thread upload time: a deadline that expired while a decode was
+        // still running would spend a whole frame on a single upload, once per batch.
+        Assert.Contains("bool decodeWasPending = !decoding!.IsCompleted;", source);
+        Assert.Contains("if (decodeWasPending)\n                    until = Stopwatch.GetTimestamp() "
+            + "+ budget;", normalized);
+        // Uploads are RenderingServer work and stay here, yielding on the load's own frame budget.
+        Assert.Contains("await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);", source);
+        // The steady loop must not plan against a half-warm residency set, and the pass must claim the
+        // focus it planned for — otherwise the first _Process replans and takes the burst anyway.
+        int process = source.IndexOf("public override void _Process", StringComparison.Ordinal);
+        Assert.True(process > 0 && source.IndexOf("if (_warming)", process, StringComparison.Ordinal)
+            < source.IndexOf("DrainDecoded();", process, StringComparison.Ordinal));
+        Assert.Contains("_focused = true;\n            _lastFocus = focus;", normalized);
+        // A cancelled load frees the node between frames; uploading past that hands RIDs to a dying
+        // scenario, so liveness and tree membership are re-checked before every upload.
+        Assert.Contains("!token.IsCancellationRequested && GodotObject.IsInstanceValid(this) "
+            + "&& IsInsideTree()", source);
+        Assert.Contains("if (!WarmMayContinue(token))", source);
+        // Anything the pass could not warm goes back to the steady loop, which otherwise would not
+        // replan until the camera moved — and would meet those chunks on the emergency path instead.
+        Assert.Contains("_needsRefill = plan.PrefetchTruncated || incomplete;", source);
+        // Opt out for A/B: the burst has to remain measurable against the pass that removes it.
+        Assert.Contains("\"UG_FOLIAGE_PREWARM\"", source);
+
+        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is { } streamerPath)
+        {
+            string streamer = File.ReadAllText(streamerPath).Replace("\r\n", "\n");
+            // Both build paths warm, and both await it: an unawaited pass would upload into the same
+            // frames as the texture apply it was staged behind.
+            Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(streamer,
+                @"await PrewarmFoliageAsync\(\);").Count);
+            Assert.Contains("await foliage.PrewarmAsync(_loadCancellation.Token);", streamer);
+            // _sceneBuilt is what releases _Process to apply textures. Setting it before the warm pass
+            // would let the two spend their separate per-frame budgets in the same frames, which is the
+            // staging the pass yields to preserve.
+            // The warm pass consumes cancellation and returns normally, so the cold build has to recheck
+            // before _sceneBuilt releases _Process and the world is published to subscribers that
+            // BackToMenu is still tearing down.
+            Assert.Contains("await PrewarmFoliageAsync();\n        // The warm pass consumes the "
+                + "cancellation", streamer);
+            Assert.Contains("if (_loadCancellation.IsCancellationRequested)\n            return;\n"
+                + "        _sceneBuilt = true;", streamer);
+            // Both build paths guard, not just the cold one: the warm task is not even stored for
+            // CancelAsync to wait on, so falling through publishes a world already queued for deletion.
+            Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(streamer,
+                @"await PrewarmFoliageAsync\(\);\n        // The warm pass consumes").Count);
+            // Textures are applied before the pass yields its frames, on both paths: a material that
+            // reaches the renderer bare and is textured later makes it compile the pipelines twice.
+            Assert.True(streamer.IndexOf("_registry.ApplyAllAvailable();", StringComparison.Ordinal)
+                < streamer.IndexOf("await PrewarmFoliageAsync();", StringComparison.Ordinal));
+            Assert.True(streamer.IndexOf("_appliedTextures += _registry.ApplyAllAvailable();",
+                    StringComparison.Ordinal)
+                < streamer.LastIndexOf("await PrewarmFoliageAsync();", StringComparison.Ordinal));
+        }
+    }
+
     // The residency snapshot is the only direct evidence of what spatial residency keeps in memory. A
     // machine that never settles within the wait is exactly the one whose report needs it, so neither
     // tier may put those counts back behind the settled flag — and an unsettled snapshot must land on
