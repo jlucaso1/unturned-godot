@@ -736,6 +736,12 @@ public static class ModelExtractor
         IReadOnlyDictionary<long, byte[]> streamedVertices = streamedVertexSource == null
             ? new Dictionary<long, byte[]>()
             : ReadStreamedVertices(streamedVertexSource, graph, work, neededGuids, cancellationToken);
+        // A cancelled pass hands back whatever ranges it got to before it stopped, and building from a
+        // partial set would cache meshes that are missing their streamed parts AND current by their own
+        // magic — permanently, because nothing would ever ask for them again. Write nothing instead: the
+        // next boot starts the extraction over, which is what cancelling it means everywhere else here.
+        if (cancellationToken.IsCancellationRequested)
+            return 0;
 
         var mappedGuids = new HashSet<Guid>();
         int extracted = 0;
@@ -791,6 +797,13 @@ public static class ModelExtractor
                     // Normals transform by the inverse-transpose of the part's basis (correct under the
                     // non-uniform scales some prefab children carry), stored in Unity space like the vertices.
                     Basis normalBasis = part.LocalToRoot.Basis.Inverse().Transposed();
+                    // A part placed through a mirroring transform — a vehicle's left wheels are the right
+                    // ones scaled by -1 on an axis, and a few props do the same — comes out with its
+                    // triangles wound the other way, so every face on it is backface-culled. Baking the
+                    // pose into the vertices is what makes that this reader's problem: Unity keeps the
+                    // scale on the transform and flips its own winding at draw time. Reverse the triangles
+                    // instead, which is the same fix applied once rather than per frame.
+                    bool mirrored = part.LocalToRoot.Basis.Determinant() < 0f;
                     bool hasNormals = mesh.Normals.Length == mesh.Vertices.Length;
                     allNormals &= hasNormals;
                     for (int i = 0; i < mesh.Vertices.Length; i++)
@@ -811,9 +824,7 @@ public static class ModelExtractor
                             sink[(bundleTag, texId)] = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, file.ReaderFor(texObj)));
 
                         int[] src = mesh.Submeshes[si];
-                        var indices = new int[src.Length];
-                        for (int k = 0; k < src.Length; k++)
-                            indices[k] = src[k] + baseVertex;
+                        int[] indices = MeshIndices.Rebase(src, baseVertex, mirrored);
                         submeshes.Add(new CachedSubmesh(indices, color, texKey, blend, metallic, smoothness, cull));
                     }
                 }

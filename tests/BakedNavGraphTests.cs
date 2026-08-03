@@ -163,7 +163,8 @@ public class BakedNavGraphTests
         }
         Assert.Equal(1, graph.SearchWorkspaceCount);
 
-        System.Threading.Tasks.Parallel.For(0, 16, i =>
+        const int Searches = 16;
+        System.Threading.Tasks.Parallel.For(0, Searches, i =>
         {
             var path = new List<Vector3>();
             Vector3 a = i % 2 == 0 ? from : to;
@@ -172,7 +173,25 @@ public class BakedNavGraphTests
             Assert.Equal(a, path[0]);
             Assert.Equal(b, path[^1]);
         });
-        Assert.InRange(graph.SearchWorkspaceCount, 1, System.Environment.ProcessorCount);
+
+        // One workspace per search is the ceiling, because a search only allocates one when it finds the
+        // pool empty. How many of the sixteen actually do is a property of the runtime, not of the graph:
+        // Parallel.For runs on the thread pool, which injects threads past the core count on its own
+        // schedule, and ConcurrentBag.TryTake can also come back empty-handed under contention. Bounding
+        // this by Environment.ProcessorCount asserted neither — it failed on a four-core runner that ran
+        // six searches at once, and would have passed a graph that allocated per call on a wider machine.
+        int pooled = graph.SearchWorkspaceCount;
+        Assert.InRange(pooled, 1, Searches);
+
+        // What the pool is actually for, asserted where it is deterministic: with every workspace handed
+        // back, further searches take from the pool instead of allocating. Same claim the cold run above
+        // makes, against a warm pool of unknown size.
+        for (int i = 0; i < 100; i++)
+        {
+            var path = new List<Vector3>();
+            Assert.True(graph.TryPath(from, to, path));
+        }
+        Assert.Equal(pooled, graph.SearchWorkspaceCount);
     }
 
     [Fact]
