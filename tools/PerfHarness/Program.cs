@@ -778,7 +778,7 @@ public static class Program
         // It is a lower bound because a real load also wants foliage, tree and terrain-layer textures that
         // are not reached from Level/Objects.dat. That is the useful direction: if even the lower bound
         // already runs to the end of the node, no larger set can end earlier.
-        HashSet<string>? mapWantKeys = MapScopedWantKeys(map, tag);
+        HashSet<string>? mapWantKeys = MapScopedWantKeys(map, tag, path);
         if (mapWantKeys != null && !AnyKeyMatches(declared, mapWantKeys))
         {
             // Ids resolved against another bundle would otherwise filter every range away and be reported
@@ -796,12 +796,25 @@ public static class Program
 
         // The pass cannot seek, so a node with nothing wanted in it is still decoded in full when a LATER
         // node is owed something. Which node is last decides that, so it has to be known before reporting.
+        // A stream node is also fully consumed when a SERIALIZED file still lies ahead of it: the real pass
+        // has to reach that metadata, and it cannot seek there either. This diagnostic deliberately skips
+        // those files, so without counting them a stream node in front of one reads as untouched.
+        int lastSerialized = -1;
+        for (int i = 0; i < ordered.Count; i++)
+            if (!IsResSNode(ordered[i].Path))
+                lastSerialized = i;
+
         var streamNodes = new List<(string Name, long Size, List<StreamRange> Wants)>();
         int lastWanted = -1;
-        foreach (MasterBundleStream.Node node in ordered)
+        int forcedByMetadata = -1;
+        for (int i = 0; i < ordered.Count; i++)
         {
+            MasterBundleStream.Node node = ordered[i];
             if (!IsResSNode(node.Path))
                 continue;
+
+            if (i < lastSerialized)
+                forcedByMetadata = streamNodes.Count;
 
             string name = LastSegment(node.Path);
             declared.TryGetValue(name, out List<StreamRange>? all);
@@ -818,15 +831,21 @@ public static class Program
             streamNodes.Add((name, node.Size, wants));
         }
 
-        long totalRead = 0;
+        // Either reason forces a node to be read whole; the later one decides where the pass can stop.
+        int lastForced = Math.Max(lastWanted, forcedByMetadata);
+
+        long totalRead = 0, streamBytes = 0;
         for (int i = 0; i < streamNodes.Count; i++)
         {
             (string name, long size, List<StreamRange> wants) = streamNodes[i];
-            totalRead += ReportNode(name, size, wants, i, lastWanted);
+            streamBytes += size;
+            totalRead += ReportNode(name, size, wants, i, lastForced, i <= forcedByMetadata);
         }
 
-        Console.WriteLine($"\n  whole pass: {Mb(totalRead)} of the {Mb(stream.TotalSize - ordered[0].Size)} "
-            + "of stream nodes is decoded");
+        // Summed from the stream nodes themselves: subtracting one serialized file from the blob would
+        // leave every further serialized file inside a figure labelled as the size of the stream nodes.
+        Console.WriteLine($"\n  whole pass: {Mb(totalRead)} of the {Mb(streamBytes)} of stream nodes "
+            + "is decoded");
         MeasureDecodeRate(stream, ordered);
         Console.WriteLine();
     }
@@ -891,17 +910,19 @@ public static class Program
     // The whole point of the diagnostic: read extent is set by the single furthest range, so the curve
     // below says how much of the file the tail alone is responsible for. Returns the bytes this node
     // costs the pass, which is not the same as what is wanted from it — see the traversal cases.
-    private static long ReportNode(string name, long size, List<StreamRange> wants, int index, int lastWanted)
+    private static long ReportNode(string name, long size, List<StreamRange> wants, int index,
+        int lastForced, bool forMetadata)
     {
+        string reason = forMetadata ? "a later serialized file has to be reached" : "a later node is owed";
         Console.WriteLine($"\n  {name} {Mb(size)}");
         if (wants.Count == 0)
         {
             // A forward-only decoder cannot skip a node to reach the next one, so "nothing wanted here"
             // only means "free" once nothing after it is owed either.
-            if (index < lastWanted)
+            if (index < lastForced)
             {
-                Console.WriteLine($"    nothing wanted here, but a later node is owed — all {Mb(size)} "
-                    + "is decoded just to reach it");
+                Console.WriteLine($"    nothing wanted here, but {reason} — all {Mb(size)} is decoded "
+                    + "just to get past it");
                 return size;
             }
 
@@ -909,14 +930,14 @@ public static class Program
             return 0;
         }
 
-        if (index < lastWanted)
+        if (index < lastForced)
         {
-            // Its own furthest range does not end the pass: a later node still has to be reached.
+            // Its own furthest range does not end the pass: something after it still has to be reached.
             long pixelsHere = 0;
             foreach (StreamRange want in wants)
                 pixelsHere += want.Size;
-            Console.WriteLine($"    wanted: {wants.Count:N0} ranges, {Mb(pixelsHere)} of pixels — but a "
-                + $"later node is owed, so all {Mb(size)} is decoded regardless");
+            Console.WriteLine($"    wanted: {wants.Count:N0} ranges, {Mb(pixelsHere)} of pixels — but "
+                + $"{reason}, so all {Mb(size)} is decoded regardless");
             return size;
         }
 
@@ -1048,10 +1069,17 @@ public static class Program
         if (unturned == null)
             return null;
 
+        // Match the filesystem's own idea of path equality: on Windows a RESS_BUNDLE differing from the
+        // discovered path only in case opens fine, and comparing it ordinally would report the tag as
+        // unresolvable for a bundle that is plainly installed.
+        StringComparison comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+
         string full = Path.GetFullPath(bundlePath);
         foreach (ContentSource source in ContentSource.Discover(unturned))
             if (source.BundlePath.Length > 0
-                && string.Equals(Path.GetFullPath(source.BundlePath), full, StringComparison.Ordinal))
+                && string.Equals(Path.GetFullPath(source.BundlePath), full, comparison))
             {
                 return source.CacheTag;
             }
@@ -1118,7 +1146,7 @@ public static class Program
     // The textures this map's placed objects depend on, taken from the mesh cache through the same index
     // the runtime uses to decide what a load still owes. Scoped to one map, unlike the texture cache
     // directory, which every map writes into and which therefore answers a different question.
-    private static HashSet<string>? MapScopedWantKeys(string? map, string tag)
+    private static HashSet<string>? MapScopedWantKeys(string? map, string tag, string bundlePath)
     {
         string? meshCache = FindGodotUserDir() is { } user ? Path.Combine(user, "model_cache") : null;
         if (map == null || meshCache == null || !Directory.Exists(meshCache))
@@ -1128,9 +1156,23 @@ public static class Program
         if (!File.Exists(objects))
             return null;
 
+        // Only GUIDs this bundle demonstrably extracted, at its current revision. The mesh cache is shared
+        // between installs and survives a bundle update, and NeededTextureIds trusts any entry in the
+        // current format — so a mesh left by another source would contribute path ids that mean nothing
+        // here. One stale id landing inside this bundle is enough for a late unrelated texture to set the
+        // reported extent, which is exactly the number the whole diagnostic turns on.
+        long stamp = ExtractionIndex.StampFor(bundlePath);
+
         var guids = new HashSet<Guid>();
         foreach (PlacedObject placed in LevelObjects.Load(objects))
-            guids.Add(placed.Guid);
+            if (placed.Guid != Guid.Empty
+                && ExtractionIndex.MeshBelongsTo(meshCache, placed.Guid, bundlePath, stamp))
+            {
+                guids.Add(placed.Guid);
+            }
+
+        if (guids.Count == 0)
+            return null;
 
         // Back to full keys: a path id is unique only inside ONE serialized file, and this bundle may
         // carry several. The index reports ids owned by the base tag, so name them with that tag and let
