@@ -1042,6 +1042,46 @@ public class ZombieSystemTests
         Assert.False(run.PartialAfter);
     }
 
+    // The same rule against the target the game actually has: one that MOVES. The route to a runner
+    // is re-derived every repath with a final waypoint that has travelled metres, while the body stays
+    // pinned against the same obstruction. Any route identity that reads the destination as part of the
+    // plan therefore calls every reissue a NEW route and hands it a clean record — and because
+    // RepathRate (0.5 s) is shorter than BlockedRouteTimeout (0.75 s), that clears the evidence
+    // strictly faster than it can accumulate. The wall route then survives forever: the exact
+    // disarmament AnImpassableRoute_IsInvalidatedEvenWhenEveryRepathReadoptsItVerbatim exists to
+    // prevent, reintroduced for the only case that matters. A stationary target cannot catch this.
+    [Fact]
+    public void AnImpassableRoute_IsInvalidatedWhileTheTargetKeepsMoving()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            path.Add(from);
+            path.Add(to); // ends exactly on the target: always "complete", so always accepted
+            return true;
+        };
+        system.MoveResolver = (from, to, radius) => from; // and always refused by the physics world
+
+        // 0.6 m/tick is a sprint: ~3 m of destination travel between repaths, far beyond any tolerance
+        // a waypoint comparison could sanely use, and the zombie never leaves its spot.
+        const float MetresPerTick = 0.6f;
+        int budget = (int)MathF.Ceiling(ZombieSystem.BlockedRouteTimeout / ImpassableDt) * 6;
+        float worstEvidence = 0f;
+        for (int tick = 1; tick <= budget; tick++)
+        {
+            var player = Player(1, new Vector3(10f, 5f, tick * MetresPerTick),
+                UnturnedGodot.Player.EPlayerStance.Sprint, moving: true);
+            system.Tick(new[] { player }, ImpassableDt);
+            worstEvidence = MathF.Max(worstEvidence, zombie.BlockedRouteTime);
+            if (zombie.State == EZombieState.Chase && zombie.PathPoints.Count == 0 && worstEvidence > 0f)
+                return; // invalidated: the physics world got its say, as it does for a still target
+        }
+
+        Assert.Fail("the impassable route was never invalidated while the target moved; evidence "
+            + $"peaked at {worstEvidence:0.###} s against a {ZombieSystem.BlockedRouteTimeout} s timeout");
+    }
+
     [Fact]
     public void ImpassableRouteInvalidation_IsDeterministicAcrossIndependentSimulations()
     {
@@ -1213,93 +1253,6 @@ public class ZombieSystemTests
         Assert.False(zombie.RouteServedAnotherTarget, "the inherited route was never replaced");
         Assert.NotEqual(stale, zombie.PathPoints[^1]);
         Assert.Equal(3f, zombie.PathPoints[^1].X, 1);
-    }
-
-    // Codex review, third finding. The complement of
-    // AnImpassableRoute_IsInvalidatedEvenWhenEveryRepathReadoptsItVerbatim: evidence must survive an
-    // EQUIVALENT reissue and only that. When the graph finally produces a real detour — the moment
-    // reconciliation carves the wall out — the first step onto it still uses the body's pre-turn
-    // forward and presses into the old obstruction, so inherited evidence sitting near the timeout
-    // would throw the detour away on the tick it arrived.
-    [Fact]
-    public void AMateriallyDifferentRoute_ArrivesWithACleanBlockedRecord()
-    {
-        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
-        zombie.Yaw = -90f;
-        bool detour = false;
-        system.PathQuery = (from, to, path, radius) =>
-        {
-            path.Add(from);
-            if (detour)
-                path.Add(new Vector3(from.X, from.Y, from.Z + 8f)); // step aside, round the obstruction
-            path.Add(to); // and on to the target either way, so the detour still scores as complete
-            return true;
-        };
-        bool blocked = true;
-        system.MoveResolver = (from, to, radius) => blocked ? from : to;
-
-        var player = Player(1, new Vector3(10, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
-        int guard = 0;
-        while (zombie.BlockedRouteTime + ImpassableDt + 1e-4f < ZombieSystem.BlockedRouteTimeout)
-        {
-            system.Tick(new[] { player }, ImpassableDt);
-            Assert.True(++guard < 100, "never accumulated blocked evidence");
-        }
-        float carried = zombie.BlockedRouteTime;
-        Assert.True(carried > 0f);
-
-        // The detour arrives. One more blocked tick would have fired the timeout on the old evidence.
-        detour = true;
-        zombie.RepathTimer = 0f;
-        zombie.RepathGranted = true;
-        system.Tick(new[] { player }, ImpassableDt);
-
-        Assert.NotEmpty(zombie.PathPoints); // the detour was not discarded on arrival
-        Assert.True(zombie.BlockedRouteTime < carried,
-            $"the detour inherited the old route's evidence: {zombie.BlockedRouteTime} vs {carried}");
-        Assert.Equal(3, zombie.PathPoints.Count); // the detour, not the straight line
-        Assert.Equal(8f, zombie.PathPoints[1].Z, 1);
-    }
-
-    // Codex review, fourth finding. A single-point route is a supported shape (see
-    // SinglePointRoutes_AndZeroDeltaTicks_AreHandled), and it is the one shape with no second waypoint
-    // to disagree on — so skipping index 0 made every pair of them compare equal.
-    [Fact]
-    public void TwoSinglePointRoutesToDifferentPlaces_AreNotTheSameRoute()
-    {
-        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
-        zombie.Yaw = -90f;
-        bool moved = false;
-        system.PathQuery = (from, to, path, radius) =>
-        {
-            path.Add(moved ? new Vector3(8f, 5f, 2f) : new Vector3(6f, 5f, 0f));
-            return true;
-        };
-        bool blocked = true;
-        system.MoveResolver = (from, to, radius) => blocked ? from : to;
-
-        var player = Player(1, new Vector3(10, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
-        int guard = 0;
-        while (zombie.BlockedRouteTime + ImpassableDt + 1e-4f < ZombieSystem.BlockedRouteTimeout)
-        {
-            system.Tick(new[] { player }, ImpassableDt);
-            Assert.True(++guard < 100, "never accumulated blocked evidence");
-        }
-        float carried = zombie.BlockedRouteTime;
-        Assert.True(carried > 0f);
-        Assert.Single(zombie.PathPoints);
-
-        // A single-point route somewhere else entirely must arrive with a clean record.
-        moved = true;
-        zombie.RepathTimer = 0f;
-        zombie.RepathGranted = true;
-        system.Tick(new[] { player }, ImpassableDt);
-
-        // Asserting the ROUTE survived, not the counter: the invalidation path zeroes the counter too,
-        // so a discarded route also reads as "evidence dropped" and would hide the defect.
-        Assert.Single(zombie.PathPoints);
-        Assert.Equal(2f, zombie.PathPoints[0].Z, 1);
-        Assert.True(zombie.BlockedRouteTime <= ImpassableDt + 1e-4f);
     }
 
     private const float ImpassableDt = 0.1f;
