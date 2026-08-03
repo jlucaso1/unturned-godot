@@ -109,7 +109,13 @@ public class PeiRouteQualityTests
     // worth more than raising an unachievable one, and the map agrees: 22 routes off the mesh here
     // against 26 proportional, with the tightest fit 0.05 m under BOTH — so the clearance the algebra
     // promises the shallow end does not survive contact with the portals that actually bind.
-    private const int WorstRoutesLeavingTheMesh = 22;
+    //
+    // Down to 21 with T-junctions joined. It briefly read 26 when the clearance work landed alongside
+    // this test, and that number was measured against a graph carrying 1784 edges it called walls where
+    // the mesh is continuous — phantom walls pull portal insets in, so anything measuring distance to
+    // the nearest wall was partly measuring against them. Joining those faces did not merely undo the
+    // 26: it is a route better than the 22 this ceiling was set at before any of the clearance work.
+    private const int WorstRoutesLeavingTheMesh = 21;
 
     private static (List<NavFlag> Flags, Coverage Mesh, BakedNavGraph Graph) Load()
     {
