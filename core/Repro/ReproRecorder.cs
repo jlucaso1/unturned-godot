@@ -69,11 +69,53 @@ public sealed class ReproRecorder : IZombieTickObserver
     // chasing has nothing to disagree with and reports an exact reproduction.
     private bool[] _sampled = Array.Empty<bool>();
 
-    // World queries dropped by the per-tick ceiling. Nonzero means the window is not complete, and the
-    // capture says so out loud instead of shipping a dump that looks whole.
-    public long DroppedCalls { get; private set; }
+    // World queries dropped by the per-tick ceiling, over the RETAINED window only. A lifetime counter
+    // would let one pathological tick taint every dump taken afterwards, long after the tick that
+    // overflowed had rotated out of the ring.
+    public long DroppedCalls
+    {
+        get
+        {
+            long dropped = 0;
+            uint first = _tick - (uint)_recorded;
+            for (uint t = first; t < _tick; t++)
+                dropped += _ring[(int)(t % (uint)_ring.Length)].Dropped;
+            return dropped;
+        }
+    }
 
     public int RecordedTicks => _recorded;
+
+    // Which of the world's questions the session was actually able to ask. A dedicated server installs
+    // only a pathfinder — no collision, no ground, no vision — and a replay that helpfully installs all
+    // four is not a more faithful reproduction, it is a different simulation: ZombieSystem branches on
+    // each of them being null.
+    public ReproWorldSeams Seams => new()
+    {
+        MoveResolver = _innerMove != null,
+        GroundSnap = _innerGround != null,
+        VisionBlocked = _innerVision != null,
+        PathQuery = _innerPath != null,
+    };
+
+    // Throws away the history and starts again from here. Loading a dump into a running session
+    // replaces the population wholesale, and a capture taken straight afterwards would otherwise
+    // splice a pre-load anchor onto post-load ticks and replay as neither situation.
+    public void Restart()
+    {
+        _tick = 0;
+        _recorded = 0;
+        _cursor = -1;
+        _nextAnchor = 0;
+        Array.Clear(_anchorValid);
+        Array.Clear(_anchorTicks);
+        Array.Clear(_sampled);
+        foreach (TickBuffer buffer in _ring)
+        {
+            buffer.Reset();
+            buffer.Tick = 0;
+        }
+    }
 
     // Wraps the system's world delegates and takes the tick seam. Idempotent.
     public void Attach()
@@ -229,7 +271,7 @@ public sealed class ReproRecorder : IZombieTickObserver
         TickBuffer candidate = _ring[_cursor];
         if (candidate.CallCount >= _options.MaxCallsPerTick)
         {
-            DroppedCalls++;
+            candidate.Dropped++;
             return false;
         }
         buffer = candidate;
@@ -318,6 +360,7 @@ public sealed class ReproRecorder : IZombieTickObserver
         public uint ServerTick;
         public float Dt;
         public bool Ready = true;
+        public long Dropped;
         public readonly List<ZombiePlayerView> Players = new();
         public readonly List<Motion> Motions = new();
         public readonly List<MoveCall> Moves = new();
@@ -331,6 +374,7 @@ public sealed class ReproRecorder : IZombieTickObserver
         public void Reset()
         {
             Ready = true;
+            Dropped = 0;
             Players.Clear();
             Motions.Clear();
             Moves.Clear();

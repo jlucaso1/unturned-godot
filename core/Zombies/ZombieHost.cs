@@ -114,6 +114,16 @@ public sealed class ZombieHost
         }
     }
 
+    // Forgets which region each player has been sent, so the next tick ships the current population
+    // again. Loading a bug-repro dump replaces every zombie wholesale — ids, types, clothing, the lot —
+    // and the per-tick state snapshots carry none of that: without this the client keeps rendering the
+    // avatars of a population that no longer exists.
+    public void ResendRegions()
+    {
+        _playerBounds.Clear();
+        _lastSent.Clear();
+    }
+
     // SendZombies: the region's complete zombie list, reliable, to one connection, in MTU-sized chunks.
     private void SendRegion(ITransportConnection connection, byte bound)
     {

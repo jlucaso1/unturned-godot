@@ -96,14 +96,27 @@ public sealed class ReproScenario
 
         // Only install what the session actually had. A world delegate that exists where the original
         // had none is not a more complete replay, it is a different simulation: ZombieSystem branches
-        // on each of these being null.
+        // on each of these being null. A dedicated server runs with a pathfinder and no physics, and a
+        // replay of one of its dumps has to run the same way or every step it takes is a different
+        // step. Dumps written before the seams were recorded fall back to "install what can answer".
+        ReproWorldSeams seams = _section.Seams
+            ?? new ReproWorldSeams
+            {
+                MoveResolver = true,
+                GroundSnap = true,
+                VisionBlocked = true,
+                PathQuery = flags != null,
+            };
         if (Oracle != null || Collision != null)
         {
-            System.MoveResolver = ResolveMove;
-            System.GroundSnap = ResolveGround;
-            System.VisionBlocked = ResolveVision;
+            if (seams.MoveResolver)
+                System.MoveResolver = ResolveMove;
+            if (seams.GroundSnap)
+                System.GroundSnap = ResolveGround;
+            if (seams.VisionBlocked)
+                System.VisionBlocked = ResolveVision;
         }
-        if (flags != null)
+        if (flags != null && seams.PathQuery)
         {
             // Without a pathfinder handed in, the dump's own navmesh slice becomes one. It routes
             // correctly around the incident and nowhere else, which is the trade a self-contained
@@ -188,10 +201,14 @@ public sealed class ReproScenario
         return report;
     }
 
+    private readonly HashSet<int> _sampledThisFrame = new();
+
     private void Compare(ReproFrame frame, ReproReplayReport report)
     {
+        _sampledThisFrame.Clear();
         foreach (ReproMotionSample expected in frame.Zombies)
         {
+            _sampledThisFrame.Add(expected.Id);
             if (!_byId.TryGetValue(expected.Id, out ZombieInstance? live))
                 continue;
             float error = (live.Position - ReproVector.To(expected.Position)).Length();
@@ -208,6 +225,18 @@ public sealed class ReproScenario
             if (live.TargetPlayer != expected.Target)
                 report.TargetMismatches++;
         }
+
+        // A zombie the recording left out of this frame is a claim, not an absence: the recorder omits
+        // exactly those that were idle with nobody to hunt, and therefore did not move. A build that
+        // newly wakes one has nothing to contradict it unless that claim is checked.
+        foreach (ZombieInstance live in System.Zombies)
+        {
+            if (_sampledThisFrame.Contains(live.Id))
+                continue;
+            report.ComparedSamples++;
+            if (live.State != EZombieState.Idle || live.TargetPlayer != byte.MaxValue)
+                report.SilentWakeups++;
+        }
     }
 
     private Vector3 ResolveMove(Vector3 from, Vector3 to, float radius)
@@ -216,7 +245,7 @@ public sealed class ReproScenario
             return recorded;
         if (Collision != null)
         {
-            GeometryAnswers++;
+            Recompute(Collision.Covers(from) && Collision.Covers(to));
             return Collision.Resolve(from, to, radius);
         }
         Unanswered();
@@ -229,7 +258,7 @@ public sealed class ReproScenario
             return hit;
         if (Collision != null)
         {
-            GeometryAnswers++;
+            Recompute(Collision.Covers(position));
             return Collision.GroundSnap(position, out y);
         }
         Unanswered();
@@ -242,11 +271,25 @@ public sealed class ReproScenario
             return blocked;
         if (Collision != null)
         {
-            GeometryAnswers++;
+            Recompute(Collision.Covers(from) && Collision.Covers(to));
             return Collision.VisionBlocked(from, to);
         }
         Unanswered();
         return false;
+    }
+
+    // A query the geometry answered, and whether it was somewhere the capture actually looked. Outside
+    // the slice the triangle soup is empty, so the answer is "open ground" whatever is really there —
+    // the body still moves (a replay that froze would be worse), but the answer is booked as one
+    // nobody could give rather than as evidence.
+    private void Recompute(bool covered)
+    {
+        if (covered)
+        {
+            GeometryAnswers++;
+            return;
+        }
+        Unanswered();
     }
 
     private bool ResolvePath(Vector3 from, Vector3 to, List<Vector3> path, float radius)
@@ -335,6 +378,10 @@ public sealed class ReproReplayReport
     public float MaxYawError { get; set; }
     public int StateMismatches { get; set; }
     public int TargetMismatches { get; set; }
+
+    // Zombies the recording says stayed idle and this replay woke up. They contribute no position to
+    // compare, so without this they diverge in silence.
+    public int SilentWakeups { get; set; }
     public int OracleHits { get; set; }
     public int OracleMisses { get; set; }
     public int GeometryAnswers { get; set; }
@@ -353,7 +400,7 @@ public sealed class ReproReplayReport
     // this time is not evidence that the window reproduced — it is evidence that the window was lucky.
     public bool ReproducesRecording => ComparedSamples > 0 && MaxPositionError <= 0.01f
         && MaxYawError <= 0.5f && StateMismatches == 0 && TargetMismatches == 0
-        && UnansweredInWindow == 0;
+        && SilentWakeups == 0 && UnansweredInWindow == 0;
 
     public string Describe()
     {
@@ -364,7 +411,8 @@ public sealed class ReproReplayReport
             .Append(" m, mean ").Append(Format(MeanPositionError)).Append(" m\n");
         text.Append("  yaw error        max ").Append(Format(MaxYawError)).Append("°\n");
         text.Append("  state mismatches ").Append(StateMismatches)
-            .Append(", target mismatches ").Append(TargetMismatches).Append('\n');
+            .Append(", target mismatches ").Append(TargetMismatches)
+            .Append(", woke up unexpectedly ").Append(SilentWakeups).Append('\n');
         text.Append("  answers          ").Append(OracleHits).Append(" recorded, ")
             .Append(GeometryAnswers).Append(" from geometry, ")
             .Append(UnansweredQueries).Append(" unanswered")

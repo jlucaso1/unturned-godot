@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Godot;
+using UnturnedGodot.Net;
 using UnturnedGodot.Zombies;
 
 namespace UnturnedGodot.Repro;
@@ -18,9 +19,15 @@ public sealed class ReproWatcherOptions
     // three seconds, so anything under a couple of metres is not a chase.
     public float MaxDisplacementMetres { get; init; } = 1.5f;
 
-    // A zombie can also be plainly wedged: a route it has failed to make progress on for longer than
-    // the brain's own patience with it.
-    public float MaxBlockedRouteTime { get; init; } = ZombieSystem.BlockedRouteTimeout;
+    // A zombie can also be plainly wedged: a route it has failed to make progress on for nearly as
+    // long as the brain's own patience with it.
+    //
+    // NOT the timeout itself. ApplyStep accumulates BlockedRouteTime in tick-sized steps and zeroes it
+    // the instant it reaches BlockedRouteTimeout, inside the same tick — so a watcher looking after
+    // the tick, as this one does, can never see the timeout value. The largest it can ever observe is
+    // one tick below it, which is what this is.
+    public float MaxBlockedRouteTime { get; init; } =
+        ZombieSystem.BlockedRouteTimeout - ServerSimulation.TickRate;
 
     // One capture per incident, not one per tick.
     public float CooldownSeconds { get; init; } = 30f;

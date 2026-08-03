@@ -114,23 +114,82 @@ public class ReproRecorderTests
             StringComparison.Ordinal));
     }
 
-    // The per-tick ceiling bounds memory, and what it drops is counted rather than quietly missing.
+    // The per-tick ceiling bounds memory, and what it drops is counted rather than quietly missing —
+    // for as long as the tick that dropped it is still in the window. A lifetime counter would let one
+    // pathological tick mark every dump taken for the rest of the session as incomplete.
     [Fact]
-    public void TheCallCeilingIsReportedRatherThanHidden()
+    public void TheCallCeilingIsReportedForTheRetainedWindowOnly()
     {
         ZombieSystem system = Bare(out _);
         var recorder = new ReproRecorder(system,
-            new ReproRecorderOptions { WindowTicks = 4, MaxCallsPerTick = 1 });
+            new ReproRecorderOptions { WindowTicks = 8, MaxCallsPerTick = 1 });
         recorder.Attach();
-        for (int i = 0; i < 20; i++)
-            system.Tick(new[] { ReproWorlds.Player(new Vector3(10f, 0f, 10f)) }, ReproWorlds.TickRate);
+        var chasing = new[] { ReproWorlds.Player(new Vector3(10f, 0f, 10f)) };
+        for (int i = 0; i < 4; i++)
+            system.Tick(chasing, ReproWorlds.TickRate);
         Assert.True(recorder.DroppedCalls > 0);
 
+        ReproDump incomplete = ReproCapture.Build(
+            ReproWorlds.Request(new ReproWorlds.Geometry(), Vector3.Zero), system, recorder,
+            ReproWorlds.FlatGround);
+        Assert.Contains(incomplete.Meta.Warnings,
+            warning => warning.Contains("per-tick recording ceiling", StringComparison.Ordinal));
+
+        // Once those ticks have rotated out — here by letting the zombie settle, which asks the world
+        // nothing — the window is complete again and stops claiming otherwise.
+        for (int i = 0; i < 24; i++)
+            system.Tick(Array.Empty<ZombiePlayerView>(), ReproWorlds.TickRate);
+        Assert.Equal(0, recorder.DroppedCalls);
+        ReproDump whole = ReproCapture.Build(
+            ReproWorlds.Request(new ReproWorlds.Geometry(), Vector3.Zero), system, recorder,
+            ReproWorlds.FlatGround);
+        Assert.DoesNotContain(whole.Meta.Warnings,
+            warning => warning.Contains("per-tick recording ceiling", StringComparison.Ordinal));
+    }
+
+    // Loading a dump replaces the population; the history from a moment ago is not a run-up to it.
+    [Fact]
+    public void RestartingThrowsAwayTheHistory()
+    {
+        ZombieSystem system = Bare(out _);
+        var recorder = new ReproRecorder(system, new ReproRecorderOptions { WindowTicks = 8 });
+        recorder.Attach();
+        for (int i = 0; i < 8; i++)
+            system.Tick(new[] { ReproWorlds.Player(new Vector3(10f, 0f, 10f)) }, ReproWorlds.TickRate);
+        Assert.NotEmpty(recorder.Build(out _, out _).Frames);
+
+        recorder.Restart();
+        Assert.Equal(0, recorder.RecordedTicks);
+        ReproZombieSection empty = recorder.Build(out _, out int ticks);
+        Assert.Equal(0, ticks);
+        Assert.Empty(empty.Frames);
+
+        // ...and it records again from here.
+        for (int i = 0; i < 4; i++)
+            system.Tick(new[] { ReproWorlds.Player(new Vector3(10f, 0f, 10f)) }, ReproWorlds.TickRate);
+        Assert.NotEmpty(recorder.Build(out _, out _).Frames);
+    }
+
+    // What the session could ask the world travels with the dump: a replay that installs a resolver
+    // the session did not have is running a different simulation, not a more complete one.
+    [Fact]
+    public void TheWorldSeamsTravelWithTheDump()
+    {
+        ZombieSystem system = Bare(out _);
+        system.PathQuery = null;
+        var recorder = new ReproRecorder(system, new ReproRecorderOptions { WindowTicks = 4 });
+        recorder.Attach();
+        Assert.True(recorder.Seams.MoveResolver);
+        Assert.True(recorder.Seams.GroundSnap);
+        Assert.True(recorder.Seams.VisionBlocked);
+        Assert.False(recorder.Seams.PathQuery);
+
+        system.Tick(Array.Empty<ZombiePlayerView>(), ReproWorlds.TickRate);
         ReproDump dump = ReproCapture.Build(
             ReproWorlds.Request(new ReproWorlds.Geometry(), Vector3.Zero), system, recorder,
             ReproWorlds.FlatGround);
-        Assert.Contains(dump.Meta.Warnings,
-            warning => warning.Contains("per-tick recording ceiling", StringComparison.Ordinal));
+        Assert.NotNull(dump.Zombies!.Seams);
+        Assert.False(dump.Zombies.Seams!.PathQuery);
     }
 
     // Frames carry the server's own tick numbers when the host supplies them, so a dump lines up with

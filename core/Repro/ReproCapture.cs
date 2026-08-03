@@ -56,7 +56,7 @@ public static class ReproCapture
         int tickCount = 0;
         if (recorder != null)
         {
-            section = recorder.Build(out startTick, out tickCount);
+            section = recorder.Build(out startTick, out tickCount) with { Seams = recorder.Seams };
             startTick = recorder.ServerTickOfWindowStart;
             if (recorder.DroppedCalls > 0)
                 request.Warnings.Add($"{recorder.DroppedCalls} world queries exceeded the per-tick "

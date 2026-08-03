@@ -60,7 +60,10 @@ public static class ReproGeometryCapture
             builder.Begin(layer, owner);
             Add(builder, PhysicsServer3D.ShapeGetType(shape), PhysicsServer3D.ShapeGetData(shape),
                 transform, warnings);
-            if (builder.TriangleCount >= MaxTriangles)
+            // Checked here AND inside the builder: one dense trimesh can carry more faces than the
+            // whole ceiling on its own, and a check that only runs between colliders would let it
+            // through in full — a key press that stalls and writes a dump far past its own limit.
+            if (builder.Full)
             {
                 warnings.Add($"the collision slice hit its {MaxTriangles} triangle ceiling; "
                     + "capture with a smaller REPRO_GEOMETRY_RADIUS for a complete one");
@@ -274,6 +277,8 @@ public static class ReproGeometryCapture
 
         public int TriangleCount => _triangles.Count / 3;
 
+        public bool Full => TriangleCount >= MaxTriangles;
+
         public void Begin(uint layer, string owner)
         {
             _layer = layer;
@@ -287,6 +292,8 @@ public static class ReproGeometryCapture
 
         public void Triangle(Vector3 a, Vector3 b, Vector3 c)
         {
+            if (Full)
+                return;
             // Kept whole whenever the sphere touches it ANYWHERE — corner, edge or face. A corner-only
             // test drops exactly the triangles that matter most: a building's floor slab is two huge
             // triangles whose vertices are all outside a 16 m capture taken while standing on it, and

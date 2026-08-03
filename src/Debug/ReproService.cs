@@ -32,6 +32,7 @@ namespace UnturnedGodot;
 public sealed partial class ReproService : Node
 {
     private ZombieSystem _zombies = null!;
+    private ZombieHost? _host;
     private NetServer? _server;
     private GroundSampler? _ground;
     private ReproRecorder? _recorder;
@@ -52,7 +53,8 @@ public sealed partial class ReproService : Node
 
     // Builds the service for a hosted session, or nothing at all when REPRO=0 — in which case the
     // simulation runs with its own delegates and this file costs the session exactly nothing.
-    public static ReproService? Create(ZombieSystem zombies, NetServer? server, GroundSampler? ground)
+    public static ReproService? Create(ZombieSystem zombies, NetServer? server, GroundSampler? ground,
+        ZombieHost? host = null)
     {
         ArgumentNullException.ThrowIfNull(zombies);
         if (!EnvFlag.IsOn(OS.GetEnvironment("REPRO"), whenUnset: true))
@@ -63,6 +65,7 @@ public sealed partial class ReproService : Node
             _zombies = zombies,
             _server = server,
             _ground = ground,
+            _host = host,
         };
         return service;
     }
@@ -278,6 +281,15 @@ public sealed partial class ReproService : Node
                 Log.PrintErr($"[repro] {e.Message}");
                 return;
             }
+
+            // The population is a different one now — different ids, types, clothing, animation
+            // variants — and the per-tick snapshots carry none of that. Anyone already connected is
+            // still rendering the avatars of the population this just replaced.
+            _host?.ResendRegions();
+
+            // And the history in the ring belongs to the session that was running a moment ago.
+            // Capturing straight after a load would splice a pre-load anchor onto post-load ticks.
+            _recorder?.Restart();
         }
 
         // Players go back to where the WINDOW starts, not to where the capture ended. The zombie state

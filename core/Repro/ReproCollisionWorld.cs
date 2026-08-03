@@ -28,20 +28,35 @@ public sealed class ReproCollisionWorld
     // fallback order the host has (physics first, terrain sampler second).
     private readonly ReproHeightSampler? _ground;
 
-    public ReproCollisionWorld(ReproTriangles triangles, ReproHeightSampler? ground = null)
+    private readonly Vector3 _centre;
+    private readonly float _radiusSquared;
+
+    public ReproCollisionWorld(ReproTriangles triangles, ReproHeightSampler? ground = null,
+        Vector3 centre = default, float radius = float.PositiveInfinity)
     {
         ArgumentNullException.ThrowIfNull(triangles);
         _triangles = triangles;
         _ground = ground;
+        _centre = centre;
+        _radiusSquared = float.IsFinite(radius) ? radius * radius : float.PositiveInfinity;
     }
 
     public static ReproCollisionWorld? From(ReproWorldData? world)
     {
         ReproTriangles? triangles = ReproTriangles.From(world?.Geometry);
-        return triangles == null
-            ? null
-            : new ReproCollisionWorld(triangles, ReproHeightSampler.From(world?.Ground));
+        if (triangles == null)
+            return null;
+        ReproGeometryData geometry = world!.Geometry!;
+        return new ReproCollisionWorld(triangles, ReproHeightSampler.From(world.Ground),
+            ReproVector.To(geometry.Center),
+            geometry.Radius > 0f ? geometry.Radius : float.PositiveInfinity);
     }
+
+    // Is this point somewhere the capture actually looked? Outside the slice there are no triangles,
+    // so every query answers "nothing there" — which is indistinguishable from open ground and is the
+    // one way this world can lie. Callers ask first and count the difference.
+    public bool Covers(Vector3 point) =>
+        (point - _centre).LengthSquared() <= _radiusSquared;
 
     public int TriangleCount => _triangles.TriangleCount;
 

@@ -649,4 +649,167 @@ public class ReproEdgeTests
         Assert.Equal(0, report.UnansweredInWindow);
         Assert.True(report.ReproducesRecording, report.Describe());
     }
+
+    // A dedicated server has a pathfinder and no physics at all. Replaying one of its dumps with a
+    // resolver, a ground snap and a vision ray installed is not a more faithful reproduction — the
+    // brain takes a different branch for each one — and it would fail its own verification.
+    [Fact]
+    public void ADumpFromAWorldWithoutPhysicsReplaysWithoutPhysics()
+    {
+        var flags = new List<NavFlag> { ReproWorlds.FlatField() };
+        var graph = BakedNavGraph.Build(flags);
+        var system = new ZombieSystem(new[] { new ZombieTable { Name = "Test", Damage = 5 } },
+            new[] { ReproWorlds.Bound() }, ReproWorlds.FlatGround, flags)
+        {
+            PathQuery = graph.TryPath,
+            PathReady = () => true,
+        };
+        system.Spawn(new[] { new ZombieSpawnpointData(0, new Vector3(5f, 0f, -5f)) },
+            new ReproRandom(1));
+        var recorder = new ReproRecorder(system, new ReproRecorderOptions { WindowTicks = 16 });
+        recorder.Attach();
+        for (int i = 0; i < 16; i++)
+            system.Tick(new[] { ReproWorlds.Player(new Vector3(12f, 0f, 12f)) }, ReproWorlds.TickRate);
+
+        ReproDump dump = ReproCapture.Build(
+            ReproWorlds.Request(new ReproWorlds.Geometry().Ground(), new Vector3(12f, 0f, 12f)),
+            system, recorder, ReproWorlds.FlatGround);
+
+        var scenario = new ReproScenario(dump);
+        Assert.Null(scenario.System.MoveResolver);
+        Assert.Null(scenario.System.GroundSnap);
+        Assert.Null(scenario.System.VisionBlocked);
+        ReproReplayReport report = scenario.Run();
+        Assert.True(report.ReproducesRecording, report.Describe());
+        Assert.Equal(0, report.UnansweredInWindow);
+    }
+
+    // A query outside the captured radius is answered by an empty world, which is indistinguishable
+    // from open ground. The replay still moves the body — freezing would be worse — but books the
+    // answer as one nobody could give.
+    [Fact]
+    public void QueriesOutsideTheCapturedSliceAreNotEvidence()
+    {
+        ReproTriangles triangles = ReproTriangles.From(
+            new ReproWorlds.Geometry().Ground().Build(Vector3.Zero, 8f))!;
+        var world = new ReproCollisionWorld(triangles, null, Vector3.Zero, 8f);
+        Assert.True(world.Covers(new Vector3(4f, 0f, 4f)));
+        Assert.False(world.Covers(new Vector3(40f, 0f, 40f)));
+
+        var dump = new ReproDump
+        {
+            World = new ReproWorldData
+            {
+                Bounds = { Box() },
+                Tables = { new ReproZombieTable { Name = "Test", Damage = 5 } },
+                Geometry = new ReproWorlds.Geometry().Ground().Build(new Vector3(500f, 0f, 500f), 4f),
+            },
+            Zombies = new ReproZombieSection
+            {
+                Seams = new ReproWorldSeams { MoveResolver = true, GroundSnap = true },
+                State = new ReproSystemState
+                {
+                    Zombies =
+                    {
+                        new ReproZombieRecord
+                        {
+                            Id = 1,
+                            Position = new[] { 20f, 0f, 20f },
+                            State = EZombieState.Chase,
+                            Target = 1,
+                        },
+                    },
+                },
+                Frames =
+                {
+                    new ReproFrame
+                    {
+                        Dt = 0.08f,
+                        Players =
+                        {
+                            new ReproPlayerSample
+                            {
+                                Id = 1,
+                                Position = new[] { 30f, 0f, 30f },
+                                Stance = UnturnedGodot.Player.EPlayerStance.Sprint,
+                            },
+                        },
+                    },
+                },
+            },
+        };
+
+        // The incident is 500 m from the geometry the dump carries, so nothing it asks is covered.
+        ReproReplayReport report = new ReproScenario(dump).Run(extraTicks: 4);
+        Assert.True(report.UnansweredQueries > 0);
+        Assert.Equal(0, report.GeometryAnswers);
+    }
+
+    // The recording says these zombies stayed asleep. That is a claim to check, not an absence: a
+    // change that newly alerts one has no position to disagree with unless the silence is verified.
+    [Fact]
+    public void AZombieTheRecordingSaysStayedIdleMustStayIdle()
+    {
+        var dump = new ReproDump
+        {
+            World = new ReproWorldData
+            {
+                Bounds = { Box() },
+                Tables = { new ReproZombieTable { Name = "Test", Damage = 5 } },
+            },
+            Zombies = new ReproZombieSection
+            {
+                Seams = new ReproWorldSeams(),
+                State = new ReproSystemState
+                {
+                    Zombies =
+                    {
+                        new ReproZombieRecord { Id = 1, Position = new[] { 20f, 0f, 20f } },
+                        new ReproZombieRecord
+                        {
+                            Id = 2,
+                            Position = new[] { 21f, 0f, 21f },
+                            State = EZombieState.Chase,
+                            Target = 3,
+                        },
+                    },
+                },
+                // Only the active one was sampled; the idle one's absence is the claim.
+                Frames =
+                {
+                    new ReproFrame
+                    {
+                        Dt = 0.08f,
+                        Zombies =
+                        {
+                            new ReproMotionSample
+                            {
+                                Id = 2,
+                                Position = new[] { 21f, 0f, 21f },
+                                State = EZombieState.Chase,
+                                Target = 3,
+                            },
+                        },
+                    },
+                },
+            },
+        };
+
+        // Replayed as recorded, the idle one stays idle and the window reproduces.
+        Assert.Equal(0, new ReproScenario(dump).Run().SilentWakeups);
+
+        // Woken by hand — standing in for a change that newly alerts it — the verdict notices, even
+        // though it contributes no position of its own to compare.
+        var scenario = new ReproScenario(dump);
+        foreach (ZombieInstance zombie in scenario.System.Zombies)
+            if (zombie.Id == 1)
+            {
+                zombie.State = EZombieState.Return; // walking somewhere it was not recorded walking
+                zombie.LeaveTo = new Vector3(60f, 0f, 60f);
+            }
+        ReproReplayReport report = scenario.Run();
+        Assert.True(report.SilentWakeups > 0);
+        Assert.False(report.ReproducesRecording);
+        Assert.Contains("woke up unexpectedly", report.Describe(), StringComparison.Ordinal);
+    }
 }

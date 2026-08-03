@@ -16,6 +16,10 @@ namespace UnturnedGodot.Repro;
 public sealed record ReproZombieSection
 {
     public ReproSystemState State { get; init; } = new();
+
+    // Which world delegates the recording session had installed. Null in a dump written before this
+    // was recorded, which a replay reads as "install whatever you can answer".
+    public ReproWorldSeams? Seams { get; init; }
     public List<ReproFrame> Frames { get; init; } = new();
     public ReproOracleData Oracle { get; init; } = new();
 
@@ -39,6 +43,18 @@ public sealed record ReproZombieSection
             text.Append("  ! the recording session used a non-reproducible RNG; rolls will differ\n");
         return text.ToString();
     }
+}
+
+// The seams between the simulation and the world it runs in. Which ones EXIST is part of the
+// simulation: ZombieSystem takes a different branch for each one that is null, so a replay that
+// installs a resolver the session did not have is not being more thorough, it is running something
+// else. A dedicated server, for instance, has a pathfinder and no physics at all.
+public sealed record ReproWorldSeams
+{
+    public bool MoveResolver { get; init; }
+    public bool GroundSnap { get; init; }
+    public bool VisionBlocked { get; init; }
+    public bool PathQuery { get; init; }
 }
 
 public sealed record ReproSystemState
