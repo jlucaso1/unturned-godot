@@ -39,9 +39,19 @@ public class UnityBundleRealTests
         foreach (SerializedObject o in file.Objects)
             counts[o.ClassId] = counts.GetValueOrDefault(o.ClassId) + 1;
 
-        Assert.Equal(4560, counts[43]);   // Mesh
-        Assert.Equal(24341, counts[1]);   // GameObject
-        Assert.Equal(9381, counts[33]);   // MeshFilter
+        // Asserted as ONE tuple rather than three statements, so a mismatch reports every class at
+        // once. Separately, the first failing Assert.Equal ended the test, and a content update that
+        // moved more than one count could only be discovered one CI round at a time — which is exactly
+        // how this was found: GameObject went 24341 -> 24342 while Mesh and MeshFilter never got read.
+        //
+        // A moving count here is normally the game, not the parser: these are counts OF the shipped
+        // bundle, and the fetch job re-downloads precisely when Valve's depot manifest changes. The
+        // signature to check before touching a number is whether the others held — a parser regression
+        // has no reason to miscount one class and get the neighbouring two exactly right.
+        var actual = (Mesh: counts.GetValueOrDefault(43),
+            GameObject: counts.GetValueOrDefault(1),
+            MeshFilter: counts.GetValueOrDefault(33));
+        Assert.Equal((Mesh: 4560, GameObject: 24342, MeshFilter: 9381), actual);
     }
 
     [RealDataFact(RequiresMasterBundle = true)]
