@@ -1355,12 +1355,33 @@ public sealed class BakedNavGraph
             // segments between its waypoints, which do not follow the ground either, so it is
             // undercounted. That biases against shortcutting over broken ground, which is the safe way
             // to be wrong here.
+            //
+            // A reach that FILLED is not an ordinary refusal, and the pass must not probe around it.
+            // The walk spends ONE unit of the route's budget however far the flood ran, so a mesh
+            // tessellated finer than the body is wide — where a flood fills rather than finishes —
+            // buys 2049 faces of spreading for one unit, and the pass then tries the next waypoint,
+            // and the next anchor, and pays it again. Measured on the 5 x 2 m floor at 0.05 m faces,
+            // one public TryPath from (0.1, 1.9) to (4.1, 0.4): 11 584 faces spread over two filled
+            // reaches, against 6 860 over one when the first of them ends the pass.
+            //
+            // So it ends the pass, exactly as an exhausted WALK budget does and for the same reason:
+            // where the reach refuses, the funnel's own route is already the answer, and giving up
+            // is what the ceiling exists to do. It gives up for the whole route rather than the one
+            // segment, which is the same trade the walk budget makes, and it costs waypoints on that
+            // mesh — the query above keeps 10 where it kept 8. Nothing changes on a mesh whose faces
+            // are the size of a body or larger, because no reach there ever fills.
+            bool exhausted = false;
             bool Reaches(int probe, out int end)
             {
                 end = -1;
+                if (exhausted)
+                    return false;
                 if (!TryLine(anchorTriangle, output[anchor], output[probe], radius, ref budget,
                     clearance, out int reached, out float surface))
+                {
+                    exhausted = clearance.Exhausted;
                     return false;
+                }
                 float replaced = 0f;
                 for (int i = anchor + 1; i <= probe; i++)
                     replaced += output[i - 1].DistanceTo(output[i]);
@@ -1418,7 +1439,7 @@ public sealed class BakedNavGraph
                     // the grid lookup is the same one the endpoints use and only runs when a shortcut
                     // failed.
                     anchorTriangle = reached >= 0 ? reached : ClosestTriangle(output[anchor], out _);
-                    if (anchorTriangle < 0 || budget <= 0)
+                    if (anchorTriangle < 0 || budget <= 0 || exhausted)
                     {
                         for (int i = anchor + 1; i < output.Count; i++)
                             scratch.Add(output[i]);

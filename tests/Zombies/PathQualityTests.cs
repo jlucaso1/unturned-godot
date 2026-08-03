@@ -583,6 +583,53 @@ public class PathQualityTests
             "the same line over 8000 faces of the same floor fills the reach, and a full reach refuses");
     }
 
+    // A reach that FILLED is not an ordinary refusal, and it used to be treated as one. The walk
+    // spends ONE unit of the route's shortcut budget however far the flood ran, so on a mesh finer
+    // than the body the pass bought 2049 faces of spreading for one unit, then tried the next
+    // waypoint and the next anchor and paid it again. Measured on the same 5 x 2 m floor at 0.05 m
+    // faces, one public TryPath:
+    //
+    //     (0.1, 1.9) -> (4.1, 0.4)   before   11 584 faces spread over TWO filled reaches,  8 wp
+    //                                after     6 860 faces over one, which ends the pass,  10 wp
+    //
+    // Over the whole floor swept at 0.4 x 0.3 m (7056 queries) the spreading falls from 17 609 064
+    // faces to 15 009 315 and the filled reaches from 1285 to 1006, for 4.0337 mean waypoints
+    // becoming 4.2100. That is the trade and it is deliberate: where the reach refuses, the funnel's
+    // own route is already the answer, and giving up is what the ceiling exists to do — the same
+    // trade the walk budget makes in ARouteTooLongToSmooth_IsReturnedIntact.
+    //
+    // Two-sided on the tessellation, which is the only thing that differs: the same query on the
+    // same floor at 0.25 m faces never fills a reach, so the pass runs to the end and its route is
+    // untouched by any of this.
+    [Fact]
+    public void AFilledClearanceReach_EndsTheShortcutPass_InsteadOfBeingPaidForAgain()
+    {
+        var from = new Vector3(0.1f, 0, 1.9f);
+        var to = new Vector3(4.1f, 0, 0.4f);
+
+        var fine = new List<Vector3>();
+        Assert.True(Strip(100, 40, 0.05f).TryPath(from, to, fine));
+        Assert.Equal(10, fine.Count);
+        Assert.Equal(from, fine[0]);
+        Assert.Equal(to, fine[^1]);
+
+        var coarse = new List<Vector3>();
+        Assert.True(Strip(20, 8, 0.25f).TryPath(from, to, coarse));
+        Assert.Equal(5, coarse.Count);
+        Assert.Equal(from, coarse[0]);
+        Assert.Equal(to, coarse[^1]);
+
+        // Whatever the pass did or did not reach, the route stays a walk on the floor it was asked
+        // for: no repeats, no leaps, nothing off the 5 x 2 m mesh.
+        foreach (List<Vector3> route in new[] { fine, coarse })
+            for (int i = 1; i < route.Count; i++)
+            {
+                Assert.InRange(route[i - 1].DistanceTo(route[i]), 1e-4f, 5.5f);
+                Assert.InRange(route[i].X, 0f, 5f);
+                Assert.InRange(route[i].Z, 0f, 2f);
+            }
+    }
+
     // An edge can carry more than two faces — the builder connects every pair that shares one. Taking
     // the first CSR match to cross by can pick a face on the side the walk is already on: the next
     // iteration finds the same exit at the same parameter and steps back, and the two trade the walk
