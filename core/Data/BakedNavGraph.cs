@@ -433,6 +433,20 @@ public sealed class BakedNavGraph
             int expectedCellStarts = cells == 0 ? 0 : cells + 1;
             int[] cellStart = ReadInts(reader, expectedCellStarts, expectedCellStarts);
             int[] cellItems = ReadInts(reader, -1, Math.Max(triangles * 16, 1));
+            // The same validation edgeStart gets, and for the same reason: ClosestTriangle walks
+            // _cellItems from _cellStart[cell] to _cellStart[cell + 1] with no bounds test of its own,
+            // so an offset outside the item array indexes past it. Only the terminal offset was checked
+            // here, which a corrupt or truncated cache satisfies while every offset before it is
+            // arbitrary — and the throw would then land in the middle of a repath, on the server tick,
+            // outside the try/catch that exists in TryRead precisely to keep bad cache files harmless.
+            if (cellStart.Length > 0)
+            {
+                if (cellStart[0] != 0)
+                    throw new InvalidDataException("CSR grid offsets invalid");
+                for (int i = 1; i < cellStart.Length; i++)
+                    if ((uint)cellStart[i] > (uint)cellItems.Length || cellStart[i] < cellStart[i - 1])
+                        throw new InvalidDataException("CSR grid offsets invalid");
+            }
             if ((cellStart.Length == 0 ? 0 : cellStart[^1]) != cellItems.Length)
                 throw new InvalidDataException("CSR grid offsets invalid");
             foreach (int item in cellItems) if ((uint)item >= (uint)triangles) throw new InvalidDataException("CSR grid item invalid");
