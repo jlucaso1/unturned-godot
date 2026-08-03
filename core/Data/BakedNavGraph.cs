@@ -15,7 +15,12 @@ namespace UnturnedGodot.Data;
 public sealed class BakedNavGraph
 {
     private const uint CacheMagic = 0x43424755; // UGBC
-    private const int CacheVersion = 1;
+    // Bump whenever the TOPOLOGY this builds changes, not just the blob's layout. The fingerprint
+    // covers the map and the reconciliation inputs, so an unchanged map on an upgraded server matches
+    // its old cache and is loaded verbatim — with none of the newer construction ever running.
+    // 2: faces meeting along a line without agreeing where it ends are now joined, which is 1784 extra
+    //    connections on PEI. A v1 cache carries every one of those seams still severed.
+    private const int CacheVersion = 2;
     private const float EndpointSnapMargin = 64f; // Bounds.dat expands authored navigation by this distance
 
     // The body the routes are for. A route is a line for a point, but a zombie is a capsule, and the
@@ -194,9 +199,12 @@ public sealed class BakedNavGraph
     // vertices on a quantised grid, so a genuine split lands exactly; this is float slack, not a
     // tolerance for "nearly collinear".
     private const float JoinPlanarSlack = 1e-3f;
-    // And how far apart in height two faces may be and still be the same floor. A join is a shared
-    // surface, so this only has to absorb the same quantisation; a storey is metres away.
-    private const float JoinHeightSlack = 0.25f;
+    // And how far apart in height two faces may be and still be the same floor. This is NOT
+    // quantisation slack: the spanning side of a join is one straight edge in 3D while the split side
+    // bends at its middle vertex, so over uneven ground the two legitimately differ by the chord's sag
+    // — measured on PEI as enough to lose 3 of 60 routes' worth of joins at 0.25 m. It only has to
+    // separate STOREYS, which are metres apart, so it matches the tolerance used for that elsewhere.
+    private const float JoinHeightSlack = 1f;
     // Shorter overlaps than this are a corner touching a line, not a doorway. Well under the body.
     private const float JoinShortestOverlap = 0.05f;
     private readonly record struct DirectedConnection(int From, Connection Edge, long Order);
@@ -412,17 +420,42 @@ public sealed class BakedNavGraph
             for (int i = 0; i < borders.Count; i++)
             {
                 Vector3 p = source.Vertices[borders[i].A], q = source.Vertices[borders[i].B];
-                int x0 = (int)MathF.Floor(MathF.Min(p.X, q.X) / Cell);
-                int x1 = (int)MathF.Floor(MathF.Max(p.X, q.X) / Cell);
-                int z0 = (int)MathF.Floor(MathF.Min(p.Z, q.Z) / Cell);
-                int z1 = (int)MathF.Floor(MathF.Max(p.Z, q.Z) / Cell);
-                for (int x = x0; x <= x1; x++)
-                    for (int z = z0; z <= z1; z++)
+                // The cells the edge CROSSES, not its bounding rectangle. A long diagonal spans a
+                // rectangle with area quadratic in its length while crossing only a linear number of
+                // cells, so filling the rectangle would let one 2 km edge on a sparse custom mesh
+                // allocate about a million buckets during build.
+                // Column by column: for each cell column the edge spans, only the rows it actually
+                // reaches inside that column. A stepped traversal that visits the exact cells crossed
+                // is not usable here — recast writes seams on round coordinates, so two collinear
+                // edges routinely lie ON a cell boundary and land on opposite sides of it, and the
+                // pair is then never compared. Closed ranges put a boundary edge in both.
+                float minX = MathF.Min(p.X, q.X), maxX = MathF.Max(p.X, q.X);
+                int firstColumn = (int)MathF.Floor(minX / Cell), lastColumn = (int)MathF.Floor(maxX / Cell);
+                float dx = q.X - p.X, dz = q.Z - p.Z;
+                for (int column = firstColumn; column <= lastColumn; column++)
+                {
+                    float spanFrom = MathF.Max(column * Cell, minX);
+                    float spanTo = MathF.Min((column + 1) * Cell, maxX);
+                    float zFrom, zTo;
+                    if (MathF.Abs(dx) <= 1e-6f)
                     {
-                        if (!grid.TryGetValue((x, z), out List<int>? bucket))
-                            grid[(x, z)] = bucket = new List<int>();
+                        zFrom = MathF.Min(p.Z, q.Z);
+                        zTo = MathF.Max(p.Z, q.Z);
+                    }
+                    else
+                    {
+                        zFrom = p.Z + (dz * ((spanFrom - p.X) / dx));
+                        zTo = p.Z + (dz * ((spanTo - p.X) / dx));
+                        if (zFrom > zTo) (zFrom, zTo) = (zTo, zFrom);
+                    }
+                    int firstRow = (int)MathF.Floor(zFrom / Cell), lastRow = (int)MathF.Floor(zTo / Cell);
+                    for (int row = firstRow; row <= lastRow; row++)
+                    {
+                        if (!grid.TryGetValue((column, row), out List<int>? bucket))
+                            grid[(column, row)] = bucket = new List<int>();
                         bucket.Add(i);
                     }
+                }
             }
 
             var seen = new HashSet<(int, int)>();
@@ -478,14 +511,19 @@ public sealed class BakedNavGraph
             if ((hi - lo) * length < JoinShortestOverlap)
                 return false; // a corner touching the line, not a way through
 
-            // The same floor, not one passing over another.
-            float middle = (lo + hi) * 0.5f;
-            float hereY = p.Y + ((q.Y - p.Y) * middle);
-            float thereY = MathF.Abs(ts - tr) <= 1e-6f
-                ? r.Y
-                : r.Y + ((s.Y - r.Y) * ((middle - tr) / (ts - tr)));
-            if (MathF.Abs(hereY - thereY) > JoinHeightSlack)
-                return false;
+            // The same floor, not one passing over another — checked at BOTH ends of the overlap. Two
+            // edges with opposite slopes cross somewhere, and a midpoint test alone passes at exactly
+            // the place they meet while their ends are storeys apart, joining faces that share a point
+            // rather than a surface.
+            if (MathF.Abs(ts - tr) <= 1e-6f)
+                return false; // the other edge is a point in this direction: no surface to share
+            foreach (float t in stackalloc[] { lo, hi })
+            {
+                float hereY = p.Y + ((q.Y - p.Y) * t);
+                float thereY = r.Y + ((s.Y - r.Y) * ((t - tr) / (ts - tr)));
+                if (MathF.Abs(hereY - thereY) > JoinHeightSlack)
+                    return false;
+            }
 
             // And the two faces must lie on OPPOSITE sides of the join. Two on the same side are
             // stacked or duplicated, and linking them would let a route step off the surface sideways.

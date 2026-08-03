@@ -181,6 +181,11 @@ public class PeiRouteQualityTests
             var route = new List<Vector3>();
             Assert.True(graph.TryPath(centre, near, route, BakedNavGraph.AgentRadius) && route.Count >= 2,
                 $"no route one metre out at {degrees:F0} deg");
+            // TryPath answers TRUE with a route to the closest reachable point when the destination is
+            // on another island, so the length bound alone would accept a short partial route and pass
+            // while the target stayed unreachable — the regression this test exists for.
+            Assert.True(new Vector2(route[^1].X - near.X, route[^1].Z - near.Z).Length() < 0.01f,
+                $"route at {degrees:F0} deg stopped {route[^1]} short of {near} — still severed");
             float length = 0f;
             for (int i = 0; i + 1 < route.Count; i++)
                 length += new Vector2(route[i + 1].X - route[i].X, route[i + 1].Z - route[i].Z).Length();
@@ -195,6 +200,8 @@ public class PeiRouteQualityTests
                 MathF.Sin(200f * MathF.PI / 180f) * 14f), out Vector3 far));
         var open = new List<Vector3>();
         Assert.True(graph.TryPath(centre, far, open, BakedNavGraph.AgentRadius) && open.Count >= 2);
+        Assert.True(new Vector2(open[^1].X - far.X, open[^1].Z - far.Z).Length() < 0.01f,
+            $"the open run stopped {open[^1]} short of {far}");
         float openLength = 0f;
         for (int i = 0; i + 1 < open.Count; i++)
             openLength += new Vector2(open[i + 1].X - open[i].X, open[i + 1].Z - open[i].Z).Length();
