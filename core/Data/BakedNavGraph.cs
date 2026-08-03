@@ -226,10 +226,15 @@ public sealed class BakedNavGraph
             private int _head;
 
             // The GROUND under the segment, as the walk measures it: the height at each point where
-            // the walk crossed into a new face, keyed by how far along the segment that was. The
-            // spread is bounded by a distance measured in XZ alone, and XZ has no idea which STOREY
-            // a face is; this is what tells it, and it is the walk's own numbers rather than the
-            // straight line's, because a body ground-snaps and the line over a rise does not.
+            // the walk crossed into a new face, plus both ends, keyed by how far along the segment
+            // that was. The spread is bounded by a distance measured in XZ alone, and XZ has no idea
+            // which STOREY a face is; this is what tells it, and it is the walk's own numbers rather
+            // than the straight line's, because a body ground-snaps and the line over a rise does not.
+            //
+            // It is filled by a measuring pass over the WHOLE segment before any clearance test reads
+            // it (see TryLine). A profile that only reaches as far as the walk has got answers about
+            // the far end with the height at the near end, which on a climb is metres too low — and
+            // too low means a wall looks like another storey and is skipped.
             private readonly List<float> _along = new();
             private readonly List<float> _height = new();
             private bool _level;
@@ -252,9 +257,9 @@ public sealed class BakedNavGraph
                 _height.Add(height);
             }
 
-            // The ground the body walks at `along`, held flat outside the part the walk has measured
-            // so far. Flat ground — which is nearly all ground, and every fixture with one storey —
-            // answers from the first sample without touching the list.
+            // The ground the body walks at `along`, held flat outside the samples' span. Flat ground —
+            // which is nearly all ground, and every fixture with one storey — answers from the first
+            // sample without touching the list.
             public float HeightAt(float along)
             {
                 if (_along.Count == 0)
@@ -1257,6 +1262,25 @@ public sealed class BakedNavGraph
         // The wall vertex a leg passes closest to, if any passes closer than the body is wide. The box
         // test is what makes the loop affordable: a corridor's wall list is every jamb it squeezes past,
         // and all but a couple of them are nowhere near any one leg.
+        //
+        // Closest in XZ, and on the leg's own STOREY. The wall list is every portal end of the corridor,
+        // and a corridor that climbs holds the ends of the floor it climbed TO; those sit directly over
+        // the legs on the floor below, which is nought metres away in plan. Measured on a wide ground
+        // floor with a narrower upper floor over it, a route from (1, 0, -1.5) to (4, 3, 1): the legs
+        // across the open ground floor were bent around the upper floor's boundary vertices three
+        // metres overhead, and since pushing off one of them lands next to the next, the route ORBITED
+        // (8, 3, 0) at 0.45 m — 25 waypoints where the corridor needed 4.
+        //
+        // That is worse than no repair at all. This pass runs after the shortcut, so nothing re-walks
+        // what it inserts: a waypoint it invents to dodge a wall the body can never meet is never
+        // cleared against the walls the body CAN meet.
+        //
+        // The leg's height at the closest point is read off the leg itself, which is a chord between
+        // two ground-snapped waypoints. It is a storey out only where the ground breaks slope inside
+        // one leg by more than StoreyTolerance, and being wrong there drops a repair — the chord-cut
+        // this pass exists to fix — rather than inventing a waypoint. The test can only ever REMOVE
+        // candidates, so on level ground, where every wall and every waypoint share a height, nothing
+        // about this pass changes.
         private int Nearest(List<int> walls, Vector3 a, Vector3 b, float reach, out float squared)
         {
             float minX = MathF.Min(a.X, b.X) - reach, maxX = MathF.Max(a.X, b.X) + reach;
@@ -1268,14 +1292,18 @@ public sealed class BakedNavGraph
                 Vector3 v = Source.Vertices[vertex];
                 if (v.X < minX || v.X > maxX || v.Z < minZ || v.Z > maxZ)
                     continue;
-                float candidate = PointSegmentDistanceSquaredXZ(v.X, v.Z, a.X, a.Z, b.X, b.Z);
-                if (candidate >= squared)
+                float candidate = PointSegmentDistanceSquaredXZ(v.X, v.Z, a.X, a.Z, b.X, b.Z,
+                    out float along);
+                if (candidate >= squared || !SameStorey(v.Y, a.Y + ((b.Y - a.Y) * along)))
                     continue;
                 squared = candidate;
                 nearest = vertex;
             }
             return nearest;
         }
+
+        private static bool SameStorey(float wall, float leg) =>
+            MathF.Abs(wall - leg) <= StoreyTolerance;
 
         // The waypoint that walks the leg around `centre` instead of through it: the point where the leg
         // came nearest, pushed out onto the circle the corners themselves sit on.
@@ -1319,7 +1347,9 @@ public sealed class BakedNavGraph
                 float ax = v.X - around.X, az = v.Z - around.Z;
                 if (MathF.Abs(ax) > reach || MathF.Abs(az) > reach)
                     continue;
-                if ((ax * ax) + (az * az) <= worstSquared)
+                // On the same storey as the waypoint being proposed, for the same reason Nearest asks:
+                // a gap is only too narrow to stand in if both sides of it are walls this body meets.
+                if ((ax * ax) + (az * az) <= worstSquared && SameStorey(v.Y, around.Y))
                     return false;
             }
             return true;
@@ -1477,6 +1507,36 @@ public sealed class BakedNavGraph
         // route it replaces. It is in fact a stronger test: the portal inset runs ALONG the portal and so
         // yields only radius * sin(angle) away from the wall the portal meets, while this measures the
         // real distance from the segment to the wall.
+        //
+        // TWICE, and this is what the storey filter costs. The clearance test skips an edge more than a
+        // storey off the GROUND under the segment where that edge comes nearest to it — and the reach it
+        // reads that ground from is filled BY the walk, so a single pass answers about the far end of the
+        // segment from the height at the near end. On level ground the two are the same number and it
+        // does not matter; on anything that climbs, the profile is metres too low exactly where the
+        // clearance test is deciding whether a wall is real, and it decides in the UNSAFE direction —
+        // every edge above the start looks like another storey and is skipped, walls included. Nor does
+        // the walk arriving there later repair it: the reach has already stamped those faces, and a
+        // stamped face is never tested again.
+        //
+        // Measured on a two-storey mesh whose ramp is one span rather than three 1 m ones, a leg
+        // climbing that ramp and drifting onto its own side boundary — the wall of the very face the
+        // body is walking on, 2.8 m above where the leg started:
+        //
+        //     ends 0.45 m off it     accepted    correct, that is radius + Clearance
+        //     ends 0.10 m off it     accepted    <- the ramp's own wall, missed by 0.35 m
+        //
+        // and it stays accepted with the upper floor deleted, so it is not the two-storey case at all:
+        // any climb does it. So the profile is built FIRST, by a walk that only measures — the same
+        // traversal with the clearance test off — and the clearance walk then reads a profile that
+        // covers the whole segment, endpoint included. The measuring walk spends a COPY of the budget:
+        // it visits exactly the faces the real one does, so charging for it twice would halve the
+        // shortcut budget for the same work.
+        //
+        // The alternative was to leave one walk and not stamp a face whose edge the storey test skipped,
+        // so it is re-tested once the profile reaches that far. It re-tests a face per step per storey
+        // disagreement instead of walking the segment twice, but it can only ever be as good as the
+        // profile the walk has SO FAR: at the last face there is no later step to repair, and the last
+        // face is precisely where the fixture above hides its wall. Measuring first has no such tail.
         private bool TryLine(int startTriangle, Vector3 from, Vector3 to, float radius, ref int budget,
             ClearanceReach reach, out int endTriangle, out float surface)
         {
@@ -1485,6 +1545,19 @@ public sealed class BakedNavGraph
             if (startTriangle < 0)
                 return false;
             reach.Begin();
+            int measuring = budget;
+            Walk(startTriangle, from, to, radius, ref measuring, reach, measure: true, out _, out _);
+            return Walk(startTriangle, from, to, radius, ref budget, reach, measure: false,
+                out endTriangle, out surface);
+        }
+
+        // One traversal. `measure` records the ground profile into the reach and tests nothing;
+        // otherwise the profile is already there and every face is cleared against it.
+        private bool Walk(int startTriangle, Vector3 from, Vector3 to, float radius, ref int budget,
+            ClearanceReach reach, bool measure, out int endTriangle, out float surface)
+        {
+            endTriangle = startTriangle;
+            surface = 0f;
 
             float ax = from.X, az = from.Z;
             float dx = to.X - ax, dz = to.Z - az;
@@ -1493,7 +1566,8 @@ public sealed class BakedNavGraph
             // ground-snaps, so what it actually covers is the surface under the line, not the line.
             float markX = ax, markZ = az;
             float markY = TryHeightOn(startTriangle, ax, az, out float seed) ? seed : from.Y;
-            reach.Mark(0f, markY);
+            if (measure)
+                reach.Mark(0f, markY);
 
             while (true)
             {
@@ -1503,7 +1577,7 @@ public sealed class BakedNavGraph
                 int i0 = Source.Triangles[current * 3];
                 int i1 = Source.Triangles[(current * 3) + 1];
                 int i2 = Source.Triangles[(current * 3) + 2];
-                if (!ClearOfWalls(current, from, to, radius, reach))
+                if (!measure && !ClearOfWalls(current, from, to, radius, reach))
                     return false;
 
                 // The edge to leave by is one the direction points OUT through — decided against the
@@ -1555,8 +1629,13 @@ public sealed class BakedNavGraph
                     // zombie simply stays downstairs and counts the target as reached below it.
                     if (!CarriesPoint(current, to))
                         return false;
-                    surface += Rise(markX, markZ, markY, to.X, to.Z,
-                        TryHeightOn(current, to.X, to.Z, out float last) ? last : markY);
+                    float end = TryHeightOn(current, to.X, to.Z, out float last) ? last : markY;
+                    // The far end of the profile is the segment's own end, not the last edge it crossed.
+                    // A face the segment stops INSIDE keeps rising under it, and the wall it stops next
+                    // to is the one the near miss is measured against.
+                    if (measure)
+                        reach.Mark(1f, end);
+                    surface += Rise(markX, markZ, markY, to.X, to.Z, end);
                     endTriangle = current;
                     return true;
                 }
@@ -1567,7 +1646,8 @@ public sealed class BakedNavGraph
                 markX = crossX;
                 markZ = crossZ;
                 markY = crossY;
-                reach.Mark(exit, crossY);
+                if (measure)
+                    reach.Mark(exit, crossY);
 
                 // `exit` is only ever set together with the pair, so past here a crossing was found.
                 //
