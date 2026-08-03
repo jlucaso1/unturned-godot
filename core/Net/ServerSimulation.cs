@@ -126,6 +126,10 @@ public sealed class ServerSimulation
         // reordered datagram recognisable as stale rather than as the latest word.
         public bool HasReceivedFrame;
         public uint LastReceivedFrame;
+
+        // Set by Teleport: the movement flag it restored is held until the client sends an input of
+        // its own, because the filler input the loop invents in the meantime holds no keys.
+        public bool HoldMovementUntilInput;
     }
 
     private readonly IMoveSolver _solver;
@@ -181,6 +185,7 @@ public sealed class ServerSimulation
             return false;
         entry.State.Stance = stance;
         entry.State.Moving = moving;
+        entry.HoldMovementUntilInput = moving;
         entry.State.Position = position;
         entry.State.Velocity = Vector3.Zero;
         entry.HasVerifiedPosition = false;
@@ -273,16 +278,28 @@ public sealed class ServerSimulation
             // The STANCE carries over too: silence means we did not hear from this player, not that they
             // stood up. Defaulting it snapped a prone or crouched player upright on every late or lost
             // frame — a flicker at 12.5 Hz that the whole session sees, hitbox included.
-            InputCommand input = entry.Inputs.TryDequeue(out InputCommand queued)
-                ? queued
-                : new InputCommand(0, 0, 0, false, false, entry.LastInput.Yaw, entry.LastInput.Pitch,
-                    entry.State.Stance, entry.State.Grounded);
+            bool starved = !entry.Inputs.TryDequeue(out InputCommand queued);
+            InputCommand input = starved
+                ? new InputCommand(0, 0, 0, false, false, entry.LastInput.Yaw, entry.LastInput.Pitch,
+                    entry.State.Stance, entry.State.Grounded)
+                : queued;
             entry.LastInput = input;
+
+            // A restored player has no input of their own yet, and the filler above holds no keys — so
+            // the solver would clear Moving before anyone reads it. The stealth radius a player is
+            // noticed at is computed from that flag, so the tick right after a repro dump is loaded is
+            // exactly the one it has to survive. Held only while STARVED: a client's own input saying
+            // "no keys" is the client speaking, and it wins.
+            bool holdRestoredMovement = entry.HoldMovementUntilInput && starved;
+            entry.HoldMovementUntilInput = holdRestoredMovement;
+            bool restoredMoving = entry.State.Moving;
 
             if (input.HasPosition)
                 ApplyTrustedPosition(entry, input);
             else
                 entry.State = _solver.Step(entry.State, input, TickRate);
+            if (holdRestoredMovement)
+                entry.State.Moving = restoredMoving;
 
             states.Add(new PlayerSnapshotState(id, entry.State.Position,
                 NetAngles.QuantizePitch(entry.State.Pitch), NetAngles.QuantizeYaw(entry.State.Yaw),

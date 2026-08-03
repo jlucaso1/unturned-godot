@@ -22,6 +22,10 @@ public static class ReproGeometryCapture
     // A capture that hits this many triangles stops adding: a dump is a bug report, not a level export.
     private const int MaxTriangles = 60_000;
 
+    // How many overlapping shapes one query may return. Godot truncates silently at this number, so a
+    // saturated result is indistinguishable from a complete one unless the count is checked.
+    private const int MaxShapes = 4096;
+
     public static ReproGeometryData? Capture(PhysicsDirectSpaceState3D? space, Vector3 focus,
         float radius, List<string> warnings)
     {
@@ -37,7 +41,15 @@ public static class ReproGeometryCapture
             CollideWithBodies = true,
             CollideWithAreas = false,
         };
-        Godot.Collections.Array<Godot.Collections.Dictionary> hits = space.IntersectShape(query, 4096);
+        Godot.Collections.Array<Godot.Collections.Dictionary> hits = space.IntersectShape(query, MaxShapes);
+        if (hits.Count >= MaxShapes)
+        {
+            // Truncated by the engine, which says nothing about it. Left unreported, the dump would
+            // claim a fully captured radius while missing whole colliders inside it, and a replay
+            // would treat that hole as open ground.
+            warnings.Add($"the collision query returned its {MaxShapes} shape ceiling, so the slice is "
+                + "missing colliders: capture with a smaller REPRO_GEOMETRY_RADIUS for a complete one");
+        }
 
         var builder = new Builder(focus, radius);
         var seen = new HashSet<(ulong Body, int Shape)>();

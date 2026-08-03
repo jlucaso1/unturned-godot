@@ -185,7 +185,11 @@ public sealed partial class ReproService : Node
         };
         ReproDump dump = ReproCapture.Build(request, _zombies, _recorder, _ground);
 
-        string path = $"{_directory.TrimEnd('/')}/{DateTime.UtcNow:yyyyMMdd-HHmmss}-{_written++}.json";
+        // The process id is in the name because two headless soak runs can share REPRO_DIR and capture
+        // in the same second, and a restarted one starts its counter over: without it, one incident
+        // silently overwrites another, which is the one thing a bug report must not do.
+        string path = $"{_directory.TrimEnd('/')}/{DateTime.UtcNow:yyyyMMdd-HHmmss}-"
+            + $"{OS.GetProcessId()}-{_written++}.json";
         try
         {
             DirAccess.MakeDirRecursiveAbsolute(ProjectSettings.GlobalizePath(_directory));

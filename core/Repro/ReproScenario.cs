@@ -40,6 +40,9 @@ public sealed class ReproScenario
     private readonly Dictionary<int, ZombieInstance> _byId = new();
     private readonly ReproHeightSampler? _heights;
     private readonly ZombiePathQuery? _pathQuery;
+    private readonly bool _routesAreSliced;
+    private readonly float _navmeshRadius;
+    private readonly Vector3 _navmeshCentre;
 
     public ZombieSystem System { get; }
 
@@ -86,6 +89,8 @@ public sealed class ReproScenario
             ?? (dump.World.HasNavmesh ? ReproZombieState.ToNavFlags(dump.World) : null);
 
         _heights = ReproHeightSampler.From(dump.World.Ground);
+        _navmeshCentre = ReproVector.To(dump.Meta.FocusPoint);
+        _navmeshRadius = dump.Meta.FocusRadius > 0f ? dump.Meta.FocusRadius : float.PositiveInfinity;
         Collision = _options.UseGeometry ? ReproCollisionWorld.From(dump.World) : null;
         Oracle = _options.UseRecordedAnswers
             ? new ReproOracle(_section.Oracle, Math.Max(1, _section.Frames.Count))
@@ -122,6 +127,10 @@ public sealed class ReproScenario
             // correctly around the incident and nowhere else, which is the trade a self-contained
             // bug report makes; pass the real map's flags (or a pathfinder) to lift it.
             _pathQuery = _options.PathQuery ?? BakedNavGraph.Build(flags).TryPath;
+            // Whether that graph covers the whole map or only what the dump sliced out. A slice can
+            // only answer near the incident, and a route asked for beyond it comes back "no route"
+            // from a graph that simply has no triangles there — which is not the same claim.
+            _routesAreSliced = _options.PathQuery == null && _options.NavFlags == null;
             System.PathQuery = ResolvePath;
             System.PathReady = () => Oracle?.Ready() ?? true;
         }
@@ -285,6 +294,14 @@ public sealed class ReproScenario
         return false;
     }
 
+    private bool WithinNavmeshSlice(Vector3 point)
+    {
+        if (float.IsPositiveInfinity(_navmeshRadius))
+            return true;
+        float dx = point.X - _navmeshCentre.X, dz = point.Z - _navmeshCentre.Z;
+        return (dx * dx) + (dz * dz) <= _navmeshRadius * _navmeshRadius;
+    }
+
     // A query the geometry answered, and whether it was somewhere the capture actually looked. Outside
     // the slice the triangle soup is empty, so the answer is "open ground" whatever is really there —
     // the body still moves (a replay that froze would be worse), but the answer is booked as one
@@ -303,10 +320,17 @@ public sealed class ReproScenario
     {
         if (Oracle != null && Oracle.TryPath(from, to, radius, path, out bool found))
             return found;
-        // Installed only alongside a pathfinder, so there is always one to fall through to: routing is
-        // the one world question a dump can always answer from its own navmesh slice.
-        GeometryAnswers++;
+        // Installed only alongside a pathfinder, so there is always one to fall through to. Whether it
+        // can actually answer is another matter: the dump's own slice has triangles near the incident
+        // and nowhere else, so a route asked for beyond it comes back "no route" from a graph that
+        // never had that ground rather than from a map that has no way through.
         RoutesRecomputed++;
+        if (_routesAreSliced && !(WithinNavmeshSlice(from) && WithinNavmeshSlice(to)))
+        {
+            Unanswered();
+            return _pathQuery!(from, to, path, radius);
+        }
+        GeometryAnswers++;
         return _pathQuery!(from, to, path, radius);
     }
 

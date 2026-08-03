@@ -459,6 +459,33 @@ public class ServerSimulationTests
         Assert.False(sim.Teleport(9, Vector3.Zero, EPlayerStance.Crouch, moving: false));
     }
 
+    // The restored movement flag has to survive the tick right after the load: no input of the
+    // player's own has arrived yet, and the filler input the loop invents holds no keys, so the solver
+    // would clear it before the zombie tick reads it — and the stealth radius is computed from it.
+    [Fact]
+    public void Teleport_HoldsTheRestoredMovementUntilTheClientSpeaks()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Vector3.Zero);
+        Assert.True(sim.Teleport(1, new Vector3(5f, 10f, 5f), EPlayerStance.Sprint, moving: true));
+
+        sim.Step(); // starved: the filler input holds no keys
+        Assert.True(sim.GetState(1).Moving);
+        sim.Step();
+        Assert.True(sim.GetState(1).Moving);
+
+        // The client's own input is the authority again the moment it arrives.
+        sim.QueueInput(1, new InputCommand(_frame++, 0, 0, false, false, 0, 90, EPlayerStance.Sprint));
+        sim.Step();
+        Assert.False(sim.GetState(1).Moving);
+
+        // A player restored as standing still is not held at all.
+        sim.AddPlayer(2, Vector3.Zero);
+        Assert.True(sim.Teleport(2, new Vector3(1f, 10f, 1f), EPlayerStance.Stand, moving: false));
+        sim.Step();
+        Assert.False(sim.GetState(2).Moving);
+    }
+
     [Fact]
     public void Teleport_RefusesUnknownPlayersAndNonFinitePositions()
     {

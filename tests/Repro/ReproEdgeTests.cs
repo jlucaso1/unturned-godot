@@ -881,4 +881,72 @@ public class ReproEdgeTests
         Assert.Equal(4, summary.Id);
         Assert.Equal(EZombieState.Idle, summary.FinalState);
     }
+
+    // The dump's navmesh slice reaches as far as the capture did. A route asked for beyond it comes
+    // back "no route" from a graph that never had that ground — which is not the same claim as a map
+    // with no way through, and must not read as one.
+    [Fact]
+    public void RoutesBeyondTheNavmeshSliceAreNotEvidence()
+    {
+        NavFlag field = ReproWorlds.FlatField();
+        var focus = new Vector3(6f, 0f, 6f);
+        var dump = new ReproDump
+        {
+            Meta = new ReproMeta { FocusPoint = ReproVector.From(focus), FocusRadius = 6f },
+            World = new ReproWorldData
+            {
+                HasNavmesh = true,
+                Bounds = { Box() },
+                Tables = { new ReproZombieTable { Name = "Test", Damage = 5 } },
+                NavFlags = { ReproCapture.Slice(field, focus, 6f) },
+            },
+            Zombies = new ReproZombieSection
+            {
+                Seams = new ReproWorldSeams { PathQuery = true },
+                State = new ReproSystemState
+                {
+                    Zombies =
+                    {
+                        new ReproZombieRecord
+                        {
+                            Id = 1,
+                            Position = new[] { 6f, 0f, 6f },
+                            State = EZombieState.Chase,
+                            Target = 1,
+                        },
+                    },
+                },
+                Frames =
+                {
+                    new ReproFrame
+                    {
+                        Dt = 0.08f,
+                        Players =
+                        {
+                            // Well outside the slice: every route asked for is one the dump cannot
+                            // answer, however confidently the graph says "no".
+                            new ReproPlayerSample
+                            {
+                                Id = 1,
+                                Position = new[] { 35f, 0f, 35f },
+                                Stance = UnturnedGodot.Player.EPlayerStance.Sprint,
+                            },
+                        },
+                    },
+                },
+            },
+        };
+
+        ReproReplayReport sliced = new ReproScenario(dump).Run(extraTicks: 8);
+        Assert.True(sliced.RoutesRecomputed > 0);
+        Assert.True(sliced.UnansweredQueries > 0);
+
+        // Handed the whole map, the same routes are answerable and stop being counted against it.
+        ReproReplayReport whole = new ReproScenario(dump, new ReproScenarioOptions
+        {
+            NavFlags = new[] { field },
+        }).Run(extraTicks: 8);
+        Assert.True(whole.RoutesRecomputed > 0);
+        Assert.Equal(0, whole.UnansweredQueries);
+    }
 }

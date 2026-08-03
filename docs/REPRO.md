@@ -118,7 +118,7 @@ Two independent sources answer the simulation's questions about the world:
   what answers the questions a **changed** brain asks, which is what anyone fixing the bug will be
   issuing.
 
-Every replay reports which source served each query (`961 recorded, 0 from geometry, 0 unanswered`),
+Every replay reports which source served each query (`95 recorded, 0 from geometry, 0 unanswered`),
 so "it stopped reproducing" can never be a silent consequence of the harness inventing a world. A
 `verify` run with a non-zero *unanswered* count is not evidence of anything, and says so.
 
