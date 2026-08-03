@@ -47,14 +47,20 @@ export function decodeText(bytes) {
 // TextDecoder has no UTF-32: the Encoding standard dropped it, so it is decoded by hand. Four bytes per
 // code point, and anything outside Unicode's range becomes the replacement character rather than a throw
 // — a map with one bad code point should lose that character, not its whole name.
+//
+// A trailing one to three bytes are a code unit the file was cut off in the middle of. .NET's decoder
+// emits one replacement character for that tail rather than dropping it, and TextDecoder does the same
+// for an odd byte at the end of a UTF-16 file, so dropping it here would have been the only quiet
+// truncation among the encodings — the desktop reading `Na�` where the browser read `Na`.
 function decodeUtf32(bytes, littleEndian) {
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength - (bytes.byteLength % 4));
+    const whole = bytes.byteLength - (bytes.byteLength % 4);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, whole);
     let out = "";
-    for (let i = 0; i < view.byteLength; i += 4) {
+    for (let i = 0; i < whole; i += 4) {
         const code = view.getUint32(i, littleEndian);
         out += code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff) ? "�" : String.fromCodePoint(code);
     }
-    return out;
+    return whole === bytes.byteLength ? out : `${out}�`;
 }
 
 export class ReadOnlyFs {

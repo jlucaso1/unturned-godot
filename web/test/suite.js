@@ -311,6 +311,22 @@ async function bomDecoding() {
             (await probeInstall(withUtf32, { platform: "linux" })).maps[0]?.displayName,
             "Ilha",
         );
+
+        // A file cut off mid-code-unit. .NET's decoder emits one replacement character for the tail
+        // rather than dropping it, so a truncated name is visibly truncated here too.
+        const truncated = new ListingFs(
+            [
+                fileFor("Bundles/core_linux.masterbundle", "Unturned", ""),
+                fileFor("Maps/Bom/Level.dat", "Unturned", ""),
+                fileFor("Maps/Bom/English.dat", "Unturned", new Uint8Array([...bom, ...body, 0x62, 0x63])),
+            ],
+            { caseInsensitive: false },
+        );
+        equal(
+            `a truncated ${label} tail becomes a replacement character`,
+            (await probeInstall(truncated, { platform: "linux" })).maps[0]?.displayName,
+            "Ilha�",
+        );
     }
 }
 

@@ -140,6 +140,13 @@ jobs:
         with:
           node-version: '22'
 
+      # For the .dat differential below, which builds a net10.0 project against core/. The hosted image
+      # happens to carry an SDK today; what it carries tomorrow is not this repo's decision, and the
+      # differential is set up to fail rather than skip here.
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
       - name: Cache DepotDownloader
         uses: actions/cache@v6
         with:
