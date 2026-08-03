@@ -236,7 +236,10 @@ public static class WorldBuilder
         }
 
         var registry = new TextureRegistry(textureCacheDir);
-        var meshLibrary = ModelLibrary.Load(cacheDir, registry, neededGuids);
+        // One material table for both levels, as the streamed path uses: a prefab's lower level draws with
+        // the same materials as its base one, so a second table just builds every one of them again.
+        var materials = new MaterialTable();
+        var meshLibrary = ModelLibrary.Load(cacheDir, registry, neededGuids, sharedMaterials: materials);
         var colliderLibrary = ColliderLibrary.Load(cacheDir, neededGuids);
 
         ObjectAssetDatabase db = dbTask.Result; // the scan ran concurrently with ModelLibrary.Load above
@@ -244,7 +247,7 @@ public static class WorldBuilder
         // The prefabs' authored lower levels, so this path renders the same as the streamed one: a
         // benchmark or screenshot taken here must submit the geometry a real session submits.
         Dictionary<Guid, ArrayMesh> lod1Library = ObjectsBuilder.ObjectLodEnabled
-            ? ModelLibrary.Load(cacheDir, registry, neededGuids, ModelExtractor.Lod1Suffix)
+            ? ModelLibrary.Load(cacheDir, registry, neededGuids, ModelExtractor.Lod1Suffix, materials)
             : new Dictionary<Guid, ArrayMesh>();
         Node3D objectsRoot = objects.Count > 0
             ? ObjectsBuilder.Build(objects, db, meshLibrary, colliderLibrary, out withMesh, lod1Library)

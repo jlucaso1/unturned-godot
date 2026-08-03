@@ -19,14 +19,26 @@ public sealed class TextureRegistry
     private readonly Dictionary<string, (ImageTexture? tex, int filterMode)> _loaded = new();
     private readonly Dictionary<string, ImageTexture> _imagesByContent = new();
     private readonly Dictionary<string, string> _materialIdentity = new();
+    // Keys whose identity is still the raw key because the .tex was not on disk when it was asked for.
+    // A cold load asks for every one of them before the texture phase has written anything, so this is
+    // where the identities that a warm load resolves immediately are remembered to be re-resolved later.
+    private readonly HashSet<string> _provisionalIdentity = new(System.StringComparer.Ordinal);
     private static readonly bool DeduplicateMaterials =
         EnvFlag.IsOn(System.Environment.GetEnvironmentVariable("UG_DEDUP_MATERIAL_CONTENT"), whenUnset: true);
 
     public TextureRegistry(string textureCacheDir) => _textureCacheDir = textureCacheDir;
 
+    public string TextureCacheDir => _textureCacheDir;
     public int PendingKeyCount => _pending.Count;
     public int MaterialAliasCount => _materialIdentity.Count
         - new HashSet<string>(_materialIdentity.Values, System.StringComparer.Ordinal).Count;
+
+    // The identity every material was built on, for the re-deduplication pass to group by.
+    public IReadOnlyDictionary<string, string> MaterialIdentities => _materialIdentity;
+
+    // The keys whose identity is still a guess. Empty after a warm load; on a cold one it starts as
+    // "nearly all of them" and empties as ResolvedIdentities lands.
+    public IReadOnlyCollection<string> ProvisionalIdentityKeys => _provisionalIdentity;
 
     // A material may use a different cache key for byte-identical texture data. The complete .tex file
     // includes format, dimensions, mip count, filter mode and pixels, so its exact hash is a safe material
@@ -37,16 +49,34 @@ public sealed class TextureRegistry
             return textureKey;
         if (_materialIdentity.TryGetValue(textureKey, out string? identity))
             return identity;
-        identity = textureKey;
-        string path = Path.Combine(_textureCacheDir, textureKey + ".tex");
-        try
+
+        // Cold load: the .tex for this key is usually still somewhere in the .resS tail being decoded, so
+        // the key stands in for its own identity and nothing merges. Recorded as provisional rather than
+        // settled, because that answer stops being true the moment the texture lands.
+        identity = TextureIdentity.Resolve(_textureCacheDir, textureKey);
+        if (identity.Length == 0)
         {
-            if (File.Exists(path) && TextureCache.IsCurrent(path))
-                identity = ExactContentKey.File(path);
+            identity = textureKey;
+            _provisionalIdentity.Add(textureKey);
         }
-        catch (IOException) { }
         _materialIdentity[textureKey] = identity;
         return identity;
+    }
+
+    // Takes identities resolved off the main thread (TextureIdentity.ResolveAll over the provisional keys)
+    // and settles them here. Only provisional keys are updated: an identity a material was already built
+    // on must not change underneath it. Returns how many keys now know their real identity.
+    public int ResolvedIdentities(IReadOnlyDictionary<string, string> resolved)
+    {
+        int settled = 0;
+        foreach ((string key, string identity) in resolved)
+        {
+            if (identity.Length == 0 || !_provisionalIdentity.Remove(key))
+                continue;
+            _materialIdentity[key] = identity;
+            settled++;
+        }
+        return settled;
     }
 
     public void Register(string textureKey, Material material)
@@ -56,6 +86,15 @@ public sealed class TextureRegistry
         if (!_pending.TryGetValue(textureKey, out List<Material>? mats))
             _pending[textureKey] = mats = new List<Material>();
         if (!mats.Contains(material))
+            mats.Add(material);
+    }
+
+    // Adds a material to a key that is still waiting for its texture, used when re-deduplication points a
+    // surface at another key's material. Deliberately not Register: a key whose texture has already been
+    // applied is done with, and re-registering it would resurrect a pending entry nothing will ever drain.
+    public void RegisterAlias(string textureKey, Material material)
+    {
+        if (_pending.TryGetValue(textureKey, out List<Material>? mats) && !mats.Contains(material))
             mats.Add(material);
     }
 
@@ -112,6 +151,7 @@ public sealed class TextureRegistry
         _loaded.Clear();
         _imagesByContent.Clear();
         _materialIdentity.Clear();
+        _provisionalIdentity.Clear();
         return entries;
     }
 

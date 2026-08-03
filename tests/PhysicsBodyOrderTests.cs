@@ -492,10 +492,50 @@ public class PhysicsBodyOrderTests
         string registry = File.ReadAllText(registryPath);
         string library = File.ReadAllText(libraryPath);
         Assert.Contains("UG_DEDUP_MATERIAL_CONTENT", registry);
-        Assert.Contains("ExactContentKey.File(path)", registry);
+        Assert.Contains("TextureIdentity.Resolve(_textureCacheDir, textureKey)", registry);
         Assert.Contains("registry.MaterialIdentity(sm.TextureKey)", library);
         Assert.Contains("sm.Color, sm.Blend, sm.Metallic, sm.Smoothness, sm.Cull", library);
         Assert.Contains("registry.Register(sm.TextureKey, shared)", library);
+
+        // The identity is the whole cache file, not the key that names it: format, dimensions, mips,
+        // filter mode and pixels all participate, so nothing merges materials that sample differently.
+        if (FindRepositoryFile(Path.Combine("core", "Unity", "TextureIdentity.cs")) is not { } identityPath)
+            return;
+        string identity = File.ReadAllText(identityPath);
+        Assert.Contains("ExactContentKey.File(path)", identity);
+        Assert.Contains("TextureCache.IsCurrent(path)", identity);
+    }
+
+    [Fact]
+    public void ColdLoadRegroupsItsMaterialsOnceTheTexturesTheyLackHaveSettled()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } streamerPath
+            || FindRepositoryFile(Path.Combine("src", "Rendering", "MaterialTable.cs")) is not { } tablePath)
+            return;
+
+        string streamer = File.ReadAllText(streamerPath);
+        string table = File.ReadAllText(tablePath);
+
+        // Only the cold path records where its materials landed: a warm load resolves every identity while
+        // it realises, so it has nothing to re-group and should not pay to remember the surfaces.
+        Assert.Contains("_materials.TrackSurfaces()", streamer);
+        Assert.Contains("_materialsSettled = false", streamer);
+
+        // Hashing the texture cache is worker work; only the surface reassignment is the main thread's.
+        Assert.Contains("Task.Run(\n                () => TextureIdentity.ResolveAll(cacheDir, provisional, cancellation), cancellation)",
+            streamer);
+        Assert.Contains("_registry.ResolvedIdentities(resolved)", streamer);
+        Assert.Contains("_materials.Rededuplicate(_registry)", streamer);
+        Assert.Contains("await ObserveStopped(_rededupTask);", streamer);
+
+        // The pass reads the registry's identity map, so the load state has to outlive it.
+        int gate = streamer.IndexOf("!_materialsSettled", StringComparison.Ordinal);
+        int release = streamer.IndexOf("_registry.ReleaseLoadingIndexes()", StringComparison.Ordinal);
+        Assert.True(gate >= 0 && release > gate);
+
+        Assert.Contains("MaterialAliasPlan.Canonical(keys, registry.MaterialIdentities)", table);
+        Assert.Contains("surface.Mesh.SurfaceSetMaterial(surface.Index, target)", table);
+        Assert.Contains("registry.RegisterAlias(surface.TextureKey, target)", table);
     }
 
     [Fact]
@@ -655,7 +695,7 @@ public class PhysicsBodyOrderTests
             return;
 
         string source = File.ReadAllText(path);
-        Assert.Contains("!_finished || (_streamStarted && !_texturesDone)", source);
+        Assert.Contains("!_finished || !_materialsSettled || (_streamStarted && !_texturesDone)", source);
         Assert.Contains("_registry.ReleaseLoadingIndexes()", source);
         Assert.Contains("_plans.Clear()", source);
         Assert.Contains("_layersProduced.Clear()", source);
