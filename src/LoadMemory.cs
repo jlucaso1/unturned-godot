@@ -33,12 +33,19 @@ public static class LoadMemory
             Log.Print($"[mem] {what} reclaim: skipped (UG_RECLAIM_PASSES=0), RSS {before} MB");
             return;
         }
+        // Re-armed for each pass: CompactOnce applies to the NEXT blocking gen-2 collection and then
+        // resets itself, so the two-pass control was measuring a second collection that left the large
+        // object heap alone — not the two compactions it is documented as.
         System.Runtime.GCSettings.LargeObjectHeapCompactionMode =
             System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
         GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
         GC.WaitForPendingFinalizers();
         if (passes == 2)
+        {
+            System.Runtime.GCSettings.LargeObjectHeapCompactionMode =
+                System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
             GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+        }
         if (before > 0) // Linux only (from /proc); skip the line where RSS is unavailable
             Log.Print($"[mem] {what} reclaim: RSS {before} -> {ProcessRssMib()} MB " +
                 $"(managed {GC.GetTotalMemory(false) >> 20} MB, {passes} pass(es)) " +

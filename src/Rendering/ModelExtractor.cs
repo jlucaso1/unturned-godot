@@ -290,7 +290,7 @@ public static class ModelExtractor
                 // well have been read by now, and owing them twice would plan ranges the decoder has
                 // already gone past.
                 if (audioPlan != null)
-                    audioOwed = OweAudioClips(audioPlan, audioOwed, ordered, owedByFile, written);
+                    audioOwed = OweAudioClips(audioPlan, audioOwed, i, ordered, owedByFile, written);
 
                 // Only once the LAST serialized file is in: the scene is built off this signal, and firing
                 // it after the first of several left the objects from the rest as fallback boxes.
@@ -385,7 +385,7 @@ public static class ModelExtractor
     // Owes the stream nodes every clip the plan has gained since `from`, and returns the new mark. A clip
     // whose definition omits the source name (older single-stream bundles) is served by the bundle's only
     // .resource node, which is the same rule the standalone extractor applies.
-    private static int OweAudioClips(AudioExtractor.StreamPlan plan, int from,
+    private static int OweAudioClips(AudioExtractor.StreamPlan plan, int from, int atNode,
         List<MasterBundleStream.Node> ordered, Dictionary<string, List<BundlePass.Want>> owedByFile,
         List<OwedRange> written)
     {
@@ -401,11 +401,31 @@ public static class ModelExtractor
             if (file.Length == 0)
                 continue;
 
+            // Only a node still ahead of the decoder can serve a range. A serialized file that names a
+            // clip in a stream this pass has already walked past would otherwise sit in owedByFile
+            // forever: BundlePass drops it, nothing writes the clip, and the definition would be marked
+            // complete without it. Say so instead, and let the next pass extract it properly.
+            if (NodeIndexOf(ordered, file) <= atNode)
+            {
+                plan.MarkUnservable(clip.Definition);
+                continue;
+            }
+
             Owe(owedByFile, file).Add(new BundlePass.Want(file, clip.Offset, clip.Size, written.Count));
             written.Add(OwedRange.ForAudioClip(plan, i));
         }
 
         return plan.Clips.Count;
+    }
+
+    // Where a stream file sits in blob order, or -1 when this bundle does not carry it (which the same
+    // check then treats as unreachable, because it is).
+    private static int NodeIndexOf(List<MasterBundleStream.Node> ordered, string fileName)
+    {
+        for (int i = 0; i < ordered.Count; i++)
+            if (LastSegment(ordered[i].Path).Equals(fileName, StringComparison.Ordinal))
+                return i;
+        return -1;
     }
 
     // Writes each definition's def.bin once its clips are in. Only on the pass's normal exits: a cancelled

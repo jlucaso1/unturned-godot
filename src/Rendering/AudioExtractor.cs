@@ -78,6 +78,12 @@ public static class AudioExtractor
             // and a slot is only filled once its bytes land, so "planned" and "written" are different
             // questions and asking the second one would plan the same clip once per file.
             internal readonly HashSet<int> Planned = new();
+
+            // A clip this pass cannot serve after all — its stream node was already behind the decoder
+            // when the definition naming it was read. def.bin is a permanent completeness marker, so
+            // writing one now would cache a definition missing a clip that IS in the bundle, and no
+            // later boot would ever look for it again. Leave no marker and let the next pass have it.
+            internal bool Unservable;
         }
 
         public readonly List<Clip> Clips = new();
@@ -105,6 +111,13 @@ public static class AudioExtractor
 
         internal (PendingDef Definition, int Index)? Existing(string directory) =>
             _byDirectory.TryGetValue(directory, out int index) ? (Definitions[index], index) : null;
+
+        // Told by the pass when a planned range turns out to be unreachable in this decode.
+        public void MarkUnservable(int definition)
+        {
+            if (definition >= 0 && definition < Definitions.Count)
+                Definitions[definition].Unservable = true;
+        }
     }
 
     // Plans one SerializedFile's share of a request into `plan` (a new one when null): which clip ranges
@@ -156,9 +169,17 @@ public static class AudioExtractor
             }
         }
 
-        return plan.Clips.Count > 0 ? plan : null;
+        // The carried plan, never null once one exists: it holds the definitions and slots planned from
+        // earlier files, and a file that adds no range of its own must not throw that away — the next
+        // file would then plan the same definitions again from scratch.
+        return plan;
     }
 
+    // Resolved off the plan and published only once the whole definition has been walked. Publishing as
+    // it went left a definition half in the plan when a later clip threw, and CompleteDefs then wrote a
+    // def.bin from that prefix — a permanently cached definition missing clips nobody would look for
+    // again. Each clip is contained on its own, so one unreadable clip costs that clip, as an
+    // unresolvable or unrebuildable one already did.
     private static void PlanDefinition(StreamPlan plan, FileCatalog catalog, SerializedFile file,
         SerializedObject defObject, string directory)
     {
@@ -177,13 +198,17 @@ public static class AudioExtractor
         // The slot is the clip's place in the definition's own list, so what lands on disk is in the
         // author's order however the stream hands the ranges back. Clips the file cannot resolve leave
         // their slot empty and CompleteDefs drops it.
-        int index = plan.Add(pending);
+        var resolved = new List<(StreamPlan.Clip Clip, int Slot)>();
         for (int slot = 0; slot < clips.Count; slot++)
         {
             pending.ClipFiles.Add(null);
-            if (catalog.ById(PathId(clips[slot])) is { } clipObject)
-                PlanClip(plan, file, clipObject, PathId(clips[slot]), index, slot);
+            if (ResolveClip(catalog, file, clips[slot], slot) is { } clip)
+                resolved.Add((clip, slot));
         }
+
+        int index = plan.Add(pending);
+        foreach ((StreamPlan.Clip clip, int _) in resolved)
+            plan.Clips.Add(clip with { Definition = index });
     }
 
     // Raw clip groups are resolved one container path at a time, so a bundle whose serialized files split
@@ -215,9 +240,11 @@ public static class AudioExtractor
         {
             if (pending.ClipFiles[slot] != null || pending.Planned.Contains(slot))
                 continue; // an earlier file already owns this clip
-            if (catalog.Find(group.ClipPaths[slot]) is { } clipObject
-                && PlanClip(plan, file, clipObject, clipObject.PathId, index, slot))
+            if (catalog.Find(group.ClipPaths[slot]) is not { } clipObject)
+                continue;
+            if (ResolveClip(catalog, file, clipObject, slot) is { } clip)
             {
+                plan.Clips.Add(clip with { Definition = index });
                 pending.Planned.Add(slot);
             }
         }
@@ -273,6 +300,15 @@ public static class AudioExtractor
         int completed = 0;
         foreach (StreamPlan.PendingDef def in plan.Definitions)
         {
+            if (def.Unservable)
+            {
+                // A clip of this definition sits in a node the decoder had already gone past. Marking it
+                // complete now would cache it permanently without a clip the bundle does in fact hold.
+                AppShutdown.WarnUnlessQuitting($"[audio] {Path.GetFileName(def.Directory)} needs a range "
+                    + "this pass could not reach; leaving it for the next one");
+                continue;
+            }
+
             // In the definition's own clip order, minus the slots whose blob FMOD could not rebuild or
             // whose file could not be written.
             var clips = new List<string>(def.ClipFiles.Count);
@@ -282,17 +318,25 @@ public static class AudioExtractor
             if (clips.Count == 0)
                 continue;
 
+            // Through a temporary and renamed into place, like every other cache file judged current by
+            // its mere existence: a def.bin truncated by a full disk mid-write would be read as a
+            // complete definition by every later boot, and re-extraction would never look at it again.
+            string marker = Path.Combine(def.Directory, "def.bin");
+            string temporary = marker + ".tmp";
             try
             {
                 Directory.CreateDirectory(def.Directory);
-                using FileStream s = File.Create(Path.Combine(def.Directory, "def.bin"));
-                AudioDefCache.Write(s, new OneShotAudioDef(def.Volume, def.MinPitch, def.MaxPitch, clips));
+                using (FileStream s = File.Create(temporary))
+                    AudioDefCache.Write(s, new OneShotAudioDef(def.Volume, def.MinPitch, def.MaxPitch, clips));
+                File.Move(temporary, marker, overwrite: true);
             }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {
                 // No marker, so the clips already on disk are re-extracted next time rather than read as
                 // a definition that never completed.
                 AppShutdown.WarnUnlessQuitting($"[audio] could not complete {def.Directory}: {e.Message}");
+                try { File.Delete(temporary); }
+                catch (Exception cleanup) when (cleanup is IOException or UnauthorizedAccessException) { }
                 continue;
             }
 
@@ -301,29 +345,60 @@ public static class AudioExtractor
         return completed;
     }
 
-    private static bool PlanClip(StreamPlan plan, SerializedFile file, SerializedObject clipObject,
-        long clipId, int definition, int slot)
+    // A clip named by path id (a definition's own list), resolved through the catalog first.
+    private static StreamPlan.Clip? ResolveClip(FileCatalog catalog, SerializedFile file, object pptr,
+        int slot)
     {
-        Dictionary<string, object> clip = TypeTreeReader.Read(clipObject.TypeTree, file.ReaderFor(clipObject));
-        string name = clip.GetValueOrDefault("m_Name") as string ?? $"clip_{clipId:x}";
-        if (clip.GetValueOrDefault("m_Resource") is not Dictionary<string, object> res
-            || res.GetValueOrDefault("m_Offset") is not { } rawOffset
-            || res.GetValueOrDefault("m_Size") is not { } rawSize)
+        try
         {
-            return false;
+            long clipId = PathId(pptr);
+            return catalog.ById(clipId) is { } clipObject
+                ? ResolveClip(catalog, file, clipObject, slot)
+                : null;
         }
+        catch (Exception e) when (IsMalformedAsset(e))
+        {
+            AppShutdown.WarnUnlessQuitting($"[audio] skipping clip {slot}: unreadable reference "
+                + $"({e.GetType().Name})");
+            return null;
+        }
+    }
 
-        long offset = Convert.ToInt64(rawOffset);
-        int size = Convert.ToInt32(rawSize);
-        if (offset < 0 || size <= 0)
-            return false;
+    // The clip's own metadata. Contained per clip, exactly as an unresolvable or unrebuildable clip
+    // already is: one bad clip costs that clip, not the definition it belongs to and not the pass.
+    // The Definition index is filled in by the caller once the definition is published.
+    private static StreamPlan.Clip? ResolveClip(FileCatalog catalog, SerializedFile file,
+        SerializedObject clipObject, int slot)
+    {
+        try
+        {
+            long clipId = clipObject.PathId;
+            Dictionary<string, object> clip =
+                TypeTreeReader.Read(clipObject.TypeTree, file.ReaderFor(clipObject));
+            string name = clip.GetValueOrDefault("m_Name") as string ?? $"clip_{clipId:x}";
+            if (clip.GetValueOrDefault("m_Resource") is not Dictionary<string, object> res
+                || res.GetValueOrDefault("m_Offset") is not { } rawOffset
+                || res.GetValueOrDefault("m_Size") is not { } rawSize)
+            {
+                return null;
+            }
 
-        // Older bundles omit m_Source because they carry only one audio stream; the empty name means
-        // "whichever .resource this bundle has", which the caller resolves against its own node table.
-        string source = res.GetValueOrDefault("m_Source") as string ?? "";
-        plan.Clips.Add(new StreamPlan.Clip(ResourceName(source), offset, size, definition, slot, name,
-            clipId));
-        return true;
+            long offset = Convert.ToInt64(rawOffset);
+            int size = Convert.ToInt32(rawSize);
+            if (offset < 0 || size <= 0)
+                return null;
+
+            // Older bundles omit m_Source because they carry only one audio stream; the empty name means
+            // "whichever .resource this bundle has", which the caller resolves against its own node table.
+            string source = res.GetValueOrDefault("m_Source") as string ?? "";
+            return new StreamPlan.Clip(ResourceName(source), offset, size, 0, slot, name, clipId);
+        }
+        catch (Exception e) when (IsMalformedAsset(e))
+        {
+            AppShutdown.WarnUnlessQuitting($"[audio] skipping clip {slot}: unreadable metadata "
+                + $"({e.GetType().Name})");
+            return null;
+        }
     }
 
     private static List<string> MissingDefs(Request request)

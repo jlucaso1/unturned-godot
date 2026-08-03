@@ -766,8 +766,11 @@ public class PhysicsBodyOrderTests
         // clip group is resolved a container at a time, so a per-file plan completed it from the first
         // file that held any of its clips and left the rest of them unextracted.
         Assert.Contains("AudioExtractor.Plan(file, audio, audioPlan)", extractor);
-        Assert.Contains("audioOwed = OweAudioClips(audioPlan, audioOwed, ordered, owedByFile, written)",
+        Assert.Contains("audioOwed = OweAudioClips(audioPlan, audioOwed, i, ordered, owedByFile, written)",
             extractor);
+        // A range in a node the decoder has already passed can never be served, and marking its
+        // definition complete would cache it permanently without a clip the bundle does hold.
+        Assert.Contains("plan.MarkUnservable(clip.Definition)", extractor);
         Assert.Contains("AudioExtractor.WriteClip(owed.AudioPlan, owed.AudioClip, bytes)", extractor);
 
         // def.bin is the cache's only completeness marker, so it is written on the pass's normal exits
