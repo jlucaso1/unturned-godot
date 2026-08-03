@@ -43,19 +43,27 @@ public partial class FreeCamera : Camera3D
 
     public override void _Process(double delta)
     {
+        // PHYSICAL keys, not keycodes. WASD is a shape — a cluster under the left hand — and asking for
+        // the key that PRINTS "W" gives a different physical key on every layout that is not QWERTY: on
+        // AZERTY that is where Z sits and A is where Q sits, so the camera answered to a scattering of
+        // keys nobody would press. IsPhysicalKeyPressed names the position through its US-layout keycode,
+        // which is the same cluster everywhere.
+        //
+        // PlayerController is deliberately not like this: it reads the player's own Unturned binds
+        // (_settings.Forward and friends), so a keycode is the right question to ask there.
         var dir = Vector3.Zero;
-        if (Input.IsKeyPressed(Key.W)) dir -= Transform.Basis.Z;
-        if (Input.IsKeyPressed(Key.S)) dir += Transform.Basis.Z;
-        if (Input.IsKeyPressed(Key.A)) dir -= Transform.Basis.X;
-        if (Input.IsKeyPressed(Key.D)) dir += Transform.Basis.X;
-        if (Input.IsKeyPressed(Key.E)) dir += Vector3.Up;
-        if (Input.IsKeyPressed(Key.Q)) dir += Vector3.Down;
+        if (Input.IsPhysicalKeyPressed(Key.W)) dir -= Transform.Basis.Z;
+        if (Input.IsPhysicalKeyPressed(Key.S)) dir += Transform.Basis.Z;
+        if (Input.IsPhysicalKeyPressed(Key.A)) dir -= Transform.Basis.X;
+        if (Input.IsPhysicalKeyPressed(Key.D)) dir += Transform.Basis.X;
+        if (Input.IsPhysicalKeyPressed(Key.E)) dir += Vector3.Up;
+        if (Input.IsPhysicalKeyPressed(Key.Q)) dir += Vector3.Down;
 
         if (dir == Vector3.Zero)
             return; // idle: don't touch Position — writing it dirties the transform and re-sends the
                     // camera to the RenderingServer every frame even when the view hasn't moved.
 
-        float speed = Speed * (Input.IsKeyPressed(Key.Shift) ? BoostMultiplier : 1f);
+        float speed = Speed * (Input.IsPhysicalKeyPressed(Key.Shift) ? BoostMultiplier : 1f);
         Position += dir.Normalized() * speed * (float)delta;
     }
 }
