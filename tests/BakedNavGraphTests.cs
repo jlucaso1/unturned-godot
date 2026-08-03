@@ -40,7 +40,11 @@ public class BakedNavGraphTests
     {
         BakedNavGraph graph = BakedNavGraph.Build(new[] { Strip(4) });
         Assert.Equal((14, 204L), graph.AdjacencyStorage);
-        Assert.Equal(912, graph.BuildScratchBytes);
+        // 912 before the T-junction broad phase was counted into this. The rise is the grid, its
+        // buckets, the border list and the pair set — transient, freed when Build returns, and
+        // deliberately included so the figure the perf harness prints is not an understatement of what
+        // a border-heavy map costs to build.
+        Assert.Equal(2096, graph.BuildScratchBytes);
         var path = new List<Vector3>();
         var from = new Vector3(0.1f, 0, 0.5f);
         var to = new Vector3(3.9f, 0, 0.5f);
@@ -541,14 +545,12 @@ public class BakedNavGraphTests
     // position along it extrapolates — and dividing that overshoot by a dx of 2e-6 turned one column
     // into a million metres of Z, half a million indexed rows.
     //
-    // This PASSES EITHER WAY and is not a guard against that, which is worth stating rather than
-    // implying: measured at 44 ms with the clamp and 1 s without it, so the defect shows up as cost,
-    // not as a failure, and no assertion here separates them. A threshold that did would be a timing
-    // assertion, which is worse than nothing in CI.
-    //
-    // What actually rules the blowup out is structural: clamping the interpolation parameter to [0, 1]
-    // means the rows indexed for a column can never exceed the segment's own extent, whatever the
-    // slack does to the column bounds. This exercises the shape so a future rewrite meets it at all.
+    // What rules the blowup out is structural: clamping the interpolation parameter to [0, 1] means the
+    // rows indexed for a column can never exceed the segment's own extent, whatever the slack does to
+    // the column bounds. The scratch bound below is what makes that measurable — the defect showed up
+    // as cost rather than as a wrong answer, so routing assertions alone passed either way and could
+    // not have caught a regression. The ceiling is generous against the 52 KB this actually uses and
+    // still orders of magnitude under the blowup.
     [Fact]
     public void ALongNearlyVerticalSliver_DoesNotExplodeTheBroadPhase()
     {
@@ -571,6 +573,8 @@ public class BakedNavGraphTests
         var path = new List<Vector3>();
         Assert.True(graph.TryPath(new Vector3(0.5f, 0, 1f), new Vector3(0.5f, 0, 1999f), path));
         Assert.Equal(2, path.Count); // one open sliver, string-pulled straight
+        Assert.True(graph.BuildScratchBytes < 200_000,
+            $"broad phase used {graph.BuildScratchBytes} bytes of scratch on a two-triangle sliver");
     }
 
     [Fact]
@@ -583,11 +587,24 @@ public class BakedNavGraphTests
 
         Assert.True(graph.TryPath(from, to, path), "the two halves of one floor were not connected");
         Assert.True(path.Count >= 2);
-        float length = 0f;
-        for (int i = 0; i + 1 < path.Count; i++)
-            length += new Vector2(path[i + 1].X - path[i].X, path[i + 1].Z - path[i].Z).Length();
+        Assert.Equal(from, path[0]);
+        Assert.Equal(to, path[^1]);
         // Straight across: the seam is not an obstacle, so nothing should be routed around.
-        Assert.Equal(3f, length, 2);
+        Assert.Equal(3f, Plan(path), 2);
+
+        // And back. The stitch adds a connection in each direction, and a one-way link would satisfy
+        // everything above while leaving the seam impassable from the other side.
+        //
+        // Not asserted as EQUAL to the forward route: it measures 3.10 m against 3.00 m, and that
+        // asymmetry is not the seam. It is corner rounding, which runs after the shortcut pass and
+        // picks which side to push off without consulting the corridor, so the reverse traversal of the
+        // same geometry can gain a waypoint the forward one does not. That is a known open defect
+        // elsewhere in this file, not something this stitch introduces or should paper over.
+        var back = new List<Vector3>();
+        Assert.True(graph.TryPath(to, from, back), "the seam was only crossable in one direction");
+        Assert.Equal(to, back[0]);
+        Assert.Equal(from, back[^1]);
+        Assert.True(Plan(back) < 3.5f, $"the return route detoured: {Plan(back):F2} m across a 3 m floor");
     }
 
     // A 6 m tent-shaped ridge — 2 m of run either side of the crest — laid along +Z from z = -2 to the

@@ -397,19 +397,11 @@ public sealed class BakedNavGraph
         private readonly int[] _cellItems = Array.Empty<int>();
         // Every edge no other face named — walls and mis-joined edges look alike from the index pairs —
         // paired up wherever two of them describe the same stretch of ground from opposite sides.
-        private static List<DirectedConnection> StitchTJunctions(NavFlag source, EdgeRecord[] records)
+        private static List<DirectedConnection> StitchTJunctions(NavFlag source, List<EdgeRecord> borders,
+            out long scratch)
         {
             var stitched = new List<DirectedConnection>();
-            var borders = new List<EdgeRecord>();
-            for (int first = 0; first < records.Length;)
-            {
-                int last = first + 1;
-                while (last < records.Length && records[last].KeyA == records[first].KeyA
-                    && records[last].KeyB == records[first].KeyB) last++;
-                if (last - first == 1)
-                    borders.Add(records[first]);
-                first = last;
-            }
+            scratch = 0;
             if (borders.Count < 2)
                 return stitched;
 
@@ -470,6 +462,13 @@ public sealed class BakedNavGraph
                 }
             }
 
+            // Counted rather than estimated where it is cheap to: the grid dominates, and it is the
+            // part that a bad broad phase blows up.
+            long buckets = 0;
+            foreach (List<int> bucket in grid.Values)
+                buckets += bucket.Count;
+            scratch = ((long)borders.Count * 24) + (grid.Count * 48L) + (buckets * 4L);
+
             var seen = new HashSet<(int, int)>();
             foreach (List<int> bucket in grid.Values)
             {
@@ -483,13 +482,32 @@ public sealed class BakedNavGraph
                         if (!TryJoin(source, borders[i], borders[j], out int portalA, out int portalB))
                             continue;
                         long order = ((long)borders[j].Sequence << 32) | (uint)borders[i].Sequence;
+                        // Oriented per DIRECTION, the way index matching already does it: it stores
+                        // (newer.A, newer.B) leaving one face and (prior.A, prior.B) leaving the other,
+                        // which is each triangle's own winding around the edge. That is what gives the
+                        // funnel a consistent left and right. Storing one order for both directions
+                        // hands the funnel a mirrored portal one way round — measured as a 3.10 m route
+                        // across a seam that is 3.00 m the other way.
+                        (int fromI, int toI) = Orient(source, borders[i], portalA, portalB);
+                        (int fromJ, int toJ) = Orient(source, borders[j], portalA, portalB);
                         stitched.Add(new DirectedConnection(borders[i].Triangle,
-                            new Connection(borders[j].Triangle, portalA, portalB), order));
+                            new Connection(borders[j].Triangle, fromI, toI), order));
                         stitched.Add(new DirectedConnection(borders[j].Triangle,
-                            new Connection(borders[i].Triangle, portalA, portalB), order));
+                            new Connection(borders[i].Triangle, fromJ, toJ), order));
                     }
             }
+            scratch += (long)seen.Count * 12L;
             return stitched;
+        }
+
+        // The portal pair ordered to run the same way as this face's OWN border edge, which is that
+        // face's winding around the join.
+        private static (int From, int To) Orient(NavFlag source, in EdgeRecord edge, int p1, int p2)
+        {
+            Vector3 a = source.Vertices[edge.A], b = source.Vertices[edge.B];
+            Vector3 u = source.Vertices[p1], v = source.Vertices[p2];
+            float along = ((v.X - u.X) * (b.X - a.X)) + ((v.Z - u.Z) * (b.Z - a.Z));
+            return along >= 0f ? (p1, p2) : (p2, p1);
         }
 
         // Do two border edges describe the same stretch of ground from opposite sides? Then the portal
@@ -499,6 +517,18 @@ public sealed class BakedNavGraph
         {
             portalA = portalB = -1;
             if (left.Triangle == right.Triangle)
+                return false;
+
+            // The SAME boundary, subdivided — which is what a T-junction IS — and not two different
+            // boundaries that happen to line up in plan at different heights. Sharing an endpoint is
+            // what says so, and no height tolerance can: the spanning side of a real join is a straight
+            // edge in 3D while the split side follows the ground, so the two differ by the chord's sag,
+            // and a sag over rough ground is the same number as a low ledge. A ledge shares no vertex.
+            //
+            // This is why the height test is not sized against the body's step height. It does not need
+            // to be: a join whose ends coincide is one surface, and the ground between them is whatever
+            // the split side already describes.
+            if (left.A != right.A && left.A != right.B && left.B != right.A && left.B != right.B)
                 return false;
 
             Vector3 p = source.Vertices[left.A], q = source.Vertices[left.B];
@@ -625,7 +655,11 @@ public sealed class BakedNavGraph
                 return byB != 0 ? byB : x.Sequence.CompareTo(y.Sequence);
             });
 
+            // One walk of the runs answers both questions: how many directed connections index matching
+            // will produce, and which edges no other face named. A run of one is a border — a wall, or
+            // a join whose two sides disagree where it ends, which the stitching below tells apart.
             long directedCountLong = 0;
+            var borders = new List<EdgeRecord>();
             for (int first = 0; first < records.Length;)
             {
                 int last = first + 1;
@@ -633,6 +667,8 @@ public sealed class BakedNavGraph
                     && records[last].KeyB == records[first].KeyB) last++;
                 long sharing = last - first;
                 directedCountLong += sharing * (sharing - 1);
+                if (sharing == 1)
+                    borders.Add(records[first]);
                 first = last;
             }
             var directed = new DirectedConnection[checked((int)directedCountLong)];
@@ -672,7 +708,7 @@ public sealed class BakedNavGraph
             // The join is the OVERLAP of the two edges, and its endpoints are always endpoints of one
             // edge or the other, so the portal is still a pair of existing vertices and Connection does
             // not change shape.
-            List<DirectedConnection> stitched = StitchTJunctions(source, records);
+            List<DirectedConnection> stitched = StitchTJunctions(source, borders, out long stitchScratch);
             if (stitched.Count > 0)
             {
                 int at = directed.Length;
@@ -697,7 +733,11 @@ public sealed class BakedNavGraph
                 _edges[i] = directed[i].Edge;
             _borderVertex = new bool[source.Vertices.Length];
             RecomputeBorderVertices();
-            ScratchBytes = ((long)records.Length * 24) + ((long)directed.Length * 24);
+            // The stitching broad phase allocates a grid, its buckets, the border list and the pair
+            // set, and on a border-heavy map that is a real share of build memory. Leaving it out made
+            // the figure the perf harness prints understate this pass to the point of being misleading
+            // about capacity on large custom maps.
+            ScratchBytes = ((long)records.Length * 24) + ((long)directed.Length * 24) + stitchScratch;
 
             // One bucket per cell, in CSR form: counts, then offsets, then the triangle ids. A triangle
             // goes in every cell its XZ bounding box touches, so the cell holding a point holds every
