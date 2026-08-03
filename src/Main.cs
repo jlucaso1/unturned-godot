@@ -221,7 +221,9 @@ public partial class Main : Node3D
             // shoots from its (third-person) camera instead.
             if (EnvFlag.IsOn(OS.GetEnvironment("PLAYER"), whenUnset: false))
             {
-                SpawnPlayer(world.Terrain, thirdPerson: true, unturnedPath, world.Heights);
+                // A screenshot run never reconciles the navmesh, so there is nothing to record into.
+                SpawnPlayer(world.Terrain, thirdPerson: true, unturnedPath, world.Heights,
+                    navigationField: null);
                 RunPendingAudioExtraction(); // no streamer on this path; extract right away
                 int settle = OS.GetEnvironment("SETTLE") is { Length: > 0 } sv ? int.Parse(sv) : 40;
                 _ = CaptureAndQuit(shot, settle);
@@ -666,16 +668,26 @@ public partial class Main : Node3D
         // Feature flag: FREECAM=1 keeps the fly-through camera; otherwise the player character spawns and
         // walks the map (terrain collision is added on demand so free-cam runs don't pay for it).
         string? stepProbe = OS.GetEnvironment("STEP_PROBE") is { Length: > 0 } probe ? probe : null;
+        // The CPU copy of the solid world that navmesh reconciliation probes instead of the physics
+        // server. It is filled by the two builders that create the layer-World bodies — terrain
+        // heightfields just below, object colliders inside the streamer — and handed to reconciliation
+        // when the streamer finishes. Only the flow that reconciles builds one; free-cam has no player,
+        // no network manager and no navmesh to reconcile, so it pays nothing.
+        Data.CollisionFieldBuilder? navigationField = null;
         // STEP_PROBE is a diagnostic run with no player/input. It starts from MeshesReady below rather
         // than from a guessed delay, so it always sees the object collision world it measures.
         if (stepProbe == null && EnvFlag.IsOn(OS.GetEnvironment("FREECAM"), whenUnset: false))
             AddFreeCamera();
         else if (stepProbe == null)
-            _player = SpawnPlayer(terrain, thirdPerson: false, unturnedPath, heights);
+        {
+            navigationField = new Data.CollisionFieldBuilder();
+            _player = SpawnPlayer(terrain, thirdPerson: false, unturnedPath, heights, navigationField);
+        }
 
         loading.SetStatus("World objects…");
         await NextFrame();
         var overlay = new LoadingOverlay { Name = "LoadingOverlay" };
+        streamer.NavigationField = navigationField; // must be set before the object build starts
         AddChild(streamer);
         AddChild(overlay);
         overlay.Track(streamer); // connect before Begin so a warm cache's instant signals are caught
@@ -689,7 +701,7 @@ public partial class Main : Node3D
         if (stepProbe != null)
             streamer.MeshesReady += elapsedMs => _ = RunStepProbe(stepProbe);
         // Only now do the object colliders exist, so only now can the navmesh be checked against them.
-        streamer.Finished += () => _network?.ReconcileNavigation(streamer.NeededGuids);
+        streamer.Finished += () => _network?.ReconcileNavigation(streamer.NeededGuids, navigationField);
         if (OS.GetEnvironment("UG_RUNTIME_BENCH_SECS") is { Length: > 0 } duration
             && double.TryParse(duration, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out double seconds))
@@ -735,11 +747,11 @@ public partial class Main : Node3D
     // terrain tile a cheap heightfield collision so it can stand on the ground (vs a 2.1M-triangle concave
     // trimesh). Objects stay non-colliding for now (the player clips buildings), which is fine for movement.
     private PlayerController SpawnPlayer(Node3D terrain, bool thirdPerson, string unturnedPath,
-        HeightmapSampler? heights)
+        HeightmapSampler? heights, Data.CollisionFieldBuilder? navigationField)
     {
         foreach (Node child in terrain.GetChildren())
             if (child is MeshInstance3D tile)
-                TerrainBuilder.AddHeightfieldCollision(tile);
+                TerrainBuilder.AddHeightfieldCollision(tile, navigationField);
 
         (Vector3 spawnPosition, float spawnYaw) = ResolveSpawn(unturnedPath, _mapName, heights);
 

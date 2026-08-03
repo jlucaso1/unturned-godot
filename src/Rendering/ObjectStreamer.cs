@@ -114,6 +114,11 @@ public partial class ObjectStreamer : Node
     // when nothing was decoded). Always completes: the terrain build waits on it.
     public Task<IReadOnlyDictionary<Guid, CachedTexture>> LayerTextures => _layerTextures.Task;
 
+    // Set before Begin() by a load that intends to reconcile the navmesh: the object collision bodies are
+    // mirrored into it as they are created, so the reconciliation pass can probe them on a worker instead
+    // of a physics tick. Left null (free-cam, previews) the reconciliation falls back to the server.
+    public CollisionFieldBuilder? NavigationField { get; set; }
+
     // Completes when the world is finished, faults when building it failed. The caller awaits this so a
     // failure lands in the load's error handling: without it, a warm build that threw while realising
     // meshes left the loading screen up for good, since Finished is never emitted and BeginAsync had
@@ -484,7 +489,10 @@ public partial class ObjectStreamer : Node
             : ColliderLibrary.Load(_cacheDir, _neededGuids);
         var stage = Stopwatch.StartNew();
         Node3D root = ObjectsBuilder.Build(_objects, _db, meshLibrary, colliderLibrary, out int withMesh,
-            lod1Library);
+            lod1Library, NavigationField);
+        // Handed on to reconciliation by whoever set it; this node has no further use for it and must not
+        // be what keeps a map-sized collision mirror alive for the session.
+        NavigationField = null;
         if (lod1Library.Count > 0)
             Log.Print($"[stream] object LOD levels: {lod1Library.Count} of {meshLibrary.Count} meshes "
                 + "have an authored lower level");

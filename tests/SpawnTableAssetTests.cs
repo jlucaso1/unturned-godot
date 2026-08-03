@@ -173,15 +173,30 @@ public class SpawnTableAssetTests
             + "ID 296\nTables 1\nTable_0_Asset_ID 40\nTable_0_Weight 100\n");
         dir.Write("Vehicles/Civilian/English.dat", "Name Civilian\n"); // no GUID: not a table
         dir.Write("Vehicles/Notes.txt", "ignored\n");
+        // The newer layout ships as ".asset"; the game's own fishing tables are written this way.
+        dir.Write("Vehicles/Rare/Rare.asset", """
+            GUID 20cdf1b0b0324866be88d5fb7a5c4507
+            Type Spawn
+            ID 297
+            Tables
+            [
+                {
+                    Guid 8c32debcf1974cd7a24a46779872c205
+                    Weight 120
+                }
+            ]
+            """);
         // A dangling symlink named .dat is enumerated but unreadable; it must not cost the whole scan.
         File.CreateSymbolicLink(Path.Combine(dir.Path, "Vehicles", "broken.dat"),
             Path.Combine(dir.Path, "absent.dat"));
 
         SpawnTableDatabase db = SpawnTableDatabase.ScanDirectory(dir.Path);
 
-        SpawnTableAsset table = Assert.Single(db.All);
-        Assert.Equal((ushort)296, table.Id);
+        Assert.Equal(2, db.Count);
+        SpawnTableAsset table = db.ById(296)!;
+        Assert.NotNull(table);
         Assert.Same(table, db.ByGuid(table.Guid));
+        Assert.Equal(120, Assert.Single(db.ById(297)!.Entries).Weight);
         Assert.Null(db.ByGuid(Guid.Empty));
         Assert.Null(db.ById(0));
     }

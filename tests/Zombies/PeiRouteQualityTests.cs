@@ -109,7 +109,13 @@ public class PeiRouteQualityTests
     // worth more than raising an unachievable one, and the map agrees: 22 routes off the mesh here
     // against 26 proportional, with the tightest fit 0.05 m under BOTH — so the clearance the algebra
     // promises the shallow end does not survive contact with the portals that actually bind.
-    private const int WorstRoutesLeavingTheMesh = 22;
+    //
+    // Down to 21 with T-junctions joined. It briefly read 26 when the clearance work landed alongside
+    // this test, and that number was measured against a graph carrying 1784 edges it called walls where
+    // the mesh is continuous — phantom walls pull portal insets in, so anything measuring distance to
+    // the nearest wall was partly measuring against them. Joining those faces did not merely undo the
+    // 26: it is a route better than the 22 this ceiling was set at before any of the clearance work.
+    private const int WorstRoutesLeavingTheMesh = 21;
 
     private static (List<NavFlag> Flags, Coverage Mesh, BakedNavGraph Graph) Load()
     {
@@ -140,6 +146,68 @@ public class PeiRouteQualityTests
             pairs.Add((a, b));
         }
         return pairs;
+    }
+
+    // Reported from play: a gap between two houses on ground that is solid and walkable, which zombies
+    // would not cross — they went round. It was not clearance. The mesh is continuous across it (every
+    // sample lands on the mesh with no snap displacement) and a body one CENTIMETRE wide took the same
+    // detour as a full-size one, which is what says adjacency rather than width.
+    //
+    // The cause was a T-junction: the faces meet along a line, but one side spans it with a single edge
+    // while the other has a vertex partway along, so no pair of vertex indices matched and both sides
+    // were classified as walls. Measured at 1784 of 37396 border edges across PEI, in every flag.
+    //
+    // Numbers before the join was stitched, at this exact point:
+    //
+    //     1 m of plan south-west  ->  163.05 m of route      (x163)
+    //    14 m of plan west        ->  150.15 m of route      (x10.7)
+    //
+    // The ceilings here are deliberately loose. This pins that the site is CONNECTED, not the exact
+    // geometry of the way through, which insets and corner handling may legitimately move.
+    [RealDataFact(Map = "PEI")]
+    public void GroundBetweenTwoHouses_IsNotSeveredByASeam()
+    {
+        (List<NavFlag> flags, Coverage _, BakedNavGraph graph) = Load();
+        var reported = new Vector3(-612.59f, 35.05f, -148.55f); // y is standing height; mesh is at 33.35
+        Assert.True(LevelNavmesh.SnapXZ(flags, reported, out Vector3 centre),
+            "the reported point is not on the navmesh");
+
+        foreach (float degrees in new[] { 200f, 220f, 240f })
+        {
+            float radians = degrees * MathF.PI / 180f;
+            var direction = new Vector3(MathF.Cos(radians), 0f, MathF.Sin(radians));
+            Assert.True(LevelNavmesh.SnapXZ(flags, centre + (direction * 1f), out Vector3 near));
+
+            var route = new List<Vector3>();
+            Assert.True(graph.TryPath(centre, near, route, BakedNavGraph.AgentRadius) && route.Count >= 2,
+                $"no route one metre out at {degrees:F0} deg");
+            // TryPath answers TRUE with a route to the closest reachable point when the destination is
+            // on another island, so the length bound alone would accept a short partial route and pass
+            // while the target stayed unreachable — the regression this test exists for.
+            Assert.True(new Vector2(route[^1].X - near.X, route[^1].Z - near.Z).Length() < 0.01f,
+                $"route at {degrees:F0} deg stopped {route[^1]} short of {near} — still severed");
+            float length = 0f;
+            for (int i = 0; i + 1 < route.Count; i++)
+                length += new Vector2(route[i + 1].X - route[i].X, route[i + 1].Z - route[i].Z).Length();
+            // Rounding a corner at the body's width costs a few metres; going round the block cost 163.
+            Assert.True(length < 15f,
+                $"one metre out at {degrees:F0} deg took {length:F2} m of route — the seam is back");
+        }
+
+        // And the open run west of it, which was 150 m for 14 m of plan, is direct.
+        Assert.True(LevelNavmesh.SnapXZ(flags,
+            centre + new Vector3(MathF.Cos(200f * MathF.PI / 180f) * 14f, 0f,
+                MathF.Sin(200f * MathF.PI / 180f) * 14f), out Vector3 far));
+        var open = new List<Vector3>();
+        Assert.True(graph.TryPath(centre, far, open, BakedNavGraph.AgentRadius) && open.Count >= 2);
+        Assert.True(new Vector2(open[^1].X - far.X, open[^1].Z - far.Z).Length() < 0.01f,
+            $"the open run stopped {open[^1]} short of {far}");
+        float openLength = 0f;
+        for (int i = 0; i + 1 < open.Count; i++)
+            openLength += new Vector2(open[i + 1].X - open[i].X, open[i + 1].Z - open[i].Z).Length();
+        float plan = new Vector2(far.X - centre.X, far.Z - centre.Z).Length();
+        Assert.True(openLength < plan * 1.5f,
+            $"14 m of open ground took {openLength:F2} m of route against {plan:F2} m of plan");
     }
 
     [RealDataFact(Map = "PEI")]

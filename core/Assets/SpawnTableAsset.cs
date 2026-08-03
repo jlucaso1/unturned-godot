@@ -175,6 +175,12 @@ public sealed class SpawnTableDatabase
         return (Guid.Empty, 0); // a cycle: the original gives up here too
     }
 
+    // A table written in the newer layout ships as ".asset" rather than ".dat" — the game's own fishing
+    // tables already do — and TryParse reads both, so the scan has to see both. Enumerating only ".dat"
+    // would leave such a table unfound, and a parent naming it by GUID would then take that GUID for the
+    // asset to spawn rather than the table to descend into.
+    private static readonly string[] SearchPatterns = { "*.dat", "*.asset" };
+
     // Scans a spawn-table tree. Every category's tables share one id namespace, so a caller that only
     // needs one of them may scan just that subtree — which is what the vehicle path does, because the
     // shipped vehicle tables only ever reference each other.
@@ -186,7 +192,7 @@ public sealed class SpawnTableDatabase
 
         try
         {
-            foreach (string file in Directory.EnumerateFiles(root, "*.dat", SearchOption.AllDirectories))
+            foreach (string file in EnumerateTableFiles(root))
             {
                 DatDictionary parsed;
                 try { parsed = DatParser.Parse(File.ReadAllText(file)); }
@@ -202,5 +208,12 @@ public sealed class SpawnTableDatabase
         }
 
         return db;
+    }
+
+    private static IEnumerable<string> EnumerateTableFiles(string root)
+    {
+        foreach (string pattern in SearchPatterns)
+            foreach (string file in Directory.EnumerateFiles(root, pattern, SearchOption.AllDirectories))
+                yield return file;
     }
 }
