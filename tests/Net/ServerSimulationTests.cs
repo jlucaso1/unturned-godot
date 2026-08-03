@@ -390,4 +390,109 @@ public class ServerSimulationTests
         Assert.False(sim.TryGetState(1, out _));
         Assert.Empty(sim.Step());
     }
+
+    // Standing a player somewhere outright, for loading a bug-repro dump into a running session. The
+    // trusted-position baseline has to go with it: measured against where they used to be, the jump
+    // reads as a cheating client and the speed budget rubber-bands them straight back.
+    [Fact]
+    public void Teleport_MovesThePlayerAndAdoptsTheirNextClaim()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, new Vector3(0f, 10f, 0f));
+        sim.QueueInput(1, new InputCommand(_frame++, 0, 0, false, false, 0, 90,
+            EPlayerStance.Stand, new Vector3(1f, 10f, 0f)));
+        sim.Step();
+        Assert.Equal(new Vector3(1f, 10f, 0f), sim.GetState(1).Position);
+
+        var somewhereElse = new Vector3(-616.22f, 35.02f, -66.58f);
+        Assert.True(sim.Teleport(1, somewhereElse));
+        Assert.Equal(somewhereElse, sim.GetState(1).Position);
+        Assert.Equal(Vector3.Zero, sim.GetState(1).Velocity);
+
+        // The client, now standing there too, is believed rather than rejected as a 600 m sprint.
+        Vector3 clientSide = somewhereElse + new Vector3(0.2f, 0f, 0f);
+        sim.QueueInput(1, new InputCommand(_frame++, 0, 0, false, false, 0, 90,
+            EPlayerStance.Stand, clientSide));
+        sim.Step();
+        Assert.Equal(clientSide, sim.GetState(1).Position);
+        Assert.Equal(0, sim.RejectedPositions);
+    }
+
+    // A datagram that was already in flight when the dump was loaded still says where the player used
+    // to be. With the baseline cleared, adopting it outright would put them straight back and undo
+    // the teleport within one tick.
+    [Fact]
+    public void Teleport_DropsInputsThatPredateIt()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, new Vector3(0f, 10f, 0f));
+        sim.QueueInput(1, new InputCommand(_frame++, 0, 0, false, false, 0, 90,
+            EPlayerStance.Stand, new Vector3(1f, 10f, 0f)));
+
+        var somewhereElse = new Vector3(-616.22f, 35.02f, -66.58f);
+        Assert.True(sim.Teleport(1, somewhereElse));
+        sim.Step(); // the queued claim is gone; nothing drags the player back
+        Vector3 after = sim.GetState(1).Position;
+        Assert.Equal(somewhereElse.X, after.X, 3);
+        Assert.Equal(somewhereElse.Z, after.Z, 3);
+        Assert.True(after.Y > 34f, $"the player did not stay where they were put: {after}");
+    }
+
+    // Stance and movement travel with the position: the stealth radius a player is noticed at is
+    // computed from both, so putting a crouching reporter back as a stander alerts a different set of
+    // zombies on the very first tick of the replay.
+    [Fact]
+    public void Teleport_CarriesTheStanceAndMovement()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Vector3.Zero);
+        Assert.Equal(EPlayerStance.Stand, sim.GetState(1).Stance);
+
+        Assert.True(sim.Teleport(1, new Vector3(5f, 10f, 5f), EPlayerStance.Prone, moving: true));
+        Assert.Equal(EPlayerStance.Prone, sim.GetState(1).Stance);
+        Assert.True(sim.GetState(1).Moving);
+
+        // The short form leaves both as they are, for callers that only want the position.
+        Assert.True(sim.Teleport(1, new Vector3(6f, 10f, 6f)));
+        Assert.Equal(EPlayerStance.Prone, sim.GetState(1).Stance);
+        Assert.True(sim.GetState(1).Moving);
+        Assert.False(sim.Teleport(9, Vector3.Zero, EPlayerStance.Crouch, moving: false));
+    }
+
+    // The restored movement flag has to survive the tick right after the load: no input of the
+    // player's own has arrived yet, and the filler input the loop invents holds no keys, so the solver
+    // would clear it before the zombie tick reads it — and the stealth radius is computed from it.
+    [Fact]
+    public void Teleport_HoldsTheRestoredMovementUntilTheClientSpeaks()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Vector3.Zero);
+        Assert.True(sim.Teleport(1, new Vector3(5f, 10f, 5f), EPlayerStance.Sprint, moving: true));
+
+        sim.Step(); // starved: the filler input holds no keys
+        Assert.True(sim.GetState(1).Moving);
+        sim.Step();
+        Assert.True(sim.GetState(1).Moving);
+
+        // The client's own input is the authority again the moment it arrives.
+        sim.QueueInput(1, new InputCommand(_frame++, 0, 0, false, false, 0, 90, EPlayerStance.Sprint));
+        sim.Step();
+        Assert.False(sim.GetState(1).Moving);
+
+        // A player restored as standing still is not held at all.
+        sim.AddPlayer(2, Vector3.Zero);
+        Assert.True(sim.Teleport(2, new Vector3(1f, 10f, 1f), EPlayerStance.Stand, moving: false));
+        sim.Step();
+        Assert.False(sim.GetState(2).Moving);
+    }
+
+    [Fact]
+    public void Teleport_RefusesUnknownPlayersAndNonFinitePositions()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Vector3.Zero);
+        Assert.False(sim.Teleport(9, Vector3.One));
+        Assert.False(sim.Teleport(1, new Vector3(float.NaN, 0f, 0f)));
+        Assert.Equal(Vector3.Zero, sim.GetState(1).Position);
+    }
 }

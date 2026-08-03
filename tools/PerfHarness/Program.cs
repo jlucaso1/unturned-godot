@@ -6,6 +6,8 @@ using System.IO;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Dat;
 using UnturnedGodot.Data;
+using UnturnedGodot.Net;
+using UnturnedGodot.Repro;
 using UnturnedGodot.Unity;
 using UnturnedGodot.Zombies;
 using Transform3D = Godot.Transform3D;
@@ -58,6 +60,8 @@ public static class Program
             NavigationCacheSuite(map);
         if (all || wanted.Contains("navprobe"))
             NavigationProbeSuite(map);
+        if (all || wanted.Contains("repro"))
+            ReproSuite();
         if (wanted.Contains("nav"))
             NavigationDiagnostic(map);
         if (wanted.Contains("ress"))
@@ -66,6 +70,111 @@ public static class Program
     }
 
     // ---------------- suites (baselines over the current Core implementations) ----------------
+
+    // What leaving the bug-repro recorder armed costs the tick it is recording. Both sides run the
+    // SAME simulation over the same synthetic world (a flat field, one hunter, collision answered by
+    // core's own triangle sweep), so the difference is the recorder and nothing else.
+    private static void ReproSuite()
+    {
+        Console.WriteLine("\n== repro recorder ==");
+        const int Ticks = 2000;
+
+        static (ZombieSystem System, ZombiePlayerView[] Players) Session()
+        {
+            var flag = new NavFlag
+            {
+                Center = new Vector3(20f, 0f, 20f),
+                Size = new Vector3(44f, 100f, 44f),
+                Vertices = new Vector3[41 * 41],
+                Triangles = new int[40 * 40 * 6],
+            };
+            for (int x = 0; x < 41; x++)
+                for (int z = 0; z < 41; z++)
+                    flag.Vertices[(x * 41) + z] = new Vector3(x, 0f, z);
+            int at = 0;
+            for (int x = 0; x < 40; x++)
+                for (int z = 0; z < 40; z++)
+                {
+                    int a = (x * 41) + z, b = a + 1, c = a + 41, d = c + 1;
+                    flag.Triangles[at++] = a;
+                    flag.Triangles[at++] = b;
+                    flag.Triangles[at++] = c;
+                    flag.Triangles[at++] = b;
+                    flag.Triangles[at++] = d;
+                    flag.Triangles[at++] = c;
+                }
+
+            var bound = new NavBound
+            {
+                Center = new Vector3(20f, 0f, 20f),
+                Size = new Vector3(160f, 100f, 160f),
+                MaxZombies = 64,
+                SpawnZombies = true,
+            };
+            var graph = BakedNavGraph.Build(new[] { flag });
+            var system = new ZombieSystem(new[] { new ZombieTable { Name = "Bench", Damage = 5 } },
+                new[] { bound }, Flat, new[] { flag })
+            {
+                GroundSnap = Snap,
+                VisionBlocked = (from, to) => false,
+                PathQuery = graph.TryPath,
+                PathReady = () => true,
+                MoveResolver = (from, to, radius) => to,
+            };
+            var spawns = new List<ZombieSpawnpointData>();
+            for (int i = 0; i < 64; i++)
+                spawns.Add(new ZombieSpawnpointData(0, new Vector3(2f + (i % 8 * 4f), 0f,
+                    -(2f + (i / 8 * 4f)))));
+            system.Spawn(spawns, new ReproRandom(1));
+            return (system, new[]
+            {
+                new ZombiePlayerView(1, new Vector3(30f, 0f, 30f),
+                    UnturnedGodot.Player.EPlayerStance.Sprint, true),
+            });
+        }
+
+        static bool Flat(float x, float z, out float y)
+        {
+            y = 0f;
+            return true;
+        }
+
+        static bool Snap(Vector3 position, out float y)
+        {
+            y = 0f;
+            return true;
+        }
+
+        (ZombieSystem plain, ZombiePlayerView[] players) = Session();
+        double bare = Bench($"{Ticks} ticks, no recorder", () =>
+        {
+            for (int i = 0; i < Ticks; i++)
+                plain.Tick(players, ServerSimulation.TickRate);
+        }, warmup: 1, iters: 5);
+
+        (ZombieSystem recorded, ZombiePlayerView[] samePlayers) = Session();
+        var recorder = new ReproRecorder(recorded);
+        recorder.Attach();
+        double armed = Bench($"{Ticks} ticks, recorder armed", () =>
+        {
+            for (int i = 0; i < Ticks; i++)
+                recorded.Tick(samePlayers, ServerSimulation.TickRate);
+        }, warmup: 1, iters: 5);
+
+        Console.WriteLine($"  overhead {(armed - bare) / bare * 100:0.0}% "
+            + $"({(armed - bare) / Ticks * 1000:0.0} us per tick over {recorded.Zombies.Count} zombies)");
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < Ticks; i++)
+            recorded.Tick(samePlayers, ServerSimulation.TickRate);
+        long perTick = (GC.GetAllocatedBytesForCurrentThread() - before) / Ticks;
+        Console.WriteLine($"  steady allocation {perTick} bytes per tick (the ring is reused)");
+
+        var stopwatch = Stopwatch.StartNew();
+        ReproZombieSection section = recorder.Build(out _, out int ticks);
+        Console.WriteLine($"  capture of a {ticks}-tick window {stopwatch.Elapsed.TotalMilliseconds:0.0} ms, "
+            + $"{section.Oracle.MoveCount} recorded moves");
+    }
 
     private static void PreviewSuite(string? unturned)
     {
