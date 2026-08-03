@@ -132,7 +132,8 @@ public static class ModelExtractor
 
             string fileTag = serializedFile++ == 0 ? bundleTag : $"{bundleTag}-{serializedFile}";
             extracted += ExtractMeshesFromSerializedFile(f.Value, source, fileTag, neededGuids, cacheDir,
-                db, neededTextures: null, foliageAssets, produced, staleLevelGuids: staleLevels);
+                db, neededTextures: null, foliageAssets, produced, staleLevelGuids: staleLevels,
+                streamedVertexSource: bundlePath, cancellationToken: cancellationToken);
         }
         if (!cancellationToken.IsCancellationRequested)
             RecordMisses(bundlePath, cacheDir, neededGuids, foliageAssets, produced, staleLevels);
@@ -278,7 +279,7 @@ public static class ModelExtractor
 
                 audioPlan = ReadSerializedNode(stream, (int)node.Size, source, fileTag, neededGuids,
                     cacheDir, db, neededTextures, layerTextures, foliageAssets, layerWants, onLayerTexture,
-                    produced, staleLevels, audio, audioPlan);
+                    produced, staleLevels, audio, audioPlan, cancellationToken);
 
                 // Settle what needs no stream at all, once per texture: pixels stored inline are in hand
                 // already, and anything extracted on an earlier boot only needs its key handed back. Both
@@ -521,11 +522,16 @@ public static class ModelExtractor
         IReadOnlyList<FoliageAsset>? foliageAssets,
         IReadOnlyDictionary<string, Guid[]> layerWants, Action<Guid, CachedTexture>? onLayerTexture,
         HashSet<Guid> produced, HashSet<Guid> staleLevels, AudioExtractor.Request? audio,
-        AudioExtractor.StreamPlan? audioPlan)
+        AudioExtractor.StreamPlan? audioPlan, CancellationToken cancellationToken)
     {
         SerializedFile file = SerializedFile.Read(stream.Read(size));
+        // `streamedVertexSource` is the bundle itself, and reading it costs a second forward pass — this
+        // pass cannot serve the ranges, because they sit in a node it has not reached and it cannot
+        // rewind once it has. Only a cold extraction with streamed geometry still to fetch pays for it,
+        // and what it buys is the difference between a vehicle with wheels and one without.
         ExtractMeshesFrom(file, source, bundleTag, neededGuids, cacheDir, db, neededTextures, foliageAssets,
-            produced, source.IsCore ? source.BundlePath : null, staleLevels);
+            produced, source.IsCore ? source.BundlePath : null, staleLevels,
+            streamedVertexSource: source.BundlePath, cancellationToken: cancellationToken);
 
         // Meshes land before the potentially long texture tail. If shutdown interrupted that tail, the
         // next load sees current meshes and ExtractFoliageMeshes/Object extraction correctly skips them;
@@ -688,9 +694,11 @@ public static class ModelExtractor
         string bundleTag, HashSet<Guid> neededGuids,
         string cacheDir, ObjectAssetDatabase db, Dictionary<(string Tag, long Id), UnityTexture>? neededTextures,
         IReadOnlyList<FoliageAsset>? foliageAssets = null, HashSet<Guid>? producedGuids = null,
-        string? typeTreeCacheFor = null, HashSet<Guid>? staleLevelGuids = null) =>
+        string? typeTreeCacheFor = null, HashSet<Guid>? staleLevelGuids = null,
+        string? streamedVertexSource = null, CancellationToken cancellationToken = default) =>
         ExtractMeshesFrom(SerializedFile.Read(sfBytes), source, bundleTag, neededGuids, cacheDir, db,
-            neededTextures, foliageAssets, producedGuids, typeTreeCacheFor, staleLevelGuids);
+            neededTextures, foliageAssets, producedGuids, typeTreeCacheFor, staleLevelGuids,
+            streamedVertexSource, cancellationToken);
 
     // Same, for a caller that already holds the decoded file (the streaming pass reads it once and then
     // uses it for the meshes, the type trees and the terrain layers alike).
@@ -698,7 +706,8 @@ public static class ModelExtractor
         HashSet<Guid> neededGuids, string cacheDir,
         ObjectAssetDatabase db, Dictionary<(string Tag, long Id), UnityTexture>? neededTextures,
         IReadOnlyList<FoliageAsset>? foliageAssets = null, HashSet<Guid>? producedGuids = null,
-        string? typeTreeCacheFor = null, HashSet<Guid>? staleLevelGuids = null)
+        string? typeTreeCacheFor = null, HashSet<Guid>? staleLevelGuids = null,
+        string? streamedVertexSource = null, CancellationToken cancellationToken = default)
     {
 
         // The per-class type trees are a by-product of having read this file. Handing them to the cache
@@ -719,6 +728,14 @@ public static class ModelExtractor
         var work = new List<(ObjectAsset asset, string key)>();
         foreach (ObjectAsset a in db.All)
             work.Add((a, PrefabKeyFor(a, source)));
+
+        // The vertex buffers this file's needed prefabs keep in a .resS, read before anything is built:
+        // BuildLevel drops a part whose mesh cannot be decoded, and a streamed buffer is exactly that
+        // until its bytes are in hand. Costs one forward pass over the bundle, and only when something
+        // still to be extracted actually needs one — a warm cache asks for nothing.
+        IReadOnlyDictionary<long, byte[]> streamedVertices = streamedVertexSource == null
+            ? new Dictionary<long, byte[]>()
+            : ReadStreamedVertices(streamedVertexSource, graph, work, neededGuids, cancellationToken);
 
         var mappedGuids = new HashSet<Guid>();
         int extracted = 0;
@@ -761,7 +778,9 @@ public static class ModelExtractor
                         complete = false;
                         continue;
                     }
-                    UnityMesh mesh = UnityMesh.Read(TypeTreeReader.Read(meshObj.TypeTree, file.ReaderFor(meshObj)));
+                    UnityMesh mesh = UnityMesh.Read(
+                        TypeTreeReader.Read(meshObj.TypeTree, file.ReaderFor(meshObj)),
+                        streamedVertices.TryGetValue(part.MeshId, out byte[]? streamed) ? streamed : null);
                     if (!mesh.Usable)
                     {
                         complete = false;
@@ -878,6 +897,60 @@ public static class ModelExtractor
                 producedGuids);
 
         return extracted;
+    }
+
+    // Every .resS-backed vertex buffer the prefabs about to be extracted depend on, read in one forward
+    // pass over the bundle. Planned from the same (asset, key) list the build below walks, and from both
+    // levels of each prefab, so a level is never built from a set of parts the plan did not cover.
+    //
+    // Collision meshes are deliberately not planned: a MeshCollider's own low-poly geometry is inline in
+    // every bundle shipped, and asking for ranges nobody needs would make the pass read further into the
+    // stream for nothing.
+    private static IReadOnlyDictionary<long, byte[]> ReadStreamedVertices(string bundlePath,
+        PrefabGraph graph, List<(ObjectAsset asset, string key)> work, HashSet<Guid> neededGuids,
+        CancellationToken cancellationToken)
+    {
+        var requests = new List<VertexStreamReader.Request>();
+        var seen = new HashSet<long>();
+        var planned = new HashSet<Guid>();
+
+        void Plan(List<MeshPart>? parts)
+        {
+            if (parts == null)
+                return;
+            foreach (MeshPart part in parts)
+            {
+                if (!seen.Add(part.MeshId)
+                    || !graph.ObjectsByPathId.TryGetValue(part.MeshId, out SerializedObject? meshObj))
+                {
+                    continue;
+                }
+                UnityMesh.StreamRef stream = UnityMesh.ReadStreamRef(
+                    TypeTreeReader.Read(meshObj.TypeTree, graph.File.ReaderFor(meshObj)));
+                if (stream.IsStreamed)
+                    requests.Add(new VertexStreamReader.Request(part.MeshId, stream));
+            }
+        }
+
+        foreach ((ObjectAsset asset, string key) in work)
+        {
+            if (!neededGuids.Contains(asset.Guid) || !planned.Add(asset.Guid))
+                continue;
+            if (!graph.PartsByKey.TryGetValue(key, out List<MeshPart>? parts))
+                continue;
+            Plan(parts);
+            Plan(graph.Lod1PartsByKey.TryGetValue(key, out List<MeshPart>? lod1) ? lod1 : null);
+        }
+
+        if (requests.Count == 0)
+            return new Dictionary<long, byte[]>();
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        Dictionary<long, byte[]> bytes =
+            VertexStreamReader.Read(bundlePath, requests, cancellationToken);
+        AppShutdown.PrintUnlessQuitting($"[extract] streamed vertex buffers: {bytes.Count}/{requests.Count} "
+            + $"read in {watch.ElapsedMilliseconds} ms");
+        return bytes;
     }
 
     // Resolves each collider part to a cacheable collider: primitives pass their Unity parameters through;

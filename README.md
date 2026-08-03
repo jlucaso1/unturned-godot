@@ -32,9 +32,10 @@ in view.
 
 ### Not done yet
 
-- **Stream-data meshes**: vertex data kept in the `.resS` stream is not decoded, so those meshes fall back
-  to boxes. Quantized geometry (`m_CompressedMesh`), which workshop bundles lean on heavily, *is* decoded,
-  as are texture pixels in `.resS`.
+- **Stream-data meshes**: vertex data kept in the `.resS` stream *is* decoded now, for the prefabs a map
+  needs — it costs one extra forward pass over the bundle on a cold cache, and only when something still
+  to be extracted has a streamed buffer. Quantized geometry (`m_CompressedMesh`), which workshop bundles
+  lean on heavily, and texture pixels in `.resS` were already decoded.
 - **Gameplay**: no items, inventory, building, damage or survival stats. Zombies exist and hunt, but you
   cannot fight back. Vehicles spawn and render, but they are scenery: nothing drives, collides with or
   damages them, and a vehicle sits at the height its spawnpoint was authored at instead of settling onto
