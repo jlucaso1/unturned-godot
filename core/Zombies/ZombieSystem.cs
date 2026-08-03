@@ -68,6 +68,7 @@ public sealed class ZombieInstance
     public Vector3 SteerDirection;    // LegacyAIPathNoRedist.targetDirection
     public float RepathTimer;         // counts down to the next path recalculation
     public float BlockedRouteTime;    // sustained physical failure while following the current route
+    public bool RouteServedAnotherTarget; // route kept across a retarget: it may not veto its replacement
 
     // ZombieManager.getZombieSpeed with Slow_Movement=false (NORMAL difficulty).
     public float Speed => Speciality switch
@@ -444,6 +445,23 @@ public sealed class ZombieSystem
         // the queue is longer than the budget, so zombies stood still mid-chase for up to 0.8 s and then
         // sprinted off again; clients derive move/idle from the replicated motion, so that renders as
         // the zombie dropping aggro and immediately picking it back up.
+        //
+        // What must NOT survive is anything that judges the route, because both of those judgements
+        // were made about a destination this zombie no longer has.
+        //
+        // The blocked-route evidence goes: it says "this body has not been delivering motion toward
+        // where it was going", and where it was going just changed. Carried over near the timeout, one
+        // blocked tick on the replacement would discard it before it had turned far enough to move,
+        // which is the mid-chase freeze this whole change exists to remove.
+        zombie.BlockedRouteTime = 0f;
+        // And the route stops being the incumbent a replacement has to beat. Move scores a partial
+        // replacement against the endpoint of the route in hand, measured to the CURRENT target — a
+        // route built for someone else can happen to end nearer the new player than anything actually
+        // reachable, and then it vetoes every replacement forever. If that stale endpoint also lands
+        // within EndReachedDistance of the new target, the step goes to zero, so no evidence
+        // accumulates and even the blocked-route timeout never fires. The route stays, and keeps the
+        // body moving; it just does not get a vote on its own succession.
+        zombie.RouteServedAnotherTarget = true;
         AdjustAgro(player.Id, +1);
         if (zombie.State is EZombieState.Idle or EZombieState.Return)
             zombie.State = EZombieState.Chase;
@@ -610,7 +628,10 @@ public sealed class ZombieSystem
             {
                 float newError = HorizontalDistanceSquared(_scratchPath[^1], queryTo);
                 float fromError = HorizontalDistanceSquared(queryFrom, queryTo);
-                float oldError = zombie.PathPoints.Count > 0
+                // A route inherited from a previous target scores as no route at all. It is still
+                // being walked, but it was aimed somewhere else, so letting it set the bar a
+                // replacement has to clear lets it reject its own succession indefinitely.
+                float oldError = zombie.PathPoints.Count > 0 && !zombie.RouteServedAnotherTarget
                     ? HorizontalDistanceSquared(zombie.PathPoints[^1], queryTo)
                     : float.PositiveInfinity;
 
@@ -631,6 +652,7 @@ public sealed class ZombieSystem
                     zombie.CurrentWaypointIndex = 0;
                     zombie.TargetReached = false;
                     zombie.PathIsPartial = !complete;
+                    zombie.RouteServedAnotherTarget = false; // this one was built for the current target
                     // The blocked-route evidence deliberately SURVIVES a repath. Accepting a route is
                     // not evidence that it can be walked; only delivered motion is, and MoveTowards
                     // already clears the counter on the first tick a route actually moves the body. The
@@ -790,6 +812,7 @@ public sealed class ZombieSystem
         zombie.RepathTimer = 0f; // the retreat is a new destination
         zombie.PathPoints.Clear();
         zombie.BlockedRouteTime = 0f;
+        zombie.RouteServedAnotherTarget = false;
         zombie.PathIsPartial = false;
         zombie.CurrentWaypointIndex = 0;
         zombie.TargetReached = false;
@@ -921,6 +944,7 @@ public sealed class ZombieSystem
         zombie.BlockedRouteTime = 0f;
         zombie.PathPoints.Clear();
         zombie.PathIsPartial = false;
+        zombie.RouteServedAnotherTarget = false;
         zombie.CurrentWaypointIndex = 0;
         zombie.TargetReached = false;
         zombie.RepathTimer = 0f;

@@ -1127,6 +1127,94 @@ public class ZombieSystemTests
         Assert.NotEmpty(zombie.PathPoints);
     }
 
+    // Codex review, P2. Keeping the route across a retarget must not keep the JUDGEMENT of it. The
+    // blocked-route evidence says "this body is not delivering motion toward where it was going", and
+    // a retarget changes where it is going. Carried over near the timeout, one blocked tick on the
+    // replacement discards it before the zombie has even turned — the mid-chase freeze that keeping
+    // the route exists to prevent, reintroduced through the back door.
+    [Fact]
+    public void Retargeting_DropsTheBlockedEvidenceEarnedAgainstTheOldTarget()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            path.Add(from);
+            path.Add(to);
+            return true;
+        };
+        bool blocked = true;
+        system.MoveResolver = (from, to, radius) => blocked ? from : to;
+
+        // Walk the evidence up to one tick short of the timeout against the first target.
+        var first = Player(1, new Vector3(10, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
+        int guard = 0;
+        while (zombie.BlockedRouteTime + ImpassableDt + 1e-4f < ZombieSystem.BlockedRouteTimeout)
+        {
+            system.Tick(new[] { first }, ImpassableDt);
+            Assert.True(++guard < 100, "never accumulated blocked evidence");
+        }
+        Assert.True(zombie.BlockedRouteTime > 0f);
+        Assert.NotEmpty(zombie.PathPoints);
+
+        // A closer player steals the target. The evidence belonged to the old destination.
+        var second = Player(2, new Vector3(-6, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint, moving: true);
+        system.Tick(new[] { first, second }, ImpassableDt);
+
+        Assert.Equal(2, zombie.TargetPlayer);
+        // The retargeting tick also moves, and the body is still blocked, so ONE tick of fresh
+        // evidence is expected. What must not happen is the old total carrying over: 0.70 + 0.08 is
+        // past the timeout, and the replacement would be thrown away on the tick it arrived.
+        Assert.True(zombie.BlockedRouteTime <= ImpassableDt + 1e-4f,
+            $"evidence carried across the retarget: {zombie.BlockedRouteTime}");
+        Assert.NotEmpty(zombie.PathPoints); // and the route itself still survives, as intended
+    }
+
+    // Codex review, P1. The kept route is still scored as the incumbent a replacement has to beat, but
+    // its endpoint was chosen for someone else. When the new target is only reachable partially, an old
+    // endpoint that happens to sit nearer the new player rejects every replacement forever — and if it
+    // sits within EndReachedDistance of that player the step goes to zero, so no blocked evidence
+    // accumulates and even the timeout cannot rescue it.
+    [Fact]
+    public void ARouteBuiltForAnotherTarget_DoesNotVetoTheFirstReplacement()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        zombie.Position = new Vector3(0f, 5f, 0f);
+        bool retargeted = false;
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            path.Add(from);
+            // Before the steal: a complete route, ending on the target. After: the new target is only
+            // reachable partially, and the best endpoint the graph can offer stops well short of it.
+            path.Add(retargeted ? new Vector3(3f, 5f, 0f) : to);
+            return true;
+        };
+        // Frozen: the geometry that decides the scoring must not drift while the test runs.
+        system.MoveResolver = (from, to, radius) => from;
+
+        // Target 1 sits just BEYOND target 2, so the route built for it ends close to target 2 — much
+        // closer than anything reachable for target 2 itself.
+        var first = Player(1, new Vector3(10f, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
+        for (int tick = 0; tick < 2; tick++)
+            system.Tick(new[] { first }, ImpassableDt);
+        Assert.Equal(1, zombie.TargetPlayer);
+        Vector3 stale = Assert.IsType<List<Vector3>>(zombie.PathPoints)[^1];
+
+        // Target 2 is nearer the zombie, so it steals; its own reachable endpoint (2,5,0) is 3 m from
+        // it, while the inherited endpoint is under a metre away and would win on score alone.
+        retargeted = true;
+        var second = Player(2, new Vector3(9f, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint, moving: true);
+        for (int tick = 0; tick < 2; tick++)
+            system.Tick(new[] { first, second }, ImpassableDt);
+
+        Assert.Equal(2, zombie.TargetPlayer);
+        Assert.True(zombie.BlockedRouteTime < ZombieSystem.BlockedRouteTimeout); // not a timeout rescue
+        Assert.False(zombie.RouteServedAnotherTarget, "the inherited route was never replaced");
+        Assert.NotEqual(stale, zombie.PathPoints[^1]);
+        Assert.Equal(3f, zombie.PathPoints[^1].X, 1);
+    }
+
     private const float ImpassableDt = 0.1f;
 
     private readonly record struct ImpassableRun(int FirstBlockedTick, int InvalidatedAtTick,
