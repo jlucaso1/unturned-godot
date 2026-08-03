@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 using System.Text.RegularExpressions;
 using Godot;
 using UnturnedGodot.Unity;
@@ -1087,26 +1088,96 @@ public class PhysicsBodyOrderTests
             return;
 
         string source = File.ReadAllText(path);
-        // Both jobs read the tree through the same verifier, so both have to leave behind cache entries
-        // that predate a change to what "whole" means -- the structural job included. Three references
-        // per job: the restore key, its restore-keys prefix, and the run-scoped save key.
-        Assert.Equal(6, CountOccurrences(source,
-            "unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}"));
 
         // Cache entries are immutable for a given key: trusting the hit flag would wedge every run behind
         // one bad entry until the depot manifest moves. Verify what came back, and re-fetch when it fails.
         Assert.DoesNotContain("steps.content-cache.outputs.cache-hit", source);
-        Assert.Equal(2, CountOccurrences(source, "if ./scripts/fetch-game-data.sh --verify 2> /dev/null; then"));
 
         // A repair has to outlive the run that made it. actions/cache skips its teardown save after an
         // exact-key hit, so a combined restore+save would fix the working directory and discard the fix,
         // leaving every later run to restore the same bad entry and download again.
         Assert.DoesNotContain("uses: actions/cache@v6\n        with:\n          path: build/game-data", source);
-        Assert.Equal(2, CountOccurrences(source, "uses: actions/cache/restore@v6"));
-        Assert.Equal(2, CountOccurrences(source, "uses: actions/cache/save@v6"));
-        Assert.Equal(2, CountOccurrences(source,
-            "key: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-${{ github.run_id }}-${{ github.job }}"));
+
+        // Asserted per job rather than by counting across the file. Totals are the weaker check: a job
+        // that drops its save while another grows a duplicate step keeps every count intact, and the
+        // point of this gate is that each job which restores the tree carries its own whole contract.
+        // A consumer is identified by the path it caches, not by a step's display name. A rename, or a
+        // new job that spells its step differently, would drop out of a name-based filter -- and since
+        // the only count here is a lower bound, the job would then go unchecked while this still passed.
+        IReadOnlyList<(string Name, string Body)> jobs = WorkflowJobs(source);
+        var consumers = new List<(string Name, string Body)>();
+        foreach ((string name, string body) in jobs)
+            if (body.Contains("path: build/game-data", StringComparison.Ordinal))
+                consumers.Add((name, body));
+
+        Assert.True(consumers.Count >= 2,
+            $"expected at least the test and structural jobs to restore content, found {consumers.Count}");
+
+        foreach ((string name, string body) in consumers)
+        {
+            // Three references: the restore key, its restore-keys prefix, and the run-scoped save key.
+            Assert.Equal(3, CountOccurrences(body,
+                "unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}"));
+            Assert.True(
+                CountOccurrences(body, "if ./scripts/fetch-game-data.sh --verify 2> /dev/null; then") == 1,
+                $"job '{name}' does not verify what the cache handed back");
+            Assert.True(CountOccurrences(body, "uses: actions/cache/restore@v6") == 1,
+                $"job '{name}' does not restore the content cache exactly once");
+            Assert.True(CountOccurrences(body, "uses: actions/cache/save@v6") == 1,
+                $"job '{name}' does not save the content cache exactly once, so a repair would be discarded");
+            Assert.True(CountOccurrences(body,
+                    "key: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-${{ github.run_id }}-${{ github.job }}") == 1,
+                $"job '{name}' does not save under a run-scoped key");
+        }
     }
+
+    // Splits a workflow into its jobs by the two-space-indented `name:` lines under `jobs:`. Enough
+    // structure for the assertions above without taking a YAML parser dependency into the test project.
+    private static IReadOnlyList<(string Name, string Body)> WorkflowJobs(string source)
+    {
+        var jobs = new List<(string, string)>();
+        string[] lines = source.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+        string? current = null;
+        var body = new StringBuilder();
+        bool inJobs = false;
+
+        foreach (string line in lines)
+        {
+            if (line.StartsWith("jobs:", StringComparison.Ordinal))
+            {
+                inJobs = true;
+                continue;
+            }
+            if (!inJobs)
+                continue;
+            // A column-zero comment is valid YAML and a normal way to separate sections, so it is not
+            // the end of the jobs block. Mistaking one for a new top-level key would silently drop every
+            // job below it -- and this gate would then pass for jobs it never looked at.
+            if (line.StartsWith("#", StringComparison.Ordinal))
+                continue;
+            // A new top-level key does end it.
+            if (line.Length > 0 && !char.IsWhiteSpace(line[0]))
+                break;
+
+            if (JobHeader.IsMatch(line))
+            {
+                if (current != null)
+                    jobs.Add((current, body.ToString()));
+                current = line.Trim().TrimEnd(':');
+                body.Clear();
+                continue;
+            }
+
+            body.Append(line).Append('\n');
+        }
+
+        if (current != null)
+            jobs.Add((current, body.ToString()));
+        return jobs;
+    }
+
+    // A job header: two-space indented, a bare key, nothing after the colon.
+    private static readonly Regex JobHeader = new(@"^  [A-Za-z0-9_-]+:\s*$", RegexOptions.Compiled);
 
     [Fact]
     public void StructuralMetricsScriptFindsTheReportOnEveryHostPlatform()

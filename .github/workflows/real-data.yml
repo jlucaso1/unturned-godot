@@ -118,6 +118,120 @@ jobs:
           UG_REQUIRE_REAL_DATA: '1'
         run: ./scripts/check-coverage.sh --no-build --no-restore
 
+  web-layer:
+    # web/ reads a real Unturned install through the browser's directory picker, which is how a web build
+    # would get the game's content without anybody shipping it. It has no C# and no Godot in it, but it
+    # does have opinions about what an install looks like — the same ones UnturnedInstall, ContentSource
+    # and MapCatalog have — so it is only worth anything when checked against the real tree. The suite
+    # self-skips without the content or a browser, so it runs here rather than in ci.yml.
+    name: browser file layer
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # This job runs `npm install -g`, which executes package install scripts. Nothing after the
+      # checkout needs Git authentication, so the token does not stay in the Git config where those
+      # scripts could reach it.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      # For the .dat differential below, which builds a net10.0 project against core/. The hosted image
+      # happens to carry an SDK today; what it carries tomorrow is not this repo's decision, and the
+      # differential is set up to fail rather than skip here.
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache DepotDownloader
+        uses: actions/cache@v6
+        with:
+          path: build/tools
+          key: depotdownloader-${{ hashFiles('scripts/fetch-game-data.sh') }}
+
+      - name: Resolve the content cache key
+        id: content-key
+        run: echo "key=$(./scripts/fetch-game-data.sh --manifest-key)" >> "$GITHUB_OUTPUT"
+
+      # Same receipt namespace and restore/save split as the jobs above; see the comments there.
+      - name: Restore the game content
+        uses: actions/cache/restore@v6
+        with:
+          path: build/game-data
+          key: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-
+          restore-keys: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-
+
+      - name: Fetch the game content
+        id: content
+        run: |
+          if ./scripts/fetch-game-data.sh --verify 2> /dev/null; then
+            echo "Restored content verified; skipping the download."
+          else
+            ./scripts/fetch-game-data.sh
+            echo "downloaded=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save the game content
+        if: steps.content.outputs.downloaded == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: build/game-data
+          key: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-${{ github.run_id }}-${{ github.job }}
+
+      # Playwright is a developer tool, not a dependency: this repo has no package.json and wants none,
+      # so it is installed globally for the run and web/test/run.mjs resolves it from there. Pinned
+      # exactly, because the version also decides which Chromium revision the suite runs against — an
+      # unpinned install would let a registry release change what this job proves, with no commit here.
+      - name: Install Playwright's Chromium
+        run: |
+          npm install -g playwright@1.56.1
+          playwright install --with-deps chromium
+
+      # The suite exits 0 when it finds no content or no browser, which would leave this job green while
+      # proving nothing. Both are installed above, so demand that it actually ran.
+      - name: Run the browser file layer suite
+        env:
+          UNTURNED_PATH: ${{ github.workspace }}/build/game-data
+        run: |
+          # The runner's shell is `bash -e` without pipefail, so without this a failing suite would be
+          # masked by tee's exit status.
+          set -o pipefail
+          node web/test/run.mjs | tee "$RUNNER_TEMP/web-suite.log"
+          if grep -q '^SKIP:' "$RUNNER_TEMP/web-suite.log"; then
+            echo "The suite skipped; it was supposed to run."
+            exit 1
+          fi
+
+      # The .dat reader is a port of core/Dat/DatParser.cs, so it is checked against that parser rather
+      # than against a fixture: thousands of generated documents through both, top-level values compared.
+      # It self-skips without the .NET SDK, which this job has.
+      - name: Check the .dat port against the game's parser
+        run: |
+          set -o pipefail
+          node web/test/differential.mjs | tee "$RUNNER_TEMP/dat-differential.log"
+          if grep -q 'skipped' "$RUNNER_TEMP/dat-differential.log"; then
+            echo "The differential skipped; it was supposed to run."
+            exit 1
+          fi
+
+      # The casing tables are exceptions to JavaScript's built-ins, so they rot when either runtime's
+      # Unicode version moves. This compares them against the BCL over every code point. It runs under
+      # Node rather than in the browser on purpose: Chromium's ICU is behind, and does not know some of
+      # the mappings the table exists to override.
+      - name: Check the casing tables against the BCL
+        run: |
+          set -o pipefail
+          node web/test/casing.mjs | tee "$RUNNER_TEMP/casing.log"
+          if grep -q 'skipped' "$RUNNER_TEMP/casing.log"; then
+            echo "The casing check skipped; it was supposed to run."
+            exit 1
+          fi
+
   structural:
     # The tests prove the parsers read the right bytes; nothing proves the world they build keeps its
     # shape. This runs the structural benchmark tier and gates its counts — meshes and materials
