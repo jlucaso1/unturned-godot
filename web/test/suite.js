@@ -374,6 +374,24 @@ async function blankLocalizedName() {
         { platform: "linux" },
     );
     equal("a whitespace-only name falls back to the folder", result.maps[0]?.displayName, "Riverside");
+
+    // The two whitespace definitions disagree in opposite directions, so both are pinned: .NET counts
+    // U+0085 NEXT LINE and JavaScript's trim() does not, and JavaScript strips U+FEFF while .NET does
+    // not. Trusting trim() would render a control character as one map's name and drop another's.
+    for (const [label, name, expected] of [
+        ["U+0085 is whitespace to .NET", "", "Riverside"],
+        ["U+FEFF is not", "﻿", "﻿"],
+    ]) {
+        const probed = await probeInstall(
+            syntheticFs({
+                "Bundles/core_linux.masterbundle": "",
+                "Maps/Riverside/Level.dat": "",
+                "Maps/Riverside/English.dat": `Name "${name}"`,
+            }),
+            { platform: "linux" },
+        );
+        equal(`a name of ${label}`, probed.maps[0]?.displayName, expected);
+    }
 }
 
 // HandleFs resolves paths by asking the browser, which asks the OS, so it folds case exactly where the
@@ -509,6 +527,19 @@ async function workshopNameCollisions() {
         sigma.maps[0]?.path.includes("steamapps/workshop/content"),
         sigma.maps[0]?.path,
     );
+
+    // The other direction, and the reason the fold is not simply ToUpperInvariant: that maps U+017F long
+    // s to 'S', yet string.Equals("ſ", "S", OrdinalIgnoreCase) is false. It is the only BMP code point
+    // where the two part company, and folding it would merge two folders the desktop lists separately.
+    const longS = await probeInstall(
+        syntheticFs({
+            "steamapps/common/Unturned/Bundles/core_linux.masterbundle": "",
+            ...mapTree("steamapps/common/Unturned/Maps/Deſcription", []),
+            ...mapTree("steamapps/workshop/content/304930/111/Description", ["Tile_0_0_Source.heightmap"]),
+        }),
+        { platform: "linux" },
+    );
+    equal("long s does not fold to S, so both are listed", longS.maps.length, 2);
 }
 
 // One unreadable map folder is one missing entry, not a folder that failed to open — LevelInfo's own

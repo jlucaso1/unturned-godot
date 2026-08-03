@@ -18,6 +18,8 @@
 // grammar is ever unclear, the answer is in that file, and web/test/differential.mjs checks the two agree
 // over thousands of generated documents rather than over the cases someone thought to write down.
 
+import { isWhiteSpace } from "./dotnet.js";
+
 // Top-level key/value pairs of a .dat document. DatDictionary is keyed with OrdinalIgnoreCase and Set
 // replaces, so the last spelling of a duplicate key wins.
 export class DatValues {
@@ -118,17 +120,6 @@ function tokenize(text) {
         }
     }
     return tokens;
-}
-
-// char.IsWhiteSpace, which is not JavaScript's \s: .NET counts U+0085 and does not count U+FEFF, and
-// getting that backwards would split a key where the game does not.
-const EXTRA_WHITESPACE = new Set([0x0085, 0x00a0, 0x1680, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000]);
-
-function isWhiteSpace(c) {
-    const code = c.charCodeAt(0);
-    if (code === 0x20 || (code >= 0x09 && code <= 0x0d)) return true;
-    if (code >= 0x2000 && code <= 0x200a) return true;
-    return EXTRA_WHITESPACE.has(code);
 }
 
 // A bracket swallows one comma tight against it.

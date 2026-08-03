@@ -10,6 +10,7 @@
 import { parseDatTopLevel } from "./dat.js";
 import { normalize } from "./paths.js";
 import { currentPlatform, isCaseInsensitiveFilesystem } from "./platform.js";
+import { compareOrdinalIgnoreCase, isNullOrWhiteSpace, ordinalIgnoreCaseKey } from "./dotnet.js";
 
 export { currentPlatform };
 
@@ -104,8 +105,10 @@ export async function readMap(fs, mapPath, source) {
         folderName: folder,
         path: normalize(mapPath),
         // MapCatalog.Read falls back on IsNullOrWhiteSpace, not on emptiness: a localized name of spaces
-        // would otherwise leave the card with a blank heading.
-        displayName: localization.name?.trim() ? localization.name : folder,
+        // would otherwise leave the card with a blank heading. Not JavaScript's trim() either — the two
+        // disagree in both directions (U+0085 is whitespace to .NET and not to trim; U+FEFF the reverse),
+        // so a name made of one of those would fall back on one side and not the other.
+        displayName: isNullOrWhiteSpace(localization.name) ? folder : localization.name,
         source,
         description: localization.description,
         category: await readCategory(fs, mapPath),
@@ -220,40 +223,6 @@ export function compareForMenu(a, b) {
     return compareOrdinalIgnoreCase(a.displayName, b.displayName);
 }
 
-// MapCatalog.CompareForMenu sorts with StringComparison.OrdinalIgnoreCase, which compares code units
-// after an invariant upcase — not by locale collation. The difference is visible the moment a map's name
-// carries an accent: locale rules file "Åland" next to "Aland", ordinal rules file it after "Zeta", and
-// the browser is supposed to be previewing the menu the game will show.
-function compareOrdinalIgnoreCase(a, b) {
-    const left = simpleUpperCase(a);
-    const right = simpleUpperCase(b);
-    return left < right ? -1 : left > right ? 1 : 0;
-}
-
-// Code points whose JavaScript uppercase differs from .NET's ToUpperInvariant, which leaves every one of
-// them unchanged. U+0131 (dotless i) is the well-known exclusion; the rest are recent Unicode additions
-// the invariant casing table has not taken up. Produced by dumping char.ToUpperInvariant across the BMP
-// from this repo's runtime and diffing it against the browser's toUpperCase — nine in total, and the only
-// one-to-one disagreements there are. Regenerate if either side's Unicode version moves.
-const NOT_UPCASED_BY_INVARIANT = new Set([
-    0x0131, 0x019b, 0x0264, 0x1c8a, 0xa7cd, 0xa7cf, 0xa7d3, 0xa7d5, 0xa7db,
-]);
-
-// The upcase OrdinalIgnoreCase performs is one code point at a time, and it is the *invariant* table:
-// a code point whose uppercase is longer than itself is left alone (ToUpperInvariant('ß') is 'ß', not
-// "SS"), and so are the nine above. JavaScript's toUpperCase does the full current Unicode mapping, so
-// without both guards "ß"/"SS" and "ı"/"I" would compare equal here and distinct on the desktop.
-function simpleUpperCase(text) {
-    let out = "";
-    for (const character of text) {
-        const upper = character.toUpperCase();
-        const folds =
-            upper.length === character.length && !NOT_UPCASED_BY_INVARIANT.has(character.codePointAt(0));
-        out += folds ? upper : character;
-    }
-    return out;
-}
-
 // The whole probe: what was picked, whether it is an install, what content it carries and which maps are
 // in it. Everything is best-effort — a folder missing a piece is reported, never thrown over.
 export async function probeInstall(fs, { platform = currentPlatform() } = {}) {
@@ -313,7 +282,7 @@ export async function scanMaps(fs, located, { platform = currentPlatform() } = {
     // rule two different ways is how they stop agreeing later.
     const foldPathCase = isCaseInsensitiveFilesystem(platform);
     const bundledPrefix = foldPathCase
-        ? simpleUpperCase(`${bundledWorkshopRoot}/`)
+        ? ordinalIgnoreCaseKey(`${bundledWorkshopRoot}/`)
         : `${bundledWorkshopRoot}/`;
 
     for (const { path, source } of searchDirectories(located)) {
@@ -345,7 +314,7 @@ export async function scanMaps(fs, located, { platform = currentPlatform() } = {
 
         // An unsupported official folder, and the game's own copy under Bundles/Workshop/Maps, can both
         // be stale stand-ins for a map the player is actually subscribed to.
-        const bundledCopy = (foldPathCase ? simpleUpperCase(entry.path) : entry.path).startsWith(
+        const bundledCopy = (foldPathCase ? ordinalIgnoreCaseKey(entry.path) : entry.path).startsWith(
             bundledPrefix,
         );
         const placeholder = bundledCopy || (entry.source === MapSource.Official && !entry.supported);
@@ -354,7 +323,7 @@ export async function scanMaps(fs, located, { platform = currentPlatform() } = {
         // pair does not round-trip, Greek final sigma most visibly: "Νησος" and "Νησοσ" upcase alike and
         // are one key on the desktop, so a subscribed map replaces the stale placeholder there, and
         // would have been two keys here, leaving both in the menu.
-        const key = simpleUpperCase(entry.folderName);
+        const key = ordinalIgnoreCaseKey(entry.folderName);
         const index = placeholderByName.get(key);
 
         if (index === undefined) {
