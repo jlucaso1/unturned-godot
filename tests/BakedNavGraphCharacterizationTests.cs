@@ -540,6 +540,10 @@ public class BakedNavGraphCharacterizationTests
     //
     // Whether it is worth the vertex-to-face index it would take to fix is not this file's call. What
     // this file guarantees is that a rewrite cannot change it without someone noticing.
+    //
+    // Tracked as issue #57. When it IS fixed, this test gets INVERTED and its comment rewritten — a
+    // SUSPECT pin asserts the defect, so a red one here means the fix landed, not that it broke
+    // something. Deleting it would lose the only record that the behaviour was ever deliberate.
     [Fact]
     public void ADegenerateFace_TurnsItsOwnVerticesIntoPhantomWallCorners()
     {
