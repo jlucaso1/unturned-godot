@@ -82,7 +82,12 @@ function splitKeyValue(line) {
         const end = findClosingQuote(line, 1);
         if (end === -1) return { key: unescape(line.slice(1)), value: "", opensBlock: false };
         key = unescape(line.slice(1, end));
-        rest = line.slice(end + 1).replace(/^[ \t]+/, "");
+        // ReadQuoted swallows one comma that immediately follows the closing quote, which is what makes
+        // `"Name", "Map Name"` a key and a value rather than a key and a value starting with a comma.
+        // Only immediately: a space before the comma leaves it in the value, there as here.
+        let after = end + 1;
+        if (line[after] === ",") after++;
+        rest = line.slice(after).replace(/^[ \t]+/, "");
     } else {
         const space = line.search(/[ \t]/);
         if (space === -1) return { key: line, value: "", opensBlock: false };

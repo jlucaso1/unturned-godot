@@ -6,6 +6,7 @@ import { ListingFs } from "../lib/listing-fs.js";
 import { parseDatTopLevel } from "../lib/dat.js";
 import { baseName, dirName, join, normalize, segments } from "../lib/paths.js";
 import { PickKind, compareForMenu, probeInstall } from "../lib/catalog.js";
+import { forgetHandle, loadHandle, saveHandle } from "../lib/handle-store.js";
 
 const results = [];
 
@@ -101,6 +102,8 @@ export async function runSuite(manifest) {
     await fallbackParity(manifest);
     await rangeReads(manifest);
     await tileNaming();
+    await blankLocalizedName();
+    await handlePersistence();
     await workshopNameCollisions();
     await unreadableMapIsolation();
     await walkParity(manifest);
@@ -141,6 +144,54 @@ async function tileNaming() {
     );
     equal("suffixless tiles do not count", rejected.maps[0]?.tileCount, 0);
     equal("a map with no engine-readable tiles is not playable", rejected.maps[0]?.supported, false);
+
+    // int.TryParse rejects a coordinate that overflows, and so does the desktop's tile enumeration.
+    const overflowing = await probeInstall(
+        syntheticFs({
+            "Bundles/core_linux.masterbundle": "",
+            ...mapTree("Maps/Huge", [
+                "Tile_2147483648_0_Source.heightmap",
+                "Tile_0_-2147483649_Source.heightmap",
+                "Tile_2147483647_0_Source.heightmap",
+            ]),
+        }),
+        { platform: "linux" },
+    );
+    equal("out-of-range tile coordinates do not count", overflowing.maps[0]?.tileCount, 1);
+}
+
+// MapCatalog.Read falls back to the folder name on IsNullOrWhiteSpace, so a name of spaces must not
+// leave the card with a blank heading.
+async function blankLocalizedName() {
+    const result = await probeInstall(
+        syntheticFs({
+            "Bundles/core_linux.masterbundle": "",
+            "Maps/Riverside/Level.dat": "",
+            "Maps/Riverside/English.dat": 'Name "   "',
+        }),
+        { platform: "linux" },
+    );
+    equal("a whitespace-only name falls back to the folder", result.maps[0]?.displayName, "Riverside");
+}
+
+// IndexedDB reports a request as successful before its transaction commits, so the store has to resolve
+// on completion or a caller cannot tell a written handle from one that was rolled back.
+async function handlePersistence() {
+    await forgetHandle();
+    equal("nothing is stored to begin with", await loadHandle(), null);
+
+    const root = await navigator.storage.getDirectory();
+    await saveHandle(root);
+    const restored = await loadHandle();
+    check("a saved handle comes back", restored !== null, "loadHandle returned null");
+    check(
+        "and is the same entry",
+        restored !== null && (await restored.isSameEntry(root)),
+        "restored handle is a different directory",
+    );
+
+    await forgetHandle();
+    equal("forgetting removes it", await loadHandle(), null);
 }
 
 // Folder names are not unique across Steam workshop items, so two subscribed maps that both use one are
@@ -316,6 +367,24 @@ function dat() {
         "dat decodes escapes in a quoted value",
         parseDatTopLevel('Name "a \\"quoted\\" name"').get("Name"),
         'a "quoted" name',
+    );
+
+    // ReadQuoted swallows one comma directly after a closing quote, so a quoted key can be followed by
+    // one. A space before the comma leaves it in the value, in the desktop parser and here alike.
+    equal(
+        "dat consumes a comma after a quoted key",
+        parseDatTopLevel('"Name", "Map Name"').get("Name"),
+        "Map Name",
+    );
+    equal(
+        "dat reads a quoted key with no comma",
+        parseDatTopLevel('"Name" "Map Name"').get("Name"),
+        "Map Name",
+    );
+    equal(
+        "dat keeps a detached comma in the value",
+        parseDatTopLevel('"Name" , "Map Name"').get("Name"),
+        ', "Map Name"',
     );
 
     // `Key {` reads as a key whose value is a brace, so its contents are not top-level either.

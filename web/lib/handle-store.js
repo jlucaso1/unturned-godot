@@ -21,13 +21,23 @@ function openDatabase() {
     });
 }
 
+// Resolves on the transaction completing, not on the request succeeding. IndexedDB reports a request as
+// successful before the transaction commits, so a commit-time failure (a quota that only bites when the
+// data is flushed) arrives later as onabort — after a request-driven promise has already resolved. That
+// would have saveHandle report a pick as remembered that was never written, and the caller now acts on
+// that answer: app.js hides the reconnect button when persistence fails.
 function transact(database, mode, run) {
     return new Promise((resolve, reject) => {
         const transaction = database.transaction(STORE, mode);
         const request = run(transaction.objectStore(STORE));
-        request.onsuccess = () => resolve(request.result);
+        let result;
+        request.onsuccess = () => {
+            result = request.result;
+        };
         request.onerror = () => reject(request.error);
+        transaction.oncomplete = () => resolve(result);
         transaction.onabort = () => reject(transaction.error);
+        transaction.onerror = () => reject(transaction.error);
     });
 }
 

@@ -109,7 +109,9 @@ export async function readMap(fs, mapPath, source) {
     return {
         folderName: folder,
         path: normalize(mapPath),
-        displayName: localization.name || folder,
+        // MapCatalog.Read falls back on IsNullOrWhiteSpace, not on emptiness: a localized name of spaces
+        // would otherwise leave the card with a blank heading.
+        displayName: localization.name?.trim() ? localization.name : folder,
         source,
         description: localization.description,
         category: await readCategory(fs, mapPath),
@@ -183,8 +185,11 @@ async function measureLandscape(fs, mapPath) {
     for (const entry of entries) {
         const match = TILE_PATTERN.exec(entry.name);
         if (match === null) continue;
-        const x = Number.parseInt(match[1], 10);
-        const y = Number.parseInt(match[2], 10);
+        // LevelInfo.EnumerateTiles parses with int.TryParse and skips the tile when it overflows, so a
+        // coordinate outside the signed 32-bit range is a tile the desktop will not load either.
+        const x = parseTileCoordinate(match[1]);
+        const y = parseTileCoordinate(match[2]);
+        if (x === null || y === null) continue;
         minX = Math.min(minX, x);
         maxX = Math.max(maxX, x);
         minY = Math.min(minY, y);
@@ -195,6 +200,11 @@ async function measureLandscape(fs, mapPath) {
     if (count === 0) return { count: 0, sizeMetres: 0 };
     const span = Math.max(maxX - minX, maxY - minY) + 1;
     return { count, sizeMetres: span * TILE_SIZE };
+}
+
+function parseTileCoordinate(digits) {
+    const value = Number.parseInt(digits, 10);
+    return Number.isSafeInteger(value) && value >= -2147483648 && value <= 2147483647 ? value : null;
 }
 
 // The order the menu lists maps in — MapCatalog.CompareForMenu: playable first, official before

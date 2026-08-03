@@ -132,7 +132,10 @@ async function runDemo() {
     });
     await demo.goto(`${origin}/index.html`);
     await demo.click("#pick");
+    // Artwork is appended by a fire-and-forget read that outlives the scan, so waiting on the heading
+    // alone would sample the page before any <img> exists and fail the artwork assertion on timing.
     await demo.waitForSelector(".card h3");
+    await demo.waitForSelector(".card .art img");
 
     const observed = await demo.evaluate(() => ({
         status: document.querySelector("#status").textContent,
