@@ -316,11 +316,18 @@ public class PhysicsBodyOrderTests
             return;
 
         string source = File.ReadAllText(path);
-        Assert.Contains("public async Task PrewarmAsync()", source);
+        Assert.Contains("public async Task PrewarmAsync(CancellationToken loadCancellation = default)", source);
+        // The caller's load token, linked with the lifetime one. This node cannot leave the tree — and so
+        // cannot cancel its own token — until the load teardown that waits on this pass has finished, so
+        // without the caller's token a cancelled load sits through every remaining decode and upload.
+        Assert.Contains("CreateLinkedTokenSource(_lifetimeCancellation.Token, loadCancellation)", source);
         // Batched decode on a worker, never DecodeChunk on the main thread the way the emergency path has to.
         Assert.Contains("_index.DecodeChunks(indices, token)", source);
         Assert.Contains("Task<WarmBatch> batch = Task.Run(", source);
-        Assert.Contains("FoliageResidencyPlanner.WarmBatches(plan, ExpectedDecodedBytes", source);
+        // Half the cap per batch: the batch being uploaded still holds its transforms while the next one
+        // decodes, so it is the pair that has to fit the bound the pass claims to respect.
+        Assert.Contains("FoliageResidencyPlanner.WarmBatches(plan, ExpectedDecodedBytes,\n"
+            + "                Math.Max(1, _decodedByteLimit / 2));", source.Replace("\r\n", "\n"));
         // Uploads are RenderingServer work and stay here, yielding on the load's own frame budget.
         Assert.Contains("await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);", source);
         // The steady loop must not plan against a half-warm residency set, and the pass must claim the
@@ -342,11 +349,16 @@ public class PhysicsBodyOrderTests
 
         if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is { } streamerPath)
         {
-            string streamer = File.ReadAllText(streamerPath);
+            string streamer = File.ReadAllText(streamerPath).Replace("\r\n", "\n");
             // Both build paths warm, and both await it: an unawaited pass would upload into the same
             // frames as the texture apply it was staged behind.
             Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(streamer,
                 @"await PrewarmFoliageAsync\(\);").Count);
+            Assert.Contains("await foliage.PrewarmAsync(_loadCancellation.Token);", streamer);
+            // _sceneBuilt is what releases _Process to apply textures. Setting it before the warm pass
+            // would let the two spend their separate per-frame budgets in the same frames, which is the
+            // staging the pass yields to preserve.
+            Assert.Contains("await PrewarmFoliageAsync();\n        _sceneBuilt = true;", streamer);
         }
     }
 

@@ -491,7 +491,10 @@ public partial class ObjectStreamer : Node
         _foliageRenderer = null;
         if (foliage == null || _loadCancellation.IsCancellationRequested)
             return;
-        await foliage.PrewarmAsync();
+        // The load's own token, not just the renderer's lifetime one: that node cannot leave the tree
+        // until CancelAsync has finished waiting for this task, so without it a cancelled load would sit
+        // through the whole remaining warm pass before the menu came back.
+        await foliage.PrewarmAsync(_loadCancellation.Token);
     }
 
     private void StartStreaming()
@@ -653,10 +656,12 @@ public partial class ObjectStreamer : Node
             return;
 
         BuildObjects(meshLibrary, lod1Library);
-        _sceneBuilt = true;
         // Warmed before time-to-playable is read, and counted in it: a world handed over with its spawn
-        // ring undecoded is not yet playable without the burst this replaces.
+        // ring undecoded is not yet playable without the burst this replaces. _sceneBuilt is set after,
+        // not before: it is also what releases _Process to apply textures, and the two would then spend
+        // their separate per-frame budgets in the same frames the warm pass is pacing itself against.
         await PrewarmFoliageAsync();
+        _sceneBuilt = true;
         // Read after the build, not before it: this is reported as time-to-playable, and the staged
         // realise above happens while the player is still waiting.
         double meshMs = _coldWatch.Elapsed.TotalMilliseconds;

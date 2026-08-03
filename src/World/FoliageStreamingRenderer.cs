@@ -182,7 +182,12 @@ public partial class FoliageStreamingRenderer : Node3D
     // It must be called before the renderer's first _Process, which means before the caller's next frame
     // yield: SceneTree emits process_frame ahead of the nodes' own process pass, so a single yield
     // between attaching this node and warming it is enough for the burst to have already happened.
-    public async Task PrewarmAsync()
+    //
+    // loadCancellation is the caller's own load token, and it is not optional in practice. This node
+    // cannot leave the tree — and so cannot cancel its lifetime token — until the load that owns it has
+    // finished tearing down, and that teardown waits on the task this pass runs inside. Without the
+    // caller's token, returning to the menu would wait out every remaining decode and paced upload.
+    public async Task PrewarmAsync(CancellationToken loadCancellation = default)
     {
         // _focused means a plan already ran: the burst has been paid and warming would only duplicate it.
         if (!_prewarmEnabled || _focused || _items.Count == 0 || !IsInsideTree())
@@ -195,14 +200,20 @@ public partial class FoliageStreamingRenderer : Node3D
         long startedTicks = Stopwatch.GetTimestamp();
         bool completed = false;
         bool incomplete = false;
+        CancellationTokenSource cancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token, loadCancellation);
         try
         {
             FoliageResidencyPlan plan = FoliageResidencyPlanner.Plan(focus, _items,
                 new HashSet<int>(_resident.Keys), _pending, _prefetchMargin, _unloadHysteresis,
                 _maximumPending);
+            // Half the steady-state cap per batch, because two of them are in flight: the batch being
+            // uploaded still holds every transform it decoded while the next one decodes behind it. The
+            // pair is what has to fit UG_FOLIAGE_DECODED_MIB, or the pass would peak at twice the bound
+            // it is written to respect.
             IReadOnlyList<int[]> batches = FoliageResidencyPlanner.WarmBatches(plan, ExpectedDecodedBytes,
-                _decodedByteLimit);
-            CancellationToken token = _lifetimeCancellation.Token;
+                Math.Max(1, _decodedByteLimit / 2));
+            CancellationToken token = cancellation.Token;
             long budget = (long)(Stopwatch.Frequency * 0.008);
             long until = Stopwatch.GetTimestamp() + budget;
             Task<WarmBatch>? decoding = batches.Count > 0 ? DecodeBatch(batches[0], token) : null;
@@ -256,6 +267,10 @@ public partial class FoliageStreamingRenderer : Node3D
         }
         finally
         {
+            // Disposed only once the pass is over. A decode this leaves running holds the token it was
+            // given; reading IsCancellationRequested on it stays valid after the source is gone, which is
+            // the same contract the steady loop's per-decode linked sources already rely on.
+            cancellation.Dispose();
             _prewarmTicks = Stopwatch.GetTimestamp() - startedTicks;
             _warming = false;
         }

@@ -181,7 +181,7 @@ public static class GpuBenchmark
                 // Tier 2 builds the world synchronously and jumps the camera between poses, so it never
                 // warms: the key is reported anyway so the two tiers' foliage sections stay comparable.
                 metrics["foliage.prewarmedChunks"] = foliage.PrewarmedChunks;
-                metrics["foliage.prewarmMs"] = foliage.PrewarmTotalMs;
+                metrics["foliage.prewarm.totalMs"] = foliage.PrewarmTotalMs;
                 metrics["foliage.emergencyVisibleLoads"] = foliage.EmergencyVisibleLoads;
                 metrics["foliage.emergencyVisible.totalMs"] = foliage.EmergencyVisibleTotalMs;
                 metrics["foliage.emergencyVisible.maxMs"] = foliage.EmergencyVisibleMaxMs;
