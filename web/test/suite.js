@@ -287,6 +287,31 @@ async function bomDecoding() {
         (await probeInstall(withUtf8Bom, { platform: "linux" })).maps[0]?.displayName,
         "Ilha",
     );
+
+    // UTF-32LE starts FF FE 00 00, whose first two bytes are the UTF-16LE mark: checked in the wrong
+    // order it decodes to NUL-interleaved text. File.ReadAllText reads both orders correctly.
+    for (const [label, bom, littleEndian] of [
+        ["utf-32le", [0xff, 0xfe, 0x00, 0x00], true],
+        ["utf-32be", [0x00, 0x00, 0xfe, 0xff], false],
+    ]) {
+        const body = [..."Name Ilha"].flatMap((c) => {
+            const b = [c.charCodeAt(0), 0, 0, 0];
+            return littleEndian ? b : b.reverse();
+        });
+        const withUtf32 = new ListingFs(
+            [
+                fileFor("Bundles/core_linux.masterbundle", "Unturned", ""),
+                fileFor("Maps/Bom/Level.dat", "Unturned", ""),
+                fileFor("Maps/Bom/English.dat", "Unturned", new Uint8Array([...bom, ...body])),
+            ],
+            { caseInsensitive: false },
+        );
+        equal(
+            `a ${label} English.dat still yields its name`,
+            (await probeInstall(withUtf32, { platform: "linux" })).maps[0]?.displayName,
+            "Ilha",
+        );
+    }
 }
 
 // CompareForMenu sorts with OrdinalIgnoreCase, not locale collation: "Åland" sorts after "Zeta".
@@ -535,7 +560,19 @@ async function walkParity(manifest) {
 }
 
 function paths() {
-    equal("normalize collapses separators", normalize("Maps//PEI\\Level.dat"), "Maps/PEI/Level.dat");
+    equal(
+        "normalize collapses repeated separators",
+        normalize("Maps//PEI///Level.dat"),
+        "Maps/PEI/Level.dat",
+    );
+    // A backslash is an ordinary filename character on Linux and macOS, and the desktop catalog treats
+    // it as one there. Splitting on it would lose a map folder literally named `A\B`.
+    equal(
+        "normalize keeps a backslash inside a name",
+        normalize("Maps/A\\B/Level.dat"),
+        "Maps/A\\B/Level.dat",
+    );
+    equal("and it does not become a directory boundary", segments("Maps/A\\B/Level.dat").length, 3);
     equal("normalize drops leading slash", normalize("/Maps/PEI/"), "Maps/PEI");
     equal("normalize resolves .", normalize("Maps/./PEI"), "Maps/PEI");
     equal("normalize cannot escape the root", normalize("../../etc/passwd"), "etc/passwd");
@@ -680,6 +717,13 @@ function dat() {
         parseDatTopLevel("Name Map Description Blurb").get("Name"),
         "Map Description Blurb",
     );
+
+    // A bracket after a quoted value is structural too: the block replaces the key's scalar rather than
+    // becoming a key of its own, and its contents stay out of the top level.
+    const valueThenBlock = parseDatTopLevel('Name "Temporary" {\nInner Leak\n}\nDescription After');
+    equal("a block after a quoted value replaces its scalar", valueThenBlock.get("Name"), undefined);
+    equal("its contents do not reach the top level", valueThenBlock.get("Inner"), undefined);
+    equal("and parsing continues after it closes", valueThenBlock.get("Description"), "After");
 
     // The root brace is consumed as a token, so the rest of its line is still tokenized.
     const inlineRoot = parseDatTopLevel("{ Name SameLine\nDescription After\n}");

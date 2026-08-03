@@ -76,6 +76,10 @@ export function parseDatTopLevel(text) {
         if (rest === "") continue;
         if (rest[0] === "/") continue; // comment to end of line
 
+        // One loop, not two passes: what a quoted value leaves behind goes back through the bracket
+        // handling rather than straight to the next pair. `Name "Temporary" {` is a key whose block
+        // *replaces* its scalar — [Name] stops being a value — and sending that `{` to splitKeyValue
+        // would make it a key of its own and leave the block's contents at the top level.
         let documentEnded = false;
         while (rest !== "") {
             const first = rest[0];
@@ -106,29 +110,26 @@ export function parseDatTopLevel(text) {
                 continue;
             }
 
-            break;
-        }
+            // Inside a block the contents are not top-level, and this subset does not read them.
+            if (depth > 0) {
+                pending = null;
+                break;
+            }
 
-        if (documentEnded) break;
-        if (rest === "" || depth > 0) {
-            if (depth > 0) pending = null;
-            continue;
-        }
-
-        // A line can hold more than one pair. ReadQuoted stops at its closing quote and the tokenizer
-        // picks up right after it, so `Name "Map" Description "Blurb"` is two keys — while an *unquoted*
-        // value runs to the end of the line, so `Name Map Description Blurb` is one key whose value is
-        // "Map Description Blurb". Only a quoted value leaves anything to keep reading.
-        let cursor = rest;
-        while (cursor !== "") {
-            const { key, value, remainder } = splitKeyValue(cursor);
+            // A line can hold more than one pair. ReadQuoted stops at its closing quote and the
+            // tokenizer picks up right after it, so `Name "Map" Description "Blurb"` is two keys —
+            // while an *unquoted* value runs to the end of the line, so `Name Map Description Blurb` is
+            // one key whose value is "Map Description Blurb".
+            const { key, value, remainder } = splitKeyValue(rest);
             if (key === null) break;
             values.set(key, value);
             pending = key;
             // Defensive: a remainder that did not shrink would spin here forever.
-            if (remainder.length >= cursor.length) break;
-            cursor = remainder;
+            if (remainder.length >= rest.length) break;
+            rest = remainder;
         }
+
+        if (documentEnded) break;
     }
 
     return values;

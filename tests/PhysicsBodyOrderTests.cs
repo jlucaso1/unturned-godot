@@ -1147,7 +1147,12 @@ public class PhysicsBodyOrderTests
             }
             if (!inJobs)
                 continue;
-            // A new top-level key ends the jobs block entirely.
+            // A column-zero comment is valid YAML and a normal way to separate sections, so it is not
+            // the end of the jobs block. Mistaking one for a new top-level key would silently drop every
+            // job below it -- and this gate would then pass for jobs it never looked at.
+            if (line.StartsWith("#", StringComparison.Ordinal))
+                continue;
+            // A new top-level key does end it.
             if (line.Length > 0 && !char.IsWhiteSpace(line[0]))
                 break;
 

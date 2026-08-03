@@ -14,6 +14,27 @@ export function decodeText(bytes) {
     if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
         return new TextDecoder("utf-8").decode(bytes.subarray(3));
     }
+    // UTF-32 first: a UTF-32LE file starts FF FE 00 00, whose first two bytes are exactly the UTF-16LE
+    // mark. Checking the shorter one first would decode it as UTF-16 and hand back NUL-interleaved text
+    // that no parser here can read, where File.ReadAllText reads it correctly.
+    if (
+        bytes.length >= 4 &&
+        bytes[0] === 0xff &&
+        bytes[1] === 0xfe &&
+        bytes[2] === 0x00 &&
+        bytes[3] === 0x00
+    ) {
+        return decodeUtf32(bytes.subarray(4), true);
+    }
+    if (
+        bytes.length >= 4 &&
+        bytes[0] === 0x00 &&
+        bytes[1] === 0x00 &&
+        bytes[2] === 0xfe &&
+        bytes[3] === 0xff
+    ) {
+        return decodeUtf32(bytes.subarray(4), false);
+    }
     if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
         return new TextDecoder("utf-16le").decode(bytes.subarray(2));
     }
@@ -21,6 +42,19 @@ export function decodeText(bytes) {
         return new TextDecoder("utf-16be").decode(bytes.subarray(2));
     }
     return new TextDecoder("utf-8").decode(bytes);
+}
+
+// TextDecoder has no UTF-32: the Encoding standard dropped it, so it is decoded by hand. Four bytes per
+// code point, and anything outside Unicode's range becomes the replacement character rather than a throw
+// — a map with one bad code point should lose that character, not its whole name.
+function decodeUtf32(bytes, littleEndian) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength - (bytes.byteLength % 4));
+    let out = "";
+    for (let i = 0; i < view.byteLength; i += 4) {
+        const code = view.getUint32(i, littleEndian);
+        out += code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff) ? "�" : String.fromCodePoint(code);
+    }
+    return out;
 }
 
 export class ReadOnlyFs {

@@ -5,11 +5,18 @@
 // API hands out one handle per path segment and has no notion of an absolute path at all, so normalizing
 // here keeps every caller from re-deciding what a separator is.
 
-// Splits a path into its segments, tolerating either separator, repeats, and "." — Unturned's own data
-// files mix "/" and "\" freely (Level.hierarchy asset paths, MasterBundle.dat prefixes).
+// Splits a path into its segments, tolerating repeated separators and "."
+//
+// Only "/" separates. A backslash is an ordinary character in a filename on Linux and macOS, and the
+// desktop catalog treats it as one there, so splitting on it would lose a map folder literally named
+// `A\B` — HandleFs would look for a nested `A/B`, and ListingFs would invent one. Nothing hands this
+// layer a Windows-style path either: `webkitRelativePath` is defined to use "/", File System Access
+// handles are single components, and every path built here is joined with "/". The mixed separators in
+// Unturned's own data files (Level.hierarchy asset paths, MasterBundle.dat prefixes) are read by core/,
+// not by this.
 export function segments(path) {
     const parts = [];
-    for (const raw of String(path ?? "").split(/[/\\]+/)) {
+    for (const raw of String(path ?? "").split("/")) {
         if (raw === "" || raw === ".") continue;
         if (raw === "..") {
             // ".." resolves against the segments collected so far, so it does traverse inside the
