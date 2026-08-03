@@ -39,8 +39,12 @@ The answer is bracketed between two want sets. The **upper** bound is every stre
 bundle declares. The **lower** bound is what the selected map's placed objects depend on, read out of
 `user://model_cache` through `TextureDependencyIndex` — the same index the runtime consults — so it is
 scoped to one map, unlike the `texture_cache` directory, which every map writes into and which would
-hand back the union of everything ever extracted. It is a lower bound because a real load also wants
-foliage, tree and terrain-layer textures that `Level/Objects.dat` does not reach. That is the useful
+hand back the union of everything ever extracted. The reference is always a **cold** load — an empty
+texture cache — so dependencies are taken unfiltered by what happens to be cached now; filtering them
+would describe what a resumed pass still owes, a different question whose answer moves with incidental
+cache state. It is a lower bound twice over: a real load also wants foliage, tree and terrain-layer
+textures that `Level/Objects.dat` does not reach, and a prefab whose mesh this bundle has not extracted
+yet contributes nothing. That is the useful
 direction: if even the lower bound runs to the end of the node, no larger set ends earlier. When there is
 no map-scoped set to be had — no mesh cache, no `Level/Objects.dat`, no placed mesh this bundle extracted
 at its current revision — the suite prints which of those it hit and reports the upper bound alone. It

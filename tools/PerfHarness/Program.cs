@@ -775,9 +775,15 @@ public static class Program
         // consults — scoped to one map, unlike the texture cache directory, which is shared by every map
         // and would hand back the union of everything ever extracted.
         //
-        // It is a lower bound because a real load also wants foliage, tree and terrain-layer textures that
-        // are not reached from Level/Objects.dat. That is the useful direction: if even the lower bound
-        // already runs to the end of the node, no larger set can end earlier.
+        // The reference throughout is a COLD load — an empty texture cache — so the dependencies are taken
+        // unfiltered by what happens to be cached now. Filtering them by TextureCache.IsCurrentForSource
+        // would describe what a resumed pass still owes, which is a different question and one whose
+        // answer moves with incidental cache state.
+        //
+        // It is a lower bound twice over: a real load also wants foliage, tree and terrain-layer textures
+        // that Level/Objects.dat does not reach, and a prefab whose mesh this bundle has not extracted yet
+        // contributes nothing here. That is the useful direction — if even the lower bound already runs to
+        // the end of the node, no larger set can end earlier.
         HashSet<string>? mapWantKeys = MapScopedWantKeys(map, tag, path, out string why);
         if (mapWantKeys == null)
             Console.WriteLine($"  note: no map-scoped want set ({why})");
@@ -800,7 +806,8 @@ public static class Program
                 : "  want set: every streamed Texture2D in the bundle (SUPERSET — an upper bound on the "
                     + "read extent, not the set a real load asks for)"
             : $"  want set: {mapWantKeys.Count:N0} textures the mesh cache says this map's placed objects "
-                + "need (a LOWER bound — foliage, trees and terrain layers are wanted too but not counted)");
+                + "need on a cold load (a LOWER bound — foliage, trees, terrain layers and any prefab not "
+                + "extracted yet are wanted too but not counted)");
 
         // The pass cannot seek, so a node with nothing wanted in it is still decoded in full when a LATER
         // node is owed something. Which node is last decides that, so it has to be known before reporting.
@@ -1031,9 +1038,13 @@ public static class Program
         long widest = 0, widestCut = 0, reach = 0;
         foreach (StreamRange want in byStart)
         {
-            if (want.Offset >= quarter && want.Offset - reach > widest)
+            // Measured from the window's edge, never from a range that ended before it. A node whose
+            // ranges stop early and resume near the tail would otherwise have the whole empty middle
+            // counted as a gap "in the last quarter" and look far sparser there than it is.
+            long from = Math.Max(reach, quarter);
+            if (want.Offset > from && want.Offset - from > widest)
             {
-                widest = want.Offset - reach;
+                widest = want.Offset - from;
                 widestCut = want.Offset;
             }
             reach = Math.Max(reach, want.End);
