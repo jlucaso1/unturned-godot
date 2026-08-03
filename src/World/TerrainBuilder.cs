@@ -293,7 +293,10 @@ public static partial class TerrainBuilder
     // HeightMapShape3D) instead of a ~131k-triangle concave trimesh, from the full-res heightmap the tile
     // carried in metadata (FinishTile) — independent of the tile's visual LOD. Verified to reproduce the
     // render surface exactly by TerrainHeightfieldTests.
-    public static void AddHeightfieldCollision(MeshInstance3D tile)
+    // `navigationField`, when given, receives the same heightfield the physics server does, so navmesh
+    // reconciliation can probe the ground without a physics tick. See CollisionField.
+    public static void AddHeightfieldCollision(MeshInstance3D tile,
+        CollisionFieldBuilder? navigationField = null)
     {
         if (tile is not TerrainTileNode terrainTile
             || (terrainTile.CollisionHeights16 == null && terrainTile.CollisionHeights32 == null))
@@ -303,6 +306,8 @@ public static partial class TerrainBuilder
         float[] mapData = terrainTile.CollisionHeights16 != null
             ? TerrainHeightfield.MapData(terrainTile.CollisionHeights16)
             : MapDataFromFlat(terrainTile.CollisionHeights32!);
+        Transform3D placement =
+            TerrainHeightfield.CollisionTransform(terrainTile.TileX, terrainTile.TileY);
 
         var body = new StaticBody3D { Name = "TerrainCollision" };
         body.AddChild(new CollisionShape3D
@@ -313,9 +318,10 @@ public static partial class TerrainBuilder
                 MapDepth = res,
                 MapData = mapData,
             },
-            Transform = TerrainHeightfield.CollisionTransform(terrainTile.TileX, terrainTile.TileY),
+            Transform = placement,
         });
         tile.AddChild(body);
+        navigationField?.AddHeightfield(placement, res, res, mapData);
 
         // The heightfield now lives in the physics server's HeightMapShape3D; drop the ~264 KB/tile source
         // copy the tile carried in metadata (collision is built once and never rebuilt).

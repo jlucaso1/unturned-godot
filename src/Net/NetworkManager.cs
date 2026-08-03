@@ -533,7 +533,10 @@ public partial class NetworkManager : Node
     // Reconciles the navmesh with the collision world. Called once the object colliders are actually in
     // the physics space (ObjectStreamer.Finished) — earlier it measures bare terrain and prunes the wrong
     // triangles. The step allowance is the CharacterController's m_StepOffset from the game data.
-    public void ReconcileNavigation(IReadOnlySet<System.Guid> colliderGuids)
+    // `collision`, when the load recorded one, is the CPU copy of the solid world: reconciliation probes
+    // it on workers and only asks the physics server about what it cannot settle itself.
+    public void ReconcileNavigation(IReadOnlySet<System.Guid> colliderGuids,
+        Data.CollisionFieldBuilder? collision = null)
     {
         if (_zombieNavigation == null || _navigationReconcile != null)
             return;
@@ -541,11 +544,11 @@ public partial class NetworkManager : Node
         // ObjectStreamer.Finished (an idle-frame signal). Enter the next physics notification first;
         // the same path also works in the default single-threaded mode.
         var selected = new HashSet<System.Guid>(colliderGuids);
-        _navigationReconcile = AppShutdown.Track(ReconcileNavigationWhenSafeAsync(selected));
+        _navigationReconcile = AppShutdown.Track(ReconcileNavigationWhenSafeAsync(selected, collision));
     }
 
     private async System.Threading.Tasks.Task ReconcileNavigationWhenSafeAsync(
-        IReadOnlySet<System.Guid> colliderGuids)
+        IReadOnlySet<System.Guid> colliderGuids, Data.CollisionFieldBuilder? collision)
     {
         await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame);
         if (AppShutdown.IsShuttingDown || _zombieNavigation == null)
@@ -557,7 +560,7 @@ public partial class NetworkManager : Node
             return;
         }
         await _zombieNavigation.PruneAgainstCollisionAsync(
-            this, space, Player.PlayerConfig.StepOffset, colliderGuids);
+            this, space, Player.PlayerConfig.StepOffset, colliderGuids, collision);
     }
 
     public void JoinServer(string host, ushort port, string name)

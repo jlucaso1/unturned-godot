@@ -275,6 +275,37 @@ a path (`UG_OBJECT_CHUNK_METRES`, `SCREENSHOT_PATH`, `TIME_OF_DAY`, …) are una
   Completed results persist under `user://nav_reconcile`; remove the selected map's cache file when a
   deliberately cold reconciliation run is required. The reconciled CSR routing graph is cached beside it;
   valid hits deserialize the graph directly, while misses build and write it off the main thread.
+- `UG_NAV_CPU_PROBE=0` sends every reconciliation probe back to the PhysicsServer. By default the load
+  records the layer-`World` collision geometry into a `CollisionField` — terrain heightfields and object
+  colliders, as the bodies for them are created — and the first session probes that on workers, asking the
+  server only about the faces `NavmeshReachability.NeedsConfirmation` names. Direct-space queries are only
+  legal inside a physics notification, so the old path serialised thousands of probes into a slice of each
+  tick; `runtime.subsystem.NavigationReconcile.calls` and the time to `[nav] collision reconciliation
+  submitted` are what this moves. On one paired PEI run on a 4-vCPU software-rendered container
+  (`NAV_RECONCILE_BUDGET_MS=100` on both sides, so the frame rate rather than the budget is not the
+  limiter), the same 42,642 faces reconciled in **54,263 ms** with `UG_NAV_CPU_PROBE=0` and **6,483 ms**
+  with it on — 298,494 physics-server probes down to 60,207, and the completion line breaks that down as
+  `sample+plan 1,620 ms, server 3,469 ms, verdict 78 ms`.
+- Two things about that split are worth knowing before tuning it. The CPU work itself is a fraction of a
+  second for a whole map (`PerfHarness -- navprobe` measures it in isolation), so `sample+plan` is mostly
+  the cost of one hop to the thread pool: an `await` inside a Godot signal handler resumes on the engine's
+  synchronization context, which drains once a frame, so a worker round trip costs a frame however little
+  work it did. That is why the pass plans every flag in one hop and reaches its verdicts inline, and why
+  the reconciliation checkpoints are written on a chain and awaited once at the end rather than per flag.
+- `UG_NAV_CONFIRM_MARGIN=<metres>` (default 0.05) widens how close to the step threshold a face has to be
+  before its verdict is settled on the server rather than in the field. The heightfield's triangulation is
+  not covered by it — `CollisionField` measures that per probe and reports it as slack, which is added on
+  top per face. Independently of the margin, every face the sampled surfaces would *drop* is confirmed:
+  keeping a face leaves the baked navmesh as shipped, while dropping one takes route out of the graph, so
+  only the destructive verdict needs the physics to sign it off.
+- `UG_NAV_PROBE_AUDIT=1` probes every face both ways and reports where they part company — including how
+  many faces would reach a different verdict than a full server probe, which is the only disagreement that
+  changes the game. It is deliberately slower than either path alone, and is how the CPU field is checked
+  against the collision world it stands in for. One PEI run on the container above (all 19 flags, 42,642
+  faces, 298,494 probes): 8,601 faces needed confirming, 129 measured a different surface — none of them a
+  surface the field failed to find — and 21 reached a different verdict out of the 6,266 the server
+  dropped. Confirming the drop set is what buys most of that last number: without it the same run reached
+  a different verdict on 66 faces, from a confirmation set of 3,685.
 - `UG_RUNTIME_BENCH_MOVE=1` makes Tier 3 alternate forward/back once per second, exercising real movement
   collision and the loopback multiplayer position stream instead of profiling only an idle player. Note
   that it oscillates rather than traverses: net displacement stays near zero, so it does not carry the

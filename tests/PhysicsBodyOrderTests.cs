@@ -505,9 +505,13 @@ public class PhysicsBodyOrderTests
             return;
         string source = File.ReadAllText(path);
         int publish = source.LastIndexOf("await PublishAsync", System.StringComparison.Ordinal);
-        int write = source.LastIndexOf("await PersistCheckpointAsync", System.StringComparison.Ordinal);
+        int queue = source.LastIndexOf("QueueCheckpoint(cachePath", System.StringComparison.Ordinal);
+        // The checkpoints are written on a chain rather than awaited where they are queued (each await
+        // there cost a whole frame). Awaiting that chain is what still puts the last write before the
+        // state it describes is dropped.
+        int drained = source.LastIndexOf("await _checkpoints;", System.StringComparison.Ordinal);
         int release = source.LastIndexOf("ReleaseReconciliationState();", System.StringComparison.Ordinal);
-        Assert.True(publish >= 0 && write > publish && release > write);
+        Assert.True(publish >= 0 && queue > publish && drained > queue && release > drained);
         Assert.Contains("UG_KEEP_NAV_RECONCILE_STATE", source);
         Assert.Contains("_unreachable.Clear()", source);
     }
@@ -520,8 +524,8 @@ public class PhysicsBodyOrderTests
         string source = File.ReadAllText(path);
         Assert.Contains("UG_PARTIAL_NAV_CACHE", source);
         Assert.Contains("TryReadPartial", source);
-        Assert.Contains("if (_unreachable.ContainsKey(flag))", source);
-        Assert.Contains("await PersistCheckpointAsync", source);
+        Assert.Contains("if (!_unreachable.ContainsKey(flag))", source);
+        Assert.Contains("QueueCheckpoint(cachePath, fingerprint, triangleCounts)", source);
         Assert.Contains("File.Move(temporary, cachePath, overwrite: true)", source);
     }
 
