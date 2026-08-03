@@ -223,6 +223,73 @@ public class BakedNavGraphTests
         Assert.False(BakedNavGraph.TryRead(new MemoryStream(outOfRange), "topology-v1", new[] { flag }, out _));
     }
 
+    // The grid offsets are consumed exactly like the edge offsets — ClosestTriangle walks _cellItems from
+    // _cellStart[cell] to _cellStart[cell + 1] with no bounds test of its own — but only the TERMINAL
+    // offset was validated on read. A cache whose last offset is right and whose earlier ones are
+    // anything at all loaded happily, and then indexed past the item array during a repath: on the
+    // server tick, outside the try/catch TryRead has for exactly this.
+    [Fact]
+    public void CsrCache_RejectsNegativeOrDecreasingGridOffsets()
+    {
+        NavFlag flag = Field(8, step: 2f);
+        using var cache = new MemoryStream();
+        BakedNavGraph.Build(new[] { flag }).Write(cache, "grid-v1");
+        byte[] bytes = cache.ToArray();
+        int offsets = GridOffsetsStart(bytes, flag);
+
+        // Sanity: untouched, it loads.
+        Assert.True(BakedNavGraph.TryRead(new MemoryStream((byte[])bytes.Clone()), "grid-v1",
+            new[] { flag }, out _));
+
+        byte[] negative = (byte[])bytes.Clone();
+        BinaryPrimitives.WriteInt32LittleEndian(negative.AsSpan(offsets + sizeof(int)), -1);
+        Assert.False(BakedNavGraph.TryRead(new MemoryStream(negative), "grid-v1", new[] { flag }, out _));
+
+        // Find a cell whose offset has actually advanced, so "one less than the previous" is a genuine
+        // decrease rather than a no-op on a run of empty cells.
+        int count = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(offsets));
+        int advanced = -1;
+        for (int i = 1; i < count && advanced < 0; i++)
+            if (BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(offsets + ((i + 1) * sizeof(int)))) > 0)
+                advanced = i;
+        Assert.True(advanced > 0, "the fixture must produce a grid with at least one non-empty cell");
+
+        byte[] decreasing = (byte[])bytes.Clone();
+        int at = offsets + ((advanced + 1) * sizeof(int));
+        int previous = BinaryPrimitives.ReadInt32LittleEndian(decreasing.AsSpan(at - sizeof(int)));
+        BinaryPrimitives.WriteInt32LittleEndian(decreasing.AsSpan(at), previous - 1);
+        Assert.False(BakedNavGraph.TryRead(new MemoryStream(decreasing), "grid-v1", new[] { flag }, out _));
+
+        byte[] beyondItems = (byte[])bytes.Clone();
+        BinaryPrimitives.WriteInt32LittleEndian(beyondItems.AsSpan(offsets + sizeof(int)), int.MaxValue);
+        Assert.False(BakedNavGraph.TryRead(new MemoryStream(beyondItems), "grid-v1", new[] { flag }, out _));
+    }
+
+    // Walks the header and the CSR block to the first grid offset, mirroring FlagGraph.Read's order.
+    private static int GridOffsetsStart(byte[] bytes, NavFlag flag)
+    {
+        using var reader = new BinaryReader(new MemoryStream(bytes), Encoding.UTF8, leaveOpen: false);
+        reader.ReadUInt32();
+        reader.ReadInt32();
+        reader.ReadString();
+        Assert.Equal(1, reader.ReadInt32());
+        int triangles = flag.Triangles.Length / 3;
+        Assert.Equal(triangles, reader.ReadInt32());
+        reader.BaseStream.Seek(triangles * 3L * sizeof(float), SeekOrigin.Current);
+        Assert.Equal(triangles, reader.ReadInt32());
+        reader.BaseStream.Seek(triangles, SeekOrigin.Current); // bool values
+        Assert.Equal(triangles + 1, reader.ReadInt32());
+        reader.BaseStream.Seek((triangles + 1L) * sizeof(int), SeekOrigin.Current);
+        int edges = reader.ReadInt32();
+        reader.BaseStream.Seek(edges * 3L * sizeof(int), SeekOrigin.Current);
+        reader.ReadInt32(); // columns
+        reader.ReadInt32(); // rows
+        reader.ReadSingle(); // cellSize
+        reader.ReadSingle(); // minX
+        reader.ReadSingle(); // minZ
+        return checked((int)reader.BaseStream.Position);
+    }
+
     private static int EdgeOffsetsStart(byte[] bytes, NavFlag flag)
     {
         using var reader = new BinaryReader(new MemoryStream(bytes), Encoding.UTF8, leaveOpen: false);
