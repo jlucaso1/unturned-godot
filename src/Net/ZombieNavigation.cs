@@ -389,16 +389,19 @@ public sealed class ZombieNavigation
         string? cachePath = null;
         string? fingerprint = null;
         bool partialCheckpoints = EnvFlag.IsOn(OS.GetEnvironment("UG_PARTIAL_NAV_CACHE"), whenUnset: true);
-        // The audit exists to probe every face both ways and say where the two disagree. A cache hit
-        // returns before any of that happens, and the common run is a warm one — so an audit that
-        // honoured the cache would silently report nothing on exactly the runs someone would use it on.
+        // An audit does not touch the cache at either end. Reading it would return before any comparison
+        // happened, and the common run is a warm one — so an audit that honoured the cache would report
+        // nothing on exactly the runs someone would use it on. Writing it is worse: an audit replaces
+        // every face with the server's own answer, so its verdicts are the OLD algorithm's, and leaving
+        // them under the ordinary fingerprint would have the next normal run restore them instead of
+        // running the hybrid it is supposed to. A diagnostic measures; it does not leave results behind.
         bool audit = EnvFlag.IsOn(OS.GetEnvironment("UG_NAV_PROBE_AUDIT"), whenUnset: false);
         bool cpuField = collision != null && EnvFlag.IsOn(OS.GetEnvironment("UG_NAV_CPU_PROBE"),
             whenUnset: true);
         int[] triangleCounts = new int[_flags.Count];
         for (int i = 0; i < _flags.Count; i++)
             triangleCounts[i] = _flags[i].Triangles.Length / 3;
-        if (_levelDir != null)
+        if (_levelDir != null && !audit)
         {
             try
             {
@@ -412,7 +415,7 @@ public sealed class ZombieNavigation
                     return (fp, System.IO.Path.Combine(reconcileCache,
                         NavReconcileCache.MapKey(_levelDir) + ".cache"));
                 });
-                if (System.IO.File.Exists(cachePath) && !audit)
+                if (System.IO.File.Exists(cachePath))
                 {
                     using System.IO.FileStream input = System.IO.File.OpenRead(cachePath);
                     if (NavReconcileCache.TryReadPartial(input, fingerprint, triangleCounts, out var cached))

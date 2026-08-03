@@ -117,8 +117,9 @@ public sealed class CollisionFieldBuilder
         }
         lock (_gate)
         {
-            _tiles.Add(new CollisionField.Heightfield(placement.Origin.X, placement.Origin.Z, scale.X,
-                width, depth, data, min + placement.Origin.Y, max + placement.Origin.Y));
+            _tiles.Add(new CollisionField.Heightfield(placement.Origin.X, placement.Origin.Y,
+                placement.Origin.Z, scale.X, width, depth, data,
+                min + placement.Origin.Y, max + placement.Origin.Y));
         }
     }
 

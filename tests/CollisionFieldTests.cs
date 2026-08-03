@@ -40,6 +40,25 @@ public class CollisionFieldTests
     }
 
     [Fact]
+    public void AHeightfieldPlacedHighSitsThatMuchHigher()
+    {
+        // The samples are heights in the shape's own frame, so the placement's Y is part of where the
+        // surface actually is — the tile's bounds already say so, and the sampled height has to agree
+        // with them or every hit on that tile comes back short by the offset.
+        var builder = new CollisionFieldBuilder();
+        var data = new float[4];
+        Array.Fill(data, 3f);
+        builder.AddHeightfield(
+            new Transform3D(Basis.Identity.Scaled(new Vector3(1f, 1f, 1f)), new Vector3(0f, 12f, 0f)),
+            2, 2, data);
+        CollisionField field = builder.Build();
+
+        SurfaceSample sample = field.Probe(0f, 0f, topY: 20f, bottomY: 0f);
+        Assert.True(sample.Hit);
+        Assert.Equal(15f, sample.Y, 0.0001f);
+    }
+
+    [Fact]
     public void PlanarHeightfieldCell_InterpolatesWithoutSlack()
     {
         // A plane is the one surface both triangulations of a cell agree on everywhere, so the sampler
@@ -196,11 +215,13 @@ public class CollisionFieldTests
         Assert.Equal(5f + MathF.Sqrt(0.25f - 0.09f), offAxis.Y, 0.001f);
     }
 
-    // A flat quad of two coplanar triangles, spanning [0, 10] x [0, 10] at `height`.
+    // A flat quad of two coplanar triangles sharing the (0,0)-(10,10) diagonal, spanning [0, 10] x
+    // [0, 10] at `height`, wound so its normal points up — a surface a downward probe meets front-on,
+    // like the roof of a real collider.
     private static Vector3[] Quad(float height) => new[]
     {
-        new Vector3(0f, height, 0f), new Vector3(10f, height, 0f), new Vector3(10f, height, 10f),
-        new Vector3(0f, height, 0f), new Vector3(10f, height, 10f), new Vector3(0f, height, 10f),
+        new Vector3(0f, height, 0f), new Vector3(10f, height, 10f), new Vector3(10f, height, 0f),
+        new Vector3(0f, height, 0f), new Vector3(0f, height, 10f), new Vector3(10f, height, 10f),
     };
 
     [Fact]
@@ -252,7 +273,7 @@ public class CollisionFieldTests
         AddFlatGround(builder, cells: 40, cell: 1f, height: 0f); // so a clean miss is an answer, not a gap
         int sliver = builder.AddMeshShape(new[]
         {
-            new Vector3(0f, 5f, 0f), new Vector3(20f, 5f, 0f), new Vector3(20f, 5f, 0.05f),
+            new Vector3(0f, 5f, 0f), new Vector3(20f, 5f, 0.05f), new Vector3(20f, 5f, 0f),
         });
         // Placed well inside the ground, so a miss beside it still lands on modelled terrain.
         builder.AddInstance(sliver, new Transform3D(Basis.Identity, new Vector3(0f, 0f, 5f)));
@@ -265,6 +286,40 @@ public class CollisionFieldTests
         SurfaceSample clear = field.Probe(10f, 4f, topY: 10f, bottomY: -1f);
         Assert.False(clear.Uncertain);
         Assert.Equal(0f, clear.Y, 0.0001f);
+    }
+
+    [Fact]
+    public void AFaceTurnedAwayFromTheProbeIsStillASurface()
+    {
+        // ObjectsBuilder leaves BackfaceCollision off, so in principle the server culls a crossing of a
+        // face turned away from the ray and this should escalate rather than report one. Measured on PEI
+        // it does not: escalating back-facing crossings took the uncertain probes from 1,225 to 99,525 —
+        // a third of every probe on the map — and the confirmation set from 20% of faces to 50%, while
+        // the audit's disagreement count barely moved. A third of crossings being back-facing while the
+        // server reports the same surfaces says the server is not culling them here. The audit is what
+        // would catch it if that ever changed; see the note in CollisionField.Intersect.
+        var builder = new CollisionFieldBuilder();
+        AddFlatGround(builder, cells: 20, cell: 1f, height: 0f);
+        Vector3[] facingUp = Quad(5f);
+        var facingDown = new Vector3[facingUp.Length];
+        for (int i = 0; i < facingUp.Length; i += 3)
+        {
+            facingDown[i] = facingUp[i + 2]; // the same triangle, wound the other way
+            facingDown[i + 1] = facingUp[i + 1];
+            facingDown[i + 2] = facingUp[i];
+        }
+        int up = builder.AddMeshShape(facingUp);
+        int down = builder.AddMeshShape(facingDown);
+        builder.AddInstance(up, Transform3D.Identity);
+        builder.AddInstance(down, new Transform3D(Basis.Identity, new Vector3(0f, 0f, 12f)));
+        CollisionField field = builder.Build();
+
+        foreach (float z in new[] { 4f, 16f })
+        {
+            SurfaceSample sample = field.Probe(5f, z, topY: 10f, bottomY: -1f);
+            Assert.Equal(5f, sample.Y, 0.0001f);
+            Assert.False(sample.Uncertain, $"winding does not decide whether a surface is there (z={z})");
+        }
     }
 
     [Fact]

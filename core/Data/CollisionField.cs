@@ -74,6 +74,10 @@ public sealed class CollisionField
     internal readonly struct Heightfield
     {
         public readonly float OriginX;
+        // The placement's own height. The samples are heights in the shape's frame, so a tile placed with
+        // a vertical offset sits that much higher in the world — the bounds already say so, and the
+        // sampled height has to agree with them.
+        public readonly float OriginY;
         public readonly float OriginZ;
         public readonly float CellSize;
         public readonly int Width;
@@ -82,10 +86,11 @@ public sealed class CollisionField
         public readonly float MinY;
         public readonly float MaxY;
 
-        public Heightfield(float originX, float originZ, float cellSize, int width, int depth, float[] data,
-            float minY, float maxY)
+        public Heightfield(float originX, float originY, float originZ, float cellSize, int width,
+            int depth, float[] data, float minY, float maxY)
         {
             OriginX = originX;
+            OriginY = originY;
             OriginZ = originZ;
             CellSize = cellSize;
             Width = width;
@@ -458,7 +463,7 @@ public sealed class CollisionField
             ? h00 + ((h10 - h00) * fx) + ((h01 - h00) * fz)
             : h11 + ((h01 - h11) * (1f - fx)) + ((h10 - h11) * (1f - fz));
 
-        y = MathF.Max(first, second);
+        y = MathF.Max(first, second) + tile.OriginY;
         slack = MathF.Abs(first - second);
     }
 
@@ -588,6 +593,19 @@ public sealed class CollisionField
             float edgeAt = float.MaxValue;
             int edgeFaces = 0;
             bool edgeInside = false;
+            // Deliberately NOT tracked separately: whether the face is turned toward the ray or away from
+            // it. ObjectsBuilder leaves BackfaceCollision off on its ConcavePolygonShape3Ds, so in
+            // principle the server culls a back-facing crossing and this should escalate rather than
+            // claim one. Measured on PEI, it does not: escalating them turned 1,225 uncertain probes into
+            // 99,525 — a third of every probe on the map, and the confirmation set from 20% of faces to
+            // 50% — while the audit's disagreement count barely moved (129 to 90 of 42,642 faces, and
+            // none of the difference attributable to this rather than to the edge band beside it). A
+            // third of mesh crossings being back-facing while the server reports the same surfaces the
+            // two-sided test does says the server is not culling them here. So the cost was the whole
+            // saving and the correction was noise, and this stays two-sided.
+            //
+            // If that changes — a Godot release that culls, or a collider set wound the other way — the
+            // audit is what would show it, as a jump in "the CPU field invented" rather than in timing.
             Span<int> stack = stackalloc int[128];
             int depth = 0;
             stack[depth++] = 0;
@@ -638,11 +656,11 @@ public sealed class CollisionField
             bool corroborated = edgeFaces >= 2 && edgeInside;
             if (corroborated && edgeAt < solid)
                 solid = edgeAt;
-            bool graze = edgeFaces > 0 && !corroborated;
+            float unresolved = edgeFaces > 0 && !corroborated ? edgeAt : float.MaxValue;
 
             return new Crossing(nearest < float.MaxValue, nearest < float.MaxValue ? nearest : 0f,
                 solid < float.MaxValue, solid < float.MaxValue ? solid : 0f,
-                graze, graze ? edgeAt : 0f);
+                unresolved < float.MaxValue, unresolved < float.MaxValue ? unresolved : 0f);
         }
 
         // Widened by the graze band, like the instance bounds are and for the same reason: a probe a
@@ -674,10 +692,12 @@ public sealed class CollisionField
             return true;
         }
 
-        // Moller-Trumbore, two-sided (a collision mesh is a shell and the probe may enter it from either
-        // face). `inside` is the plain geometric answer; `edge` says the crossing landed within
+        // Moller-Trumbore. `inside` is the plain geometric answer; `edge` says the crossing landed within
         // GrazeEpsilon of the triangle's boundary — inside it or just outside — which is the band where
         // the collision engine decides and this code does not.
+        //
+        // Two-sided on purpose — a collision mesh is a shell and the probe may enter it from either face.
+        // See the note in Intersect for why the facing is not used to cull.
         private static void Classify(Vector3 a, Vector3 b, Vector3 c, Vector3 origin, Vector3 direction,
             float length, out float t, out bool inside, out bool edge)
         {
