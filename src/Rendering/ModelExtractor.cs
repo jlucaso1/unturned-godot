@@ -296,6 +296,14 @@ public static class ModelExtractor
                 // it after the first of several left the objects from the rest as fallback boxes.
                 if (--serializedLeft == 0)
                 {
+                    // A cancelled pass has produced nothing, or nearly nothing, and RecordMisses reads
+                    // exactly that to decide what this bundle cannot make: recording it would blacklist
+                    // every GUID the pass never reached and delete its cache, so the next launch would
+                    // suppress extraction and render them as boxes until the bundle stamp changed. The
+                    // file-based path guards its own call for the same reason.
+                    if (cancellationToken.IsCancellationRequested || AppShutdown.IsShuttingDown)
+                        return;
+
                     // All serialized files have now been scanned. A miss index written by an earlier
                     // file would permanently hide GUIDs owned by a later file after an interrupted pass.
                     RecordMisses(bundlePath, cacheDir, neededGuids, foliageAssets, produced, staleLevels);
