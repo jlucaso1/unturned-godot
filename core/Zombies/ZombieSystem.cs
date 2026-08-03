@@ -647,6 +647,17 @@ public sealed class ZombieSystem
                 bool improvesRoute = newError + 0.01f < oldError;
                 if (complete || (improvesFrom && improvesRoute))
                 {
+                    // Evidence survives an EQUIVALENT reissue and only that. A route the physics world
+                    // has been refusing gets re-derived verbatim while the body sits against the wall,
+                    // and pardoning that is what disarmed the timeout in the first place. A materially
+                    // different route is a different claim: velocity is computed from the body's
+                    // CURRENT forward, before RotateTowards runs, and scaled by how aligned that
+                    // forward is with the new heading — so the first step onto a fresh detour still
+                    // presses into the old obstruction and delivers nothing. Inheriting evidence that
+                    // is already near the timeout would then discard the detour on the tick it
+                    // arrived, exactly when the graph had finally produced the way round.
+                    if (!SameRoute(zombie.PathPoints, _scratchPath))
+                        zombie.BlockedRouteTime = 0f;
                     zombie.PathPoints.Clear();
                     zombie.PathPoints.AddRange(_scratchPath);
                     zombie.CurrentWaypointIndex = 0;
@@ -687,6 +698,23 @@ public sealed class ZombieSystem
     }
 
     private readonly List<Vector3> _scratchPath = new();
+
+    // Is the replacement the SAME route the body is already failing to walk? Waypoint 0 is the query
+    // start, which tracks the body, so it moves a little even while blocked and is skipped. Everything
+    // after it is the plan, and a genuine detour differs from a re-derived wall route by metres, not by
+    // the centimetres of creep a blocked body manages.
+    private const float SameRouteTolerance = 1f;
+
+    private static bool SameRoute(List<Vector3> current, List<Vector3> replacement)
+    {
+        if (current.Count == 0 || current.Count != replacement.Count)
+            return false;
+        for (int i = 1; i < current.Count; i++)
+            if (HorizontalDistanceSquared(current[i], replacement[i])
+                > SameRouteTolerance * SameRouteTolerance)
+                return false;
+        return true;
+    }
 
     // LegacyAIPathNoRedist.CalculateVelocity, ported: advance waypoints within pickNextWaypointDist
     // (XZ), aim at the forwardLook point interpolated ON THE CURRENT SEGMENT, stop within

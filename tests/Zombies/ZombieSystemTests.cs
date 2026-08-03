@@ -1215,6 +1215,52 @@ public class ZombieSystemTests
         Assert.Equal(3f, zombie.PathPoints[^1].X, 1);
     }
 
+    // Codex review, third finding. The complement of
+    // AnImpassableRoute_IsInvalidatedEvenWhenEveryRepathReadoptsItVerbatim: evidence must survive an
+    // EQUIVALENT reissue and only that. When the graph finally produces a real detour — the moment
+    // reconciliation carves the wall out — the first step onto it still uses the body's pre-turn
+    // forward and presses into the old obstruction, so inherited evidence sitting near the timeout
+    // would throw the detour away on the tick it arrived.
+    [Fact]
+    public void AMateriallyDifferentRoute_ArrivesWithACleanBlockedRecord()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        bool detour = false;
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            path.Add(from);
+            if (detour)
+                path.Add(new Vector3(from.X, from.Y, from.Z + 8f)); // step aside, round the obstruction
+            path.Add(to); // and on to the target either way, so the detour still scores as complete
+            return true;
+        };
+        bool blocked = true;
+        system.MoveResolver = (from, to, radius) => blocked ? from : to;
+
+        var player = Player(1, new Vector3(10, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
+        int guard = 0;
+        while (zombie.BlockedRouteTime + ImpassableDt + 1e-4f < ZombieSystem.BlockedRouteTimeout)
+        {
+            system.Tick(new[] { player }, ImpassableDt);
+            Assert.True(++guard < 100, "never accumulated blocked evidence");
+        }
+        float carried = zombie.BlockedRouteTime;
+        Assert.True(carried > 0f);
+
+        // The detour arrives. One more blocked tick would have fired the timeout on the old evidence.
+        detour = true;
+        zombie.RepathTimer = 0f;
+        zombie.RepathGranted = true;
+        system.Tick(new[] { player }, ImpassableDt);
+
+        Assert.NotEmpty(zombie.PathPoints); // the detour was not discarded on arrival
+        Assert.True(zombie.BlockedRouteTime < carried,
+            $"the detour inherited the old route's evidence: {zombie.BlockedRouteTime} vs {carried}");
+        Assert.Equal(3, zombie.PathPoints.Count); // the detour, not the straight line
+        Assert.Equal(8f, zombie.PathPoints[1].Z, 1);
+    }
+
     private const float ImpassableDt = 0.1f;
 
     private readonly record struct ImpassableRun(int FirstBlockedTick, int InvalidatedAtTick,
