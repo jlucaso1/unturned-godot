@@ -99,6 +99,16 @@ public class PeiRouteQualityTests
     // number never climbs back, and it is meant to come down as the funnel improves. Before portal
     // budget was shared without starving either wall end it was 26 — the proportional split handed one
     // real wall as little as 0.04 m of the inset it asked for, leaving route points 0.01 m from a jamb.
+    //
+    // Re-measured both ways when a review argued for restoring the proportional split, on the grounds
+    // that it equalises PERPENDICULAR clearance while an equal along-edge share does not. The algebra
+    // is right — InsetFor asks for wanted/sin, so scaling both requests by budget/total lands every end
+    // on wanted*budget/total — but it optimises the wrong thing. Equalising drags the end that CAN be
+    // cleared down to the level of one that cannot: a near-parallel wall asks for metres of a portal
+    // that is one metre long, and no allocation ever satisfies it. Fully clearing the achievable end is
+    // worth more than raising an unachievable one, and the map agrees: 22 routes off the mesh here
+    // against 26 proportional, with the tightest fit 0.05 m under BOTH — so the clearance the algebra
+    // promises the shallow end does not survive contact with the portals that actually bind.
     private const int WorstRoutesLeavingTheMesh = 22;
 
     private static (List<NavFlag> Flags, Coverage Mesh, BakedNavGraph Graph) Load()
