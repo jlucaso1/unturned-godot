@@ -11,7 +11,7 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildManifest, PROBE_SELECTION } from "./seed.mjs";
-import { INSTALL_PREFIX } from "./shared.js";
+import { INSTALL_PREFIX } from "./shared.mjs";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const webRoot = resolve(here, "..");
@@ -76,7 +76,7 @@ async function importPlaywright() {
 }
 
 const manifest = await buildManifest(content, PROBE_SELECTION);
-addArtworkFallbackMap(manifest);
+const seededArtFallback = addArtworkFallbackMap(manifest);
 const inlined = manifest.entries.filter((entry) => entry.data !== null).length;
 
 // One map the download does not contain: its Preview.png is empty, so the browser cannot decode it, and
@@ -84,13 +84,19 @@ const inlined = manifest.entries.filter((entry) => entry.data !== null).length;
 // and the demo has to as well — which only shows up when the preferred file exists but is not an image.
 function addArtworkFallbackMap(target) {
     const preview = target.entries.find((entry) => entry.path === "Maps/PEI/Preview.png");
-    if (!preview?.data) return;
+    if (!preview?.data) {
+        // Say so here. Otherwise the only symptom is the demo waiting out its selector timeout, and the
+        // run blames the assertion rather than the seed it never got.
+        console.log("Maps/PEI/Preview.png carries no inlined data: skipping the ArtFallback map.");
+        return false;
+    }
     target.entries.push(
         { path: "Maps/ArtFallback/Level.dat", size: 0, data: "" },
         { path: "Maps/ArtFallback/Landscape/Heightmaps/Tile_0_0_Source.heightmap", size: 0, data: "" },
         { path: "Maps/ArtFallback/Preview.png", size: 0, data: "" },
         { path: "Maps/ArtFallback/Chart.png", size: preview.size, data: preview.data },
     );
+    return true;
 }
 console.log(
     `Seeding ${manifest.entries.length} paths from ${content} ` +
@@ -118,7 +124,8 @@ const origin = `http://127.0.0.1:${server.address().port}`;
 
 let browser;
 try {
-    browser = await chromium.launch();
+    // --keep-open exists to poke at the seeded pages afterwards, which needs a window to poke at.
+    browser = await chromium.launch({ headless: !keepOpen });
 } catch (error) {
     console.log(`SKIP: could not launch Chromium (${error.message.split("\n")[0]})`);
     server.close();
@@ -186,13 +193,15 @@ async function runDemo() {
     );
 
     // The fallback map's preview cannot decode, so its card only gets an image if the chart is tried.
-    await demo.waitForFunction(() =>
-        [...document.querySelectorAll(".card")].some(
-            (card) =>
-                card.querySelector("h3")?.textContent === "ArtFallback" &&
-                card.querySelector(".art img")?.naturalWidth > 0,
-        ),
-    );
+    if (seededArtFallback) {
+        await demo.waitForFunction(() =>
+            [...document.querySelectorAll(".card")].some(
+                (card) =>
+                    card.querySelector("h3")?.textContent === "ArtFallback" &&
+                    card.querySelector(".art img")?.naturalWidth > 0,
+            ),
+        );
+    }
 
     const observed = await demo.evaluate(() => ({
         status: document.querySelector("#status").textContent,
@@ -226,12 +235,18 @@ async function runDemo() {
             ok: observed.artwork > 0,
             detail: `${observed.artwork} decoded images`,
         },
-        {
-            // Both cards decoded: PEI on its preview, ArtFallback only by falling through to its chart.
-            name: "demo falls through to the chart when the preview will not decode",
-            ok: observed.artwork >= 2 && observed.cards.includes("ArtFallback"),
-            detail: `${observed.artwork} decoded across ${observed.cards.join(", ")}`,
-        },
+        // Both cards decoded: PEI on its preview, ArtFallback only by falling through to its chart. Only
+        // asserted when the seed had a real picture to borrow, so a content change reports itself as the
+        // skip logged above rather than as this assertion mysteriously failing.
+        ...(seededArtFallback
+            ? [
+                  {
+                      name: "demo falls through to the chart when the preview will not decode",
+                      ok: observed.artwork >= 2 && observed.cards.includes("ArtFallback"),
+                      detail: `${observed.artwork} decoded across ${observed.cards.join(", ")}`,
+                  },
+              ]
+            : []),
     ];
 }
 

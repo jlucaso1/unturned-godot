@@ -7,7 +7,7 @@ import { parseDatTopLevel } from "../lib/dat.js";
 import { baseName, dirName, join, normalize, segments } from "../lib/paths.js";
 import { PickKind, compareForMenu, probeInstall } from "../lib/catalog.js";
 import { forgetHandle, loadHandle, saveHandle } from "../lib/handle-store.js";
-import { INSTALL_PREFIX } from "./shared.js";
+import { INSTALL_PREFIX } from "./shared.mjs";
 
 const results = [];
 
@@ -270,6 +270,23 @@ async function bomDecoding() {
     );
     const result = await probeInstall(withBom, { platform: "linux" });
     equal("a utf-16 English.dat still yields its name", result.maps[0]?.displayName, "Ilha");
+
+    // A UTF-8 BOM is the common one. Left in place, U+FEFF joins the first key and "Name" stops matching,
+    // which looks exactly like a map with no localized name at all.
+    const utf8Bom = new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode("Name Ilha")]);
+    const withUtf8Bom = new ListingFs(
+        [
+            fileFor("Bundles/core_linux.masterbundle", "Unturned", ""),
+            fileFor("Maps/Bom/Level.dat", "Unturned", ""),
+            fileFor("Maps/Bom/English.dat", "Unturned", utf8Bom),
+        ],
+        { caseInsensitive: false },
+    );
+    equal(
+        "a utf-8 BOM does not become part of the first key",
+        (await probeInstall(withUtf8Bom, { platform: "linux" })).maps[0]?.displayName,
+        "Ilha",
+    );
 }
 
 // CompareForMenu sorts with OrdinalIgnoreCase, not locale collation: "Åland" sorts after "Zeta".
@@ -602,6 +619,17 @@ function dat() {
     const multiline = parseDatTopLevel('Name "First\nSecond"\nDescription After');
     equal("dat keeps a newline inside a quoted value", multiline.get("Name"), "First\nSecond");
     equal("and the next line is still a key", multiline.get("Description"), "After");
+    // CRLF is what a .dat authored on Windows uses. The parser keeps it verbatim inside a quoted run and
+    // leaves no stray \r on a value that ends at the line break.
+    const crlf = parseDatTopLevel('Name "First\r\nSecond"\r\nDescription After');
+    equal("a quoted value spans a CRLF the same way", crlf.get("Name"), "First\r\nSecond");
+    equal("and the line after it is still a key", crlf.get("Description"), "After");
+    equal(
+        "a CRLF ends an unquoted value without keeping the carriage return",
+        parseDatTopLevel("Name First\r\nDescription After").get("Name"),
+        "First",
+    );
+
     equal(
         "an unterminated quote takes the rest of the document",
         parseDatTopLevel('Name "First\nDescription After').get("Name"),
