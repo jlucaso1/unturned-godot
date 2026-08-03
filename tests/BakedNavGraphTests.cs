@@ -503,6 +503,107 @@ public class BakedNavGraphTests
         Assert.Equal(expected, actual);
     }
 
+    // A 6 m tent-shaped ridge — 2 m of run either side of the crest — laid along +Z from z = -2 to the
+    // far edge of the field, so the only way past it is round its -Z end. Everything else is flat.
+    private static float RidgeHeight(float x, float z)
+    {
+        float crest = MathF.Abs(x) >= 2f ? 0f : 6f * (1f - (MathF.Abs(x) / 2f));
+        return z >= -2f ? crest : z <= -3f ? 0f : crest * (z + 3f);
+    }
+
+    private static NavFlag RidgeField()
+    {
+        const int Columns = 25; // x = -12 .. 12
+        const int Rows = 11;    // z =  -8 .. 2
+        var vertices = new List<Vector3>();
+        for (int x = 0; x < Columns; x++)
+            for (int z = 0; z < Rows; z++)
+                vertices.Add(new Vector3(x - 12, RidgeHeight(x - 12, z - 8), z - 8));
+
+        var triangles = new List<int>();
+        for (int x = 0; x < Columns - 1; x++)
+            for (int z = 0; z < Rows - 1; z++)
+            {
+                int a = (x * Rows) + z, b = a + 1, c = a + Rows, d = c + 1;
+                triangles.AddRange(new[] { a, b, c, b, d, c });
+            }
+
+        return new NavFlag
+        {
+            Center = new Vector3(0, 0, -3),
+            Size = new Vector3(26, 40, 12),
+            Vertices = vertices.ToArray(),
+            Triangles = triangles.ToArray(),
+        };
+    }
+
+    // What the body actually covers, which is the ground under the route rather than the route: sampled
+    // off the same height function the field was built from.
+    private static float GroundLength(IReadOnlyList<Vector3> path)
+    {
+        const int Samples = 4000;
+        float total = 0f;
+        for (int i = 1; i < path.Count; i++)
+        {
+            Vector3 from = path[i - 1], to = path[i];
+            var previous = new Vector3(from.X, RidgeHeight(from.X, from.Z), from.Z);
+            for (int s = 1; s <= Samples; s++)
+            {
+                float t = s / (float)Samples;
+                float x = from.X + ((to.X - from.X) * t), z = from.Z + ((to.Z - from.Z) * t);
+                var here = new Vector3(x, RidgeHeight(x, z), z);
+                total += previous.DistanceTo(here);
+                previous = here;
+            }
+        }
+        return total;
+    }
+
+    // A rise A* deliberately goes AROUND, which the shortcut pass would put straight back OVER.
+    //
+    // Every other replacement the shortcut makes is licensed by the triangle inequality, and that holds
+    // in the XZ plan. It does NOT hold on the surface, and the surface is what gets walked: zombies
+    // ground-snap, so a segment that is shorter in plan can be longer to cover. A* already prices this
+    // correctly — its edge cost is centre-to-centre in 3D — and here it prefers the flat way round the
+    // end of the ridge to climbing six metres over it.
+    //
+    // Which makes the straight line from end to end genuinely tempting to the shortcut pass: it stays on
+    // enabled mesh the whole way and clears every wall, and it is 16 m in plan against the detour's 17.6.
+    // Only the surface-length comparison in Reaches refuses it, and refusing is right: over the crest is
+    // 24.6 m of ground against the detour's 17.8.
+    [Fact]
+    public void ShortcutRefusesAStraightLineOverARiseThatIsLongerToWalkThanTheDetour()
+    {
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { RidgeField() });
+        Vector3 from = new(-8, 0, 0), to = new(8, 0, 0);
+        var path = new List<Vector3>();
+
+        Assert.True(graph.TryPath(from, to, path));
+
+        // Four waypoints is both halves of the claim at once. The funnel's own corridor is six, so the
+        // shortcut pass DID run and DID tighten the detour; collapsing it to the two-point straight line
+        // over the crest is what the surface check prevents.
+        Assert.Equal(4, path.Count);
+        Assert.Equal(from, path[0]);
+        Assert.Equal(to, path[^1]);
+        Assert.Equal(-3f, path[1].Z, 3);
+        Assert.Equal(-3f, path[2].Z, 3);
+
+        // Shorter in plan, longer on the ground — the whole reason the plan-only triangle inequality is
+        // not enough here.
+        Assert.InRange(Plan(path), 17.5f, 17.8f);
+        Assert.InRange(Plan(new[] { from, to }), 15.9f, 16.1f);
+        Assert.InRange(GroundLength(path), 17.7f, 18f);
+        Assert.InRange(GroundLength(new[] { from, to }), 24.5f, 24.8f);
+    }
+
+    private static float Plan(IReadOnlyList<Vector3> path)
+    {
+        float total = 0f;
+        for (int i = 1; i < path.Count; i++) total += path[i - 1].DistanceTo(path[i]);
+        return total;
+    }
+
     private static Vector3 Centre(NavFlag flag, int triangle) =>
         (flag.Vertices[flag.Triangles[triangle * 3]]
             + flag.Vertices[flag.Triangles[(triangle * 3) + 1]]
