@@ -736,6 +736,10 @@ public static class Program
         // past the first stream node would cost the very ~1.18 GB decode this diagnostic exists to avoid,
         // so serialized files sitting behind one are counted and skipped rather than scanned.
         var declared = new Dictionary<string, List<StreamRange>>(StringComparer.Ordinal);
+        // Textures this bundle stores inline. A map whose meshes want only these needs no stream bytes at
+        // all, which has to be told apart from a want set belonging to some other bundle entirely.
+        var inlineKeys = new HashSet<string>(StringComparer.Ordinal);
+        var fileTags = new List<string>();
         int scanned = 0, skippedSerialized = 0;
         bool pastFirstStream = false;
         foreach (MasterBundleStream.Node node in ordered)
@@ -753,13 +757,14 @@ public static class Program
             }
 
             string fileTag = scanned == 0 ? tag : $"{tag}-{scanned + 1}";
+            fileTags.Add(fileTag);
             scanned++;
             var timer = Stopwatch.StartNew();
             SerializedFile file = SerializedFile.Read(stream.Read((int)node.Size));
             timer.Stop();
             Console.WriteLine($"  serialized: {LastSegment(node.Path)} {Mb(node.Size)} "
                 + $"({timer.Elapsed.TotalSeconds:0.00} s to decode+parse)");
-            CollectStreamRanges(file, fileTag, declared);
+            CollectStreamRanges(file, fileTag, declared, inlineKeys);
         }
 
         if (skippedSerialized > 0)
@@ -784,16 +789,34 @@ public static class Program
         // that Level/Objects.dat does not reach, and a prefab whose mesh this bundle has not extracted yet
         // contributes nothing here. That is the useful direction — if even the lower bound already runs to
         // the end of the node, no larger set can end earlier.
-        HashSet<string>? mapWantKeys = MapScopedWantKeys(map, tag, path, out string why);
+        HashSet<string>? mapWantKeys = MapScopedWantKeys(map, fileTags, path, out string why);
         if (mapWantKeys == null)
             Console.WriteLine($"  note: no map-scoped want set ({why})");
         else if (!AnyKeyMatches(declared, mapWantKeys))
         {
-            // Ids resolved against another bundle would otherwise filter every range away and be reported
-            // as "nothing wanted" — a wrong answer that looks like a measured one.
-            Console.WriteLine($"  note: the mesh cache names {mapWantKeys.Count:N0} textures for tag '{tag}' "
-                + "but none of them are in this bundle; falling back to the superset");
-            mapWantKeys = null;
+            // Keys resolved against another bundle would otherwise filter every range away and be reported
+            // as "nothing wanted" — a wrong answer that looks like a measured one. A map wanting only
+            // INLINE textures of this bundle produces the same empty filter but is a true zero, so the two
+            // are told apart before the fallback fires.
+            bool inlineOnly = false;
+            foreach (string key in mapWantKeys)
+                if (inlineKeys.Contains(key))
+                {
+                    inlineOnly = true;
+                    break;
+                }
+
+            if (inlineOnly)
+            {
+                Console.WriteLine($"  note: all {mapWantKeys.Count:N0} textures this map wants from "
+                    + $"'{tag}' are stored inline — the pass reads no stream bytes for it");
+            }
+            else
+            {
+                Console.WriteLine($"  note: the mesh cache names {mapWantKeys.Count:N0} textures for tag "
+                    + $"'{tag}' but none of them are in this bundle; falling back to the superset");
+                mapWantKeys = null;
+            }
         }
 
         // Only a complete scan makes the declared set an upper bound. With a serialized file skipped, the
@@ -873,7 +896,7 @@ public static class Program
     }
 
     private static void CollectStreamRanges(SerializedFile file, string fileTag,
-        Dictionary<string, List<StreamRange>> declared)
+        Dictionary<string, List<StreamRange>> declared, HashSet<string> inlineKeys)
     {
         const int texture2DClassId = 28;
         Dictionary<long, string> groupById = ReadContainerGroups(file);
@@ -884,7 +907,12 @@ public static class Program
 
             UnityTexture texture = UnityTexture.Read(TypeTreeReader.Read(obj.TypeTree, file.ReaderFor(obj)));
             if (texture.StreamPath.Length == 0 || texture.StreamSize <= 0)
-                continue; // pixels stored inline: the pass never waits on the stream for these
+            {
+                // Pixels stored inline: the pass never waits on the stream for these, but they are still
+                // this bundle's textures, and a want set made only of them is a real answer of zero.
+                inlineKeys.Add(TextureKey.For(fileTag, obj.PathId));
+                continue;
+            }
 
             string streamFile = texture.StreamFileName;
             if (!declared.TryGetValue(streamFile, out List<StreamRange>? list))
@@ -1194,7 +1222,7 @@ public static class Program
     // The textures this map's placed objects depend on, taken from the mesh cache through the same index
     // the runtime uses to decide what a load still owes. Scoped to one map, unlike the texture cache
     // directory, which every map writes into and which therefore answers a different question.
-    private static HashSet<string>? MapScopedWantKeys(string? map, string tag, string bundlePath,
+    private static HashSet<string>? MapScopedWantKeys(string? map, List<string> fileTags, string bundlePath,
         out string why)
     {
         // Every way this can come back empty is a different measurement, so the caller says which one it
@@ -1246,15 +1274,19 @@ public static class Program
             return null;
         }
 
-        // Back to full keys: a path id is unique only inside ONE serialized file, and this bundle may
-        // carry several. The index reports ids owned by the base tag, so name them with that tag and let
-        // a second file's identically numbered texture stay unmatched.
+        // Once per serialized file this bundle carries. NeededTextureIds matches one owner tag exactly, so
+        // asking only for the base tag would drop every dependency a second file owns — and a map whose
+        // textures all live in one of those would lose its want set entirely.
         var keys = new HashSet<string>(StringComparer.Ordinal);
-        foreach (long id in TextureDependencyIndex.NeededTextureIds(meshCache, tag, guids))
-            keys.Add(TextureKey.For(tag, id));
+        foreach (string fileTag in fileTags)
+            foreach (long id in TextureDependencyIndex.NeededTextureIds(meshCache, fileTag, guids))
+                keys.Add(TextureKey.For(fileTag, id));
 
         if (keys.Count == 0)
-            why = $"the {guids.Count:N0} cached meshes for this map name no texture owned by '{tag}'";
+        {
+            why = $"the {guids.Count:N0} cached meshes for this map name no texture owned by "
+                + string.Join("/", fileTags);
+        }
         return keys.Count > 0 ? keys : null;
     }
 
@@ -1317,9 +1349,14 @@ public static class Program
     {
         string appdata = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        // XDG_DATA_HOME first on Linux, as check-structural-metrics.sh already does: Godot follows it, and
+        // probing only ~/.local/share reports "no cache" on a machine that has one somewhere else.
+        string xdg = Environment.GetEnvironmentVariable("XDG_DATA_HOME") is { Length: > 0 } configured
+            ? configured
+            : Path.Combine(home, ".local", "share");
         string[] candidates =
         {
-            Path.Combine(home, ".local", "share", "godot", "app_userdata", "unturned-godot"),   // Linux
+            Path.Combine(xdg, "godot", "app_userdata", "unturned-godot"),                       // Linux
             Path.Combine(appdata, "Godot", "app_userdata", "unturned-godot"),                   // Windows
             Path.Combine(home, "Library", "Application Support", "Godot", "app_userdata", "unturned-godot"), // macOS
         };
