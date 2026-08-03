@@ -986,18 +986,23 @@ public static class Program
             histogram.Add(perDecile[i].ToString("N0"));
         Console.WriteLine($"    ranges per tenth of the node: {string.Join(" ", histogram)}");
 
+        // Only the printed rows are computed, so each one can afford to union its own tail. A running sum
+        // would count bytes two aliasing ranges share once per range, letting "deferred px" claim more
+        // texture data than the node holds — beside a coverage figure that is already unioned.
+        var steps = new List<int>();
+        foreach (int k in new[] { 1, 2, 3, 4, 8, 16, 32, 64, wants.Count })
+            if (k <= wants.Count && !steps.Contains(k))
+                steps.Add(k);
+        steps.Sort();
+
         Console.WriteLine("    deferring the last k ranges (by end offset):");
         Console.WriteLine($"      {"k",5}  {"read extent",13}  {"saved",11}  {"of node",8}  {"deferred px",12}");
-        long deferredPixels = 0;
-        for (int k = 1; k <= wants.Count; k++)
+        foreach (int k in steps)
         {
-            deferredPixels += wants[^k].Size;
             long remaining = k == wants.Count ? 0 : wants[^(k + 1)].End;
-            if (k <= 4 || k == 8 || k == 16 || k == 32 || k == 64 || k == wants.Count)
-            {
-                Console.WriteLine($"      {k,5}  {Mb(remaining),13}  {Mb(extent - remaining),11}  "
-                    + $"{Percent(extent - remaining, size),8}  {Mb(deferredPixels),12}");
-            }
+            long deferred = UnionLength(wants.GetRange(wants.Count - k, k));
+            Console.WriteLine($"      {k,5}  {Mb(remaining),13}  {Mb(extent - remaining),11}  "
+                + $"{Percent(extent - remaining, size),8}  {Mb(deferred),12}");
         }
 
         // The decision numbers: how few ranges have to move for the pass to read materially less. A node
