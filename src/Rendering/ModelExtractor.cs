@@ -733,9 +733,16 @@ public static class ModelExtractor
         // BuildLevel drops a part whose mesh cannot be decoded, and a streamed buffer is exactly that
         // until its bytes are in hand. Costs one forward pass over the bundle, and only when something
         // still to be extracted actually needs one — a warm cache asks for nothing.
+        // Planned from the prefabs whose mesh is NOT already cached against this bundle, not from every
+        // needed one. A pass runs whenever anything is missing — one texture, one terrain layer, one
+        // newly placed inline-only object — and planning from the whole needed set made every such pass
+        // open a second decoder and re-read the streamed buffers of vehicles it already had, for the ~6 s
+        // the forward pass costs. With nothing missing to plan for, ReadStreamedVertices never opens the
+        // bundle at all.
         IReadOnlyDictionary<long, byte[]> streamedVertices = streamedVertexSource == null
             ? new Dictionary<long, byte[]>()
-            : ReadStreamedVertices(streamedVertexSource, graph, work, neededGuids, cancellationToken);
+            : ReadStreamedVertices(streamedVertexSource, graph, work,
+                UncachedMeshes(cacheDir, neededGuids, streamedVertexSource), cancellationToken);
         // A cancelled pass hands back whatever ranges it got to before it stopped, and building from a
         // partial set would cache meshes that are missing their streamed parts AND current by their own
         // magic — permanently, because nothing would ever ask for them again. Write nothing instead: the
@@ -908,6 +915,18 @@ public static class ModelExtractor
                 producedGuids);
 
         return extracted;
+    }
+
+    // The needed GUIDs this bundle does not already hold a current mesh for — the same completeness test
+    // ContentExtraction.Plan applies, asked here because ExtractMeshesFrom is given the needed set rather
+    // than the missing one and the streamed-vertex pass is far too expensive to run for meshes that are
+    // already cached. Known misses are excluded: a GUID with no prefab in this bundle will not gain one.
+    private static HashSet<Guid> UncachedMeshes(string cacheDir, HashSet<Guid> neededGuids, string bundlePath)
+    {
+        long stamp = ExtractionIndex.StampFor(bundlePath);
+        HashSet<Guid> misses = ExtractionIndex.Load(
+            Path.Combine(cacheDir, ExtractionIndex.FileNameFor(bundlePath)), stamp);
+        return ExtractionIndex.MissingMeshes(cacheDir, neededGuids, misses, bundlePath, stamp);
     }
 
     // Every .resS-backed vertex buffer the prefabs about to be extracted depend on, read in one forward

@@ -35,7 +35,7 @@ public static class VertexStreamReader
 
         using MasterBundleStream? stream = MasterBundleStream.OpenFile(bundlePath);
         if (stream == null)
-            return result; // not the single-LZMA-block shape this reader handles
+            return ReadWholeBundle(bundlePath, requests, cancellationToken);
 
         // Blob order, because the decoder cannot rewind: every node up to the last one owing bytes has to
         // come out of the stream whether or not anything wants it.
@@ -82,6 +82,48 @@ public static class VertexStreamReader
                 cancellationToken: cancellationToken);
         }
 
+        return result;
+    }
+
+    // The same ranges out of a bundle the forward reader cannot open: a multi-block or LZ4 bundle, which
+    // is a shape workshop content does ship. Decoding the whole blob is what the ordinary reader avoids,
+    // but the alternative here is worse than slow — it is a prefab cached with its streamed parts silently
+    // dropped and stamped current, so nothing ever asks for them again. Only a bundle that both fails to
+    // open as a stream and actually has streamed geometry pays for it.
+    private static Dictionary<long, byte[]> ReadWholeBundle(string bundlePath,
+        IReadOnlyList<Request> requests, CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<long, byte[]>();
+        UnityBundle bundle;
+        try
+        {
+            bundle = UnityBundle.Read(File.ReadAllBytes(bundlePath));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            return result; // unreadable: the caller's meshes lose their streamed parts, as they did before
+        }
+
+        // Bundle.Files is keyed by node path; a stream reference names only the last segment of it.
+        var byFileName = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        foreach (KeyValuePair<string, byte[]> file in bundle.Files)
+            byFileName[LastSegment(file.Key)] = file.Value;
+
+        foreach (Request request in requests)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                return result;
+            UnityMesh.StreamRef s = request.Stream;
+            if (!s.IsStreamed || !byFileName.TryGetValue(s.FileName, out byte[]? node)
+                || s.Offset < 0 || s.Offset + s.Size > node.Length)
+            {
+                continue;
+            }
+
+            var bytes = new byte[s.Size];
+            Array.Copy(node, s.Offset, bytes, 0, s.Size);
+            result[request.PathId] = bytes;
+        }
         return result;
     }
 
