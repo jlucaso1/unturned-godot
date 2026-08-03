@@ -54,6 +54,8 @@ public partial class ObjectStreamer : Node
     private Dictionary<Guid, FoliageAsset.Owned> _foliageAssets = new();
     private LevelFoliageChunks? _foliage;
     private FoliageResidencyIndex? _foliageIndex;
+    // Held only between building the scene and warming the spawn ring; the tree owns the node itself.
+    private FoliageStreamingRenderer? _foliageRenderer;
 
     // Every GUID this map needs a mesh for: placed objects, trees and the resolved foliage types. Drives
     // both the cold-load check and which slice of the shared cache is realised.
@@ -423,11 +425,24 @@ public partial class ObjectStreamer : Node
         phase.Restart();
         BuildObjects(meshLibrary, lod1Library);
         Log.Print($"[stream] scene built: {phase.ElapsedMilliseconds} ms");
-        await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
 
+        // Textures first, and before any frame is yielded. A material that reaches the renderer bare and
+        // is textured a frame later makes it build the pipelines twice, so the warm pass — which yields
+        // several frames — must not come between the scene and its textures.
         phase.Restart();
         _registry.ApplyAllAvailable();
         Log.Print($"[stream] textures applied: {phase.ElapsedMilliseconds} ms");
+
+        // Then warm, still before the yield below. The build above put the streaming foliage in the
+        // tree, so the very next frame is the one whose _Process runs its first plan — and takes the
+        // whole spawn ring synchronously. Warming has to claim that frame first or there is nothing
+        // left to warm.
+        await PrewarmFoliageAsync();
+        // The warm pass consumes cancellation and returns normally, so returning to the menu mid-pass
+        // would otherwise fall through to publishing a world already queued for deletion. The cold
+        // build below makes the same check for the same reason.
+        if (_loadCancellation.IsCancellationRequested)
+            return;
         await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
         _finished = true;
         TryFinalizeLoadState();
@@ -477,9 +492,11 @@ public partial class ObjectStreamer : Node
         AddChild(root);
         double attachMs = stage.Elapsed.TotalMilliseconds;
         stage.Restart();
-        AddChild(_foliageIndex != null
+        Node3D foliageRoot = _foliageIndex != null
             ? FoliageBuilder.Build(_foliageIndex, meshLibrary)
-            : FoliageBuilder.Build(_foliage, meshLibrary));
+            : FoliageBuilder.Build(_foliage, meshLibrary);
+        AddChild(foliageRoot);
+        _foliageRenderer = foliageRoot as FoliageStreamingRenderer;
         Log.Print($"[stream] objects build {buildMs:0} ms, attach {attachMs:0} ms, "
             + $"foliage {stage.Elapsed.TotalMilliseconds:0} ms");
         _totalTextureKeys = _registry.PendingKeyCount;
@@ -494,6 +511,23 @@ public partial class ObjectStreamer : Node
         _objects = null!;
         _db = null!;
         _foliageAssets = new(); // consumed by the streaming worker / mesh extraction; drop it too
+    }
+
+    // Hands the streaming foliage the spawn ring while the loading screen still owns the frame. The
+    // camera is already where the player will stand — Main spawns the character before this node begins —
+    // so this is the first plan the renderer would have run anyway, paid for here instead of on the frame
+    // the world appears. It yields internally; awaiting it keeps the load staged rather than overlapping
+    // its uploads with the texture apply below.
+    private async Task PrewarmFoliageAsync()
+    {
+        FoliageStreamingRenderer? foliage = _foliageRenderer;
+        _foliageRenderer = null;
+        if (foliage == null || _loadCancellation.IsCancellationRequested)
+            return;
+        // The load's own token, not just the renderer's lifetime one: that node cannot leave the tree
+        // until CancelAsync has finished waiting for this task, so without it a cancelled load would sit
+        // through the whole remaining warm pass before the menu came back.
+        await foliage.PrewarmAsync(_loadCancellation.Token);
     }
 
     private void StartStreaming()
@@ -659,17 +693,30 @@ public partial class ObjectStreamer : Node
             return;
 
         BuildObjects(meshLibrary, lod1Library);
-        _sceneBuilt = true;
-        // Read after the build, not before it: this is reported as time-to-playable, and the staged
-        // realise above happens while the player is still waiting.
-        double meshMs = _coldWatch.Elapsed.TotalMilliseconds;
 
         // Whatever the decode already produced goes on before the world is shown. Applying a texture
         // changes the material's shader key (an albedo map appears, the filter may switch to nearest, a
         // cutout swaps shader), so a material that reaches the scene bare and is textured a frame later
         // makes the renderer build its pipelines twice. Everything still arriving keeps streaming through
         // _Process; this only closes the gap for what was ready all along, at a cost of tens of ms.
+        // It runs before the warm pass, which yields frames: they would be exactly that bare gap.
         _appliedTextures += _registry.ApplyAllAvailable();
+
+        // Warmed before time-to-playable is read, and counted in it: a world handed over with its spawn
+        // ring undecoded is not yet playable without the burst this replaces. _sceneBuilt is set after,
+        // not before: it is also what releases _Process to apply textures, and the two would then spend
+        // their separate per-frame budgets in the same frames the warm pass is pacing itself against.
+        await PrewarmFoliageAsync();
+        // The warm pass consumes the cancellation and returns normally, so the check has to be made
+        // here. Falling through would set _sceneBuilt — which also releases _Process — and go on to
+        // publish MeshesReady and Finished for a world already being torn down, while BackToMenu is
+        // still inside CancelAsync waiting for this task.
+        if (_loadCancellation.IsCancellationRequested)
+            return;
+        _sceneBuilt = true;
+        // Read after the build, not before it: this is reported as time-to-playable, and the staged
+        // realise above happens while the player is still waiting.
+        double meshMs = _coldWatch.Elapsed.TotalMilliseconds;
 
         EmitSignal(SignalName.MeshesReady, meshMs);
         EmitSignal(SignalName.Progress, _appliedTextures, _totalTextureKeys);
