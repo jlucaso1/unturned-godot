@@ -59,7 +59,7 @@ public static class Program
         if (wanted.Contains("nav"))
             NavigationDiagnostic(map);
         if (wanted.Contains("ress"))
-            ResSDiagnostic(unturned);
+            ResSDiagnostic(unturned, map);
         return 0;
     }
 
@@ -697,7 +697,7 @@ public static class Program
     // Only metadata is decoded: the ranges come from the SerializedFile, so the .resS itself is never
     // read except for the short sample that measures this machine's decode rate.
     // RESS_BUNDLE overrides the bundle; RESS_TAG the cache tag when it is not derived from the file name.
-    private static void ResSDiagnostic(string? unturned)
+    private static void ResSDiagnostic(string? unturned, string? map)
     {
         string? bundlePath = Environment.GetEnvironmentVariable("RESS_BUNDLE")
             ?? (unturned == null ? null : UnturnedInstall.FindMasterBundle(unturned));
@@ -768,24 +768,31 @@ public static class Program
                 + "and were not scanned — their textures are missing from the numbers below");
         }
 
-        // What the real cold load asks for is the subset that a previous run actually extracted: one
-        // .tex per wanted texture, named <tag>_<hex path id>. Without that cache every streamed texture
-        // in the bundle is the honest stand-in — a superset, which can only overstate the read extent.
-        HashSet<string>? cachedKeys = ReadTextureCacheKeys();
-        if (cachedKeys != null && !AnyKeyMatches(declared, cachedKeys))
+        // Two want sets, and the answer is bracketed between them.
+        //
+        // The upper bound is every streamed Texture2D the bundle declares. The lower bound is what THIS
+        // map's placed objects depend on, read out of the mesh cache through the same index the runtime
+        // consults — scoped to one map, unlike the texture cache directory, which is shared by every map
+        // and would hand back the union of everything ever extracted.
+        //
+        // It is a lower bound because a real load also wants foliage, tree and terrain-layer textures that
+        // are not reached from Level/Objects.dat. That is the useful direction: if even the lower bound
+        // already runs to the end of the node, no larger set can end earlier.
+        HashSet<string>? mapWantKeys = MapScopedWantKeys(map, tag);
+        if (mapWantKeys != null && !AnyKeyMatches(declared, mapWantKeys))
         {
-            // A cache holding only other bundles' tags would otherwise filter every range away and be
-            // reported as "nothing wanted" — a wrong answer that looks like a measured one.
-            Console.WriteLine($"  note: the texture cache holds {cachedKeys.Count:N0} entries but none for "
-                + $"tag '{tag}', so it says nothing about this bundle; falling back to the superset");
-            cachedKeys = null;
+            // Ids resolved against another bundle would otherwise filter every range away and be reported
+            // as "nothing wanted" — a wrong answer that looks like a measured one.
+            Console.WriteLine($"  note: the mesh cache names {mapWantKeys.Count:N0} textures for tag '{tag}' "
+                + "but none of them are in this bundle; falling back to the superset");
+            mapWantKeys = null;
         }
 
-        Console.WriteLine(cachedKeys == null
-            ? "  want set: every streamed Texture2D in the bundle (SUPERSET — an upper bound on the "
-                + "read extent, not the set a real load asks for)"
-            : $"  want set: texture cache ({cachedKeys.Count:N0} .tex entries). NOTE: the cache is shared "
-                + "by every map, so this is the union of what past runs needed, not one cold load.");
+        Console.WriteLine(mapWantKeys == null
+            ? "  want set: every streamed Texture2D in the bundle (SUPERSET — an upper bound on the read "
+                + "extent, not the set a real load asks for)"
+            : $"  want set: {mapWantKeys.Count:N0} textures the mesh cache says this map's placed objects "
+                + "need (a LOWER bound — foliage, trees and terrain layers are wanted too but not counted)");
 
         // The pass cannot seek, so a node with nothing wanted in it is still decoded in full when a LATER
         // node is owed something. Which node is last decides that, so it has to be known before reporting.
@@ -801,7 +808,7 @@ public static class Program
             var wants = new List<StreamRange>();
             foreach (StreamRange range in all ?? new List<StreamRange>())
                 if (range.Offset >= 0 && range.Size > 0 && range.Offset + range.Size <= node.Size
-                    && (cachedKeys == null || cachedKeys.Contains(range.Key)))
+                    && (mapWantKeys == null || mapWantKeys.Contains(range.Key)))
                 {
                     wants.Add(range);
                 }
@@ -914,13 +921,19 @@ public static class Program
         }
 
         wants.Sort((a, b) => a.End.CompareTo(b.End));
-        long pixels = 0;
-        foreach (StreamRange want in wants)
-            pixels += want.Size;
         long extent = wants[^1].End;
 
-        Console.WriteLine($"    wanted:      {wants.Count:N0} ranges, {Mb(pixels)} of pixels "
-            + $"({Percent(pixels, size)} of the node)");
+        // Two Texture2D objects can name the same (or an overlapping) stream region, so summing range
+        // sizes counts those physical bytes twice. Waste is extent minus the bytes actually covered, and
+        // the sum would understate it — far enough, with enough sharing, to print a negative number.
+        long pixels = UnionLength(wants);
+        long summed = 0;
+        foreach (StreamRange want in wants)
+            summed += want.Size;
+
+        Console.WriteLine($"    wanted:      {wants.Count:N0} ranges covering {Mb(pixels)} "
+            + $"({Percent(pixels, size)} of the node)"
+            + (summed == pixels ? "" : $"; {Mb(summed - pixels)} of that is shared between ranges"));
         Console.WriteLine($"    read extent: {Mb(extent)} ({Percent(extent, size)}) — "
             + $"{Mb(extent - pixels)} decoded for nothing");
 
@@ -1046,8 +1059,9 @@ public static class Program
         return null;
     }
 
-    // Whether the cache says anything at all about this bundle. It is shared by every bundle and map, so
-    // "has entries" and "has entries for these ranges" are different questions.
+    // Whether the want set says anything at all about this bundle. "The index named some textures" and
+    // "it named textures that are in here" are different questions, and only the second one makes the
+    // filter below meaningful rather than silently emptying it.
     private static bool AnyKeyMatches(Dictionary<string, List<StreamRange>> declared, HashSet<string> keys)
     {
         foreach (List<StreamRange> ranges in declared.Values)
@@ -1083,16 +1097,47 @@ public static class Program
             + $"({timer.Elapsed.TotalSeconds:0.00} s) — every 100 MB not read is ~{100 / rate:0.00} s");
     }
 
-    // The .tex files a previous run left behind, keyed exactly as TextureKey names them.
-    private static HashSet<string>? ReadTextureCacheKeys()
+    // Physical bytes covered by a set of ranges, counting shared regions once. The list arrives sorted by
+    // END offset, which is not the same order as by start, so this sorts a copy by start before sweeping.
+    private static long UnionLength(List<StreamRange> ranges)
     {
-        string? cache = FindGodotUserDir() is { } user ? Path.Combine(user, "texture_cache") : null;
-        if (cache == null || !Directory.Exists(cache))
+        var byStart = new List<StreamRange>(ranges);
+        byStart.Sort((a, b) => a.Offset.CompareTo(b.Offset));
+
+        long covered = 0, reach = long.MinValue;
+        foreach (StreamRange range in byStart)
+        {
+            long from = Math.Max(range.Offset, reach);
+            if (range.End > from)
+                covered += range.End - from;
+            reach = Math.Max(reach, range.End);
+        }
+        return covered;
+    }
+
+    // The textures this map's placed objects depend on, taken from the mesh cache through the same index
+    // the runtime uses to decide what a load still owes. Scoped to one map, unlike the texture cache
+    // directory, which every map writes into and which therefore answers a different question.
+    private static HashSet<string>? MapScopedWantKeys(string? map, string tag)
+    {
+        string? meshCache = FindGodotUserDir() is { } user ? Path.Combine(user, "model_cache") : null;
+        if (map == null || meshCache == null || !Directory.Exists(meshCache))
             return null;
 
+        string objects = Path.Combine(map, "Level", "Objects.dat");
+        if (!File.Exists(objects))
+            return null;
+
+        var guids = new HashSet<Guid>();
+        foreach (PlacedObject placed in LevelObjects.Load(objects))
+            guids.Add(placed.Guid);
+
+        // Back to full keys: a path id is unique only inside ONE serialized file, and this bundle may
+        // carry several. The index reports ids owned by the base tag, so name them with that tag and let
+        // a second file's identically numbered texture stay unmatched.
         var keys = new HashSet<string>(StringComparer.Ordinal);
-        foreach (string file in Directory.GetFiles(cache, "*.tex"))
-            keys.Add(Path.GetFileNameWithoutExtension(file));
+        foreach (long id in TextureDependencyIndex.NeededTextureIds(meshCache, tag, guids))
+            keys.Add(TextureKey.For(tag, id));
         return keys.Count > 0 ? keys : null;
     }
 

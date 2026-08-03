@@ -35,10 +35,14 @@ bundle's caches by its declared name (`core.masterbundle` → `core`), while the
 outside the install, name it with `RESS_TAG` — the suite refuses to guess, because a wrong tag misses
 every cache key and reports that nothing is wanted.
 
-The want set comes from `user://texture_cache` when a previous run left one behind. Two caveats it
-prints for itself: that cache is shared by every map, so it is the union of what past runs needed rather
-than one cold load; and when it holds no entry for this bundle's tag the suite says so and falls back to
-every streamed `Texture2D` in the bundle, which is a superset and can only overstate the read extent.
+The answer is bracketed between two want sets. The **upper** bound is every streamed `Texture2D` the
+bundle declares. The **lower** bound is what the selected map's placed objects depend on, read out of
+`user://model_cache` through `TextureDependencyIndex` — the same index the runtime consults — so it is
+scoped to one map, unlike the `texture_cache` directory, which every map writes into and which would
+hand back the union of everything ever extracted. It is a lower bound because a real load also wants
+foliage, tree and terrain-layer textures that `Level/Objects.dat` does not reach. That is the useful
+direction: if even the lower bound runs to the end of the node, no larger set ends earlier. With no mesh
+cache on the machine the suite says so and reports the superset alone.
 
 Measured on the game's own `core_linux.masterbundle` (superset of 5,360 streamed textures over a
 1,180 MB `.resS`): they are spread evenly end to end — the last tenth of the node is the second
