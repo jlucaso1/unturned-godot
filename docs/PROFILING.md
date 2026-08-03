@@ -264,7 +264,8 @@ a path (`UG_OBJECT_CHUNK_METRES`, `SCREENSHOT_PATH`, `TIME_OF_DAY`, …) are una
   the frame: the decodes go to a worker a batch at a time, and the uploads are paced against the load's
   own 8 ms frame budget. Two batches are in flight at once — one uploading, the next decoding behind it —
   so each is cut to half of `UG_FOLIAGE_DECODED_MIB` and the pair stays inside the same bound the steady
-  loop decodes under. `prewarmedChunks` is what the pass made resident and `prewarm.totalMs` what it spent
+  loop decodes under, and what it is holding counts towards `maxDecodedBytes` like any other decode in
+  flight. `prewarmedChunks` is what the pass made resident and `prewarm.totalMs` what it spent
   doing so; read them against `emergencyVisibleLoads`, which the pass is there to keep at zero through
   the spawn. Nothing is resident that the first plan would not have asked for a frame later anyway, so
   this trades load time for the burst and not for a larger resident set. The flag is the A/B control:

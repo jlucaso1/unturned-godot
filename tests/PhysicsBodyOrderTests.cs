@@ -333,6 +333,15 @@ public class PhysicsBodyOrderTests
             + "                Math.Max(1, _decodedByteLimit / 2));", normalized);
         Assert.Contains("held + BatchBytes(batches[batch + 1]) <= _decodedByteLimit", source);
         Assert.Contains("decoded = null;\n                if (more && !overlapped)", normalized);
+        // What the pass holds is decoded-and-waiting like any other in-flight decode, so it belongs in
+        // the counter maxDecodedBytes reports — otherwise a warm pass that answered the whole ring lets
+        // the benchmark report a peak of zero while it was holding two batches — and anything it never
+        // uploaded has to be given back, since the steady loop reads that counter before decoding.
+        Assert.Contains("UpdateMaximum(ref _maxDecodedBytes, Interlocked.Add(ref _decodedBytes, held))",
+            source);
+        Assert.Contains("Interlocked.Add(ref _decodedBytes, -uploaded);", source);
+        Assert.Contains("if (outstandingBytes != 0)\n                Interlocked.Add(ref _decodedBytes, "
+            + "-outstandingBytes);", normalized);
         // Worker wall time is not main-thread upload time: a deadline that expired while a decode was
         // still running would spend a whole frame on a single upload, once per batch.
         Assert.Contains("bool decodeWasPending = !decoding!.IsCompleted;", source);
@@ -368,7 +377,13 @@ public class PhysicsBodyOrderTests
             // _sceneBuilt is what releases _Process to apply textures. Setting it before the warm pass
             // would let the two spend their separate per-frame budgets in the same frames, which is the
             // staging the pass yields to preserve.
-            Assert.Contains("await PrewarmFoliageAsync();\n        _sceneBuilt = true;", streamer);
+            // The warm pass consumes cancellation and returns normally, so the cold build has to recheck
+            // before _sceneBuilt releases _Process and the world is published to subscribers that
+            // BackToMenu is still tearing down.
+            Assert.Contains("await PrewarmFoliageAsync();\n        // The warm pass consumes the "
+                + "cancellation", streamer);
+            Assert.Contains("if (_loadCancellation.IsCancellationRequested)\n            return;\n"
+                + "        _sceneBuilt = true;", streamer);
         }
     }
 

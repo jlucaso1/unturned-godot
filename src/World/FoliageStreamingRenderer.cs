@@ -206,6 +206,11 @@ public partial class FoliageStreamingRenderer : Node3D
         long startedTicks = Stopwatch.GetTimestamp();
         bool completed = false;
         bool incomplete = false;
+        // Decoded transforms this pass is holding but has not uploaded yet. They belong in _decodedBytes
+        // like any other decode in flight: that counter is what maxDecodedBytes reports, and a warm pass
+        // that answered the whole spawn ring would otherwise let the benchmark report a peak of zero
+        // while it was holding two batches.
+        long outstandingBytes = 0;
         CancellationTokenSource cancellation =
             CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token, loadCancellation);
         try
@@ -233,11 +238,16 @@ public partial class FoliageStreamingRenderer : Node3D
                 WarmBatch? decoded = await decoding;
                 if (decodeWasPending)
                     until = Stopwatch.GetTimestamp() + budget;
+                long held = DecodedBytes(decoded.Chunks);
+                if (held > 0)
+                {
+                    outstandingBytes += held;
+                    UpdateMaximum(ref _maxDecodedBytes, Interlocked.Add(ref _decodedBytes, held));
+                }
                 // Overlap the next batch's IO and decode with this batch's uploads, but only while both
                 // fit the cap at once. WarmBatches gives a chunk larger than half the cap a batch of its
                 // own, and pipelining behind that one would put the pass over the bound it respects, so
                 // an oversized batch is uploaded first and its successor started below instead.
-                long held = BatchBytes(decoded.Indices);
                 bool more = batch + 1 < batches.Count;
                 bool overlapped = more && held + BatchBytes(batches[batch + 1]) <= _decodedByteLimit;
                 decoding = overlapped ? DecodeBatch(batches[batch + 1], token) : null;
@@ -255,8 +265,13 @@ public partial class FoliageStreamingRenderer : Node3D
                 {
                     if (!WarmMayContinue(token))
                         return;
+                    long uploaded = (long)decoded.Chunks[i].Packed.Length * sizeof(float);
                     Upload(decoded.Indices[i], decoded.Chunks[i]);
                     _prewarmedChunks++;
+                    // Resident now, not decoded-and-waiting: hand the bytes over to ResidentBufferBytes'
+                    // side of the ledger as each chunk lands, the way DrainDecoded does.
+                    outstandingBytes -= uploaded;
+                    Interlocked.Add(ref _decodedBytes, -uploaded);
                     if (Stopwatch.GetTimestamp() < until)
                         continue;
                     await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
@@ -292,6 +307,11 @@ public partial class FoliageStreamingRenderer : Node3D
         }
         finally
         {
+            // Whatever a cancelled or failed pass never uploaded is released here. Left behind it would
+            // sit in _decodedBytes for the session, and the steady loop reads that counter to decide
+            // whether it may start another decode at all.
+            if (outstandingBytes != 0)
+                Interlocked.Add(ref _decodedBytes, -outstandingBytes);
             // Disposed only once the pass is over. A decode this leaves running holds the token it was
             // given; reading IsCancellationRequested on it stays valid after the source is gone, which is
             // the same contract the steady loop's per-decode linked sources already rely on.
@@ -560,6 +580,18 @@ public partial class FoliageStreamingRenderer : Node3D
         long bytes = 0;
         foreach (int index in indices)
             bytes += ExpectedDecodedBytes(index);
+        return bytes;
+    }
+
+    // What a decoded batch actually occupies, for the batch already in hand. The estimate above is only
+    // needed for a batch that has not been read yet.
+    private static long DecodedBytes(IReadOnlyList<FoliageChunk>? chunks)
+    {
+        if (chunks == null)
+            return 0;
+        long bytes = 0;
+        foreach (FoliageChunk chunk in chunks)
+            bytes += (long)chunk.Packed.Length * sizeof(float);
         return bytes;
     }
 

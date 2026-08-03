@@ -661,6 +661,12 @@ public partial class ObjectStreamer : Node
         // not before: it is also what releases _Process to apply textures, and the two would then spend
         // their separate per-frame budgets in the same frames the warm pass is pacing itself against.
         await PrewarmFoliageAsync();
+        // The warm pass consumes the cancellation and returns normally, so the check has to be made
+        // here. Falling through would set _sceneBuilt — which also releases _Process — and go on to
+        // publish MeshesReady and Finished for a world already being torn down, while BackToMenu is
+        // still inside CancelAsync waiting for this task.
+        if (_loadCancellation.IsCancellationRequested)
+            return;
         _sceneBuilt = true;
         // Read after the build, not before it: this is reported as time-to-playable, and the staged
         // realise above happens while the player is still waiting.
