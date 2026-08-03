@@ -162,9 +162,8 @@ public static class ReproCapture
         int[] source = flag.Triangles;
         for (int i = 0; i + 2 < source.Length; i += 3)
         {
-            if (!Near(flag.Vertices[source[i]], focus, radiusSquared)
-                && !Near(flag.Vertices[source[i + 1]], focus, radiusSquared)
-                && !Near(flag.Vertices[source[i + 2]], focus, radiusSquared))
+            if (!Meets(flag.Vertices[source[i]], flag.Vertices[source[i + 1]],
+                flag.Vertices[source[i + 2]], focus, radiusSquared))
                 continue;
             for (int corner = 0; corner < 3; corner++)
             {
@@ -191,10 +190,18 @@ public static class ReproCapture
         };
     }
 
-    private static bool Near(Vector3 vertex, Vector3 focus, float radiusSquared)
+    // Does the triangle come within the radius of the focus in XZ — corner, edge or interior? A
+    // corner-only test drops exactly the triangles that matter most: a recast mesh over open ground
+    // has faces metres across, and the one the incident happens ON can easily have all three vertices
+    // outside a slice taken around it, leaving the local graph with a hole where the bug is.
+    private static bool Meets(Vector3 a, Vector3 b, Vector3 c, Vector3 focus, float radiusSquared)
     {
-        float dx = vertex.X - focus.X, dz = vertex.Z - focus.Z;
-        return (dx * dx) + (dz * dz) <= radiusSquared;
+        var flatA = new Vector3(a.X, 0f, a.Z);
+        var flatB = new Vector3(b.X, 0f, b.Z);
+        var flatC = new Vector3(c.X, 0f, c.Z);
+        var flatFocus = new Vector3(focus.X, 0f, focus.Z);
+        return (ReproGeometry.ClosestPointOnTriangle(flatFocus, flatA, flatB, flatC) - flatFocus)
+            .LengthSquared() <= radiusSquared;
     }
 
     // The terrain under the incident, on a regular grid. NaN marks a cell the sampler had no answer

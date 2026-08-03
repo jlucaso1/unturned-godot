@@ -574,4 +574,79 @@ public class ReproEdgeTests
         Assert.True(summary.TravelledMetres >= summary.NetDisplacementMetres);
         Assert.True(summary.TravelledMetres > 0f);
     }
+
+    // A verdict has to account for the world it could not answer for. A window where part of the world
+    // was treated as empty is not a reproduction, however well the positions happen to line up.
+    [Fact]
+    public void AWindowWithUnansweredQueriesIsNotAReproduction()
+    {
+        var geometry = new ReproWorlds.Geometry().Ground();
+        (ZombieSystem system, _, _) = ReproWorlds.Session(geometry);
+        var recorder = new ReproRecorder(system, new ReproRecorderOptions { WindowTicks = 8 });
+        recorder.Attach();
+        for (int i = 0; i < 8; i++)
+            system.Tick(new[] { ReproWorlds.Player(new Vector3(10f, 0f, 10f)) }, ReproWorlds.TickRate);
+
+        // A dump whose recording is complete AND has geometry reproduces...
+        ReproDump whole = ReproCapture.Build(
+            ReproWorlds.Request(geometry, new Vector3(10f, 0f, 10f)), system, recorder,
+            ReproWorlds.FlatGround);
+        Assert.True(new ReproScenario(whole).Run().ReproducesRecording);
+
+        // ...and the same dump with nothing to answer the queries the recording does not cover does
+        // not, even though the recorded answers still put every zombie exactly where it was.
+        var holed = new ReproDump
+        {
+            Meta = whole.Meta,
+            World = new ReproWorldData
+            {
+                HasNavmesh = whole.World.HasNavmesh,
+                Bounds = whole.World.Bounds,
+                Tables = whole.World.Tables,
+                NavFlags = whole.World.NavFlags,
+            },
+            Zombies = Missing(whole.Zombies!),
+        };
+        ReproReplayReport report = new ReproScenario(holed).Run();
+        Assert.True(report.UnansweredInWindow > 0);
+        Assert.False(report.ReproducesRecording);
+        Assert.Contains("inside the window", report.Describe(), StringComparison.Ordinal);
+    }
+
+    // The same section with the ground answers removed: what a recording that hit the per-tick
+    // ceiling looks like from the replay's side.
+    private static ReproZombieSection Missing(ReproZombieSection section)
+    {
+        var oracle = new ReproOracleData();
+        oracle.Move.AddRange(section.Oracle.Move);
+        oracle.Vision.AddRange(section.Oracle.Vision);
+        oracle.Path.AddRange(section.Oracle.Path);
+        oracle.PathPoints.AddRange(section.Oracle.PathPoints);
+        oracle.Ready.AddRange(section.Oracle.Ready);
+        var copy = new ReproZombieSection { State = section.State, Oracle = oracle };
+        copy.Frames.AddRange(section.Frames);
+        return copy;
+    }
+
+    // Beyond the window there is nothing to reproduce, so questions nobody recorded are expected and
+    // must not retroactively disqualify the window that did reproduce.
+    [Fact]
+    public void UnansweredQueriesPastTheWindowDoNotChangeTheVerdict()
+    {
+        var geometry = new ReproWorlds.Geometry().Ground();
+        (ZombieSystem system, _, _) = ReproWorlds.Session(geometry);
+        var recorder = new ReproRecorder(system, new ReproRecorderOptions { WindowTicks = 8 });
+        recorder.Attach();
+        for (int i = 0; i < 8; i++)
+            system.Tick(new[] { ReproWorlds.Player(new Vector3(10f, 0f, 10f)) }, ReproWorlds.TickRate);
+        ReproDump dump = ReproCapture.Build(
+            ReproWorlds.Request(geometry, new Vector3(10f, 0f, 10f)), system, recorder,
+            ReproWorlds.FlatGround);
+
+        ReproReplayReport report =
+            new ReproScenario(dump, new ReproScenarioOptions { UseGeometry = false }).Run(extraTicks: 30);
+        Assert.True(report.UnansweredQueries > 0);
+        Assert.Equal(0, report.UnansweredInWindow);
+        Assert.True(report.ReproducesRecording, report.Describe());
+    }
 }

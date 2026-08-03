@@ -50,6 +50,28 @@ public class ReproCaptureTests
         Assert.True(graph.TryPath(new Vector3(18f, 0f, 18f), new Vector3(22f, 0f, 22f), route));
     }
 
+    // A face the focus stands ON, with every corner outside the radius: the triangle a corner-only
+    // test drops, leaving the local graph with a hole exactly where the incident is.
+    [Fact]
+    public void ATriangleTheFocusStandsOnIsKept()
+    {
+        var big = new NavFlag
+        {
+            Center = Vector3.Zero,
+            Size = new Vector3(200f, 10f, 200f),
+            Vertices = new[]
+            {
+                new Vector3(-50f, 0f, -50f), new Vector3(50f, 0f, -50f), new Vector3(-50f, 0f, 50f),
+            },
+            Triangles = new[] { 0, 1, 2 },
+        };
+        ReproNavFlag sliced = ReproCapture.Slice(big, new Vector3(-10f, 0f, -10f), radius: 5f);
+        Assert.Equal(3, sliced.Triangles.Length);
+
+        // ...and one nowhere near it still goes.
+        Assert.Empty(ReproCapture.Slice(big, new Vector3(500f, 0f, 500f), radius: 5f).Triangles);
+    }
+
     [Fact]
     public void AFocusOutsideTheFlagKeepsNothingButTheBox()
     {

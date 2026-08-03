@@ -252,6 +252,21 @@ public sealed partial class ReproService : Node
             if (line.Length > 0)
                 Log.Print($"[repro] {line}");
 
+        // A dump from another map must not be restored into this one. The zombie records carry table
+        // indices, nav bounds and coordinates that mean something else here: at best the simulation is
+        // nonsense, at worst a zombie whose type does not exist on this map indexes past the table the
+        // moment it lands a hit. The bound check inside RestoreState only catches the cases where this
+        // map happens to have fewer regions.
+        string here = string.IsNullOrEmpty(LevelName) ? Map : LevelName;
+        string there = string.IsNullOrEmpty(dump.Meta.LevelName) ? dump.Meta.Map : dump.Meta.LevelName;
+        if (!string.IsNullOrEmpty(there) && !string.IsNullOrEmpty(here)
+            && !string.Equals(here, there, System.StringComparison.OrdinalIgnoreCase))
+        {
+            Log.PrintErr($"[repro] this dump was taken on '{there}' and this session is running "
+                + $"'{here}'. Start the session on that map first (MAP={there}).");
+            return;
+        }
+
         if (dump.Zombies is { } section)
         {
             try
@@ -269,29 +284,46 @@ public sealed partial class ReproService : Node
         // restored above is the window's first tick; standing the reporter at their capture-time
         // position instead skips the approach the dump exists to show, and the two halves of the
         // situation would not even be from the same moment.
+        PlayerController? controller = Find<PlayerController>(GetTree().Root);
+        byte local = controller?.Net?.PlayerId ?? byte.MaxValue;
         Vector3 focus = ReproVector.To(dump.Meta.FocusPoint);
-        IReadOnlyList<ReproPlayerSample> atWindowStart =
-            dump.Zombies?.Frames.Count > 0 ? dump.Zombies.Frames[0].Players : Array.Empty<ReproPlayerSample>();
+        bool placed = false;
+        IReadOnlyList<ReproPlayerSample> atWindowStart = dump.Zombies?.Frames.Count > 0
+            ? dump.Zombies.Frames[0].Players
+            : Array.Empty<ReproPlayerSample>();
+
         if (atWindowStart.Count > 0)
         {
             foreach (ReproPlayerSample player in atWindowStart)
-            {
-                Vector3 position = ReproVector.To(player.Position);
-                _server?.Teleport(player.Id, position);
-                focus = position;
-            }
+                Place(player.Id, ReproVector.To(player.Position));
         }
         else
         {
             foreach (ReproPlayerState player in dump.Session.Players)
-            {
-                Vector3 position = ReproVector.To(player.Position);
-                _server?.Teleport(player.Id, position);
-                focus = position;
-            }
+                Place(player.Id, ReproVector.To(player.Position));
         }
-        if (Find<PlayerController>(GetTree().Root) is { } controller)
+
+        // The body follows the LOCAL player's own sample. A dump from a session with several players
+        // has several recorded positions and only one of them is this machine's; standing the
+        // controller on whichever happened to be last would put it somewhere the simulation does not
+        // think it is, and its next position claim would drag the whole replay after it.
+        void Place(byte id, Vector3 position)
+        {
+            _server?.Teleport(id, position);
+            if (placed && id != local)
+                return;
+            focus = position;
+            placed = id == local;
+        }
+
+        if (controller != null)
             controller.GlobalPosition = focus;
+
+        // "Only at night" is a bug report. The lighting the session was under travels with the dump,
+        // so put the clock back too.
+        if (dump.Session.TimeOfDay >= 0f && Find<DayNightController>(GetTree().Root) is { } cycle)
+            cycle.TimeOfDay = dump.Session.TimeOfDay;
+
         Log.Print($"[repro] loaded; stand at {focus}. Camera: SHOT_CAM={dump.Meta.ShotCam}");
     }
 

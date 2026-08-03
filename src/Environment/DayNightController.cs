@@ -48,9 +48,14 @@ public partial class DayNightController : Node
     private float _azimuth = DefaultAzimuth;
     private float _time;
 
-    // Where the cycle currently stands, 0..1. Read by the bug-repro capture: lighting is part of what a
-    // session looked like, and "it only happens at night" is a real bug report.
-    public float TimeOfDay => _time;
+    // Where the cycle currently stands, 0..1. Captured into a bug-repro dump, because lighting is part
+    // of what a session looked like, and restored when one is loaded — "it only happens at night" is a
+    // real bug report. Setting it wraps into range and lets the next _Process apply the keyframes.
+    public float TimeOfDay
+    {
+        get => _time;
+        set => _time = Mathf.PosMod(value, 1f);
+    }
     private float _speed = 1f;
     private bool _frozen;
     private int _moonPhase;

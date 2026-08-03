@@ -50,6 +50,17 @@ public partial class DedicatedServer : Node
                 zombies.PathReady = () => node._zombieNavigation?.IsReady == true;
             }
             _ = new UnturnedGodot.Zombies.ZombieHost(zombies, node._server);
+
+            // The same bug-report recorder the windowed session arms. There is no key to press on a
+            // dedicated server, which is the point: REPRO_AUTO=1 and REPRO_CAPTURE_AT are for exactly
+            // this — an unattended soak run that writes a dump when the simulation misbehaves.
+            if (ReproService.Create(zombies, node._server, ground) is { } repro)
+            {
+                repro.LevelName = levelName;
+                repro.Map = mapName;
+                node.AddChild(repro);
+            }
+
             Log.Print($"[server] {zombies.Zombies.Count} zombies spawned");
         }
 

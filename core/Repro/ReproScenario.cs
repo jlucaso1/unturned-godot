@@ -61,6 +61,10 @@ public sealed class ReproScenario
     // these, and a replay with a high count here is not evidence of anything.
     public int UnansweredQueries { get; private set; }
 
+    // ...of which these happened inside the recorded window. Only those bear on whether the window
+    // reproduced: a tail simulated past the recording is expected to ask questions nobody recorded.
+    public int UnansweredInWindow { get; private set; }
+
     // Routes recomputed rather than replayed, called out separately because they are the one world
     // answer a replay cannot reproduce faithfully: a map inside Godot's polygon budget paths through
     // the engine's NavigationServer, and a replay has no engine, so it paths over the baked graph.
@@ -175,6 +179,7 @@ public sealed class ReproScenario
         report.OracleMisses = Oracle?.Misses ?? 0;
         report.GeometryAnswers = GeometryAnswers;
         report.UnansweredQueries = UnansweredQueries;
+        report.UnansweredInWindow = UnansweredInWindow;
         report.RoutesRecomputed = RoutesRecomputed;
         foreach (KeyValuePair<int, MotionTrack> entry in tracks)
             if (entry.Value.Samples > 0)
@@ -214,7 +219,7 @@ public sealed class ReproScenario
             GeometryAnswers++;
             return Collision.Resolve(from, to, radius);
         }
-        UnansweredQueries++;
+        Unanswered();
         return to;
     }
 
@@ -227,7 +232,7 @@ public sealed class ReproScenario
             GeometryAnswers++;
             return Collision.GroundSnap(position, out y);
         }
-        UnansweredQueries++;
+        Unanswered();
         return SampleGround(position.X, position.Z, out y);
     }
 
@@ -240,7 +245,7 @@ public sealed class ReproScenario
             GeometryAnswers++;
             return Collision.VisionBlocked(from, to);
         }
-        UnansweredQueries++;
+        Unanswered();
         return false;
     }
 
@@ -253,6 +258,13 @@ public sealed class ReproScenario
         GeometryAnswers++;
         RoutesRecomputed++;
         return _pathQuery!(from, to, path, radius);
+    }
+
+    private void Unanswered()
+    {
+        UnansweredQueries++;
+        if (Tick < WindowTicks)
+            UnansweredInWindow++;
     }
 
     // The dump's heightfield patch, as the brain's ground sampler. Outside the patch it answers false,
@@ -327,6 +339,7 @@ public sealed class ReproReplayReport
     public int OracleMisses { get; set; }
     public int GeometryAnswers { get; set; }
     public int UnansweredQueries { get; set; }
+    public int UnansweredInWindow { get; set; }
     public int RoutesRecomputed { get; set; }
     public List<ReproMotionSummary> Motion { get; } = new();
 
@@ -334,8 +347,13 @@ public sealed class ReproReplayReport
 
     // Did the replay reproduce the RECORDING, rather than merely something plausible? Only meaningful
     // for unmodified code; a millimetre is well inside the rounding a dump stores positions at.
+    //
+    // A query nobody could answer disqualifies the claim outright, however well the positions line up.
+    // Part of the world was treated as empty for it, and a body that happened not to need that answer
+    // this time is not evidence that the window reproduced — it is evidence that the window was lucky.
     public bool ReproducesRecording => ComparedSamples > 0 && MaxPositionError <= 0.01f
-        && MaxYawError <= 0.5f && StateMismatches == 0 && TargetMismatches == 0;
+        && MaxYawError <= 0.5f && StateMismatches == 0 && TargetMismatches == 0
+        && UnansweredInWindow == 0;
 
     public string Describe()
     {
@@ -349,7 +367,9 @@ public sealed class ReproReplayReport
             .Append(", target mismatches ").Append(TargetMismatches).Append('\n');
         text.Append("  answers          ").Append(OracleHits).Append(" recorded, ")
             .Append(GeometryAnswers).Append(" from geometry, ")
-            .Append(UnansweredQueries).Append(" unanswered\n");
+            .Append(UnansweredQueries).Append(" unanswered")
+            .Append(UnansweredInWindow > 0 ? $" ({UnansweredInWindow} inside the window)" : "")
+            .Append('\n');
         if (RoutesRecomputed > 0)
             text.Append("  routes           ").Append(RoutesRecomputed)
                 .Append(" recomputed over the baked graph rather than replayed; the live map may have "
