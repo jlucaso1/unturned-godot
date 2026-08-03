@@ -157,6 +157,52 @@ public class LevelHandshakeTests
         Assert.False(conn.Closed);
     }
 
+    // The server clamps the name it STORES, but a Hello has to arrive before that runs. Past
+    // MaxPayloadBytes the transport drops the datagram outright, so an over-long PLAYER_NAME produced a
+    // Hello that could never be read: the client retried it until it gave up, instead of joining under a
+    // shortened name. Clamping where the bytes are produced makes the two ends agree by construction.
+    [Fact]
+    public void AnOverlongNameStillProducesADeliverableHello()
+    {
+        string huge = new('W', UdpServerTransport.MaxPayloadBytes * 2);
+        byte[] hello = NetMessages.WriteHello(huge, ServerLevel);
+
+        Assert.True(hello.Length < UdpServerTransport.MaxPayloadBytes,
+            $"a Hello is {hello.Length} bytes, past the {UdpServerTransport.MaxPayloadBytes}-byte "
+            + "transport cap, so the server would never see it");
+
+        // And it still joins, under the clamped name rather than not at all.
+        (NetServer server, FakeServerTransport transport) = Build();
+        var conn = new FakeConnection();
+        transport.Connect(conn);
+        transport.Message(conn, hello);
+        server.Update(0);
+
+        Assert.Single(conn.Of(ENetMessage.Welcome));
+        Assert.Equal(1, server.PlayerCount);
+    }
+
+    // Anyone can ask this, without joining and without saying anything else — so the answer must not make
+    // the server retain anything on the asker's behalf. A reliable reply is held per connection until
+    // acked or GiveUpAfter and retransmitted every ResendInterval, so a sender that asks and never acks
+    // turns the server into its retransmitter: across the 256 connections the transport allows, stopping
+    // just under the pending cap held ~262k frames and made every 0.25 s worth roughly a million sends.
+    //
+    // ServerQuery re-asks on its own RetryInterval, so nothing is lost by letting a reply drop.
+    [Fact]
+    public void ServerInfoIsAnsweredUnreliably_SoAnAskerCannotMakeTheServerRetain()
+    {
+        (NetServer server, FakeServerTransport transport) = Build();
+        var conn = new FakeConnection();
+        transport.Connect(conn);
+        transport.Message(conn, NetMessages.WriteServerInfoRequest());
+        server.Update(0);
+
+        (byte[] Payload, ESendType SendType) reply = Assert.Single(
+            conn.Sent, m => NetMessages.TypeOf(m.Payload) == ENetMessage.ServerInfo);
+        Assert.Equal(ESendType.Unreliable, reply.SendType);
+    }
+
     [Fact]
     public void ServerInfo_ReportsThePopulation()
     {
