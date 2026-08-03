@@ -78,8 +78,10 @@ public sealed class ZombieInstance
         _ => 5.5f,
     };
 
-    // The CharacterController capsule (SetCapsuleRadiusAndHeight): megas 0.75, everyone else 0.4.
-    public float Radius => Speciality == EZombieSpeciality.Mega ? 0.75f : 0.4f;
+    // The CharacterController capsule (SetCapsuleRadiusAndHeight): megas 0.75, everyone else 0.4. The
+    // ordinary radius comes from BakedNavGraph so the routes and the body cannot drift apart — the funnel
+    // insets wall portals by exactly this much.
+    public float Radius => Speciality == EZombieSpeciality.Mega ? 0.75f : BakedNavGraph.AgentRadius;
 
     // Zombie.GetHorizontalAttackRangeSquared for a player target on a dedicated server. The
     // official value IS the squared threshold (compared against sqrHorizontalDistanceFromTarget):

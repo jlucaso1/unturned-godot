@@ -460,6 +460,49 @@ public class BakedNavGraphTests
         Assert.Fail("California2 contained no adjacent navmesh faces");
     }
 
+    // Progressive reconciliation disables faces one batch at a time, and the graph must end up in the
+    // state a graph BUILT with those faces excluded would have been in. That is the whole licence for
+    // keeping the original CSR instead of rebuilding.
+    //
+    // Non-manifold edges are where a cheap incremental update stops agreeing with a rebuild. The builder
+    // connects EVERY pair of faces sharing an edge, so an edge can carry three of them; disabling one
+    // leaves the other two joined across it and it did NOT become a wall. Treating it as one narrows
+    // portals in the middle of open mesh, which is the wandering-route symptom.
+    //
+    // The face disabled here is a duplicate of an interior one, so all three of its edges survive it.
+    // Nothing about the walkable region changes and the route must not move by so much as a waypoint.
+    [Fact]
+    public void DisablingOneFaceOfANonManifoldEdge_MatchesABuildWithoutIt()
+    {
+        NavFlag field = Field(32, 0f);
+        const int Side = 33;
+        // Quad (16, 16)'s first triangle, square in the middle of a straight run along z = 16.
+        int a = (16 * Side) + 16, b = a + 1, c = a + Side;
+        var triangles = new List<int>(field.Triangles) { a, b, c };
+        var flag = new NavFlag
+        {
+            Center = field.Center,
+            Size = field.Size,
+            Vertices = field.Vertices,
+            Triangles = triangles.ToArray(),
+        };
+        var duplicate = new HashSet<int> { (16 * 32 * 2) + (16 * 2) };
+
+        BakedNavGraph rebuilt = BakedNavGraph.Build(new[] { flag },
+            new Dictionary<NavFlag, HashSet<int>> { [flag] = duplicate });
+        BakedNavGraph reconciled = BakedNavGraph.Build(new[] { flag });
+        Assert.Equal(1, reconciled.Disable(flag, duplicate));
+
+        var expected = new List<Vector3>();
+        var actual = new List<Vector3>();
+        var from = new Vector3(2, 0, 16);
+        var to = new Vector3(30, 0, 16);
+        Assert.True(rebuilt.TryPath(from, to, expected));
+        Assert.True(reconciled.TryPath(from, to, actual));
+        Assert.Equal(new[] { from, to }, expected);
+        Assert.Equal(expected, actual);
+    }
+
     private static Vector3 Centre(NavFlag flag, int triangle) =>
         (flag.Vertices[flag.Triangles[triangle * 3]]
             + flag.Vertices[flag.Triangles[(triangle * 3) + 1]]
