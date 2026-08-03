@@ -25,6 +25,14 @@ public partial class ObjectStreamer : Node
     [Signal] public delegate void ProgressEventHandler(int applied, int total);
     [Signal] public delegate void FinishedEventHandler();
 
+    // The world is finished AND no decode pass is still running. Finished alone does not say the second
+    // half: a warm mesh cache with cold terrain layers builds and finishes the scene while its bundle
+    // pass is still streaming. Anything that would open a bundle of its own — the deferred audio
+    // extraction — has to wait for this one instead, or the two decode the same file at the same time,
+    // recreating the multi-gigabyte peak the passes are serialized to avoid and racing over the same
+    // cache files.
+    [Signal] public delegate void ExtractionFinishedEventHandler();
+
     // GPU upload budget per frame while streaming. The ceiling is what measured well on a fast machine;
     // the live budget is clamped down from it by the frame time actually being achieved, so a machine that
     // drops to 20 fps backs off and hands the frame to the game rather than to texture streaming.
@@ -582,6 +590,9 @@ public partial class ObjectStreamer : Node
         Log.Print($"[stream] released loading state: {retainedItems} items + " +
             $"{registryEntries} texture-index entries");
         LoadMemory.Reclaim("post-load");
+        // After the reclaim: whatever this releases is the one-time work's, and a listener that starts a
+        // decode of its own should not have its first allocations compacted out from under it.
+        EmitSignal(SignalName.ExtractionFinished);
     }
 
     private TerrainLayerPlan.BundleWants LayerWantsFor(ContentExtraction.BundlePlan plan) =>

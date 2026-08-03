@@ -33,8 +33,16 @@ public sealed partial class MemoryTrace : Node
         return new MemoryTrace { Name = "MemoryTrace", _seconds = Math.Clamp(seconds, 0.25, 60.0) };
     }
 
-    public override void _Ready() => Log.Print("[mem] tracing: "
-        + $"every {_seconds:0.##}s — rss, gc committed/live, allocated since the previous line");
+    public override void _Ready()
+    {
+        // Baseline taken here, not left at zero: the first line otherwise reported everything allocated
+        // since the process started as if it belonged to that one interval — 257 MB of engine and load
+        // startup on the first line of every trace, which is exactly the kind of number this exists to
+        // attribute correctly.
+        _lastAllocated = GC.GetTotalAllocatedBytes(precise: false);
+        Log.Print("[mem] tracing: "
+            + $"every {_seconds:0.##}s — rss, gc committed/live, allocated since the previous line");
+    }
 
     public override void _Process(double delta)
     {

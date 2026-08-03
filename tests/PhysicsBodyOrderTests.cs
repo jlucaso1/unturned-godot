@@ -759,7 +759,9 @@ public class PhysicsBodyOrderTests
             return;
         }
 
-        string extractor = File.ReadAllText(extractorPath);
+        // Normalized: the literals below span lines, and a checkout that materializes CRLF would make
+        // every one of them miss on source that is perfectly correct.
+        string extractor = File.ReadAllText(extractorPath).Replace("\r\n", "\n");
         Assert.Contains("AudioExtractor.Plan(file, audio)", extractor);
         Assert.Contains("OweAudioClips(audioPlan, ordered, owedByFile, written)", extractor);
         Assert.Contains("AudioExtractor.WriteClip(owed.AudioPlan, owed.AudioClip, bytes)", extractor);
@@ -782,6 +784,34 @@ public class PhysicsBodyOrderTests
         int started = streamer.IndexOf("StartStreaming();", StringComparison.Ordinal);
         Assert.True(planned > 0 && started > planned);
         Assert.Contains("audio: audio,", streamer);
+    }
+
+    // Whatever may open a bundle of its own waits for the pass that is already reading one. Finished says
+    // the scene is built, which is not the same thing: a warm mesh cache with cold terrain layers streams
+    // a bundle while the scene finishes without it, and hanging the audio fallback off Finished let the
+    // two decode the same file at once — the multi-gigabyte peak the passes are serialized to avoid, plus
+    // two writers over one set of cache files.
+    [Fact]
+    public void TheAudioFallbackWaitsForTheBundlePassRatherThanTheBuiltScene()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } streamerPath
+            || FindRepositoryFile(Path.Combine("src", "Main.cs")) is not { } mainPath)
+        {
+            return;
+        }
+
+        string streamer = File.ReadAllText(streamerPath);
+        string main = File.ReadAllText(mainPath);
+        Assert.Contains("streamer.ExtractionFinished += RunPendingAudioExtraction;", main);
+        Assert.DoesNotContain("streamer.Finished += RunPendingAudioExtraction;", main);
+
+        // Emitted from the one place that knows both halves: the scene is finished and no decoder can
+        // still be reading (TryFinalizeLoadState's own guard).
+        int guard = streamer.IndexOf("if (_loadStateReleased || !_finished || (_streamStarted && !_texturesDone))",
+            StringComparison.Ordinal);
+        int emitted = streamer.IndexOf("EmitSignal(SignalName.ExtractionFinished);", guard,
+            StringComparison.Ordinal);
+        Assert.True(guard > 0 && emitted > guard);
     }
 
     [Fact]

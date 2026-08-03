@@ -680,7 +680,11 @@ public partial class Main : Node3D
         overlay.Track(streamer); // connect before Begin so a warm cache's instant signals are caught
         streamer.Finished += loading.Finish; // fade out once the scene (and warm textures) are in
         streamer.Finished += () => _player?.MarkWorldReady();
-        streamer.Finished += RunPendingAudioExtraction;
+        // ExtractionFinished, not Finished: this may open a bundle, and a warm mesh cache with cold
+        // terrain layers finishes the scene while its pass is still decoding the very bundle this would
+        // reach for. Waiting also means the pass has had its chance to extract these definitions itself,
+        // which on the cold path leaves this with nothing to do at all.
+        streamer.ExtractionFinished += RunPendingAudioExtraction;
         if (stepProbe != null)
             streamer.MeshesReady += elapsedMs => _ = RunStepProbe(stepProbe);
         // Only now do the object colliders exist, so only now can the navmesh be checked against them.
@@ -873,9 +877,23 @@ public partial class Main : Node3D
                     break;
                 if (request.BundlePath.Length == 0 || AudioExtractor.IsSatisfied(request))
                     continue;
+
+                // Marked before the attempt, not after it: a decode that threw part-way still grew the
+                // heap, so the reclaim below is owed either way.
                 decoded = true;
-                AudioExtractor.Extract(request.BundlePath, request.BundleTag, request.DefPaths,
-                    request.AudioCacheDir, request.ClipGroups);
+                try
+                {
+                    AudioExtractor.Extract(request.BundlePath, request.BundleTag, request.DefPaths,
+                        request.AudioCacheDir, request.ClipGroups);
+                }
+                catch (System.Exception e) when (e is System.IO.IOException
+                    or System.UnauthorizedAccessException or System.IO.InvalidDataException)
+                {
+                    // Per bundle. The order here comes from a dictionary, so one truncated workshop
+                    // bundle used to be able to end the loop before the game's own footsteps and zombie
+                    // clips were ever extracted.
+                    Log.PrintErr($"[audio] {request.BundlePath} could not be extracted: {e.Message}");
+                }
             }
 
             // A whole-bundle decode here lands AFTER the streamer has already compacted the load's heap,

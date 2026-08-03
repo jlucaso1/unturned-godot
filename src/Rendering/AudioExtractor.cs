@@ -155,6 +155,11 @@ public static class AudioExtractor
     // Rebuilds one planned clip from the exact bytes of its range and writes the .ogg beside its
     // definition. Best effort per clip: a blob FMOD cannot rebuild leaves that clip out rather than
     // failing the definition, which is what the whole-bundle path did too.
+    //
+    // The write is best effort for the same reason, and now for a larger one: this runs inside the load's
+    // shared bundle pass, so an unwritable audio cache would otherwise throw out through the forward
+    // reader and take the meshes, object textures and terrain layers of that pass down with it. A sound
+    // this session cannot cache is a sound; it is not a reason to stop building the world.
     public static void WriteClip(StreamPlan plan, int clipIndex, byte[] fsb)
     {
         if (clipIndex < 0 || clipIndex >= plan.Clips.Count)
@@ -168,20 +173,31 @@ public static class AudioExtractor
         string fileName = SafeCachePath.UniqueFileName(clip.Name, "clip", clip.ClipId, ".ogg");
         if (!SafeCachePath.TryResolveChild(def.Directory, fileName, out string clipOutput))
             return;
-        Directory.CreateDirectory(def.Directory);
-        File.WriteAllBytes(clipOutput, ogg);
+        try
+        {
+            Directory.CreateDirectory(def.Directory);
+            File.WriteAllBytes(clipOutput, ogg);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            AppShutdown.WarnUnlessQuitting($"[audio] could not cache '{clip.Name}': {e.Message}");
+            return;
+        }
+
         def.ClipFiles[clip.Slot] = fileName;
     }
 
     // Marks every definition whose clips landed as complete. def.bin is the cache's only completeness
     // marker, so it is written last and only for definitions that actually got clips: a def.bin over an
-    // empty directory would make every later boot skip the definition and play silence.
+    // empty directory would make every later boot skip the definition and play silence. Per definition,
+    // and contained for the same reason WriteClip is: this closes the shared bundle pass.
     public static int CompleteDefs(StreamPlan plan)
     {
         int completed = 0;
         foreach (StreamPlan.PendingDef def in plan.Definitions)
         {
-            // In the definition's own clip order, minus the slots whose blob FMOD could not rebuild.
+            // In the definition's own clip order, minus the slots whose blob FMOD could not rebuild or
+            // whose file could not be written.
             var clips = new List<string>(def.ClipFiles.Count);
             foreach (string? file in def.ClipFiles)
                 if (file != null)
@@ -189,9 +205,20 @@ public static class AudioExtractor
             if (clips.Count == 0)
                 continue;
 
-            Directory.CreateDirectory(def.Directory);
-            using (FileStream s = File.Create(Path.Combine(def.Directory, "def.bin")))
+            try
+            {
+                Directory.CreateDirectory(def.Directory);
+                using FileStream s = File.Create(Path.Combine(def.Directory, "def.bin"));
                 AudioDefCache.Write(s, new OneShotAudioDef(def.Volume, def.MinPitch, def.MaxPitch, clips));
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                // No marker, so the clips already on disk are re-extracted next time rather than read as
+                // a definition that never completed.
+                AppShutdown.WarnUnlessQuitting($"[audio] could not complete {def.Directory}: {e.Message}");
+                continue;
+            }
+
             completed++;
         }
         return completed;
@@ -249,7 +276,13 @@ public static class AudioExtractor
     private sealed class FileCatalog
     {
         private readonly Dictionary<long, SerializedObject> _byId = new();
-        private readonly Dictionary<string, long> _containers = new(StringComparer.Ordinal);
+
+        // Keyed by the container path's last segment, which is the only part a wanted path is guaranteed
+        // to pin down. The core bundle publishes tens of thousands of containers and a plan asks for one
+        // per definition and per raw clip, so scanning them all per lookup is a product this pass now
+        // pays inside the load rather than in a background extraction.
+        private readonly Dictionary<string, List<(string Path, long Id)>> _byLeaf =
+            new(StringComparer.OrdinalIgnoreCase);
 
         internal FileCatalog(SerializedFile file)
         {
@@ -264,8 +297,12 @@ public static class AudioExtractor
                 foreach (object entry in (List<object>)ab["m_Container"])
                 {
                     var pair = (Dictionary<string, object>)entry;
-                    _containers[(string)pair["first"]] =
-                        PathId(((Dictionary<string, object>)pair["second"])["asset"]);
+                    string path = (string)pair["first"];
+                    long id = PathId(((Dictionary<string, object>)pair["second"])["asset"]);
+                    string leaf = LastSegment(path);
+                    if (!_byLeaf.TryGetValue(leaf, out List<(string, long)>? candidates))
+                        _byLeaf[leaf] = candidates = new List<(string, long)>();
+                    candidates.Add((path, id));
                 }
             }
         }
@@ -274,15 +311,32 @@ public static class AudioExtractor
 
         internal SerializedObject? Find(string assetPath)
         {
-            string suffix = assetPath.Replace('\\', '/').ToLowerInvariant();
-            foreach ((string path, long id) in _containers)
-                if (path.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
-                    && _byId.TryGetValue(id, out SerializedObject? asset))
-                {
+            string wanted = assetPath.Replace('\\', '/');
+            if (!_byLeaf.TryGetValue(LastSegment(wanted), out List<(string Path, long Id)>? candidates))
+                return null;
+
+            foreach ((string path, long id) in candidates)
+                if (EndsAtSegmentBoundary(path, wanted) && _byId.TryGetValue(id, out SerializedObject? asset))
                     return asset;
-                }
 
             return null;
+        }
+
+        // The wanted path is bundle-relative, so it matches a suffix of the published container path —
+        // but only one that starts where a segment does. A plain EndsWith let "…/Walk/Boardwalk.asset"
+        // answer a request for "…/Walk/ardwalk.asset"-shaped tails of a longer name.
+        private static bool EndsAtSegmentBoundary(string path, string wanted)
+        {
+            if (!path.EndsWith(wanted, StringComparison.OrdinalIgnoreCase))
+                return false;
+            int start = path.Length - wanted.Length;
+            return start == 0 || path[start - 1] == '/';
+        }
+
+        private static string LastSegment(string path)
+        {
+            int slash = path.LastIndexOf('/');
+            return slash >= 0 ? path[(slash + 1)..] : path;
         }
     }
 
