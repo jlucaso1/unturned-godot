@@ -309,7 +309,9 @@ a path (`UG_OBJECT_CHUNK_METRES`, `SCREENSHOT_PATH`, `TIME_OF_DAY`, …) are una
   Completed results persist under `user://nav_reconcile`; remove the selected map's cache file when a
   deliberately cold reconciliation run is required. The reconciled CSR routing graph is cached beside it;
   valid hits deserialize the graph directly, while misses build and write it off the main thread.
-- `UG_NAV_CPU_PROBE=0` sends every reconciliation probe back to the PhysicsServer. By default the load
+- `UG_NAV_CPU_PROBE=0` sends every reconciliation probe back to the PhysicsServer, except under
+  `UG_NAV_PROBE_AUDIT=1`, which needs the field to have anything to compare against and says so in the log
+  when it overrides this. By default the load
   records the layer-`World` collision geometry into a `CollisionField` — terrain heightfields and object
   colliders, as the bodies for them are created — and the first session probes that on workers, asking the
   server only about the faces `NavmeshReachability.NeedsConfirmation` names. Direct-space queries are only

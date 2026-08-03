@@ -396,9 +396,28 @@ public sealed class ZombieNavigation
         // them under the ordinary fingerprint would have the next normal run restore them instead of
         // running the hybrid it is supposed to. A diagnostic measures; it does not leave results behind.
         bool audit = EnvFlag.IsOn(OS.GetEnvironment("UG_NAV_PROBE_AUDIT"), whenUnset: false);
-        _auditing = audit; // read once for the whole pass rather than per flag and per face
         bool cpuField = collision != null && EnvFlag.IsOn(OS.GetEnvironment("UG_NAV_CPU_PROBE"),
             whenUnset: true);
+        // The audit exists to compare the field against the server, so it needs the field whatever
+        // UG_NAV_CPU_PROBE says. Left alone, the two flags together would send every flag down the
+        // server-only path and report nothing — a diagnostic that silently measures nothing is worse than
+        // one that refuses. Where no geometry was recorded there is no field to turn on, so the audit is
+        // declined out loud instead.
+        if (audit && !cpuField)
+        {
+            if (collision != null)
+            {
+                cpuField = true;
+                Log.Print("[nav] UG_NAV_PROBE_AUDIT is on, so UG_NAV_CPU_PROBE=0 is ignored for this run");
+            }
+            else
+            {
+                audit = false;
+                Log.Print("[nav] UG_NAV_PROBE_AUDIT needs a collision field, and this session recorded "
+                    + "none — reconciling normally instead");
+            }
+        }
+        _auditing = audit; // read once for the whole pass rather than per flag and per face
         int[] triangleCounts = new int[_flags.Count];
         for (int i = 0; i < _flags.Count; i++)
             triangleCounts[i] = _flags[i].Triangles.Length / 3;
