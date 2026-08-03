@@ -57,3 +57,7 @@ perf.data*
 
 # OS
 .DS_Store
+
+# Subagent worktrees: each is a full checkout of this repo, created and removed by tooling.
+# .claude/hooks and .claude/settings.json stay tracked, so this ignores only the scratch.
+.claude/worktrees/
