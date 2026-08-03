@@ -172,6 +172,7 @@ public sealed class BakedNavGraph
         private readonly int[] _edgeStart;
         private readonly Connection[] _edges;
         private readonly bool[] _enabled;
+        private readonly bool[] _borderVertex;
         private readonly ConcurrentBag<SearchWorkspace> _workspaces = new();
         private int _workspaceCount;
         public int WorkspaceCount => Volatile.Read(ref _workspaceCount);
@@ -318,6 +319,8 @@ public sealed class BakedNavGraph
             _edges = new Connection[directed.Length];
             for (int i = 0; i < directed.Length; i++)
                 _edges[i] = directed[i].Edge;
+            _borderVertex = new bool[source.Vertices.Length];
+            RecomputeBorderVertices();
             ScratchBytes = ((long)records.Length * 24) + ((long)directed.Length * 24);
 
             // One bucket per cell, in CSR form: counts, then offsets, then the triangle ids. A triangle
@@ -381,6 +384,8 @@ public sealed class BakedNavGraph
             Source = source; _centres = centres; _edgeStart = edgeStart; _edges = edges; _enabled = enabled;
             _columns = columns; _rows = rows; _cellSize = cellSize; _minX = minX; _minZ = minZ;
             _cellStart = cellStart; _cellItems = cellItems; ScratchBytes = 0;
+            _borderVertex = new bool[source.Vertices.Length];
+            RecomputeBorderVertices();
         }
 
         public void Write(BinaryWriter writer)
@@ -573,7 +578,44 @@ public sealed class BakedNavGraph
                 _enabled[triangle] = false;
                 changed++;
             }
+            if (changed > 0)
+                RecomputeBorderVertices(); // disabling a face turns its open edges into walls
             return changed;
+        }
+
+        // Which vertices sit on the edge of the walkable region — the wall corners. Derived from the CSR
+        // alone: an edge of an enabled triangle is a border edge when no ENABLED neighbour is listed as
+        // sharing that vertex pair. A triangle has at most three connections, so this is O(3 * 3) per
+        // triangle with no dictionary, which is why it can be re-derived after a cache read and after
+        // every Disable rather than being serialized and going stale.
+        private void RecomputeBorderVertices()
+        {
+            Array.Clear(_borderVertex);
+            int triangles = _centres.Length;
+            for (int t = 0; t < triangles; t++)
+            {
+                if (!_enabled[t])
+                    continue;
+                for (int e = 0; e < 3; e++)
+                {
+                    int v0 = Source.Triangles[(t * 3) + e];
+                    int v1 = Source.Triangles[(t * 3) + ((e + 1) % 3)];
+                    bool shared = false;
+                    for (int at = _edgeStart[t]; at < _edgeStart[t + 1] && !shared; at++)
+                    {
+                        Connection c = _edges[at];
+                        if (!_enabled[c.To])
+                            continue;
+                        shared = (c.VertexA == v0 && c.VertexB == v1)
+                            || (c.VertexA == v1 && c.VertexB == v0);
+                    }
+                    if (!shared)
+                    {
+                        _borderVertex[v0] = true;
+                        _borderVertex[v1] = true;
+                    }
+                }
+            }
         }
 
         private void Consider(int triangle, Vector3 point, ref int closest, ref float score,
@@ -688,7 +730,12 @@ public sealed class BakedNavGraph
                                 - (travel.Z * (a.X - middle.X));
                             // Godot's XZ ground plane has +Z opposite the usual 2D screen Y convention
                             // used by the funnel area tests, so the positive-side endpoint is the right.
-                            portals.Add(side >= 0f ? new Portal(b, a) : new Portal(a, b));
+                            (Vector3 left, Vector3 right) = side >= 0f ? (b, a) : (a, b);
+                            (int leftVertex, int rightVertex) = side >= 0f
+                                ? (edge.VertexB, edge.VertexA)
+                                : (edge.VertexA, edge.VertexB);
+                            portals.Add(Inset(left, right,
+                                _borderVertex[leftVertex], _borderVertex[rightVertex]));
                             break;
                         }
                     }
@@ -709,6 +756,47 @@ public sealed class BakedNavGraph
         // floor look like a slalom; the movement forward-look then turns that zigzag into a wide arc.
         // Funnel/string-pulling emits only corners forced by the corridor and is deterministic because
         // portal order and every tie follow the source triangle/index order.
+        // The body the routes are for. A route is a line for a point, but a zombie is a capsule, and the
+        // funnel string-pulls to portal ENDPOINTS — which are mesh vertices, and at a doorway that vertex
+        // is the jamb. Aiming a 0.4 m capsule at a point on the wall is what left them grinding there.
+        public const float AgentRadius = 0.4f;
+
+        // Skin on top of the radius. Insetting by exactly the radius aims the body at the precise limit
+        // of where it fits, leaving nothing for the turn: these bodies steer at 720 deg/s toward a
+        // look-ahead point, so they arrive at an angle and clip the jamb they were aimed to graze. A
+        // CharacterController carries a skin width for the same reason.
+        private const float Clearance = 0.05f;
+
+        // Pull a portal end in along the portal's own line, but ONLY where that end is a wall.
+        //
+        // This is the whole difficulty. Insetting every end fixes doorways and ruins open ground: in the
+        // middle of a field a portal end is an interior vertex with walkable mesh all around it, nothing
+        // to keep clear of, and shrinking those portals stops the funnel collapsing straight runs — a
+        // measured 1.174 detour became 1.254 and 12 waypoints became 43. Only border ends are walls, so
+        // only border ends move.
+        //
+        // Each end is clamped to just under half the portal so the two insets can never cross and invert
+        // it; a gap narrower than the body degrades to its midpoint, which is the best a body can aim at
+        // anyway — whether it physically fits is the collision resolver's call, not the graph's.
+        private static Portal Inset(Vector3 left, Vector3 right, bool insetLeft, bool insetRight)
+        {
+            if (!insetLeft && !insetRight)
+                return new Portal(left, right);
+
+            Vector3 along = right - left;
+            along.Y = 0f;
+            float length = along.Length();
+            if (length <= 1e-4f)
+                return new Portal(left, right);
+
+            float inset = MathF.Min(AgentRadius + Clearance, (length * 0.5f) - 1e-3f);
+            if (inset <= 0f)
+                return new Portal(left, right);
+
+            Vector3 step = along / length * inset;
+            return new Portal(insetLeft ? left + step : left, insetRight ? right - step : right);
+        }
+
         private static void AppendFunnel(List<Vector3> output, List<Portal> portals, Vector3 destination)
         {
             Vector3 apex = portals[0].Left;
