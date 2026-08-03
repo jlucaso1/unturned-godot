@@ -7,10 +7,11 @@
 // like the C# suite's data-backed tests: green on a bare machine, meaningful on one with the content.
 
 import { createServer } from "node:http";
-import { createReadStream, existsSync } from "node:fs";
-import { extname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { createReadStream, existsSync, statSync } from "node:fs";
+import { extname, join, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildManifest, PROBE_SELECTION } from "./seed.mjs";
+import { INSTALL_PREFIX } from "./shared.js";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const webRoot = resolve(here, "..");
@@ -59,8 +60,12 @@ async function importPlaywright() {
 
     for (const candidate of candidates) {
         try {
+            // import() takes URL specifiers. A bare absolute POSIX path happens to work, but a Windows
+            // one does not — "C:" parses as an unsupported URL scheme — so the global-install fallback
+            // would silently miss there and the whole suite would report SKIP.
+            const specifier = candidate === "playwright" ? candidate : pathToFileURL(candidate).href;
             // Playwright is CommonJS, so importing it by path lands everything under `default`.
-            const module = await import(candidate);
+            const module = await import(specifier);
             const browsers = module.chromium ? module : module.default;
             if (browsers?.chromium) return browsers.chromium;
         } catch {
@@ -79,14 +84,19 @@ console.log(
 
 const server = createServer((request, response) => {
     const path = decodeURIComponent(new URL(request.url, "http://x").pathname);
-    // The harness only ever serves this repo's own web/ folder.
+    // The harness only ever serves this repo's own web/ folder, and only regular files out of it. The
+    // containment test is anchored on a separator: a bare prefix check would also accept a sibling
+    // directory whose name merely starts with "web".
     const file = resolve(webRoot, `.${path === "/" ? "/index.html" : path}`);
-    if (!file.startsWith(webRoot) || !existsSync(file)) {
+    const contained = file === webRoot || file.startsWith(webRoot + sep);
+    if (!contained || !existsSync(file) || !statSync(file).isFile()) {
         response.writeHead(404).end("not found");
         return;
     }
     response.writeHead(200, { "content-type": MIME[extname(file)] ?? "application/octet-stream" });
-    createReadStream(file).pipe(response);
+    const stream = createReadStream(file);
+    stream.on("error", () => response.destroy());
+    stream.pipe(response);
 });
 await new Promise((done) => server.listen(0, "127.0.0.1", done));
 const origin = `http://127.0.0.1:${server.address().port}`;
@@ -110,14 +120,29 @@ page.on("console", (message) => {
     if (message.type() === "error") pageErrors.push(message.text());
 });
 
-await page.goto(`${origin}/test/harness.html`);
-await page.waitForFunction(() => typeof globalThis.runSuite === "function");
-const results = await page.evaluate((payload) => globalThis.runSuite(payload), manifest);
+// Every await below can reject — a page-side throw, or a selector that never appears. Without the
+// finally, Node would exit on the unhandled rejection with a raw stack instead of a FAIL line, leaving
+// the Chromium process alive behind it.
+let results;
+let demoResults;
+try {
+    await page.goto(`${origin}/test/harness.html`);
+    await page.waitForFunction(() => typeof globalThis.runSuite === "function");
+    results = await page.evaluate((payload) => globalThis.runSuite(payload), manifest);
 
-// The demo page itself, driven end to end. The native picker dialog cannot be automated, so
-// showDirectoryPicker is stubbed to hand back the OPFS root the suite already seeded — which is the same
-// type it would return for real, so everything downstream of the click is the shipping path.
-const demoResults = await runDemo();
+    // The demo page itself, driven end to end. The native picker dialog cannot be automated, so
+    // showDirectoryPicker is stubbed to hand back the OPFS root the suite already seeded — the same type
+    // it would return for real, so everything downstream of the click is the shipping path.
+    demoResults = await runDemo();
+} catch (error) {
+    results = [{ name: "the suite ran to completion", ok: false, detail: String(error) }];
+    demoResults = [];
+} finally {
+    if (!keepOpen) {
+        await browser.close().catch(() => {});
+        server.close();
+    }
+}
 
 async function runDemo() {
     const demo = await context.newPage();
@@ -126,10 +151,10 @@ async function runDemo() {
         if (message.type() === "error") pageErrors.push(`demo: ${message.text()}`);
     });
 
-    await demo.addInitScript(() => {
+    await demo.addInitScript((prefix) => {
         globalThis.showDirectoryPicker = async () =>
-            (await navigator.storage.getDirectory()).getDirectoryHandle("install");
-    });
+            (await navigator.storage.getDirectory()).getDirectoryHandle(prefix);
+    }, INSTALL_PREFIX);
     await demo.goto(`${origin}/index.html`);
     await demo.click("#pick");
     // Artwork is appended by a fire-and-forget read that outlives the scan, so waiting on the heading
@@ -137,11 +162,19 @@ async function runDemo() {
     await demo.waitForSelector(".card h3");
     await demo.waitForSelector(".card .art img");
 
+    // Decoded, not merely present: a placeholder seeded as an empty file still produces an <img>, so
+    // counting nodes would let "renders map artwork" pass on a page of broken images.
+    await demo.waitForFunction(() =>
+        [...document.querySelectorAll(".card .art img")].some((img) => img.complete && img.naturalWidth > 0),
+    );
+
     const observed = await demo.evaluate(() => ({
         status: document.querySelector("#status").textContent,
         facts: [...document.querySelectorAll("#summary dd")].map((node) => node.textContent),
         cards: [...document.querySelectorAll(".card h3")].map((node) => node.textContent),
-        artwork: [...document.querySelectorAll(".card .art img")].length,
+        artwork: [...document.querySelectorAll(".card .art img")].filter(
+            (img) => img.complete && img.naturalWidth > 0,
+        ).length,
     }));
 
     // build/ is git-ignored, which is where every other generated artifact in this repo goes.
@@ -162,7 +195,11 @@ async function runDemo() {
             ok: /Scanned .* map folder/.test(observed.status),
             detail: observed.status,
         },
-        { name: "demo renders map artwork", ok: observed.artwork > 0, detail: `${observed.artwork} images` },
+        {
+            name: "demo renders map artwork",
+            ok: observed.artwork > 0,
+            detail: `${observed.artwork} decoded images`,
+        },
     ];
 }
 
@@ -189,7 +226,5 @@ console.log(`\n${passed} passed, ${failed} failed`);
 if (keepOpen) {
     console.log(`Browser left open at ${origin}. Ctrl-C to stop.`);
 } else {
-    await browser.close();
-    server.close();
     process.exit(failed === 0 ? 0 : 1);
 }

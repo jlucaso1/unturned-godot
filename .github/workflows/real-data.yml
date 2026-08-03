@@ -129,7 +129,12 @@ jobs:
     timeout-minutes: 30
 
     steps:
+      # This job runs `npm install -g`, which executes package install scripts. Nothing after the
+      # checkout needs Git authentication, so the token does not stay in the Git config where those
+      # scripts could reach it.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v6
         with:
@@ -172,10 +177,12 @@ jobs:
           key: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-${{ github.run_id }}-${{ github.job }}
 
       # Playwright is a developer tool, not a dependency: this repo has no package.json and wants none,
-      # so it is installed globally for the run and web/test/run.mjs resolves it from there.
+      # so it is installed globally for the run and web/test/run.mjs resolves it from there. Pinned
+      # exactly, because the version also decides which Chromium revision the suite runs against — an
+      # unpinned install would let a registry release change what this job proves, with no commit here.
       - name: Install Playwright's Chromium
         run: |
-          npm install -g playwright
+          npm install -g playwright@1.56.1
           playwright install --with-deps chromium
 
       # The suite exits 0 when it finds no content or no browser, which would leave this job green while

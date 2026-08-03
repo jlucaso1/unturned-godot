@@ -118,9 +118,14 @@ async function onPick() {
 }
 
 async function onReconnect() {
+    // Claimed at entry, not after the awaits: requestPermission can leave its prompt open for as long as
+    // the player ignores it, and the page stays interactive underneath. Claiming afterwards would hand
+    // this the *newest* token once the prompt finally resolves, inverting recency and letting a stale
+    // reconnect paint over whatever the player did in the meantime.
+    const token = claim();
     const handle = await loadHandle().catch(() => null);
     const granted = handle !== null && (await ensureReadPermission(handle, { prompt: true }));
-    const token = claim();
+    if (!isCurrent(token)) return;
     if (!granted) {
         setStatus("Permission denied. Pick the folder again.");
         return;
@@ -130,16 +135,19 @@ async function onReconnect() {
 }
 
 async function onForget() {
-    // Retire any scan still in flight, so it cannot repaint the listing this is about to clear.
-    claim();
+    // Retire any scan still in flight, so it cannot repaint the listing this is about to clear — and
+    // keep the token, because the delete is itself an await the player can outrun by picking a folder.
+    const token = claim();
     try {
         await forgetHandle();
     } catch (error) {
+        if (!isCurrent(token)) return;
         // "Forget" is the privacy-facing control on this page: reporting success while the handle is
         // still in IndexedDB, and still restorable on the next load, is the one lie it must not tell.
         setStatus(`Could not forget the saved folder: ${error?.message ?? error}. It is still stored.`);
         return;
     }
+    if (!isCurrent(token)) return;
     ui.forget.hidden = true;
     ui.reconnect.hidden = true;
     ui.summary.hidden = true;

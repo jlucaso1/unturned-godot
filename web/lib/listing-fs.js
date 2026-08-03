@@ -17,15 +17,21 @@
 
 import { baseName, dirName, normalize } from "./paths.js";
 import { isCaseInsensitiveFilesystem } from "./platform.js";
+import { ReadOnlyFs } from "./read-only-fs.js";
 
 export function supportsDirectoryInput() {
     if (typeof document === "undefined") return false;
     return "webkitdirectory" in document.createElement("input");
 }
 
-export class ListingFs {
+export class ListingFs extends ReadOnlyFs {
     #files = new Map(); // normalized path -> File
     #dirs = new Set([""]);
+    // Directory path -> its immediate children, built once. Without it every listDir scanned the whole
+    // flat file map, and the probe calls listDir per workshop item and per map's Heightmaps folder — so
+    // a player selecting a Steam library (the only way to reach workshop maps in this backend) paid
+    // total-files × directories-listed, on a listing that can hold every file of every installed game.
+    #children = new Map();
     // Lowercased path -> the spelling in #files, built only on a case-insensitive host. HandleFs asks
     // the browser, which asks the OS, so it folds case exactly where the platform does; this backend
     // resolves out of its own index and would otherwise be the only case-sensitive filesystem on a
@@ -38,16 +44,28 @@ export class ListingFs {
     // with the picked folder's own name, which is stripped so paths are relative to the root exactly as
     // in HandleFs.
     constructor(fileList, { name = null, caseInsensitive = isCaseInsensitiveFilesystem() } = {}) {
+        super();
         let rootName = name;
         if (caseInsensitive) this.#folded = new Map();
         for (const file of fileList) {
             const relative = file.webkitRelativePath || file.name;
-            const parts = normalize(relative).split("/");
-            if (parts.length === 0) continue;
+            // Test the normalized string, not the split array: "".split("/") is [""], so a length check
+            // lets an entry with no usable path through and files it under the root's own key.
+            const cleaned = normalize(relative);
+            if (cleaned === "") continue;
+            const parts = cleaned.split("/");
             if (rootName === null && parts.length > 1) rootName = parts[0];
             const path = parts.length > 1 ? parts.slice(1).join("/") : parts[0];
             this.#files.set(path, file);
-            for (let dir = dirName(path); dir !== ""; dir = dirName(dir)) this.#dirs.add(dir);
+            this.#addChild(dirName(path), { name: baseName(path), kind: "file", path });
+            for (let dir = dirName(path); dir !== ""; dir = dirName(dir)) {
+                if (this.#dirs.has(dir)) break; // this dir and every parent are already registered
+                this.#dirs.add(dir);
+                this.#addChild(dirName(dir), { name: baseName(dir), kind: "directory", path: dir });
+            }
+        }
+        for (const entries of this.#children.values()) {
+            entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
         }
         if (this.#folded !== null) {
             // Built after the loop so an exact spelling always wins over a folded one, and the first
@@ -62,6 +80,12 @@ export class ListingFs {
             }
         }
         this.#name = rootName ?? "";
+    }
+
+    #addChild(directory, entry) {
+        const siblings = this.#children.get(directory);
+        if (siblings === undefined) this.#children.set(directory, [entry]);
+        else siblings.push(entry);
     }
 
     // The stored spelling of a path, or null. Exact match first; case folding only where the host folds.
@@ -98,27 +122,10 @@ export class ListingFs {
     }
 
     async listDir(path) {
-        const prefix = this.#resolveDir(path) ?? normalize(path);
-        const head = prefix === "" ? "" : `${prefix}/`;
-        const seen = new Map();
-        for (const key of this.#files.keys()) {
-            if (!key.startsWith(head)) continue;
-            const rest = key.slice(head.length);
-            if (rest === "") continue;
-            const slash = rest.indexOf("/");
-            const name = slash === -1 ? rest : rest.slice(0, slash);
-            const kind = slash === -1 ? "file" : "directory";
-            if (!seen.has(name)) seen.set(name, { name, kind, path: head + name });
-        }
-        return [...seen.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-    }
-
-    async listDirectories(path) {
-        return (await this.listDir(path)).filter((entry) => entry.kind === "directory");
-    }
-
-    async listFiles(path) {
-        return (await this.listDir(path)).filter((entry) => entry.kind === "file");
+        const prefix = this.#resolveDir(path);
+        if (prefix === null) return [];
+        // Already sorted by name in the constructor, and copied so a caller cannot mutate the index.
+        return [...(this.#children.get(prefix) ?? [])];
     }
 
     async stat(path) {
@@ -131,29 +138,6 @@ export class ListingFs {
     async file(path) {
         const key = this.#resolveFile(path);
         return key === null ? null : this.#files.get(key);
-    }
-
-    async readFile(path) {
-        const file = await this.file(path);
-        return file === null ? null : new Uint8Array(await file.arrayBuffer());
-    }
-
-    async readRange(path, offset, length) {
-        const file = await this.file(path);
-        if (file === null) return null;
-        const start = Math.max(0, Math.min(offset, file.size));
-        const end = Math.max(start, Math.min(start + length, file.size));
-        return new Uint8Array(await file.slice(start, end).arrayBuffer());
-    }
-
-    async readText(path) {
-        const file = await this.file(path);
-        return file === null ? null : file.text();
-    }
-
-    async objectUrl(path) {
-        const file = await this.file(path);
-        return file === null ? null : URL.createObjectURL(file);
     }
 
     // Same contract as HandleFs.walk: `filter` selects files, `prune` skips directories. There is no

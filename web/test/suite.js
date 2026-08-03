@@ -7,6 +7,7 @@ import { parseDatTopLevel } from "../lib/dat.js";
 import { baseName, dirName, join, normalize, segments } from "../lib/paths.js";
 import { PickKind, compareForMenu, probeInstall } from "../lib/catalog.js";
 import { forgetHandle, loadHandle, saveHandle } from "../lib/handle-store.js";
+import { INSTALL_PREFIX } from "./shared.js";
 
 const results = [];
 
@@ -21,7 +22,21 @@ function equal(name, actual, expected) {
 
 // --- OPFS seeding ---------------------------------------------------------------------------------
 
-async function seed(manifest, prefix) {
+// Four phases assert against the same seeded install. Writing the manifest once per prefix rather than
+// once per phase is the whole difference: on a real install that is thousands of OPFS entries, removed
+// and rewritten each time for content that never changes within a run.
+const seeded = new Map();
+
+function seed(manifest, prefix) {
+    let pending = seeded.get(prefix);
+    if (pending === undefined) {
+        pending = seedFresh(manifest, prefix);
+        seeded.set(prefix, pending);
+    }
+    return pending;
+}
+
+async function seedFresh(manifest, prefix) {
     const opfs = await navigator.storage.getDirectory();
     // A fresh subtree per run: OPFS survives between navigations within the origin.
     await opfs.removeEntry(prefix, { recursive: true }).catch(() => {});
@@ -95,24 +110,36 @@ function withUnreadableDirectory(fs, unreadable) {
 
 // --- The suite ------------------------------------------------------------------------------------
 
+// One throw must not cost every result. runSuite's return value crosses into run.mjs through
+// page.evaluate, so an uncaught error there rejects that call and the process reports nothing at all —
+// including the phases that already passed. A phase that dies is one recorded failure instead.
+async function phase(name, run) {
+    try {
+        await run();
+    } catch (error) {
+        check(`${name} ran to completion`, false, String(error));
+    }
+}
+
 export async function runSuite(manifest) {
     results.length = 0;
+    seeded.clear();
 
-    paths();
-    dat();
-    await installLayout(manifest);
-    await steamLibraryLayout(manifest);
-    await fallbackParity(manifest);
-    await rangeReads(manifest);
-    await tileNaming();
-    await relaxedConfigJson();
-    menuOrdering();
-    await caseFolding();
-    await blankLocalizedName();
-    await handlePersistence();
-    await workshopNameCollisions();
-    await unreadableMapIsolation();
-    await walkParity(manifest);
+    await phase("paths", paths);
+    await phase("dat", dat);
+    await phase("installLayout", () => installLayout(manifest));
+    await phase("steamLibraryLayout", () => steamLibraryLayout(manifest));
+    await phase("fallbackParity", () => fallbackParity(manifest));
+    await phase("rangeReads", () => rangeReads(manifest));
+    await phase("tileNaming", tileNaming);
+    await phase("relaxedConfigJson", relaxedConfigJson);
+    await phase("menuOrdering", menuOrdering);
+    await phase("caseFolding", caseFolding);
+    await phase("blankLocalizedName", blankLocalizedName);
+    await phase("handlePersistence", handlePersistence);
+    await phase("workshopNameCollisions", workshopNameCollisions);
+    await phase("unreadableMapIsolation", unreadableMapIsolation);
+    await phase("walkParity", () => walkParity(manifest));
 
     return results;
 }
@@ -258,6 +285,10 @@ async function caseFolding() {
         await both.readText("Maps/M/level.dat"),
         "folded",
     );
+    // The two reads above both hit exact matches, so neither consults the folded index at all. A third
+    // spelling that matches nothing exactly is the only one that does — and it must resolve to the first
+    // of the duplicates, not the last.
+    equal("a third spelling folds to the first stored one", await both.readText("Maps/M/LEVEL.DAT"), "exact");
 }
 
 // IndexedDB reports a request as successful before its transaction commits, so the store has to resolve
@@ -354,7 +385,7 @@ async function unreadableMapIsolation() {
 // The two backends are advertised as interchangeable, so walk has to mean the same thing in both:
 // `filter` selects files, `prune` stops a directory from being descended into.
 async function walkParity(manifest) {
-    const root = await seed(manifest, "install");
+    const root = await seed(manifest, INSTALL_PREFIX);
     const handles = new HandleFs(root);
     const listing = new ListingFs(fileListFrom(manifest, "Unturned"), { caseInsensitive: false });
 
@@ -473,6 +504,22 @@ function dat() {
         ', "Map Name"',
     );
 
+    // ReadQuoted runs to its closing quote across CR/LF, so a quoted value can span lines — and an
+    // unterminated one swallows the rest of the document.
+    const multiline = parseDatTopLevel('Name "First\nSecond"\nDescription After');
+    equal("dat keeps a newline inside a quoted value", multiline.get("Name"), "First\nSecond");
+    equal("and the next line is still a key", multiline.get("Description"), "After");
+    equal(
+        "an unterminated quote takes the rest of the document",
+        parseDatTopLevel('Name "First\nDescription After').get("Name"),
+        "First\nDescription After",
+    );
+    equal(
+        "a quote inside a comment opens nothing",
+        parseDatTopLevel('/ he said "hi\nName Kept').get("Name"),
+        "Kept",
+    );
+
     // A brace is structural only where the tokenizer would start a token. These three were read off the
     // game's own parser rather than reasoned from its source, and they do not all agree with intuition.
 
@@ -491,7 +538,7 @@ function dat() {
 }
 
 async function installLayout(manifest) {
-    const root = await seed(manifest, "install");
+    const root = await seed(manifest, INSTALL_PREFIX);
     const fs = new HandleFs(root);
     const result = await probeInstall(fs, { platform: "linux" });
 
@@ -505,6 +552,21 @@ async function installLayout(manifest) {
         `workshopPath=${result.workshopPath}`,
     );
 
+    // The maps the probe lists are exactly the folders that have a Level.dat.
+    const folders = await fs.listDirectories("Maps");
+    const withLevel = [];
+    for (const folder of folders) {
+        if (await fs.isFile(`${folder.path}/Level.dat`)) withLevel.push(folder.name);
+    }
+    equal("every Level.dat folder is listed", result.maps.length, withLevel.length);
+
+    // Ordering: playable before unplayable, official before workshop.
+    const unplayable = { supported: false, source: "Official", displayName: "Z" };
+    const playable = { supported: true, source: "Workshop", displayName: "A" };
+    check("playable maps sort first", compareForMenu(playable, unplayable) < 0, "sort order wrong");
+
+    // Everything below is about PEI specifically. The checks above are not, so they run first: a
+    // missing PEI should cost one failure, not silently shrink the suite.
     const pei = result.maps.find((map) => map.folderName === "PEI");
     check("PEI is listed", pei !== undefined, `maps: ${result.maps.map((m) => m.folderName).join(", ")}`);
     if (pei === undefined) return;
@@ -520,19 +582,6 @@ async function installLayout(manifest) {
         `description=${JSON.stringify(pei.description)}`,
     );
     check("PEI artwork resolved", pei.previewPath === "Maps/PEI/Preview.png", `preview=${pei.previewPath}`);
-
-    // The maps the probe lists are exactly the folders that have a Level.dat.
-    const folders = await fs.listDirectories("Maps");
-    const withLevel = [];
-    for (const folder of folders) {
-        if (await fs.isFile(`${folder.path}/Level.dat`)) withLevel.push(folder.name);
-    }
-    equal("every Level.dat folder is listed", result.maps.length, withLevel.length);
-
-    // Ordering: playable before unplayable, official before workshop.
-    const unplayable = { supported: false, source: "Official", displayName: "Z" };
-    const playable = { supported: true, source: "Workshop", displayName: "A" };
-    check("playable maps sort first", compareForMenu(playable, unplayable) < 0, "sort order wrong");
 }
 
 async function steamLibraryLayout(manifest) {
@@ -564,7 +613,7 @@ async function fallbackParity(manifest) {
     const listing = new ListingFs(fileListFrom(manifest, "Unturned"), { caseInsensitive: false });
     const viaListing = await probeInstall(listing, { platform: "linux" });
 
-    const root = await seed(manifest, "install");
+    const root = await seed(manifest, INSTALL_PREFIX);
     const viaHandles = await probeInstall(new HandleFs(root), { platform: "linux" });
 
     equal("fallback keeps the folder name", listing.name, "Unturned");
@@ -581,7 +630,7 @@ async function fallbackParity(manifest) {
 // Range reads are how anything large gets read here — a 1.4 GB masterbundle has no whole-file read in a
 // 32-bit wasm heap. Level.dat is small, but the mechanism is the same one the bundle streamer needs.
 async function rangeReads(manifest) {
-    const root = await seed(manifest, "install");
+    const root = await seed(manifest, INSTALL_PREFIX);
     const fs = new HandleFs(root);
 
     const whole = await fs.readFile("Maps/PEI/Level.dat");

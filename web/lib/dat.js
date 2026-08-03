@@ -9,11 +9,17 @@
 // from core/ compiled to WebAssembly, not from a second hand-written parser drifting against the first.
 //
 // Where it *does* overlap, it has to agree, because a map the browser describes differently from the
-// catalogue is worse than one it says nothing about. Three rules are therefore copied exactly rather
-// than approximated: keys are matched case-insensitively (DatDictionary uses OrdinalIgnoreCase), a value
-// runs to the end of its line and a '/' only opens a comment where a token would start (DatParser's
-// ReadStringValue consumes the remainder of the line, so a URL in a Description keeps its slashes), and
-// `\n`, `\t` and `\<anything>` are decoded (DatParser.Unescape).
+// catalogue is worse than one it says nothing about. The rules below are therefore copied rather than
+// approximated, and every one of them was confirmed by running the game's parser rather than reasoned
+// from its source — the two disagreed more than once:
+//
+//   * Keys match case-insensitively and the last duplicate wins (DatDictionary, OrdinalIgnoreCase).
+//   * A value runs to the end of its line, and '/' only opens a comment where a token would start, so a
+//     URL in a Description keeps its slashes (ReadStringValue).
+//   * `\n`, `\t` and `\<anything>` are decoded (Unescape), and a quoted run ends at the first
+//     unescaped quote — crossing newlines to get there (ReadQuoted).
+//   * One comma directly after a closing quote belongs to the quote, not to what follows (ReadQuoted).
+//   * Braces are structural only at the start of a line; see parseDatTopLevel.
 
 // Top-level key/value pairs of a .dat document. Keys are compared case-insensitively and the last
 // spelling of a duplicate key wins, both matching DatDictionary.
@@ -58,7 +64,7 @@ export function parseDatTopLevel(text) {
     // The last key set at the top level, which a block opening on the next line takes back over.
     let pending = null;
 
-    for (const rawLine of String(text ?? "").split(/\r\n|\r|\n/)) {
+    for (const rawLine of logicalLines(String(text ?? ""))) {
         const line = rawLine.trim();
         if (line === "") continue;
 
@@ -96,6 +102,54 @@ export function parseDatTopLevel(text) {
 
 export function datString(text, key) {
     return parseDatTopLevel(text).get(key) ?? null;
+}
+
+// Splits into lines the way the tokenizer would, which is not the same as splitting on newlines:
+// ReadQuoted runs to its closing quote and crosses CR/LF on the way, so
+//
+//     Name "First
+//     Second"
+//
+// is one key with a two-line value, and an *unterminated* quote swallows the rest of the document.
+// Splitting first and parsing after would read the continuation as another key. Comments are handled
+// here too, because a stray quote inside one ("/ he said "hi") must not open a quoted run — the game's
+// tokenizer consumes a comment to end of line without looking at what is in it.
+function* logicalLines(text) {
+    let start = 0;
+    let quoted = false;
+    let lineHasContent = false;
+
+    for (let i = 0; i < text.length; i++) {
+        const c = text[i];
+
+        if (quoted) {
+            if (c === "\\")
+                i++; // an escaped character, including \" , is not a delimiter
+            else if (c === '"') quoted = false;
+            continue;
+        }
+
+        if (c === "\n" || c === "\r") {
+            yield text.slice(start, i);
+            if (c === "\r" && text[i + 1] === "\n") i++;
+            start = i + 1;
+            lineHasContent = false;
+            continue;
+        }
+
+        if (c === " " || c === "\t") continue;
+
+        // A '/' where a token would start opens a comment; the rest of the line is not tokenized.
+        if (c === "/" && !lineHasContent) {
+            while (i + 1 < text.length && text[i + 1] !== "\n" && text[i + 1] !== "\r") i++;
+            continue;
+        }
+
+        lineHasContent = true;
+        if (c === '"') quoted = true;
+    }
+
+    if (start < text.length) yield text.slice(start);
 }
 
 // The key is the first whitespace-delimited word, or a quoted string; the value is everything after it on

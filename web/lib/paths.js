@@ -12,8 +12,9 @@ export function segments(path) {
     for (const raw of String(path ?? "").split(/[/\\]+/)) {
         if (raw === "" || raw === ".") continue;
         if (raw === "..") {
-            // A picked directory is the root of its own world: there is no handle above it, so ".."
-            // cannot escape and is dropped rather than silently resolving somewhere unexpected.
+            // ".." resolves against the segments collected so far, so it does traverse inside the
+            // picked folder. What it cannot do is leave: that folder is the root of its own world, with
+            // no handle above it, so a ".." with nothing to pop is discarded rather than escaping.
             parts.pop();
             continue;
         }

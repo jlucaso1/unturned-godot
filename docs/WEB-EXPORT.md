@@ -114,7 +114,7 @@ The project runs Jolt on its own thread (`physics/3d/run_on_separate_thread=true
 `Task.Run`/`Parallel` in 29 places across foliage, streaming, navigation and extraction. Godot's threaded
 web export needs `SharedArrayBuffer`, which needs the page served with:
 
-```
+```text
 Cross-Origin-Opener-Policy: same-origin
 Cross-Origin-Embedder-Policy: require-corp
 ```
@@ -183,6 +183,7 @@ A dependency-free ES-module layer plus a demo page:
 | Path | What it is |
 |---|---|
 | `web/lib/paths.js` | POSIX-shaped path handling; `..` cannot escape the picked root |
+| `web/lib/read-only-fs.js` | What both backends share: everything derivable from `file()` and `listDir()`, so the two cannot drift |
 | `web/lib/handle-fs.js` | Read-only VFS over a `FileSystemDirectoryHandle`: `stat`, `listDir`, `readFile`, `readRange`, `walk`, cached handle resolution |
 | `web/lib/listing-fs.js` | The same interface over a `webkitdirectory` `FileList`, for browsers with no picker |
 | `web/lib/handle-store.js` | Persists the picked handle in IndexedDB; re-requests permission on a gesture |
@@ -214,7 +215,7 @@ the same type `showDirectoryPicker()` returns — so `HandleFs` is exercised on 
 mock. It then drives the demo page end to end with the picker stubbed to hand back that same handle,
 because the one thing no automation can click is the native folder dialog.
 
-99 assertions, covering path handling, the `.dat` subset, install detection (both the install folder and
+104 assertions, covering path handling, the `.dat` subset, install detection (both the install folder and
 the Steam-library layout), map discovery against PEI's real `Level.dat`/`English.dat`/`Config.json` and
 its 16 Landscape tiles, range reads and their clamping, and parity between the two filesystem backends.
 It self-skips when the content or Playwright is missing, like the C# suite's data-backed tests. Files
