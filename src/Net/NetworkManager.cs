@@ -126,7 +126,7 @@ public partial class NetworkManager : Node
             if (space == null)
                 return false;
             ray.From = from;
-            ray.To = from + ((to - from) * 0.95f);
+            ray.To = from + ((to - from) * Zombies.ZombieBody.VisionRayFraction);
             return space.IntersectRay(ray).Count > 0;
         };
         // The CharacterController's collide-and-slide against real world colliders: sweep a
@@ -134,7 +134,7 @@ public partial class NetworkManager : Node
         // dragged its base along the terrain and jammed on every micro-slope; ground contact is
         // the ground snap's job here, like a CC's grounding pass). Catches knee-high furniture and
         // head-high overhangs that the old chest sphere missed.
-        var sweep = new CapsuleShape3D { Height = 1.6f };
+        var sweep = new CapsuleShape3D { Height = Zombies.ZombieBody.CapsuleHeight };
         // Mask 1 only: LARGE world + terrain + resources. MEDIUM furniture lives on its own layer
         // (the navmesh ignores it; original zombies shove through it).
         var query = new PhysicsShapeQueryParameters3D { Shape = sweep, CollisionMask = 1 };
@@ -150,7 +150,10 @@ public partial class NetworkManager : Node
                 sweep.Radius = radius;
                 lastRadius = radius;
             }
-            var chest = new Vector3(0f, 1.2f, 0f); // capsule centre: covers 0.4..2.0 above the feet
+            // Capsule centre: covers ZombieBody.CapsuleBottom..CapsuleTop above the feet. The constants
+            // live in core because the bug-repro replay sweeps the SAME body without an engine, and a
+            // replay against a different capsule is not a reproduction of anything.
+            var chest = new Vector3(0f, Zombies.ZombieBody.CapsuleCenter, 0f);
             Vector3 at = from;
             Vector3 motion = to - from;
 
@@ -161,8 +164,7 @@ public partial class NetworkManager : Node
             // sidestep heuristic bolted on top of a single pass re-decides every tick and visibly
             // shuffles left and right. Four passes is enough for a corner (two walls) plus slack;
             // Unity does not publish its own count.
-            const int MaxSlides = 4;
-            for (int pass = 0; pass < MaxSlides; pass++)
+            for (int pass = 0; pass < Zombies.ZombieBody.MaxSlides; pass++)
             {
                 if (motion.LengthSquared() < 1e-8f)
                     break;
@@ -181,8 +183,8 @@ public partial class NetworkManager : Node
                 // not. Only attempted on the first contact, like the CC's own step pass.
                 if (pass == 0)
                 {
-                    query.Transform =
-                        new Transform3D(Basis.Identity, at + chest + new Vector3(0f, 0.5f, 0f));
+                    query.Transform = new Transform3D(Basis.Identity,
+                        at + chest + new Vector3(0f, Player.PlayerConfig.StepOffset, 0f));
                     float[] stepCast = space.CastMotion(query);
                     if (stepCast[0] >= 1f)
                     {
@@ -226,8 +228,8 @@ public partial class NetworkManager : Node
             if (space == null)
                 return _ground(position.X, position.Z, out y);
             // Start just above the CC's stepOffset (0.5): steps resolve, railings above don't.
-            snapRay.From = position + new Vector3(0f, 0.55f, 0f);
-            snapRay.To = position + new Vector3(0f, -3f, 0f);
+            snapRay.From = position + new Vector3(0f, Zombies.ZombieBody.GroundProbeUp, 0f);
+            snapRay.To = position + new Vector3(0f, -Zombies.ZombieBody.GroundProbeDown, 0f);
             Godot.Collections.Dictionary hit = space.IntersectRay(snapRay);
             if (hit.Count > 0)
             {

@@ -409,7 +409,8 @@ public sealed partial class ZombieSystem
                 // AlertTool's line-of-sight raycast: from the zombie's eyes toward the alert, 95%
                 // of the distance so the ray doesn't clip the player's own collider.
                 if (VisionBlocked != null
-                    && VisionBlocked(zombie.Position + Vector3.Up, player.Position))
+                    && VisionBlocked(zombie.Position + (Vector3.Up * ZombieBody.EyeHeight),
+                        player.Position))
                     continue;
                 Alert(zombie, player, players);
             }
