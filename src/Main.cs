@@ -11,6 +11,7 @@ public partial class Main : Node3D
     // The map folder under Maps/ (or a workshop item) that this run loads. The menu picks it; MAP=
     // overrides for automation, and the last pick is remembered between sessions.
     private const string DefaultMapName = "PEI";
+    private const float DefaultMeshLodThreshold = 2f;
     private const string MenuConfigPath = "user://menu.cfg";
 
     private string _mapName = DefaultMapName;
@@ -32,14 +33,23 @@ public partial class Main : Node3D
     {
         // Godot's own automatic mesh LOD, in pixels of screen-space error. 0 disables it outright, which
         // is the only way to A/B what the meshoptimizer chain ModelLibrary already generates is worth.
+        //
+        // Above the engine default because the engine's is chosen to be lossless on any content, and
+        // this content is far more forgiving than that: its meshes are low-poly and untextured-flat, so
+        // the levels differ mostly in silhouette. A step up sheds a useful share of the geometry a
+        // wooded map submits at eye level with no difference the eye finds at the horizon, where the
+        // levels actually swap. Further steps stop being free — the distant tree canopies visibly thin
+        // — and buy progressively less, so this sits at the last value that still costs nothing.
+        float thresholdPixels = DefaultMeshLodThreshold;
         if (OS.GetEnvironment("UG_MESH_LOD_THRESHOLD") is { Length: > 0 } lodThreshold
             && float.TryParse(lodThreshold, System.Globalization.NumberStyles.Float,
-                System.Globalization.CultureInfo.InvariantCulture, out float thresholdPixels)
-            && float.IsFinite(thresholdPixels) // TryParse accepts "NaN"/"Infinity", and Clamp keeps NaN
-            && GetViewport() is { } viewport)
+                System.Globalization.CultureInfo.InvariantCulture, out float requestedThreshold)
+            && float.IsFinite(requestedThreshold)) // TryParse accepts "NaN"/"Infinity", Clamp keeps NaN
         {
-            viewport.MeshLodThreshold = Mathf.Clamp(thresholdPixels, 0f, 1024f);
+            thresholdPixels = requestedThreshold;
         }
+        if (GetViewport() is { } viewport)
+            viewport.MeshLodThreshold = Mathf.Clamp(thresholdPixels, 0f, 1024f);
 
         if (OS.GetEnvironment("MAP") is { Length: > 0 } mapOverride)
             _mapName = mapOverride;

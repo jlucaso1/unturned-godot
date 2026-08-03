@@ -325,11 +325,13 @@ ground poses barely move, because the vantage the harness picks there is open be
 in frame — the near and aerial poses carry the whole effect. On a dense map the same setting takes a
 tenth or more off the ground view, which is the view that matters.
 
-It is not adopted because the cost is visible, and only a dense map shows that too. Comparing captures
-at the ground pose, raising it thins distant tree canopies and coarsens landmarks on the skyline; the
-differing pixels concentrate in the horizon band, and there are several times more of them than on the
-sparse map. Whether that is worth the geometry is a judgement about the game's look, not something the
-counts settle — so the shipped value stays at Godot's default until someone makes that call.
+The cost is visible too, and again only a dense map shows it: raising it far enough thins distant tree
+canopies and coarsens skyline landmarks, with the differing pixels concentrated in the horizon band.
+That cost is very unevenly distributed across the range. One step above the engine default is free by
+both measures — the differing pixels are a rounding error and nothing in the captures changes — while
+each step after that costs several times more pixels for progressively less geometry. So the shipped
+value takes the free step and stops; `UG_MESH_LOD_THRESHOLD` reaches the rest for anyone who wants to
+retrade it, and zero disables automatic mesh LOD entirely as the A/B control.
 
 The wider lesson is about the harness: a conclusion drawn from one map's ground pose can be wrong by an
 order of magnitude, in both the saving and the cost. Check a dense map before believing either.

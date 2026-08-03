@@ -549,6 +549,19 @@ public class PhysicsBodyOrderTests
     }
 
     [Fact]
+    public void TheMeshLodThresholdIsAppliedWhetherOrNotTheOverrideIsSet()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Main.cs")) is not { } path)
+            return;
+        string source = File.ReadAllText(path);
+        // The override used to be the only writer, so the shipped value was whatever the engine
+        // defaulted to and dropping the assignment out of the unset path would silently restore it.
+        Assert.Contains("float thresholdPixels = DefaultMeshLodThreshold", source);
+        Assert.Contains("UG_MESH_LOD_THRESHOLD", source);
+        Assert.Contains("viewport.MeshLodThreshold = Mathf.Clamp(thresholdPixels, 0f, 1024f)", source);
+    }
+
+    [Fact]
     public void ObjectCellsAreAnchoredPerGroupAndCoarsenedByTheGeometryTheyCarry()
     {
         if (FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs")) is not { } path)
