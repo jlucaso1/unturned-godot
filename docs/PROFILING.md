@@ -319,11 +319,19 @@ under a percent while leaving the aerial poses byte-identical. Per-asset thresho
 bound. The reason is that automatic mesh LOD has already decimated the base mesh by the distances where
 an authored level would take over, so which of the two answers first barely matters.
 
-**Raising the viewport's mesh LOD threshold.** This one does have an effect, and an uneven one: it
-barely moves a standing ground view while roughly halving a near view and taking a tenth off the aerial
-poses. It is not adopted here because the harness has no vantage that would show its cost — the
-ground-level pose it captures is open beach, where foliage submits nothing at all (an all-resident
-foliage control reproduces the counts byte-identically). Judging it needs a town-dense, foliage-dense
-pose; until then the shipped value stays at Godot's default.
+**Raising the viewport's mesh LOD threshold.** Unlike the other two this one is a real trade rather
+than a dead end, and how large it looks depends entirely on which map you measure. On a sparse map the
+ground poses barely move, because the vantage the harness picks there is open beach with nothing distant
+in frame — the near and aerial poses carry the whole effect. On a dense map the same setting takes a
+tenth or more off the ground view, which is the view that matters.
+
+It is not adopted because the cost is visible, and only a dense map shows that too. Comparing captures
+at the ground pose, raising it thins distant tree canopies and coarsens landmarks on the skyline; the
+differing pixels concentrate in the horizon band, and there are several times more of them than on the
+sparse map. Whether that is worth the geometry is a judgement about the game's look, not something the
+counts settle — so the shipped value stays at Godot's default until someone makes that call.
+
+The wider lesson is about the harness: a conclusion drawn from one map's ground pose can be wrong by an
+order of magnitude, in both the saving and the cost. Check a dense map before believing either.
 
 Profiling output (`*.nettrace`, `heaptrack.*.zst`, `massif.out.*`, `perf.data`, `*.rgp`) is git-ignored.
