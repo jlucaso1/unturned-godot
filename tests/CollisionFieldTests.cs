@@ -483,6 +483,135 @@ public class CollisionFieldTests
     }
 
     [Fact]
+    public void GroundOutsideTheProbedSegment_IsAnAnswerRatherThanIgnorance()
+    {
+        // Reconciliation probes a bounded segment around each navmesh face, so most of the map's terrain is
+        // out of range of any given probe. Being out of range is not the same as being unrecorded: the
+        // column is still modelled, so "nothing here" is a verdict the server does not need to re-check.
+        var above = new CollisionFieldBuilder();
+        AddFlatGround(above, cells: 4, cell: 1f, height: 40f); // whole tile above the segment
+        SurfaceSample high = above.Build().Probe(2f, 2f, topY: 2f, bottomY: 0f);
+        Assert.False(high.Hit);
+        Assert.False(high.Uncertain);
+
+        var below = new CollisionFieldBuilder();
+        AddFlatGround(below, cells: 4, cell: 1f, height: -40f); // whole tile below it
+        SurfaceSample low = below.Build().Probe(2f, 2f, topY: 2f, bottomY: 0f);
+        Assert.False(low.Hit);
+        Assert.False(low.Uncertain);
+
+        // A cliff spans the segment, so the tile's range cannot rule it out and each column has to be
+        // sampled and then judged on its own height.
+        var cliff = new CollisionFieldBuilder();
+        var data = new float[] { -20f, -20f, 20f, 20f };
+        cliff.AddHeightfield(Grid(new Vector3(1f, 0f, 1f), 2f), 2, 2, data);
+        CollisionField field = cliff.Build();
+        Assert.False(field.Probe(0.1f, 0.1f, topY: 2f, bottomY: 0f).Hit);  // sampled below the segment
+        Assert.False(field.Probe(0.1f, 1.9f, topY: 2f, bottomY: 0f).Hit);  // sampled above it
+        Assert.True(field.Probe(0.1f, 1f, topY: 2f, bottomY: -2f).Hit);    // and through it in between
+    }
+
+    [Fact]
+    public void SpheresOutsideTheSegment_DoNotAnswerForIt()
+    {
+        // The broadphase pads by the graze band, so a body sitting just outside the probed segment is still
+        // handed to the ray test and has to be rejected there — once for starting past it, once for
+        // sitting behind the ray's origin.
+        var builder = new CollisionFieldBuilder();
+        AddFlatGround(builder, cells: 4, cell: 1f, height: 0f);
+        int sphere = builder.AddSphereShape(1f);
+        builder.AddInstance(sphere, new Transform3D(Basis.Identity, new Vector3(1f, 5f, 1f)));
+        builder.AddInstance(sphere, new Transform3D(Basis.Identity, new Vector3(3f, -5f, 3f)));
+        CollisionField field = builder.Build();
+
+        // topY sits just under the upper sphere: it is inside the padded bounds, but the ray points away.
+        SurfaceSample overhead = field.Probe(1f, 1f, topY: 3.99f, bottomY: 0f);
+        Assert.True(overhead.Hit);
+        Assert.Equal(0f, overhead.Y, 0.0001f); // the ground, not the sphere overhead
+
+        // bottomY stops just above the lower sphere, so its entry lies past the end of the segment.
+        SurfaceSample underfoot = field.Probe(3f, 3f, topY: -3.5f, bottomY: -3.99f);
+        Assert.False(underfoot.Hit);
+    }
+
+    [Fact]
+    public void ACapsuleIsMissedCleanlyBesideIt_AndAboveAndBelowItsEnds()
+    {
+        // A lying capsule is the one shape where the ray can miss three separate ways, and each has to
+        // come back as a clean miss rather than as a doubt the server pays for.
+        var builder = new CollisionFieldBuilder();
+        AddFlatGround(builder, cells: 8, cell: 1f, height: 0f);
+        int rail = builder.AddCapsuleShape(radius: 0.25f, height: 4f);
+        // Laid along X at y = 2, so its axis runs from x = 2 to x = 6 through z = 4.
+        var lying = new Transform3D(new Basis(new Quaternion(Vector3.Back, MathF.PI / 2f)),
+            new Vector3(4f, 2f, 4f));
+        builder.AddInstance(rail, lying);
+        CollisionField field = builder.Build();
+
+        // Squarely over the middle, the answer is the top of the cylinder rather than its axis.
+        Assert.Equal(2.25f, field.Probe(4f, 4f, topY: 5f, bottomY: 0.5f).Y, 0.01f);
+
+        // Just beside the rail in Z: the ray never reaches the cylinder's radius, but it passes close
+        // enough that which side of the surface it fell on is the collision engine's call, not ours.
+        SurfaceSample beside = field.Probe(4f, 4.26f, topY: 5f, bottomY: 0.5f);
+        Assert.False(beside.Hit);
+        Assert.True(beside.Uncertain);
+
+        // Past the end caps along the axis: the cylinder's solution is beyond the segment the caps close
+        // off, and neither cap is in the way either.
+        SurfaceSample past = field.Probe(6.01f, 4f, topY: 5f, bottomY: 0.5f);
+        Assert.False(past.Hit);
+
+        // Over the rail but stopping a centimetre short of it, so the entry lies past the end of the ray.
+        SurfaceSample stopsShort = field.Probe(4f, 4f, topY: 5f, bottomY: 2.26f);
+        Assert.False(stopsShort.Hit);
+    }
+
+    [Fact]
+    public void ADegenerateMeshTriangleIsNothingToStandOn()
+    {
+        // Collision meshes carry collapsed triangles. One has no area, so it has no altitude to measure a
+        // graze band against and no surface to report — it must drop out rather than divide by zero and
+        // hand the whole column to the server.
+        var builder = new CollisionFieldBuilder();
+        AddFlatGround(builder, cells: 4, cell: 1f, height: 0f);
+        int mesh = builder.AddMeshShape(new[]
+        {
+            new Vector3(1f, 2f, 1f), new Vector3(3f, 2f, 1f), new Vector3(2f, 2f, 1f), // collinear
+        });
+        builder.AddInstance(mesh, Transform3D.Identity);
+        CollisionField field = builder.Build();
+
+        SurfaceSample sample = field.Probe(2f, 1f, topY: 5f, bottomY: -1f);
+        Assert.True(sample.Hit);
+        Assert.Equal(0f, sample.Y, 0.0001f); // the ground below it, never the sliver
+        Assert.False(sample.Uncertain);
+    }
+
+    [Fact]
+    public void ScaledInstancePlacementsAreRefused()
+    {
+        // ProbeInstances rotates the ray into shape space and reads the returned parameter back as a world
+        // distance, which only holds while the basis is rigid. A scaled placement would answer with a
+        // plausible height in the wrong units and no uncertainty flag, so it is refused at the door.
+        var builder = new CollisionFieldBuilder();
+        int shape = builder.AddSphereShape(1f);
+        foreach (Vector3 scale in new[]
+        {
+            new Vector3(1.5f, 1f, 1f), new Vector3(1f, 1.5f, 1f), new Vector3(1f, 1f, 1.5f),
+        })
+        {
+            var scaled = new Transform3D(Basis.Identity.Scaled(scale), Vector3.Zero);
+            Assert.Throws<ArgumentException>(() => builder.AddInstance(shape, scaled));
+        }
+
+        // Rotation alone is rigid, and the tolerance absorbs the drift of a basis built from a quaternion.
+        var turned = new Transform3D(new Basis(new Quaternion(Vector3.Up, 0.7f)), new Vector3(3f, 0f, 0f));
+        builder.AddInstance(shape, turned);
+        Assert.Equal(1, builder.Build().InstanceCount);
+    }
+
+    [Fact]
     public void ACapsuleLyingDown_IsProbedThroughItsCylinder()
     {
         // Every capsule in the tests above stands on its axis, so a downward probe runs parallel to it and
