@@ -449,9 +449,15 @@ public sealed class BakedNavGraph
                     }
                     else
                     {
-                        zFrom = p.Z + (dz * ((spanFrom - p.X) / dx));
-                        zTo = p.Z + (dz * ((spanTo - p.X) / dx));
-                        if (zFrom > zTo) (zFrom, zTo) = (zTo, zFrom);
+                        // Clamped to the segment's OWN span, because the column bounds carry the slack
+                        // and therefore reach past both ends. Dividing that overshoot by a tiny dx
+                        // extrapolates: a nearly vertical 2 km edge would report a million metres of Z
+                        // for one column and index half a million rows, which is the quadratic blowup
+                        // this sweep exists to avoid, reintroduced by the slack that fixed the last one.
+                        float from = Math.Clamp((spanFrom - p.X) / dx, 0f, 1f);
+                        float to = Math.Clamp((spanTo - p.X) / dx, 0f, 1f);
+                        zFrom = p.Z + (dz * MathF.Min(from, to));
+                        zTo = p.Z + (dz * MathF.Max(from, to));
                     }
                     int firstRow = (int)MathF.Floor((zFrom - JoinPlanarSlack) / Cell);
                     int lastRow = (int)MathF.Floor((zTo + JoinPlanarSlack) / Cell);

@@ -536,6 +536,43 @@ public class BakedNavGraphTests
         };
     }
 
+    // The broad phase indexes each border edge by the cells it spans, widened by the slack the join
+    // test allows. Those widened bounds reach PAST both ends of the edge, so converting them back to a
+    // position along it extrapolates — and dividing that overshoot by a dx of 2e-6 turned one column
+    // into a million metres of Z, half a million indexed rows.
+    //
+    // This PASSES EITHER WAY and is not a guard against that, which is worth stating rather than
+    // implying: measured at 44 ms with the clamp and 1 s without it, so the defect shows up as cost,
+    // not as a failure, and no assertion here separates them. A threshold that did would be a timing
+    // assertion, which is worse than nothing in CI.
+    //
+    // What actually rules the blowup out is structural: clamping the interpolation parameter to [0, 1]
+    // means the rows indexed for a column can never exceed the segment's own extent, whatever the
+    // slack does to the column bounds. This exercises the shape so a future rewrite meets it at all.
+    [Fact]
+    public void ALongNearlyVerticalSliver_DoesNotExplodeTheBroadPhase()
+    {
+        var flag = new NavFlag
+        {
+            Center = new Vector3(0.5f, 0, 1000f),
+            Size = new Vector3(4f, 10f, 2100f),
+            Vertices = new[]
+            {
+                new Vector3(0f, 0, 0f),
+                new Vector3(0.000002f, 0, 2000f),
+                new Vector3(1f, 0, 0f),
+                new Vector3(1.000002f, 0, 2000f),
+            },
+            Triangles = new[] { 0, 1, 2, 1, 3, 2 },
+        };
+
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { flag });
+
+        var path = new List<Vector3>();
+        Assert.True(graph.TryPath(new Vector3(0.5f, 0, 1f), new Vector3(0.5f, 0, 1999f), path));
+        Assert.Equal(2, path.Count); // one open sliver, string-pulled straight
+    }
+
     [Fact]
     public void AFloorSplitByATJunction_IsStillOneWalkableSurface()
     {
