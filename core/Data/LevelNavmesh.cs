@@ -161,7 +161,7 @@ public static class LevelNavmesh
                 bool pos = d1 > 0f || d2 > 0f || d3 > 0f;
                 if (!(neg && pos))
                 {
-                    float y = (a.Y + b.Y + c.Y) / 3f;
+                    float y = HeightAt(a, b, c, area2, point);
                     float dy = Mathf.Abs(y - point.Y);
                     if (dy < bestContainedDy)
                     {
@@ -189,6 +189,25 @@ public static class LevelNavmesh
             return true;
         }
         return false;
+    }
+
+    // The surface height under the point, not the triangle's average. A baked face can be tens of metres
+    // across and carry the whole rise of a ramp or hillside, so the centroid is not the ground anywhere
+    // except the middle: on a 40 m face rising 8 m, every point on it snapped to 2.67 — 2.5 m too high at
+    // the bottom edge and 5.1 m too low at the top corner, a 7.8 m spread collapsed to one number.
+    //
+    // That number is also what the dy comparison above uses to choose between triangles that overlap in
+    // XZ, which is the "do not snap onto another storey" rule the callers rely on. Deciding it against a
+    // face's average rather than the ground under the point is exactly wrong on the geometry that has
+    // storeys in the first place — stairs and ramps.
+    //
+    // Barycentric in XZ; the denominator is twice the signed area, which is the area2 the caller already
+    // computed and already rejected for being degenerate.
+    private static float HeightAt(in Vector3 a, in Vector3 b, in Vector3 c, float area2, Vector3 point)
+    {
+        float w1 = (((b.Z - c.Z) * (point.X - c.X)) + ((c.X - b.X) * (point.Z - c.Z))) / area2;
+        float w2 = (((c.Z - a.Z) * (point.X - c.X)) + ((a.X - c.X) * (point.Z - c.Z))) / area2;
+        return (w1 * a.Y) + (w2 * b.Y) + ((1f - w1 - w2) * c.Y);
     }
 
     private static void ClosestOnEdge(Vector3 a, Vector3 b, Vector3 point,
