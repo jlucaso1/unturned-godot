@@ -207,6 +207,7 @@ npx http-server web -p 8080     # or: python3 -m http.server -d web 8080
 ```sh
 node web/test/run.mjs            # uses UNTURNED_PATH, or build/game-data
 node web/test/run.mjs --keep-open
+node web/test/differential.mjs   # the .dat port against core/Dat/DatParser.cs
 ```
 
 The suite seeds Chromium's origin-private filesystem from real game content and runs the shipping modules
@@ -215,12 +216,20 @@ the same type `showDirectoryPicker()` returns — so `HandleFs` is exercised on 
 mock. It then drives the demo page end to end with the picker stubbed to hand back that same handle,
 because the one thing no automation can click is the native folder dialog.
 
-160 assertions, covering path handling, the `.dat` subset, install detection (both the install folder and
+160 assertions, covering path handling, the `.dat` reader, install detection (both the install folder and
 the Steam-library layout), map discovery against PEI's real `Level.dat`/`English.dat`/`Config.json` and
 its 16 Landscape tiles, range reads and their clamping, and parity between the two filesystem backends.
 It self-skips when the content or Playwright is missing, like the C# suite's data-backed tests. Files
 over 256 KB are seeded as empty placeholders — the probe only counts or checks for those, and moving
 73 MB through a page for every run buys nothing.
+
+`web/lib/dat.js` gets a second, different kind of check. It is a port of `core/Dat/DatParser.cs`, so the
+thing worth testing is not whether it passes fixtures but whether it *is* that parser — and a hand-written
+approximation of the grammar was wrong in a new way in each of three consecutive reviews, every time
+passing the assertions written for the previous one. `web/test/differential.mjs` builds 4000 documents out
+of the tokens that actually distinguish the grammar — brackets in every position, mismatched closers,
+quotes crossing newlines, tight and detached commas, comments — runs them through the real parser and
+compares the top-level values with the port's. 8000 comparisons, and it skips without the .NET SDK.
 
 Some layouts no download contains are built by hand instead, because they are where the probe can quietly
 disagree with `core/`: two subscribed workshop items whose maps share a folder name (two maps, not one),

@@ -200,6 +200,18 @@ jobs:
             exit 1
           fi
 
+      # The .dat reader is a port of core/Dat/DatParser.cs, so it is checked against that parser rather
+      # than against a fixture: thousands of generated documents through both, top-level values compared.
+      # It self-skips without the .NET SDK, which this job has.
+      - name: Check the .dat port against the game's parser
+        run: |
+          set -o pipefail
+          node web/test/differential.mjs | tee "$RUNNER_TEMP/dat-differential.log"
+          if grep -q 'skipped' "$RUNNER_TEMP/dat-differential.log"; then
+            echo "The differential skipped; it was supposed to run."
+            exit 1
+          fi
+
   structural:
     # The tests prove the parsers read the right bytes; nothing proves the world they build keeps its
     # shape. This runs the structural benchmark tier and gates its counts — meshes and materials

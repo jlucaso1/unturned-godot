@@ -177,6 +177,9 @@ dotnet format unturned-godot.sln                                   # auto-format
 
 # Browser file layer: runs web/ against real game content in Chromium. Self-skips without either.
 node web/test/run.mjs
+
+# The browser's .dat port against core/Dat/DatParser.cs, over generated documents.
+node web/test/differential.mjs
 ```
 
 Style and analyzers are enforced via `.editorconfig` + `Directory.Build.props` (`EnableNETAnalyzers`,
