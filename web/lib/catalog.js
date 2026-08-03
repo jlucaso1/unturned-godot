@@ -230,15 +230,26 @@ function compareOrdinalIgnoreCase(a, b) {
     return left < right ? -1 : left > right ? 1 : 0;
 }
 
-// The upcase OrdinalIgnoreCase performs is one code point at a time, and a code point whose uppercase
-// is longer than itself is left alone: ToUpperInvariant('ß') is 'ß', not "SS". JavaScript's toUpperCase
-// does the full Unicode mapping, which would make "ß" and "SS" compare equal here and not on the
-// desktop — so anything that expands keeps its original form.
+// Code points whose JavaScript uppercase differs from .NET's ToUpperInvariant, which leaves every one of
+// them unchanged. U+0131 (dotless i) is the well-known exclusion; the rest are recent Unicode additions
+// the invariant casing table has not taken up. Produced by dumping char.ToUpperInvariant across the BMP
+// from this repo's runtime and diffing it against the browser's toUpperCase — nine in total, and the only
+// one-to-one disagreements there are. Regenerate if either side's Unicode version moves.
+const NOT_UPCASED_BY_INVARIANT = new Set([
+    0x0131, 0x019b, 0x0264, 0x1c8a, 0xa7cd, 0xa7cf, 0xa7d3, 0xa7d5, 0xa7db,
+]);
+
+// The upcase OrdinalIgnoreCase performs is one code point at a time, and it is the *invariant* table:
+// a code point whose uppercase is longer than itself is left alone (ToUpperInvariant('ß') is 'ß', not
+// "SS"), and so are the nine above. JavaScript's toUpperCase does the full current Unicode mapping, so
+// without both guards "ß"/"SS" and "ı"/"I" would compare equal here and distinct on the desktop.
 function simpleUpperCase(text) {
     let out = "";
     for (const character of text) {
         const upper = character.toUpperCase();
-        out += upper.length === character.length ? upper : character;
+        const folds =
+            upper.length === character.length && !NOT_UPCASED_BY_INVARIANT.has(character.codePointAt(0));
+        out += folds ? upper : character;
     }
     return out;
 }

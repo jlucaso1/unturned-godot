@@ -18,7 +18,8 @@
 //     URL in a Description keeps its slashes (ReadStringValue).
 //   * `\n`, `\t` and `\<anything>` are decoded (Unescape), and a quoted run ends at the first
 //     unescaped quote — crossing newlines to get there (ReadQuoted).
-//   * One comma directly after a closing quote belongs to the quote, not to what follows (ReadQuoted).
+//   * A comma after a closing quote depends on which token closed: after a quoted KEY only a tight one
+//     is consumed, after a quoted VALUE the tokenizer loop skips detached ones too. See afterQuotedKey.
 //   * Braces are structural only at the start of a line; see parseDatTopLevel.
 
 // Top-level key/value pairs of a .dat document. Keys are compared case-insensitively and the last
@@ -219,7 +220,7 @@ function splitKeyValue(line) {
         const end = findClosingQuote(line, 1);
         if (end === -1) return { key: unescape(line.slice(1)), value: "", remainder: "" };
         key = unescape(line.slice(1, end));
-        rest = afterQuote(line, end);
+        rest = afterQuotedKey(line, end);
     } else {
         const space = line.search(/[ \t]/);
         if (space === -1) return { key: line, value: "", remainder: "" };
@@ -232,6 +233,26 @@ function splitKeyValue(line) {
     return { key, value, remainder };
 }
 
+// After a quoted KEY, ReadStringValue is entered directly and skips nothing, so only a comma tight
+// against the closing quote (the one ReadQuoted itself swallows) is consumed:
+//
+//     "Name", "Map Name"   ->  [Name] = "Map Name"
+//     "Name" , "Map Name"  ->  [Name] = ", \"Map Name\""
+//
+// After a quoted VALUE, control returns to the tokenizer loop instead, and that loop treats a comma as
+// whitespace — so a detached one before the next key is skipped too:
+//
+//     Name "Map" , Description "Blurb"  ->  two keys
+function afterQuotedKey(text, end) {
+    let after = end + 1;
+    if (text[after] === ",") after++;
+    return text.slice(after).replace(/^[ \t]+/, "");
+}
+
+function afterQuotedValue(text, end) {
+    return text.slice(end + 1).replace(/^[ \t,]+/, "");
+}
+
 // DatParser.ReadStringValue: a quoted value ends at its closing quote and the tokenizer carries on from
 // there; an unquoted one runs to the end of the line and leaves nothing behind. Either way escapes are
 // decoded.
@@ -239,15 +260,7 @@ function readValue(rest) {
     if (rest[0] !== '"') return { value: unescape(rest), remainder: "" };
     const end = findClosingQuote(rest, 1);
     if (end === -1) return { value: unescape(rest.slice(1)), remainder: "" };
-    return { value: unescape(rest.slice(1, end)), remainder: afterQuote(rest, end) };
-}
-
-// What follows a closing quote at `end`, with the one comma ReadQuoted swallows taken off. Only
-// immediately: a space before the comma leaves it in whatever comes next, there as here.
-function afterQuote(text, end) {
-    let after = end + 1;
-    if (text[after] === ",") after++;
-    return text.slice(after).replace(/^[ \t]+/, "");
+    return { value: unescape(rest.slice(1, end)), remainder: afterQuotedValue(rest, end) };
 }
 
 // The closing quote of a run that started at `from`, skipping escaped quotes.

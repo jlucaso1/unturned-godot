@@ -311,6 +311,13 @@ function menuOrdering() {
         compareForMenu(named("ß"), named("SS")) !== 0,
         "compared equal",
     );
+    // ToUpperInvariant leaves dotless i alone (U+0131 stays U+0131) where JavaScript maps it to "I", so
+    // string.Compare("ı", "I", OrdinalIgnoreCase) is 232 and these must not compare equal either.
+    check(
+        "and does not fold dotless i onto I",
+        compareForMenu(named("ı"), named("I")) !== 0,
+        "compared equal",
+    );
     equal("but ASCII case is still folded", compareForMenu(named("alpha"), named("ALPHA")), 0);
 }
 
@@ -660,6 +667,14 @@ function dat() {
     equal("and the second one is read", pairs.get("Description"), "Blurb");
     const commaPairs = parseDatTopLevel('"Name", "Map", "Description", "Blurb"');
     equal("the comma-separated form too", commaPairs.get("Description"), "Blurb");
+
+    // Which token closed decides what happens to a following comma. After a quoted VALUE the tokenizer
+    // loop resumes and treats a comma as whitespace, detached or not; after a quoted KEY, ReadStringValue
+    // is entered directly and skips nothing, so only a tight comma is consumed.
+    // The contrast is asserted against the quoted-key case further down, which keeps its detached comma.
+    const spacedAfterValue = parseDatTopLevel('Name "Map" , Description "Blurb"');
+    equal("a detached comma after a quoted value is skipped", spacedAfterValue.get("Name"), "Map");
+    equal("so the pair after it is still read", spacedAfterValue.get("Description"), "Blurb");
     equal(
         "but an unquoted value still takes the whole line",
         parseDatTopLevel("Name Map Description Blurb").get("Name"),

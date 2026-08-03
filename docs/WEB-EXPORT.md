@@ -215,7 +215,7 @@ the same type `showDirectoryPicker()` returns — so `HandleFs` is exercised on 
 mock. It then drives the demo page end to end with the picker stubbed to hand back that same handle,
 because the one thing no automation can click is the native folder dialog.
 
-134 assertions, covering path handling, the `.dat` subset, install detection (both the install folder and
+137 assertions, covering path handling, the `.dat` subset, install detection (both the install folder and
 the Steam-library layout), map discovery against PEI's real `Level.dat`/`English.dat`/`Config.json` and
 its 16 Landscape tiles, range reads and their clamping, and parity between the two filesystem backends.
 It self-skips when the content or Playwright is missing, like the C# suite's data-backed tests. Files
