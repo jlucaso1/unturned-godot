@@ -1027,16 +1027,18 @@ public static class ModelExtractor
         var result = new List<CachedCollider>(parts.Count);
         foreach (ColliderPart p in parts)
         {
+            bool isLadder = UnityLayers.IsLadder(p.Layer);
             switch (p.Kind)
             {
                 case EColliderKind.Box:
-                    result.Add(CachedCollider.Box(p.LocalToRoot, p.Center, p.Size));
+                    result.Add(CachedCollider.Box(p.LocalToRoot, p.Center, p.Size, isLadder));
                     break;
                 case EColliderKind.Sphere:
-                    result.Add(CachedCollider.Sphere(p.LocalToRoot, p.Center, p.Radius));
+                    result.Add(CachedCollider.Sphere(p.LocalToRoot, p.Center, p.Radius, isLadder));
                     break;
                 case EColliderKind.Capsule:
-                    result.Add(CachedCollider.Capsule(p.LocalToRoot, p.Center, p.Radius, p.Height, p.Direction));
+                    result.Add(CachedCollider.Capsule(p.LocalToRoot, p.Center, p.Radius, p.Height,
+                        p.Direction, isLadder));
                     break;
                 default:
                     if (!graph.ObjectsByPathId.TryGetValue(p.MeshId, out SerializedObject? meshObj))
@@ -1047,7 +1049,7 @@ public static class ModelExtractor
                     var indices = new List<int>();
                     foreach (int[] sub in mesh.Submeshes)
                         indices.AddRange(sub);
-                    result.Add(CachedCollider.Mesh(p.LocalToRoot, mesh.Vertices, indices.ToArray()));
+                    result.Add(CachedCollider.Mesh(p.LocalToRoot, mesh.Vertices, indices.ToArray(), isLadder));
                     break;
             }
         }

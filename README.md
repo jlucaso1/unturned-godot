@@ -21,7 +21,7 @@ and checked byte-for-byte against the game's own data, using
 | **Foliage** | `Foliage.blob` grass, flowers and pebbles as chunked MultiMeshes (~667k instances on PEI, 7.2M on Germany) |
 | **Roads / water** | Bezier splines lofted through the port of `Road.buildMesh`, real road textures; sea plane from the map's lighting |
 | **Lighting** | Day/night cycle driven by the map's `Lighting.dat` keyframes: sun, ambient, fog, ported skybox (sun disc, stars, moon phases, clouds) |
-| **Player** | Port of `PlayerMovement`/`PlayerLook`/`PlayerStance` with the game's own constants; real character model, skeleton and animations; first/third person. Left click throws a punch (`PlayerEquipment`), replicated so everyone sees it |
+| **Player** | Port of `PlayerMovement`/`PlayerLook`/`PlayerStance` with the game's own constants; real character model, skeleton and animations; first/third person. Left click throws a punch (`PlayerEquipment`), replicated so everyone sees it; ladders are climbable — walk into one or look at it and interact, both through the game's own climb rules |
 | **Audio** | Footsteps/landings resolved through the terrain splat like `PhysicsTool.GetTerrainMaterialName`, clips extracted from the master bundle's FSB5 banks |
 | **Zombies** | Spawn tables, navigation bounds and the pre-baked navmeshes; detection, hunting and the `Zombie.cs` animation set |
 | **Vehicles** | The map's own `Spawns/Vehicles.dat` rolled through its spawn tables and redirectors, as many as the level's size allows, each drawn from its real `Vehicle.prefab`. Parked scenery for now: no driving, physics or damage |
@@ -40,6 +40,10 @@ in view.
   can swing at them, but the punch is an animation only — nothing takes damage yet. Vehicles spawn and
   render, but they are scenery: nothing drives, collides with or damages them, and a vehicle sits at the
   height its spawnpoint was authored at instead of settling onto the ground as its rigidbody would.
+- **Ladders**: the ones a map places as objects are climbable. Player-built barricade ladders are not,
+  because barricades do not exist here yet — their prefabs carry the same climbing volume on the same
+  layer, so they come for free once they do. Neither does the climb/swim transition, for the same reason:
+  there is no swimming stance to move between.
 - **Old road bundles**: maps built before Unity 2018 (Alpha Valley, Washington, Yukon, and many workshop
   maps) keep `Environment/Roads.unity3d` in a SerializedFile version this reader does not decode yet, so
   their roads fall back to the procedural asphalt/dirt material. Terrain layers are unaffected: those come
@@ -87,7 +91,8 @@ That takes a few minutes once; later runs start from the cache, and picking a ma
 never extracted streams in just those.
 
 **Controls** (Unturned's own defaults, from `PlayerSettings`): `WASD` move, mouse look, `Space` jump,
-`Shift` sprint, `X` crouch, `Z` prone, `H` (or `F5`) toggle first/third person, `Esc` pause. In free-camera
+`Shift` sprint, `X` crouch, `Z` prone, `F` climb the ladder you are looking at (walking into one climbs it
+too), `H` (or `F5`) toggle first/third person, `Esc` pause. In free-camera
 mode: `WASD` + `Q`/`E` down/up, `Shift` to boost. `F3` toggles the performance HUD, and `F7` writes a
 bug-repro dump — the last few seconds of the simulation, replayable headless or back inside the game
 (see [docs/REPRO.md](docs/REPRO.md)).

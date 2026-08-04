@@ -486,6 +486,49 @@ public class ServerSimulationTests
         Assert.False(sim.GetState(2).Moving);
     }
 
+    // A climber is metres above the heightfield, so the walking solver's terrain clamp would call them
+    // airborne on any tick that carries no input of its own — and a dropped datagram is ordinary. Every
+    // client derives its landing sounds from the replicated grounded flag, so that false would come back
+    // true on the next frame and thud on the ladder, on every lost packet.
+    [Fact]
+    public void AStarvedClimberStaysWhereTheyAreAndStaysGrounded()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Vector3.Zero);
+        Assert.True(sim.Teleport(1, new Vector3(0f, 25f, 0f), EPlayerStance.Climb, moving: false));
+
+        for (int i = 0; i < 10; i++) // ten ticks of silence: no input, no position
+            sim.Step();
+
+        PlayerMoveState state = sim.GetState(1);
+        Assert.True(state.Grounded);
+        Assert.Equal(25f, state.Position.Y, 3); // no gravity: they are holding a ladder, not falling
+        Assert.Equal(EPlayerStance.Climb, state.Stance);
+    }
+
+    [Fact]
+    public void AClimbersInputMovesThemUpAndDownTheLadderOnly()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Vector3.Zero);
+        Assert.True(sim.Teleport(1, new Vector3(3f, 25f, -4f), EPlayerStance.Climb, moving: false));
+
+        // Forward is -1 on the wire, and a ladder is climbed at half SPEED_CLIMB.
+        sim.QueueInput(1, new InputCommand(_frame++, 1, -1, false, true, 0, 90, EPlayerStance.Climb));
+        sim.Step();
+
+        PlayerMoveState up = sim.GetState(1);
+        Assert.Equal(25f + (PlayerConfig.SpeedClimb * 0.5f * ServerSimulation.TickRate), up.Position.Y, 3);
+        // Strafing and sprinting do nothing on a ladder, so the horizontal position never moves.
+        Assert.Equal(3f, up.Position.X, 4);
+        Assert.Equal(-4f, up.Position.Z, 4);
+        Assert.True(up.Grounded);
+
+        sim.QueueInput(1, new InputCommand(_frame++, 0, 1, false, false, 0, 90, EPlayerStance.Climb));
+        sim.Step();
+        Assert.Equal(25f, sim.GetState(1).Position.Y, 3); // back down by the same step
+    }
+
     [Fact]
     public void Teleport_RefusesUnknownPlayersAndNonFinitePositions()
     {

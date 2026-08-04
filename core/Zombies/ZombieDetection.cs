@@ -29,7 +29,9 @@ public static class ZombieDetection
         {
             EPlayerStance.Sprint => DetectSprint * move,
             EPlayerStance.Stand => DetectStand * move,
-            EPlayerStance.Crouch => DetectCrouch * move,
+            // A climber is as quiet as a crouching player: GetStealthDetectionRadius groups CLIMB with
+            // CROUCH, which is also why the clamp below matters — 6 * 1.1 is well inside the bounds.
+            EPlayerStance.Crouch or EPlayerStance.Climb => DetectCrouch * move,
             EPlayerStance.Prone => DetectProne * move,
             _ => 0f,
         };

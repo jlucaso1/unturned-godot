@@ -1982,6 +1982,9 @@ public class ZombieSystemTests
     [InlineData(UnturnedGodot.Player.EPlayerStance.Crouch, true, 6.6f)]
     [InlineData(UnturnedGodot.Player.EPlayerStance.Prone, false, 3f)]
     [InlineData(UnturnedGodot.Player.EPlayerStance.Prone, true, 3.3f)]
+    // GetStealthDetectionRadius groups CLIMB with CROUCH: a player on a ladder is heard as a croucher.
+    [InlineData(UnturnedGodot.Player.EPlayerStance.Climb, false, 6f)]
+    [InlineData(UnturnedGodot.Player.EPlayerStance.Climb, true, 6.6f)]
     public void DetectionRadii_MatchPlayerStance(
         UnturnedGodot.Player.EPlayerStance stance, bool moving, float expected)
     {
@@ -1991,6 +1994,7 @@ public class ZombieSystemTests
     [Fact]
     public void DetectionRadius_ClampsToTheAlertToolFloor()
     {
-        Assert.Equal(1f, ZombieDetection.RadiusFor((UnturnedGodot.Player.EPlayerStance)0, false));
+        // A stance the table has no entry for at all. Not 0: that is Climb, which the game does answer.
+        Assert.Equal(1f, ZombieDetection.RadiusFor((UnturnedGodot.Player.EPlayerStance)99, false));
     }
 }

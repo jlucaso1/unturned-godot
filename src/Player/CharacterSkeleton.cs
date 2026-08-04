@@ -366,6 +366,9 @@ public partial class CharacterSkeleton : Skeleton3D
 
     private static string ClipFor(EPlayerStance stance, bool moving) => (stance, moving) switch
     {
+        // PlayerAnimator.updateState puts climbing first: a player on a ladder has its own pair of clips.
+        (EPlayerStance.Climb, true) => "Move_Climb",
+        (EPlayerStance.Climb, false) => "Idle_Climb",
         (EPlayerStance.Sprint, true) => "Move_Run",
         (EPlayerStance.Stand, true) => "Move_Walk",
         (EPlayerStance.Crouch, true) => "Move_Crouch",

@@ -20,9 +20,9 @@ public readonly struct MeshPart
     }
 }
 
-// One collider on a prefab GameObject: its Unity primitive parameters (or a collision-mesh id) and its pose
-// relative to the prefab root. Values stay in Unity space; the Unity->Godot flip and shape construction
-// happen when the collision body is built.
+// One collider on a prefab GameObject: its Unity primitive parameters (or a collision-mesh id), its pose
+// relative to the prefab root, and the Unity layer its GameObject sits on. Values stay in Unity space; the
+// Unity->Godot flip and shape construction happen when the collision body is built.
 public readonly struct ColliderPart
 {
     public readonly EColliderKind Kind;
@@ -34,8 +34,12 @@ public readonly struct ColliderPart
     public readonly int Direction;  // Capsule axis: 0=X, 1=Y, 2=Z
     public readonly long MeshId;    // Mesh (collision mesh, distinct from the render Model_0)
 
+    // The GameObject's Unity layer (UnityLayers). What a collider is FOR, and the only place the shipped
+    // content says it: a ladder's climbing volume is an ordinary box everywhere else.
+    public readonly int Layer;
+
     private ColliderPart(EColliderKind kind, Transform3D localToRoot, Vector3 center, Vector3 size,
-        float radius, float height, int direction, long meshId)
+        float radius, float height, int direction, long meshId, int layer)
     {
         Kind = kind;
         LocalToRoot = localToRoot;
@@ -45,16 +49,18 @@ public readonly struct ColliderPart
         Height = height;
         Direction = direction;
         MeshId = meshId;
+        Layer = layer;
     }
 
-    public static ColliderPart Box(Transform3D t, Vector3 center, Vector3 size)
-        => new(EColliderKind.Box, t, center, size, 0f, 0f, 0, 0);
-    public static ColliderPart Sphere(Transform3D t, Vector3 center, float radius)
-        => new(EColliderKind.Sphere, t, center, Vector3.Zero, radius, 0f, 0, 0);
-    public static ColliderPart Capsule(Transform3D t, Vector3 center, float radius, float height, int direction)
-        => new(EColliderKind.Capsule, t, center, Vector3.Zero, radius, height, direction, 0);
-    public static ColliderPart Mesh(Transform3D t, long meshId)
-        => new(EColliderKind.Mesh, t, Vector3.Zero, Vector3.Zero, 0f, 0f, 0, meshId);
+    public static ColliderPart Box(Transform3D t, Vector3 center, Vector3 size, int layer = 0)
+        => new(EColliderKind.Box, t, center, size, 0f, 0f, 0, 0, layer);
+    public static ColliderPart Sphere(Transform3D t, Vector3 center, float radius, int layer = 0)
+        => new(EColliderKind.Sphere, t, center, Vector3.Zero, radius, 0f, 0, 0, layer);
+    public static ColliderPart Capsule(Transform3D t, Vector3 center, float radius, float height,
+        int direction, int layer = 0)
+        => new(EColliderKind.Capsule, t, center, Vector3.Zero, radius, height, direction, 0, layer);
+    public static ColliderPart Mesh(Transform3D t, long meshId, int layer = 0)
+        => new(EColliderKind.Mesh, t, Vector3.Zero, Vector3.Zero, 0f, 0f, 0, meshId, layer);
 }
 
 // Reads a masterbundle SerializedFile's prefab structure: every object by path id, the asset container,
@@ -209,7 +215,7 @@ public sealed class PrefabGraph
         private readonly Dictionary<long, long> _transformFather;
         private readonly Dictionary<long, long> _transformGo;
         private readonly Dictionary<long, Transform3D> _localById;
-        private readonly Dictionary<long, string> _nameCache = new();
+        private readonly Dictionary<long, (string Name, int Layer)> _goCache = new();
 
         public PrefabWalk(SerializedFile file, Dictionary<long, SerializedObject> objects,
             Dictionary<long, string> pathByRootGo, Dictionary<long, long> goToTransform,
@@ -225,15 +231,28 @@ public sealed class PrefabGraph
             _localById = localById;
         }
 
-        public string NameOf(long goId)
+        public string NameOf(long goId) => GameObjectOf(goId).Name;
+
+        // The GameObject's Unity layer, or 0 (Default) when the file does not carry it. Read from the same
+        // TypeTree pass as the name so a collider's layer costs no extra decode.
+        public int LayerOf(long goId) => GameObjectOf(goId).Layer;
+
+        private (string Name, int Layer) GameObjectOf(long goId)
         {
-            if (_nameCache.TryGetValue(goId, out string? name))
-                return name;
-            name = _objects.TryGetValue(goId, out SerializedObject? go)
-                ? (string)TypeTreeReader.Read(go.TypeTree, _file.ReaderFor(go))["m_Name"]
-                : string.Empty;
-            _nameCache[goId] = name;
-            return name;
+            if (_goCache.TryGetValue(goId, out (string Name, int Layer) cached))
+                return cached;
+            if (_objects.TryGetValue(goId, out SerializedObject? go))
+            {
+                Dictionary<string, object> fields = TypeTreeReader.Read(go.TypeTree, _file.ReaderFor(go));
+                cached = ((string)fields["m_Name"],
+                    fields.TryGetValue("m_Layer", out object? layer) ? Convert.ToInt32(layer) : 0);
+            }
+            else
+            {
+                cached = (string.Empty, 0);
+            }
+            _goCache[goId] = cached;
+            return cached;
         }
 
         // Null when the GameObject is not part of a prefab this reader instantiates, or when the chain up
@@ -340,19 +359,20 @@ public sealed class PrefabGraph
 
             if (!byKey.TryGetValue(anchor.Key, out List<ColliderPart>? list))
                 byKey[anchor.Key] = list = new List<ColliderPart>();
-            list.Add(ReadCollider(kind, c, anchor.LocalToRoot));
+            list.Add(ReadCollider(kind, c, anchor.LocalToRoot, walk.LayerOf(goId)));
         }
         return byKey;
     }
 
-    private static ColliderPart ReadCollider(EColliderKind kind, Dictionary<string, object> c, Transform3D t)
+    private static ColliderPart ReadCollider(EColliderKind kind, Dictionary<string, object> c, Transform3D t,
+        int layer)
         => kind switch
         {
-            EColliderKind.Box => ColliderPart.Box(t, Vec(c["m_Center"]), Vec(c["m_Size"])),
-            EColliderKind.Sphere => ColliderPart.Sphere(t, Vec(c["m_Center"]), F(c["m_Radius"])),
+            EColliderKind.Box => ColliderPart.Box(t, Vec(c["m_Center"]), Vec(c["m_Size"]), layer),
+            EColliderKind.Sphere => ColliderPart.Sphere(t, Vec(c["m_Center"]), F(c["m_Radius"]), layer),
             EColliderKind.Capsule => ColliderPart.Capsule(t, Vec(c["m_Center"]), F(c["m_Radius"]),
-                F(c["m_Height"]), Convert.ToInt32(c["m_Direction"])),
-            _ => ColliderPart.Mesh(t, PathId((Dictionary<string, object>)c["m_Mesh"])),
+                F(c["m_Height"]), Convert.ToInt32(c["m_Direction"]), layer),
+            _ => ColliderPart.Mesh(t, PathId((Dictionary<string, object>)c["m_Mesh"]), layer),
         };
 
     private static Vector3 Vec(object value)

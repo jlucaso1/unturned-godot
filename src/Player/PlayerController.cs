@@ -88,6 +88,10 @@ public partial class PlayerController : CharacterBody3D
     private EPlayerStance _stance = EPlayerStance.Stand;
     private bool _wantCrouch;
     private bool _wantProne;
+
+    // Queued by the climb branch and spent on the tick the player leaves the ladder
+    // (PlayerMovement.pendingLaunchVelocity).
+    private Vector3 _pendingLaunchVelocity;
     private float _pitch;       // Godot pitch degrees: 0 = horizon, + up, - down
     private float _eyeHeight = PlayerConfig.EyeHeightStand;
     private bool _thirdPerson;
@@ -105,6 +109,13 @@ public partial class PlayerController : CharacterBody3D
     private PhysicsShapeQueryParameters3D? _clearanceQuery;
     private PhysicsRayQueryParameters3D? _cameraRay;
     private Godot.Collections.Array<Rid>? _selfExclude;
+
+    // The climb probe runs every tick and the mount tests only on the tick a ladder is reached, so both
+    // hold their query objects rather than allocating a RefCounted pair per tick.
+    private PhysicsRayQueryParameters3D? _ladderRay;
+    private PhysicsRayQueryParameters3D? _ladderLosRay;
+    private PhysicsShapeQueryParameters3D? _ladderCapsule;
+    private CapsuleShape3D? _ladderCapsuleShape;
 
     private Godot.Collections.Array<Rid> SelfExclude => _selfExclude ??= new Godot.Collections.Array<Rid> { GetRid() };
 
@@ -139,7 +150,34 @@ public partial class PlayerController : CharacterBody3D
         AttachViewmodel();
         ApplyPerspective();
 
+        AddChild(BuildClimbPrompt());
+
         Input.MouseMode = Input.MouseModeEnum.Captured;
+    }
+
+    // EPlayerMessage.CLIMB: the prompt Unturned puts under the crosshair when a ladder is in reach. It is
+    // the only interaction hint this port has, so it brings its own layer rather than assuming a HUD.
+    private CanvasLayer BuildClimbPrompt()
+    {
+        var layer = new CanvasLayer { Name = "ClimbPrompt" };
+        _climbPrompt = new Label
+        {
+            Text = $"Climb [{OS.GetKeycodeString(_settings.Interact)}]",
+            Visible = false,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            AnchorLeft = 0f,
+            AnchorRight = 1f,
+            AnchorTop = 0.5f,
+            AnchorBottom = 0.5f,
+            OffsetTop = 48f,
+            OffsetBottom = 72f,
+            MouseFilter = Control.MouseFilterEnum.Ignore,
+        };
+        _climbPrompt.AddThemeFontSizeOverride("font_size", 18);
+        _climbPrompt.AddThemeColorOverride("font_outline_color", new Color(0f, 0f, 0f, 0.7f));
+        _climbPrompt.AddThemeConstantOverride("outline_size", 6);
+        layer.AddChild(_climbPrompt);
+        return layer;
     }
 
     public override void _Input(InputEvent @event)
@@ -148,9 +186,7 @@ public partial class PlayerController : CharacterBody3D
         {
             RotateY(-Mathf.DegToRad(motion.Relative.X * _settings.MouseSensitivity)); // yaw the whole body
             float dir = _settings.InvertLook ? 1f : -1f;
-            (float down, float up) = PlayerConfig.PitchLimitsFor(_stance);
-            _pitch = Mathf.Clamp(_pitch + (dir * motion.Relative.Y * _settings.MouseSensitivity), down, up);
-            _head.RotationDegrees = new Vector3(_pitch, 0, 0);
+            ApplyPitch(_pitch + (dir * motion.Relative.Y * _settings.MouseSensitivity));
             return;
         }
 
@@ -198,7 +234,34 @@ public partial class PlayerController : CharacterBody3D
         Vector3 wishDir = moving ? (Transform.Basis * new Vector3(input.X, 0f, input.Y)).Normalized() : Vector3.Zero;
 
         bool wantSprint = inputCaptured && Input.IsKeyPressed(_settings.Sprint);
-        bool stanceChanged = UpdateStance(moving, wantSprint);
+
+        // Ladders are resolved BEFORE the stance intents, like PlayerStance.simulate: while a ladder is
+        // held, the whole crouch/prone/sprint block is skipped, and the intents themselves are cleared so
+        // a toggle pressed mid-climb does not take effect the moment the player steps off.
+        ClimbDecision climb = UpdateLadder();
+        // The interact mount is offered only to a player who is not already on a ladder, and taken only
+        // on the press — then the probe above mounts them on the next tick, as the game's does.
+        UpdateClimbPrompt(inputCaptured && !climb.IsClimbing, dt);
+        if (TryInteractClimb(inputCaptured && Input.IsKeyPressed(_settings.Interact)))
+        {
+            // The mount turned us to face the ladder, so this tick's movement belongs to the new facing —
+            // otherwise the first step after interacting goes wherever the player happened to be walking.
+            wishDir = moving ? (Transform.Basis * new Vector3(input.X, 0f, input.Y)).Normalized() : Vector3.Zero;
+        }
+        bool stanceChanged;
+        if (climb.IsClimbing)
+        {
+            _wantCrouch = false;
+            _wantProne = false;
+            stanceChanged = climb.Transition == EClimbTransition.Mount;
+        }
+        else
+        {
+            stanceChanged = UpdateStance(moving, wantSprint);
+            stanceChanged |= climb.Transition == EClimbTransition.Dismount;
+        }
+        bool climbing = _stance == EPlayerStance.Climb;
+
         _rig?.SetState(_stance, moving); // crossfades to Idle_/Move_<stance>
         _rig?.SetPitch(_pitch);          // bends the upper body toward the look
         // The arms follow the same movement state so they idle and bob like the body; the camera already
@@ -207,21 +270,34 @@ public partial class PlayerController : CharacterBody3D
 
         float speed = PlayerConfig.SpeedFor(_stance);
         bool wasOnFloor = IsOnFloor();
-        bool canJump = wasOnFloor && inputCaptured && Input.IsKeyPressed(_settings.Jump)
+        bool canJump = wasOnFloor && !climbing && inputCaptured && Input.IsKeyPressed(_settings.Jump)
             && _stance is EPlayerStance.Stand or EPlayerStance.Sprint;
-        bool integrate = PlayerPhysicsActivity.NeedsIntegration(
+        bool integrate = climbing || PlayerPhysicsActivity.NeedsIntegration(
             _worldReady, wasOnFloor, moving, canJump, stanceChanged);
         Vector3 velocity = Velocity;
-        if (wasOnFloor)
+        if (climbing)
+        {
+            // PlayerMovement.simulate's CLIMB branch: vertical only, at half the climb speed, with no
+            // gravity — and a forward nudge queued for the tick the ladder ends, so stepping off the top
+            // reaches the surface in front instead of dropping back down the shaft.
+            float moveZ = -input.Y; // Unturned's convention: +1 is forward
+            _pendingLaunchVelocity = PlayerLadder.LaunchVelocity(GlobalTransform.Basis, moveZ);
+            velocity = PlayerLadder.ClimbVelocity(moveZ, speed);
+        }
+        else if (wasOnFloor)
         {
             Vector3 ground = PlayerMovement.GroundVelocity(wishDir, speed);
             velocity.X = ground.X;
             velocity.Z = ground.Z;
             velocity.Y = canJump ? PlayerConfig.JumpSpeed : -2f; // small downward keeps us snapped to the floor
+            velocity += _pendingLaunchVelocity;
+            _pendingLaunchVelocity = Vector3.Zero;
         }
         else
         {
             velocity = PlayerMovement.AirVelocity(velocity, wishDir, speed, dt);
+            velocity += _pendingLaunchVelocity;
+            _pendingLaunchVelocity = Vector3.Zero;
         }
 
         bool isOnFloor = wasOnFloor;
@@ -237,6 +313,10 @@ public partial class PlayerController : CharacterBody3D
             Benchmark.RuntimeCounters.Record(Benchmark.RuntimeCounters.Counter.PlayerStep, stepStarted);
             isOnFloor = IsOnFloor();
         }
+
+        // checkGround forces a climber grounded: they are on a ladder, not falling, and the footstep
+        // clock ticks their rungs rather than thudding a landing when they reach the top.
+        isOnFloor |= climbing;
 
         // PlayerMovement's footstep block: the MovementSoundClock derives the landing thud on the
         // airborne->grounded edge and the 2.1/speed footstep cadence from this state, like every client
@@ -299,6 +379,165 @@ public partial class PlayerController : CharacterBody3D
         Benchmark.RuntimeCounters.Record(Benchmark.RuntimeCounters.Counter.PlayerPhysics, benchmarkStarted);
     }
 
+    // One tick of PlayerStance.simulate's ladder block: probe forward, mount what the probe found, hold
+    // the climb while it keeps finding it, and stand back up the moment it does not.
+    private ClimbDecision UpdateLadder()
+    {
+        if (_stance != EPlayerStance.Climb && !PlayerLadder.CanTransitionToClimbing(_stance))
+            return default;
+
+        LadderContact? contact = ProbeLadder(PlayerLadder.ProbeOrigin(GlobalPosition),
+            -GlobalTransform.Basis.Z, PlayerConfig.LadderProbeRange);
+        ClimbDecision decision = PlayerLadder.Resolve(_stance, GlobalPosition, contact,
+            IsLadderPathBlocked, IsCapsuleOccupied);
+
+        switch (decision.Transition)
+        {
+            case EClimbTransition.Mount:
+                GlobalPosition = decision.MountPoint;
+                SetStance(EPlayerStance.Climb);
+                break;
+            case EClimbTransition.Dismount:
+                SetStance(EPlayerStance.Stand);
+                break;
+        }
+
+        return decision;
+    }
+
+    // --- The interact path: InteractableLadder's "Climb" prompt and PlayerStance.ReceiveClimbRequest ---
+
+    private Label? _climbPrompt;
+    private double _sinceInteractProbe = InteractProbeInterval;
+    private bool _canInteractClimb;
+    private Vector3 _interactMountPoint;
+    private float _interactYawDegrees;
+    private bool _interactHeld;
+
+    // PlayerInteract re-casts its focus ray at this cadence rather than every frame.
+    private const double InteractProbeInterval = 0.1;
+
+    // A ladder within reach of the look ray can be mounted outright, which is how the game lets a player
+    // climb onto one they cannot walk into — the top of a ladder over a ledge, most of all. The rules are
+    // stricter than walking into it: the reach is short, angled ladders are refused, and the capsule the
+    // mount would create has to both fit and be visible from the hit.
+    private void UpdateClimbPrompt(bool eligible, double dt)
+    {
+        _sinceInteractProbe += dt;
+        if (!eligible)
+        {
+            // Mounting a ladder, or opening a menu, takes the offer away now rather than at the next probe.
+            _canInteractClimb = false;
+        }
+        else if (_sinceInteractProbe >= InteractProbeInterval)
+        {
+            _sinceInteractProbe = 0;
+            _canInteractClimb = PlayerLadder.CanInteractClimb(_stance,
+                ProbeLadder(_head.GlobalPosition, -_head.GlobalTransform.Basis.Z,
+                    PlayerConfig.LadderInteractRange),
+                HasLineOfSightToMount, HasInteractMountClearance,
+                out _interactMountPoint, out _interactYawDegrees);
+        }
+
+        if (_climbPrompt != null)
+            _climbPrompt.Visible = _canInteractClimb;
+    }
+
+    private bool HasLineOfSightToMount(Vector3 from, Vector3 capsuleCentre)
+    {
+        _ladderLosRay ??= new PhysicsRayQueryParameters3D
+        {
+            CollisionMask = CollisionLayers.BlockLadderMask,
+            Exclude = SelfExclude,
+        };
+        _ladderLosRay.From = from;
+        _ladderLosRay.To = capsuleCentre;
+        return GetWorld3D().DirectSpaceState.IntersectRay(_ladderLosRay).Count == 0;
+    }
+
+    private bool HasInteractMountClearance(Vector3 feet) =>
+        HasCapsuleClearance(feet, PlayerLadder.InteractTestHeight);
+
+    // The teleport itself, once the key is pressed: land the validated mount point facing the ladder. The
+    // stance stays as it was — the probe above mounts the ladder on the next tick, exactly as the game's
+    // does after its own climb request lands.
+    private bool TryInteractClimb(bool held)
+    {
+        bool pressed = held && !_interactHeld;
+        _interactHeld = held;
+        if (!pressed || !_canInteractClimb)
+            return false;
+
+        GlobalPosition = PlayerLadder.TeleportDestination(_interactMountPoint);
+        RotationDegrees = new Vector3(0f, _interactYawDegrees, 0f);
+        Velocity = Vector3.Zero;          // Player.ReceiveTeleport -> updateMovement clears both
+        _pendingLaunchVelocity = Vector3.Zero;
+        _canInteractClimb = false;
+        if (_climbPrompt != null)
+            _climbPrompt.Visible = false;
+        return true;
+    }
+
+    // The first thing a ray meets on RayMasks.LADDER_INTERACT, as a ladder contact — null when that first
+    // thing is not a ladder, which is what stops a player mounting one through a wall.
+    private LadderContact? ProbeLadder(Vector3 from, Vector3 direction, float range)
+    {
+        _ladderRay ??= new PhysicsRayQueryParameters3D
+        {
+            CollisionMask = CollisionLayers.LadderInteractMask,
+            Exclude = SelfExclude,
+        };
+        _ladderRay.From = from;
+        _ladderRay.To = from + (direction * range);
+        Godot.Collections.Dictionary hit = GetWorld3D().DirectSpaceState.IntersectRay(_ladderRay);
+        return LadderVolumes.TryResolve(hit, out LadderContact contact) ? contact : null;
+    }
+
+    // The capsule the ladder tests are made of, at whatever height the test wants (the interact path asks
+    // for a taller one, since its teleport lifts the player). Its radius is a hair under the real one so a
+    // capsule resting against the geometry it is about to climb does not read as inside it — the same trim
+    // HasClearance uses, and the same reason the game's own clearance test lifts its capsule 1 cm.
+    //
+    // RayMasks.BLOCK_LADDER and RayMasks.BLOCK_STANCE list the same layers, and both reduce to the solid
+    // world plus furniture here, so one mask serves the sweep, the destination and the line of sight.
+    private PhysicsShapeQueryParameters3D LadderCapsuleQuery(Vector3 feet, float height)
+    {
+        _ladderCapsuleShape ??= new CapsuleShape3D { Radius = PlayerConfig.Radius - 0.01f };
+        _ladderCapsule ??= new PhysicsShapeQueryParameters3D
+        {
+            Shape = _ladderCapsuleShape,
+            CollisionMask = CollisionLayers.BlockLadderMask,
+            Exclude = SelfExclude,
+        };
+        _ladderCapsuleShape.Height = height;
+        _ladderCapsule.Transform = new Transform3D(Basis.Identity, feet + (Vector3.Up * (height * 0.5f)));
+        _ladderCapsule.Motion = Vector3.Zero;
+        return _ladderCapsule;
+    }
+
+    // Physics.CapsuleCast against RayMasks.BLOCK_LADDER: is there anything solid between the player and
+    // the ladder's face? Godot reports [0, 0] when the capsule is already overlapping something at the
+    // start, which is exactly the case Unity's CapsuleCast cannot see either — and exactly why the game
+    // follows it with the destination test below rather than trusting the sweep alone.
+    private bool IsLadderPathBlocked(Vector3 from, Vector3 to)
+    {
+        PhysicsShapeQueryParameters3D query = LadderCapsuleQuery(from, PlayerConfig.HeightStand);
+        query.Motion = to - from;
+        float[] fractions = GetWorld3D().DirectSpaceState.CastMotion(query);
+        query.Motion = Vector3.Zero;
+        if (fractions.Length < 2 || fractions[0] >= 1f)
+            return false;
+        return fractions[0] > 0f || fractions[1] > 0f;
+    }
+
+    // Physics.CheckCapsule at the destination: a standing capsule there would already be inside something.
+    private bool IsCapsuleOccupied(Vector3 feet) => !HasCapsuleClearance(feet, PlayerConfig.HeightStand);
+
+    // PlayerStance.hasHeightClearanceAtPosition, for a capsule of the given height standing at `feet`.
+    private bool HasCapsuleClearance(Vector3 feet, float height) =>
+        GetWorld3D().DirectSpaceState
+            .IntersectShape(LadderCapsuleQuery(feet, height), 1).Count == 0;
+
     // Runs the hands for one simulation tick and plays whatever they did. The owner acts on its own
     // decision immediately rather than waiting for the server to confirm it, exactly as PlayerEquipment
     // does — the swing has to start on the frame the button went down, and the server's copy of the same
@@ -337,6 +576,13 @@ public partial class PlayerController : CharacterBody3D
             _stance, _wantCrouch, _wantProne, wantSprint, moving,
             hasStamina: true, // stamina/skills are a follow-up; base player is never exhausted
             canStand, canCrouch);
+        return SetStance(next);
+    }
+
+    // PlayerStance.internalSetStance: the capsule follows the stance (PlayerMovement.setSize). Returns
+    // whether anything changed, which is what decides if this tick has to integrate collision at all.
+    private bool SetStance(EPlayerStance next)
+    {
         if (next == _stance)
             return false;
 
@@ -344,7 +590,17 @@ public partial class PlayerController : CharacterBody3D
         float height = PlayerConfig.HeightFor(next);
         _capsule.Height = height;
         _collider.Position = Vector3.Up * (height * 0.5f);
+        // The new stance may not allow the view the old one did — mounting a ladder while looking
+        // straight down is the sharpest case, since a climber may not look below 10 degrees at all.
+        ApplyPitch(_pitch);
         return true;
+    }
+
+    // PlayerLook's per-frame pitch clamp, against whatever stance is current.
+    private void ApplyPitch(float pitchDegrees)
+    {
+        _pitch = PlayerConfig.ClampPitch(pitchDegrees, _stance);
+        _head.RotationDegrees = new Vector3(_pitch, 0, 0);
     }
 
     // True when a standing/crouching capsule of the given height fits at the current position (headroom).
