@@ -154,7 +154,7 @@ public class PhysicsBodyOrderTests
         Assert.Contains("BakedNavGraph.Build(_flags, _unreachable, _portalProbe)", source);
         Assert.Contains("await PublishAsync(fingerprint, cachePath + \".csr\")", source);
         Assert.Contains("await PublishAsync(fingerprint, cachePath == null ? null : cachePath + \".csr\")", source);
-        Assert.Contains("BakedNavGraph.TryRead", source);
+        Assert.Contains("BakedNavGraph.TryReadFile", source);
         Assert.Contains("built.Write(output, fingerprint)", source);
         Assert.Contains("bool found = _bakedGraph?.TryPath", source);
         Assert.DoesNotContain("NavigationServer3D", source);
@@ -555,6 +555,15 @@ public class PhysicsBodyOrderTests
         Assert.Contains("Dictionary<(List<CachedCollider>, int), int>", builder);
         Assert.Contains("pool.Primitives.TryGetValue", builder);
         Assert.Contains("pool.Meshes.TryGetValue", builder);
+    }
+
+    [Fact]
+    public void ObjectBodiesUseTheTestedFenceCollisionPolicy()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs")) is not { } path)
+            return;
+        string source = File.ReadAllText(path);
+        Assert.Contains("ObjectCollisionPolicy.PhysicsLayer(asset!)", source);
     }
 
     [Fact]

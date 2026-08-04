@@ -15,11 +15,11 @@ public static class ObjectsBuilder
     // whole layout — these two names are kept because the call sites read well with them.
     public const uint VisionBlockerLayer = CollisionLayers.VisionBlocker;
 
-    // MEDIUM furniture (gravestones, benches, beds) collides with the PLAYER but not with zombie
-    // movement: the original's navmesh ignores it (BLOCK_NAVMESH rasterizes only the dedicated Nav
-    // colliders) and its zombies shove straight through such props — colliding here made ours jam
-    // dead-still on a gravestone the route legitimately crosses. Zombie ground/step rays still see
-    // it (a zombie standing on a deck must find the deck).
+    // MEDIUM furniture (gravestones, benches, beds) collides with the PLAYER but not by default with
+    // zombie movement: colliding there made ours jam dead-still on a gravestone the route legitimately
+    // crosses. ObjectCollisionPolicy promotes the Fences category to World, because a continuous fence
+    // is a wall to a character even though Unturned classifies the asset as MEDIUM. Ground/step rays see
+    // both kinds.
     public const uint MediumFurnitureLayer = CollisionLayers.MediumFurniture;
 
     // Instances real meshes (grouped per GUID into one MultiMesh each) where available; placed objects
@@ -167,16 +167,12 @@ public static class ObjectsBuilder
             // Felling/mining swaps a dead resource to its Stump prefab; that's a future damage system.
             // LARGE/MEDIUM bodies also carry the vision-blocker layer bit: RayMasks.BLOCK_VISION is
             // exactly LARGE | MEDIUM, so zombie alert rays must see these and nothing else.
-            EObjectType? type = colliderLibrary.ContainsKey(guid) ? db.Resolve(guid, 0)?.Type : null;
+            ObjectAsset? asset = colliderLibrary.ContainsKey(guid) ? db.Resolve(guid, 0) : null;
+            EObjectType? type = asset?.Type;
             if (colliderLibrary.TryGetValue(guid, out List<CachedCollider>? colliders)
                 && type is EObjectType.Large or EObjectType.Medium or EObjectType.Resource)
             {
-                uint layer = type switch
-                {
-                    EObjectType.Resource => 1u,
-                    EObjectType.Medium => MediumFurnitureLayer | VisionBlockerLayer,
-                    _ => 1u | VisionBlockerLayer, // LARGE: full world collision
-                };
+                uint layer = ObjectCollisionPolicy.PhysicsLayer(asset!);
                 BuildCollision(collision, collisionOwner, ref collisionBodyCount, guid, colliders,
                     transforms, layer, collisionShapes);
             }

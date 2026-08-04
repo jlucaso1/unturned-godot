@@ -105,6 +105,7 @@ public sealed record ReproZombieRecord
     public bool PathIsPartial { get; init; }
     public bool RouteServedAnotherTarget { get; init; }
     public bool RouteEscapingCollision { get; init; }
+    public bool EscapeRouteHasProgress { get; init; }
     public float[] Steer { get; init; } = Array.Empty<float>();
     public float[] Route { get; init; } = Array.Empty<float>(); // flat xyz waypoints
 }

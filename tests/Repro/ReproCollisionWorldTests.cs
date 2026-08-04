@@ -1,4 +1,6 @@
 using Godot;
+using UnturnedGodot.Assets;
+using UnturnedGodot.Dat;
 using UnturnedGodot.Data;
 using UnturnedGodot.Repro;
 using UnturnedGodot.Zombies;
@@ -168,5 +170,27 @@ public class ReproCollisionWorldTests
         Assert.True(result.X > 4.4f, $"furniture stopped the body: {result}");
         Assert.True(world.GroundSnap(new Vector3(5f, 0.5f, 0f), out float y));
         Assert.Equal(0.6f, y, 2);
+    }
+
+    [Fact]
+    public void AMediumFence_BlocksZombieMovementAndVision()
+    {
+        DatDictionary data = DatParser.Parse(
+            "GUID 40921a1a3cd742f69cc25cc25b856572\nType Medium\nID 2\n");
+        Assert.True(ObjectAsset.TryParse(data, null, out ObjectAsset? fence));
+        fence.Directory = "/Bundles/Objects/Medium/Fences/Fence_Wood_0";
+        uint layer = ObjectCollisionPolicy.PhysicsLayer(fence);
+
+        var geometry = new ReproWorlds.Geometry().Ground()
+            .Box("Fence_Wood_0", new Vector3(0f, 1.1f, 0f),
+                new Vector3(20f, 1.1f, 0.1f), layer);
+        ReproCollisionWorld world = World(geometry);
+
+        Vector3 stopped = world.Resolve(new Vector3(0f, 0f, -1f),
+            new Vector3(0f, 0f, 1f), Radius);
+        Assert.True(stopped.Z < -0.45f, $"the zombie crossed the fence: {stopped}");
+        Assert.Equal("Fence_Wood_0", world.LastBlocker);
+        Assert.True(world.VisionBlocked(new Vector3(0f, 1f, -1f),
+            new Vector3(0f, 1f, 1f)));
     }
 }

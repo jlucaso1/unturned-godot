@@ -1,6 +1,8 @@
 using System;
+using System.IO;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Dat;
+using UnturnedGodot.Tests.Helpers;
 using Xunit;
 
 namespace UnturnedGodot.Tests;
@@ -47,6 +49,53 @@ public class ObjectAssetTests
             "GUID 2e698a7b85e94c019b3f91ec8796a961\nType Medium\nID 1\nBundle_Override_Path /Objects/Medium/Furniture/Grave_0\n");
         Assert.True(ObjectAsset.TryParse(root, null, out var asset));
         Assert.Equal("/Objects/Medium/Furniture/Grave_0", asset.BundleOverridePath);
+    }
+
+    [Theory]
+    [InlineData("/Bundles/Objects/Medium/Fences/Fence_Wood_0", true)]
+    [InlineData("C:\\Game\\Bundles\\Objects\\Medium\\Fences\\Fence_Metal_0", true)]
+    [InlineData("/Bundles/Objects/Medium/Furniture/Grave_0", false)]
+    [InlineData("/Workshop/Objects/Medium/Benches/Fences_Are_Nearby", false)]
+    public void MediumFenceDirectories_DecideWhetherZombiesCollide(string directory, bool blocks)
+    {
+        DatDictionary root = DatParser.Parse(
+            "GUID 40921a1a3cd742f69cc25cc25b856572\nType Medium\nID 2\n");
+        Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset? asset));
+        asset.Directory = directory;
+
+        uint layer = ObjectCollisionPolicy.PhysicsLayer(asset);
+
+        Assert.Equal(blocks, (layer & CollisionLayers.World) != 0);
+        Assert.NotEqual(0u, layer & CollisionLayers.MediumFurniture);
+        Assert.NotEqual(0u, layer & CollisionLayers.VisionBlocker);
+    }
+
+    [Fact]
+    public void MediumFenceBundleOverridesAlsoBlockZombies()
+    {
+        DatDictionary root = DatParser.Parse(
+            "GUID 40921a1a3cd742f69cc25cc25b856572\nType Medium\nID 2\n" +
+            "Bundle_Override_Path /Objects/Medium/Fences/Fence_Wood_0\n");
+        Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset? asset));
+        asset.Directory = "/Workshop/Objects/Medium/Holiday/Fence_Wood_Snow";
+
+        uint layer = ObjectCollisionPolicy.PhysicsLayer(asset);
+
+        Assert.NotEqual(0u, layer & CollisionLayers.World);
+    }
+
+    [RealDataFact]
+    public void PeiWoodFenceAsset_IsPublishedAsAWorldBarrier()
+    {
+        string directory = Path.Combine(GameData.Install!, "Bundles", "Objects", "Medium",
+            "Fences", "Fence_Wood_0");
+        ObjectAssetDatabase db = ObjectAssetDatabase.ScanDirectory(directory);
+
+        ObjectAsset? fence = db.Resolve(new Guid("40921a1a-3cd7-42f6-9cc2-5cc25b856572"), 2);
+
+        Assert.NotNull(fence);
+        Assert.Equal(EObjectType.Medium, fence!.Type);
+        Assert.NotEqual(0u, ObjectCollisionPolicy.PhysicsLayer(fence) & CollisionLayers.World);
     }
 
     [Fact]

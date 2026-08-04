@@ -159,8 +159,8 @@ public sealed class ZombieNavigation
         {
             if (fingerprint != null && graphCachePath != null && System.IO.File.Exists(graphCachePath))
             {
-                using System.IO.FileStream input = System.IO.File.OpenRead(graphCachePath);
-                if (BakedNavGraph.TryRead(input, fingerprint, _flags, out BakedNavGraph? cached,
+                if (BakedNavGraph.TryReadFile(graphCachePath, fingerprint, _flags,
+                        out BakedNavGraph? cached,
                         _portalProbe))
                     return (cached!, true);
             }

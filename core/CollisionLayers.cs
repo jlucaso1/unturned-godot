@@ -21,8 +21,9 @@ public static class CollisionLayers
     // standing in its own line of sight has to stay off it.
     public const uint VisionBlocker = 1u << 1;
 
-    // MEDIUM furniture (gravestones, benches, beds): collides with the player, but not with zombie
-    // movement — the original's navmesh ignores it and its zombies shove straight through such props.
+    // MEDIUM furniture (gravestones, benches, beds): collides with the player, but not by itself with
+    // zombie movement. ObjectCollisionPolicy additionally gives fence assets the World bit because a
+    // continuous fence is a character barrier, not furniture a zombie may shove through.
     public const uint MediumFurniture = 1u << 2;
 
     // Characters: the local player and the headless movement probe. Deliberately its own bit and not

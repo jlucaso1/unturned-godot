@@ -1167,6 +1167,38 @@ public class ZombieSystemTests
     }
 
     [Fact]
+    public void CollisionRecovery_EndsAtRangeWhenLineOfSightReturns()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        var player = Player(1, new Vector3(10f, 5f, 0f),
+            UnturnedGodot.Player.EPlayerStance.Sprint);
+
+        system.VisionBlocked = (_, _) => false;
+        system.Tick(new[] { player }, 0.1f); // acquire the target first
+
+        var destinations = new List<Vector3>();
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            destinations.Add(to);
+            path.Add(from);
+            path.Add(to);
+            return true;
+        };
+        zombie.Path = EZombiePath.Left;
+        zombie.RouteEscapingCollision = true;
+        zombie.RepathTimer = -1f;
+
+        system.Tick(new[] { player }, 0.1f);
+
+        Assert.False(zombie.RouteEscapingCollision);
+        Vector3 destination = Assert.Single(destinations);
+        Assert.True(new Vector2(destination.X - player.Position.X,
+            destination.Z - player.Position.Z).Length() > 0.5f,
+            $"formation offset remained suppressed after sight returned: {destination}");
+    }
+
+    [Fact]
     public void CollisionEscape_IsNotReplacedByTheShortWallRouteOnTheNextRepath()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
@@ -1214,6 +1246,52 @@ public class ZombieSystemTests
         Assert.True(escapeIssued, "the blocked shortcut never armed collision recovery");
         Assert.True(shortcutsAfterEscape > 0, "no later repath offered the lying shorter route");
         Assert.True(zombie.Position.X > 8f, $"the shortcut pulled it back into the wall: {zombie.Position}");
+        Assert.Equal(EZombieState.Attack, zombie.State);
+    }
+
+    [Fact]
+    public void TheFirstUnprovenRecoveryRoute_CannotVetoTheLaterWorkingDetour()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        int recoveryQueries = 0;
+        bool detourIssued = false;
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            path.Add(from);
+            if (zombie.RouteEscapingCollision && recoveryQueries++ == 1)
+            {
+                detourIssued = true;
+                path.Add(new Vector3(3f, 5f, 3f));
+                path.Add(new Vector3(5f, 5f, 3f));
+            }
+            path.Add(to);
+            return true;
+        };
+        system.MoveResolver = (from, to, radius) =>
+        {
+            float dx = to.X - from.X;
+            if (MathF.Abs(dx) <= 1e-6f)
+                return to;
+            float crossing = (4f - from.X) / dx;
+            if (crossing >= 0f && crossing <= 1f)
+            {
+                float z = from.Z + ((to.Z - from.Z) * crossing);
+                if (MathF.Abs(z) < 2f)
+                    return from;
+            }
+            return to;
+        };
+
+        var player = Player(1, new Vector3(10f, 5f, 0f),
+            UnturnedGodot.Player.EPlayerStance.Sprint);
+        for (int tick = 0; tick < 200; tick++)
+            system.Tick(new[] { player }, ImpassableDt);
+
+        Assert.True(recoveryQueries >= 2, "the post-timeout shortcut was not followed by another query");
+        Assert.True(detourIssued, "the working detour was never offered");
+        Assert.True(zombie.Position.X > 8f,
+            $"the unproven shortcut vetoed the detour: {zombie.Position}");
         Assert.Equal(EZombieState.Attack, zombie.State);
     }
 
@@ -1422,6 +1500,63 @@ public class ZombieSystemTests
         Assert.False(float.IsNaN(zombie.Yaw), "yaw went NaN");
     }
 
+    [Fact]
+    public void ACompleteRouteOnAnotherFloor_CannotVetoTheStairRoute()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        var first = Player(1, new Vector3(10f, 5f, 0f),
+            UnturnedGodot.Player.EPlayerStance.Sprint);
+        system.Tick(new[] { first }, 0.1f); // acquire player 1
+
+        // The incumbent ends directly below the player's new position. In XZ it looks perfect, but it
+        // is on the wrong storey and cannot be allowed to veto the longer route up the stairs.
+        zombie.Position = new Vector3(0f, 5f, 0f);
+        zombie.PathPoints.Clear();
+        zombie.PathPoints.Add(zombie.Position);
+        zombie.PathPoints.Add(zombie.Position);
+        zombie.CurrentWaypointIndex = 1;
+        zombie.TargetReached = false;
+        zombie.PathIsPartial = false;
+        zombie.RouteServedAnotherTarget = false;
+        zombie.RepathTimer = -1f;
+
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            path.Add(from);
+            path.Add(new Vector3(5f, 5f, 0f));
+            path.Add(new Vector3(5f, 8f, 0f));
+            path.Add(to);
+            return true;
+        };
+        var upstairs = Player(1, new Vector3(0f, 8f, 0f),
+            UnturnedGodot.Player.EPlayerStance.Sprint);
+
+        system.Tick(new[] { upstairs }, 0.1f);
+
+        Assert.Equal(4, zombie.PathPoints.Count);
+        Assert.Equal(8f, zombie.PathPoints[^1].Y, 2);
+        Assert.True(zombie.Position.X > 0f,
+            $"the downstairs route kept vetoing the stairs: {zombie.Position}");
+    }
+
+    [Fact]
+    public void CompleteRouteLength_UsesTheDestinationTheFollowerActuallyWalksTo()
+    {
+        Vector3 position = Vector3.Zero;
+        var route = new List<Vector3>
+        {
+            position,
+            new Vector3(4f, 0f, 0f),
+            new Vector3(9f, 0f, 1.5f), // within 2 m: the follower ignores this final endpoint
+        };
+        Vector3 destination = new(10f, 0f, 0f);
+
+        float length = ZombieSystem.EffectiveRouteLengthFrom(position, route, 1, destination);
+
+        Assert.Equal(10f, length, 3); // 0 -> 4 -> the real destination, not 0 -> 4 -> (9, 1.5)
+    }
+
     // Two ways round the same obstacle, of near-equal cost, and the body standing where the choice
     // between them flips. Every repath the graph answers with the other one — both COMPLETE, both
     // ending on the player — and the follower turns to face whichever arrived last.
@@ -1467,12 +1602,11 @@ public class ZombieSystemTests
         Assert.True(turned < 360f, $"turned {turned:F0} degrees to close {closed:F2} m");
     }
 
-    // The tie-break above lets an incumbent refuse a replacement that is not clearly shorter, and an
-    // incumbent with nothing left to walk is shorter than everything — so on its own it would let a
-    // route that no longer arrives hold the body for ever. It does not, and this pins why: the route
-    // still ASKS the body to move, into the wall, so it keeps delivering nothing against a non-zero
-    // request and BlockedRouteTimeout throws it out. That is load-bearing, not incidental — disarm the
-    // timeout and this exact geometry parks the body 2.51 m from its target, in Chase, for ever.
+    // The tie-break above lets a nearly-finished incumbent refuse a much longer replacement. On its
+    // own that could let a stale route hold the body forever. It does not, and this pins why: the
+    // follower still aims at the destination, into the wall, so it keeps delivering nothing against a
+    // non-zero request and BlockedRouteTimeout throws it out. That is load-bearing, not incidental —
+    // disarm the timeout and this exact geometry parks the body 2.51 m from its target, in Chase, forever.
     //
     // The target is deliberately stationary and the staleness is injected directly, as the first
     // answer the graph gives. Walking a player behind the wall instead would move the destination with
@@ -1513,7 +1647,7 @@ public class ZombieSystemTests
                 return true;
             }
             // The way that still arrives, round the end of the wall: about 16 m against a route with
-            // nothing left, so it can never win on length. A corner already turned is dropped, or the
+            // a short final leg, so it cannot win on length. A corner already turned is dropped, or the
             // fixture would keep dragging the body back to it and be the thing that oscillates.
             if (!rounded)
             {
@@ -2044,6 +2178,51 @@ public class ZombieSystemTests
         for (int i = 0; i < 5; i++)
             system.Tick(new[] { player }, 0.1f); // and its hit lands attackTime/2 later
         Assert.Equal(2, hits.Count);
+    }
+
+    [Fact]
+    public void AThinWallInsideAttackRange_BlocksTheSwingAndDamage()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        var hits = new List<byte>();
+        system.OnAttack += (_, _, damage) => hits.Add(damage);
+        system.MoveResolver = (from, _, _) => from;
+
+        // Acquire while visible and just outside normal attack range, then put the same target within
+        // reach on the other side of a fence. Distance alone must not start an attack through it.
+        system.VisionBlocked = (_, _) => false;
+        system.Tick(new[] { Player(1, new Vector3(1.2f, 5f, 0f)) }, 0.1f);
+        system.VisionBlocked = (_, _) => true;
+        var behindFence = Player(1, new Vector3(0.8f, 5f, 0f));
+        for (int i = 0; i < 20; i++)
+            system.Tick(new[] { behindFence }, 0.1f);
+
+        Assert.Equal(EZombieState.Chase, zombie.State);
+        Assert.True(zombie.PendingHit < 0f);
+        Assert.Empty(hits);
+    }
+
+    [Fact]
+    public void AWallAppearingDuringTheSwing_BlocksThePendingHit()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        var hits = new List<byte>();
+        system.OnAttack += (_, _, damage) => hits.Add(damage);
+        system.MoveResolver = (from, _, _) => from;
+        var player = Player(1, new Vector3(0.8f, 5f, 0f));
+
+        system.VisionBlocked = (_, _) => false;
+        system.Tick(new[] { player }, 0.1f);
+        Assert.Equal(EZombieState.Attack, zombie.State);
+        Assert.True(zombie.PendingHit >= 0f);
+
+        // The target stepped behind the fence after the animation began but before attackTime/2.
+        system.VisionBlocked = (_, _) => true;
+        for (int i = 0; i < 5; i++)
+            system.Tick(new[] { player }, 0.1f);
+
+        Assert.Equal(EZombieState.Chase, zombie.State);
+        Assert.Empty(hits);
     }
 
     [Fact]

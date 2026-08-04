@@ -44,6 +44,7 @@ public static class ReproZombieState
             PathIsPartial = zombie.PathIsPartial,
             RouteServedAnotherTarget = zombie.RouteServedAnotherTarget,
             RouteEscapingCollision = zombie.RouteEscapingCollision,
+            EscapeRouteHasProgress = zombie.EscapeRouteHasProgress,
             Steer = ReproVector.From(zombie.SteerDirection),
             Route = ReproVector.Flatten(zombie.PathPoints),
         };
@@ -82,6 +83,7 @@ public static class ReproZombieState
             PathIsPartial = record.PathIsPartial,
             RouteServedAnotherTarget = record.RouteServedAnotherTarget,
             RouteEscapingCollision = record.RouteEscapingCollision,
+            EscapeRouteHasProgress = record.EscapeRouteHasProgress,
             SteerDirection = ReproVector.To(record.Steer),
         };
         ReproVector.Unflatten(record.Route, zombie.PathPoints);

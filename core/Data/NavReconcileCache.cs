@@ -15,10 +15,11 @@ public static class NavReconcileCache
     private const uint Magic = 0x524E4755; // "UGNR" little-endian
     private const int FormatVersion = 2;
     // 3: the surface probe moved off the physics server onto CollisionField for everything but the faces
-    // whose verdict is close enough to the step threshold to need confirming. The verdict is meant to be
-    // the same one, but "meant to" is not what a cache should be pinned on — an entry written by the old
-    // measurement is not an entry this one produced, so it is not reused.
-    public const int AlgorithmVersion = 3;
+    // whose verdict is close enough to the step threshold to need confirming.
+    // 4: MEDIUM fence assets joined the World field. An old cache was measured without those barriers
+    // and would restore walkable faces through them, so it cannot be reused even though collider bytes
+    // and map placements are otherwise unchanged.
+    public const int AlgorithmVersion = 4;
 
     public static string Fingerprint(string levelDir, string colliderCacheDir)
         => Fingerprint(levelDir, colliderCacheDir, selectedColliders: null);

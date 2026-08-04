@@ -74,6 +74,8 @@ public sealed class ZombieSystemState
         destination.RepathTimer = source.RepathTimer;
         destination.BlockedRouteTime = source.BlockedRouteTime;
         destination.RouteServedAnotherTarget = source.RouteServedAnotherTarget;
+        destination.RouteEscapingCollision = source.RouteEscapingCollision;
+        destination.EscapeRouteHasProgress = source.EscapeRouteHasProgress;
         destination.PathPoints.Clear();
         destination.PathPoints.AddRange(source.PathPoints);
     }

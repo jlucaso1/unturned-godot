@@ -42,6 +42,7 @@ public class ReproStateTests
         PathIsPartial = true,
         RouteServedAnotherTarget = true,
         RouteEscapingCollision = true,
+        EscapeRouteHasProgress = true,
         SteerDirection = new Vector3(0.5f, 0f, -0.5f),
     };
 
@@ -80,6 +81,7 @@ public class ReproStateTests
         Assert.Equal(original.PathIsPartial, restored.PathIsPartial);
         Assert.Equal(original.RouteServedAnotherTarget, restored.RouteServedAnotherTarget);
         Assert.Equal(original.RouteEscapingCollision, restored.RouteEscapingCollision);
+        Assert.Equal(original.EscapeRouteHasProgress, restored.EscapeRouteHasProgress);
         Assert.Equal(original.SteerDirection, restored.SteerDirection);
         Assert.Equal(original.PathPoints, restored.PathPoints);
     }
@@ -166,9 +168,13 @@ public class ReproStateTests
     {
         var geometry = new ReproWorlds.Geometry().Ground();
         (ZombieSystem system, _, _) = ReproWorlds.Session(geometry);
+        system.Zombies[0].RouteEscapingCollision = true;
+        system.Zombies[0].EscapeRouteHasProgress = true;
         var buffer = new ZombieSystemState();
         system.CaptureStateInto(buffer);
         Vector3 before = buffer.Zombies[0].Position;
+        Assert.True(buffer.Zombies[0].RouteEscapingCollision);
+        Assert.True(buffer.Zombies[0].EscapeRouteHasProgress);
 
         for (int i = 0; i < 10; i++)
             system.Tick(new[] { ReproWorlds.Player(new Vector3(10f, 0f, 10f)) }, ReproWorlds.TickRate);

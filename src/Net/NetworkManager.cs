@@ -135,8 +135,8 @@ public partial class NetworkManager : Node
         // the ground snap's job here, like a CC's grounding pass). Catches knee-high furniture and
         // head-high overhangs that the old chest sphere missed.
         var sweep = new CapsuleShape3D { Height = Zombies.ZombieBody.CapsuleHeight };
-        // Mask 1 only: LARGE world + terrain + resources. MEDIUM furniture lives on its own layer
-        // (the navmesh ignores it; original zombies shove through it).
+        // Mask 1 only: LARGE world + terrain + resources + MEDIUM fences promoted to World by the
+        // object collision policy. Other MEDIUM furniture remains on its own layer and is ignored.
         var query = new PhysicsShapeQueryParameters3D { Shape = sweep, CollisionMask = 1 };
         var stepDown = new PhysicsRayQueryParameters3D { CollisionMask = 1 | ObjectsBuilder.MediumFurnitureLayer };
         float lastRadius = -1f;
