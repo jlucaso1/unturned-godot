@@ -185,9 +185,9 @@ public sealed class ServerSimulation
         public byte LastSwingSequence;
 
         // How many swings this player may spend, and when that was last topped up. Starts at one so a
-        // session's opening punch lands.
+        // session's opening punch lands, and accrues from admission (AddPlayer seeds AllowanceAt) rather
+        // than from the first swing — see AcceptSwing.
         public double SwingAllowance = 1;
-        public bool HasSwingAllowance;
         public double AllowanceAt;
 
         // Trusted-position bookkeeping: the budget rate-limits CONSECUTIVE client claims, so it needs the
@@ -246,6 +246,8 @@ public sealed class ServerSimulation
                 Grounded = false,
                 Stance = EPlayerStance.Stand,
             },
+            // Swing allowance accrues from the moment they are admitted; see AcceptSwing.
+            AllowanceAt = _clock,
         };
     }
 
@@ -387,10 +389,13 @@ public sealed class ServerSimulation
         // pass is the time before the batch, and that is what this counts. The ceiling is what keeps an
         // idle player from banking a long burst, and it is what a client sending a hundred swings at
         // once runs into.
-        if (entry.HasSwingAllowance)
-            entry.SwingAllowance = Math.Min(MaxSwingAllowance,
-                entry.SwingAllowance + ((receivedAt - entry.AllowanceAt) / PunchCooldownSeconds));
-        entry.HasSwingAllowance = true;
+        // The clock this counts from is set when the player is admitted, not by their first swing. Left to
+        // the first swing there is no earlier moment on record, so a stall that drains a player's opening
+        // two punches together gives the second one zero elapsed time and refuses it — the exact case the
+        // allowance exists for, unavailable until some prior swing had established a timestamp. Waiting
+        // before swinging now banks credit the way it does for the rest of the session.
+        entry.SwingAllowance = Math.Min(MaxSwingAllowance,
+            entry.SwingAllowance + ((receivedAt - entry.AllowanceAt) / PunchCooldownSeconds));
         entry.AllowanceAt = receivedAt;
 
         // Refused, and deliberately NOT recorded as answered. The number is what the repeat frames carry

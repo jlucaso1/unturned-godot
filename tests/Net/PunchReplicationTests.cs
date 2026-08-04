@@ -137,6 +137,55 @@ public class PunchReplicationTests
         Assert.Equal(EPlayerStance.Stand, thrown.Stance);
     }
 
+    // The allowance counts from admission, not from a player's first swing. Left to the first swing there
+    // is no earlier moment on record, so a host stall that drains someone's OPENING two punches together
+    // hands the second zero elapsed time and refuses it — which is the exact case the allowance exists to
+    // pay out, unavailable until some prior swing had established a timestamp.
+    [Fact]
+    public void Server_BanksAllowanceFromAdmission_NotFromTheFirstSwing()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        // The player joins and waits out a cooldown before throwing anything.
+        for (int i = 0; i < 12; i++)
+            sim.Step();
+
+        // Then a stall drains two legitimately-spaced punches into one batch: same arrival timestamp,
+        // and the second is only payable out of the credit banked while they were standing there.
+        sim.QueueInput(1, Attack());
+        sim.QueueInput(1, Attack());
+
+        // Both are ACCEPTED here, on arrival; the tick loop announces one per tick, so counting them
+        // takes two.
+        int answered = 0;
+        for (int i = 0; i < 2; i++)
+        {
+            sim.Step();
+            answered += sim.Gestures.Count;
+        }
+        Assert.Equal(2, answered);
+    }
+
+    // Banking is still bounded: joining and immediately hammering buys exactly the opening punch.
+    [Fact]
+    public void Server_DoesNotBankAllowanceForWaitingThatDidNotHappen()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        sim.QueueInput(1, Attack());
+        sim.QueueInput(1, Attack());
+
+        int answered = 0;
+        for (int i = 0; i < 4; i++)
+        {
+            sim.Step();
+            answered += sim.Gestures.Count;
+        }
+        Assert.Equal(1, answered);
+    }
+
     // A swing the rate limit refuses must stay retryable. The repeat frames carry the same number to
     // survive an unreliable channel, so recording a REFUSAL against that number would spend the swing's
     // only redundancy: an honest punch landing a hair inside the cooldown — the client's own gate and

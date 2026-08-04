@@ -91,7 +91,18 @@ verify_content() {
 
     # Either data-directory layout will do; see the filelist above. Checked here so a cache from before
     # this file was fetched fails verification and is refilled, rather than quietly drawing placeholders.
-    if [[ ! -f "$1/Unturned_Data/resources.assets" && ! -f "$1/Unturned_Headless_Data/resources.assets" ]]; then
+    #
+    # The headless pair is checked as a PAIR, because that is the one this script downloads and the two
+    # files land separately: a run interrupted between them leaves a tree that reads as complete while
+    # every texture whose pixels live in the stream — the skybox's stars and clouds — silently resolves
+    # to nothing. A client install is only ever pointed at by UNTURNED_PATH, is not this script's to
+    # complete, and lays its streams out differently, so it is judged on resources.assets alone.
+    if [[ -f "$1/Unturned_Headless_Data/resources.assets" ]]; then
+        if [[ ! -f "$1/Unturned_Headless_Data/resources.resource" ]]; then
+            echo "Missing: $1/Unturned_Headless_Data/resources.resource" >&2
+            ok=0
+        fi
+    elif [[ ! -f "$1/Unturned_Data/resources.assets" ]]; then
         echo "Missing: $1/Unturned_Headless_Data/resources.assets" >&2
         ok=0
     fi

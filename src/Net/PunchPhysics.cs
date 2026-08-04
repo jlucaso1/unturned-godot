@@ -58,17 +58,27 @@ internal static class PunchPhysics
 
     // Which asset the body a ray struck belongs to, so the punch damages the thing it hit rather than
     // whatever breakable happens to stand nearby. Object collision lives on server-owned bodies that
-    // carry the asset's GUID in their name (ObjectCollisionNames), and the query reports the body's RID
-    // — so the name is the identity, and terrain or anything else resolves to Guid.Empty.
+    // carry the asset's GUID in their name (ObjectCollisionNames), so the name is the identity and
+    // terrain or anything else resolves to Guid.Empty.
+    //
+    // Two shapes of body, because ObjectsBuilder builds either. Ordinarily one InstancedStaticBodies owns
+    // every collider and the query's RID says which of its names was struck; under UG_NODE_PHYSICS=1 each
+    // collider is its own InstancedStaticBody node, and then the node's own name is the answer. Reading
+    // only the batched form left every breakable unpunchable in the other mode — the hit came back
+    // unnamed, so the ledger refused it as terrain.
     private static System.Guid AssetOf(Godot.Collections.Dictionary hit)
     {
-        if (!hit.TryGetValue("collider", out Variant colliderValue)
-            || colliderValue.As<Node>() is not InstancedStaticBodies owner
-            || !hit.TryGetValue("rid", out Variant rid))
+        if (!hit.TryGetValue("collider", out Variant colliderValue))
             return System.Guid.Empty;
-        return ObjectCollisionNames.TryParseGuid(owner.NameFor(rid.As<Rid>()), out System.Guid guid)
-            ? guid
-            : System.Guid.Empty;
+
+        string name = colliderValue.As<Node>() switch
+        {
+            InstancedStaticBodies owner when hit.TryGetValue("rid", out Variant rid) =>
+                owner.NameFor(rid.As<Rid>()),
+            InstancedStaticBody body => body.Name,
+            _ => string.Empty,
+        };
+        return ObjectCollisionNames.TryParseGuid(name, out System.Guid guid) ? guid : System.Guid.Empty;
     }
 
     // PUNCH_LOG=1 prints what every swing found. The damage model has no HUD in front of it yet — no hit
