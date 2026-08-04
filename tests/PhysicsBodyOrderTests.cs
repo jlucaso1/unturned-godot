@@ -983,8 +983,9 @@ public class PhysicsBodyOrderTests
     // Cache completeness is decided per mesh, so a format that gains a new per-prefab artifact cannot be
     // detected by a missing file — an absent lower level looks the same as a prefab that never had one.
     // The magic is the only thing that forces one more extraction pass, and it must never go backwards:
-    // UGM8 predates source-aware texture tags, UGM9 predates the authored LOD levels, and UGMA kept
-    // every level a prefab shipped instead of only the ones materially cheaper than the base mesh.
+    // UGM8 predates source-aware texture tags, UGM9 predates the authored LOD levels, UGMA kept every level
+    // a prefab shipped instead of only the ones materially cheaper than the base mesh, and UGMB cached the
+    // hidden Dead/Ragdoll states as if they were the object's own geometry.
     [Fact]
     public void MeshCacheMagicInvalidatesEveryOlderExtraction()
     {
@@ -992,7 +993,7 @@ public class PhysicsBodyOrderTests
             return;
 
         string source = File.ReadAllText(path);
-        Assert.Contains("private const uint Magic = 0x424D4755;", source); // "UGMB"
+        Assert.Contains("private const uint Magic = 0x434D4755;", source); // "UGMC"
     }
 
     // The source check above pins the constant; this one proves the constant does its job. A cache
@@ -1009,7 +1010,8 @@ public class PhysicsBodyOrderTests
         byte[] current = written.ToArray();
         Assert.True(MeshCache.IsCurrent(current));
 
-        foreach (uint stale in new uint[] { 0x414D4755, 0x394D4755, 0x384D4755 }) // UGMA, UGM9, UGM8
+        // UGMB, UGMA, UGM9, UGM8
+        foreach (uint stale in new uint[] { 0x424D4755, 0x414D4755, 0x394D4755, 0x384D4755 })
         {
             byte[] older = (byte[])current.Clone();
             System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(older, stale);
