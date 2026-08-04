@@ -37,7 +37,8 @@ public static class WorldBuilder
     // Dedicated authority needs static object collision but none of the render/texture products. This
     // follows the same source ownership, asset metadata, extraction and ObjectsBuilder policy as the
     // interactive world, then asks ObjectsBuilder to realise only bodies and ladder volumes.
-    public static Node3D BuildObjectCollision(string unturnedPath, LevelInfo level)
+    public static Node3D BuildObjectCollision(string unturnedPath, LevelInfo level,
+        out IReadOnlySet<Guid> selectedGuids, CollisionFieldBuilder? navigationField = null)
     {
         IReadOnlyList<ContentSource> sources = ContentSource.Discover(unturnedPath);
         List<PlacedObject> objects = LevelObjects.Load(level.ObjectsDat);
@@ -49,6 +50,7 @@ public static class WorldBuilder
         var needed = new HashSet<Guid>();
         foreach (PlacedObject placed in objects)
             needed.Add(placed.Guid);
+        selectedGuids = needed;
 
         string cacheDir = ProjectSettings.GlobalizePath("user://model_cache");
         string textureCacheDir = ProjectSettings.GlobalizePath("user://texture_cache");
@@ -73,7 +75,7 @@ public static class WorldBuilder
         Dictionary<Guid, List<CachedCollider>> colliders = ColliderLibrary.Load(cacheDir, needed);
         Node3D root = ObjectsBuilder.Build(objects, db,
             new Dictionary<Guid, ArrayMesh>(), colliders, out _,
-            label: "DedicatedObjects", renderGeometry: false);
+            navigationField: navigationField, label: "DedicatedObjects", renderGeometry: false);
         Log.Print($"[server] authoritative object collision: {colliders.Count}/{needed.Count} asset types");
         return root;
     }
@@ -81,7 +83,8 @@ public static class WorldBuilder
     // HeightfieldMoveSolver keeps players/zombies on grade, but it cannot answer a 3D ray or stop a
     // capsule at a cliff. Publish the same cheap heightmap shapes as the interactive player path so a
     // dedicated attack cannot pass through terrain and its movement world is not object-only.
-    public static Node3D BuildTerrainCollision(IReadOnlyList<HeightmapTile> tiles)
+    public static Node3D BuildTerrainCollision(IReadOnlyList<HeightmapTile> tiles,
+        CollisionFieldBuilder? navigationField = null)
     {
         var root = new Node3D { Name = "DedicatedTerrainCollision" };
         const int res = Landscape.HEIGHTMAP_RESOLUTION;
@@ -90,6 +93,7 @@ public static class WorldBuilder
             float[] data = tile.RawSamples != null
                 ? TerrainHeightfield.MapData(tile.RawSamples)
                 : TerrainHeightfield.MapData(tile.Heights);
+            Transform3D placement = TerrainHeightfield.CollisionTransform(tile.CoordX, tile.CoordY);
             var body = new StaticBody3D { Name = $"Terrain_{tile.CoordX}_{tile.CoordY}" };
             body.AddChild(new CollisionShape3D
             {
@@ -99,9 +103,10 @@ public static class WorldBuilder
                     MapDepth = res,
                     MapData = data,
                 },
-                Transform = TerrainHeightfield.CollisionTransform(tile.CoordX, tile.CoordY),
+                Transform = placement,
             });
             root.AddChild(body);
+            navigationField?.AddHeightfield(placement, res, res, data);
         }
         Log.Print($"[server] authoritative terrain collision: {tiles.Count} heightfield bodies");
         return root;

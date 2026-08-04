@@ -25,11 +25,11 @@ public sealed class ZombieNavigation
     public bool IsReady => !_disposed && _ready && _bakedGraph != null;
 
     public static ZombieNavigation? Build(IReadOnlyList<NavFlag>? flags,
-        ZombieMoveResolver? moveResolver = null)
+        ZombieMoveResolver? moveResolver = null, string? levelDir = null)
     {
         if (flags == null || flags.Count == 0)
             return null;
-        return new ZombieNavigation(flags, publishImmediately: true, moveResolver: moveResolver);
+        return new ZombieNavigation(flags, publishImmediately: true, levelDir, moveResolver);
     }
 
     // Interactive loading parses the baked data early, but deliberately does not build its graph yet.

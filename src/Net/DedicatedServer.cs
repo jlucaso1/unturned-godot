@@ -6,8 +6,8 @@ using UnturnedGodot.Net;
 namespace UnturnedGodot;
 
 // Standalone dedicated server: `godot --headless -- --server [--port=27015]`. Loads only what the
-// authoritative movement sim needs (the map's heightmap tiles) and runs NetServer over raw UDP —
-// no rendering, no local player.
+// authoritative movement sim needs (heightfields plus placed-object collision) and runs NetServer over
+// raw UDP — no rendering and no local player.
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class DedicatedServer : Node
 {
@@ -40,8 +40,10 @@ public partial class DedicatedServer : Node
 
         // Static bodies must exist in the same World3D the authoritative zombie queries use. The root is
         // attached before this node enters the tree; ZombiePhysics resolves the world lazily on first tick.
-        node.AddChild(WorldBuilder.BuildTerrainCollision(tiles));
-        node.AddChild(WorldBuilder.BuildObjectCollision(unturnedPath, level));
+        var navigationField = new CollisionFieldBuilder();
+        node.AddChild(WorldBuilder.BuildTerrainCollision(tiles, navigationField));
+        node.AddChild(WorldBuilder.BuildObjectCollision(unturnedPath, level,
+            out IReadOnlySet<System.Guid> selectedGuids, navigationField));
 
         UnturnedGodot.Zombies.ZombieSystem? zombies = UnturnedGodot.Zombies.ZombieWorld.Load(
             level.Path, ground,
@@ -49,12 +51,19 @@ public partial class DedicatedServer : Node
         if (zombies != null)
         {
             ZombiePhysics.Attach(zombies, () => node.GetViewport()?.World3D, ground);
-            node._zombieNavigation = ZombieNavigation.Build(zombies.Navmesh);
+            node._zombieNavigation = ZombieNavigation.Build(zombies.Navmesh, zombies.MoveResolver, level.Path);
             if (node._zombieNavigation != null)
             {
+                // Movement collision alone prevents crossing, but the graph must also learn about those
+                // bodies or a hunter can keep selecting the route through a placed fence instead of the
+                // route around its end. Retain the CPU mirror until the first safe physics-frame reconcile.
+                node._navigationField = navigationField;
+                node._selectedColliderGuids = selectedGuids;
                 zombies.PathQuery = node._zombieNavigation.Query;
                 zombies.PathReady = () => node._zombieNavigation?.IsReady == true;
             }
+            else
+                navigationField.Release();
             var host = new UnturnedGodot.Zombies.ZombieHost(zombies, node._server);
 
             // The same bug-report recorder the windowed session arms. There is no key to press on a
@@ -70,6 +79,8 @@ public partial class DedicatedServer : Node
 
             Log.Print($"[server] {zombies.Zombies.Count} zombies spawned");
         }
+        else
+            navigationField.Release();
 
         Log.Print($"[server] dedicated server for {levelName} listening on UDP {port} ({tiles.Count} height tiles)");
         return node;
@@ -79,6 +90,7 @@ public partial class DedicatedServer : Node
 
     public override void _PhysicsProcess(double delta)
     {
+        StartNavigationReconciliation();
         _server.Update(NetworkManager.Now);
         if (NetworkManager.Now - _lastStatus >= 10.0)
         {
@@ -88,10 +100,34 @@ public partial class DedicatedServer : Node
     }
 
     private ZombieNavigation? _zombieNavigation;
+    private CollisionFieldBuilder? _navigationField;
+    private IReadOnlySet<System.Guid>? _selectedColliderGuids;
+
+    private void StartNavigationReconciliation()
+    {
+        if (_navigationField == null || _selectedColliderGuids == null || _zombieNavigation == null)
+            return;
+
+        CollisionFieldBuilder field = _navigationField;
+        IReadOnlySet<System.Guid> selected = _selectedColliderGuids;
+        _navigationField = null;
+        _selectedColliderGuids = null;
+
+        PhysicsDirectSpaceState3D? space = GetViewport()?.World3D?.DirectSpaceState;
+        if (space == null)
+        {
+            Log.PushWarning("[server] physics space unavailable; navigation collision reconciliation skipped");
+            field.Release();
+            return;
+        }
+        _ = AppShutdown.Track(_zombieNavigation.PruneAgainstCollisionAsync(
+            this, space, UnturnedGodot.Player.PlayerConfig.StepOffset, selected, field));
+    }
 
     public override void _ExitTree()
     {
         _transport.Close();
+        _navigationField?.Release();
         _zombieNavigation?.Free();
     }
 }

@@ -187,10 +187,13 @@ public class PhysicsBodyOrderTests
         string server = File.ReadAllText(serverPath);
         string host = File.ReadAllText(hostPath);
         string physics = File.ReadAllText(physicsPath);
-        Assert.Contains("BuildTerrainCollision(tiles)", server);
-        Assert.Contains("BuildObjectCollision(unturnedPath, level)", server);
+        Assert.Contains("BuildTerrainCollision(tiles, navigationField)", server);
+        Assert.Contains("BuildObjectCollision(unturnedPath, level,", server);
         Assert.Contains("ZombiePhysics.Attach(zombies", server);
         Assert.Contains("ZombiePhysics.Attach(zombies", host);
+        Assert.Contains("ZombieNavigation.Build(zombies.Navmesh, zombies.MoveResolver, level.Path)", server);
+        Assert.Contains("PruneAgainstCollisionAsync(", server);
+        Assert.Contains("PlayerConfig.StepOffset, selected, field", server);
         Assert.Contains("CollisionLayers.World | CollisionLayers.VisionBlocker", physics);
         Assert.Contains("physicalRay.To = to", physics);
     }
