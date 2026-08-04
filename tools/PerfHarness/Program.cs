@@ -447,8 +447,10 @@ public static class Program
 
     // What the masterbundle's object metadata costs to turn into values: the SerializedFile table, then
     // the TypeTree-driven object reader over it. The cold load's single biggest Core cost after LZMA, and
-    // until now the only major decode path with no suite at all. Splits what every load decodes from what
-    // only a map that places it decodes, because conflating the two prices the wrong thing.
+    // until now the only major decode path with no suite at all. Splits what a cold object/texture pass
+    // decodes from what only a map that places it decodes, because conflating the two prices the wrong
+    // thing. Note that the pass itself is conditional — a load with warm caches never runs one, so none of
+    // these rows are "per load". See docs/PROFILING.md for which caches gate which block.
     private static void BundleSuite(string? unturned)
     {
         string? bundlePath = Environment.GetEnvironmentVariable("BUNDLE_PATH")
@@ -617,14 +619,17 @@ public static class Program
             + $"({(input > 0 ? alloc / (double)input : 0):0.0}x), {alloc / (double)objects.Count / 1024:0.0} KiB per object");
     }
 
-    // Objects the port decodes MORE THAN ONCE per load, and what the extra decodes cost. The rows above
-    // decode everything exactly once, so they already contain the first decode of each of these; only the
-    // decodes beyond the first are additional, which is what the "extra" column reports.
+    // Objects the port decodes MORE THAN ONCE during a cold object/texture pass, and what the extra
+    // decodes cost. The rows above decode everything exactly once, so they already contain the first decode
+    // of each of these; only the decodes beyond the first are additional, which is what the "extra" column
+    // reports. The counts assume that pass is running: a load whose caches are warm runs no pass, and then
+    // several of these sites do not execute at all (the standalone AudioExtractor.Extract fallback, for
+    // instance, decodes the container once with no pass around it).
     //
     // THIS LIST IS NOT EXHAUSTIVE, and cannot be. It is a hand-maintained mirror of what several passes in
     // `src/` happen to do, many of them behind conditions the suite cannot see (which map is loaded, which
-    // caches are warm, which env flags are set). Six rounds of review found six sites; there is no reason
-    // to believe the seventh does not exist. Read the table as a demonstrated LOWER BOUND on repeated
+    // caches are warm, which env flags are set). Ten rounds of review found seven sites; there is no reason
+    // to believe the eighth does not exist. Read the table as a demonstrated LOWER BOUND on repeated
     // decode work, never as its total, and re-derive it against the code before trusting any figure here.
     //
     // `EveryObject` says whether the multiplicity applies to every object of the class in the file or only

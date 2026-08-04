@@ -132,8 +132,8 @@ this table, which prices objects rather than passes.
 
 **This table is a lower bound on repeated decode work, not a total.** It is a hand-maintained mirror of
 what several `src/` passes happen to do, much of it behind conditions the harness cannot observe — which
-map is loaded, which caches are warm, which env flags are set. Successive review rounds found six such
-sites; there is no reason to believe a seventh look would find none. Individual entries bound their own
+map is loaded, which caches are warm, which env flags are set. Successive review rounds found seven such
+sites; there is no reason to believe an eighth look would find none. Individual entries bound their own
 cost from *above* (`≤`), while the list as a whole bounds the total from *below*. Re-derive it against the
 code before trusting any figure here.
 
@@ -172,8 +172,11 @@ cheapest real win in this whole area, and the only reason it is not in this PR i
 `src/` — decode the container once and hand it around — which is another lane's call.
 
 Three more things fall out. The object table itself is free — ~10 ms to index 103k objects, so nothing is
-to be gained by making it lazier. The unique-object decode every load pays is **216 ms** scanned plus some
-fixed part of the 59 ms partly-scanned row, which against a ~15 s LZMA pass is under 2%. And **the reader's cost is allocation, not
+to be gained by making it lazier. The unique-object decode a cold object/texture pass pays is **216 ms**
+scanned plus some
+fixed part of the 59 ms partly-scanned row, which against that pass's ~12.3 s of LZMA is under 2%. (A load
+whose caches are warm runs no pass and pays neither — see `docs/PROFILING.md` for which caches gate what.)
+And **the reader's cost is allocation, not
 parsing**: the scanned set turns 5.5 MiB of object bytes into 125 MiB of managed objects — **22.9x** —
 because a Transform or a BoxCollider is a handful of floats that becomes nested `Dictionary` objects with
 a boxed leaf each. Over the whole file it is 168 MiB into 2,121 MiB. That is inherent in the output shape
@@ -221,9 +224,10 @@ Two consequences for anyone reading `ress`. Its "every 100 MiB not read is ~0.74
 inside `.resS`, so it is roughly right *for `.resS` deferrals* and wrong everywhere else — deferring
 audio is worth ~10 s per 100 MiB, not 0.74 s. And the audio node is 1.5% of the blob's bytes but **15% of
 its decode time**: folding audio extraction into the streamer's pass (see `docs/PROFILING.md`) reads
-20.8 MiB further for ~2.1 s, not the ~0.15 s the sampled rate implies. That is still a large win against
-a second full 1.4 GB pass, but it is the most expensive 20 MiB in the file and worth pricing correctly
-before anything else is moved behind it.
+20.8 MiB further for ~2.1 s, not the ~0.15 s the sampled rate implies. It is still a large win — the
+standalone fallback that runs when no pass is streaming has to decompress and discard the whole 1.18 GB
+`.resS` to reach `.resource` behind it, ~14.5 s for the same 20.8 MiB — but the audio node is the most
+expensive 20 MiB in the file and worth pricing correctly before anything else is moved behind it.
 
 To A/B a candidate optimization: copy the current implementation into a local variant, `Bench()` both,
 and **gate on an output-equivalence check first**. The gate compares the *output* — every value and the
