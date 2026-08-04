@@ -138,10 +138,12 @@ public class LegacyMapContentRealDataTests
         ObjectAssetDatabase db = ContentExtraction.ScanAssets(sources);
         PrefabGraph prefabs = GameData.Prefabs;
 
+        // Core-owned decals only: a subscribed workshop item may ship its own, and its texture lives in
+        // its own bundle rather than the core prefab graph this checks against.
         var decals = 0;
         foreach (ObjectAsset asset in db.All)
         {
-            if (asset.Type != EObjectType.Decal)
+            if (asset.Type != EObjectType.Decal || !sources[0].Owns(asset.Directory))
                 continue;
 
             decals++;

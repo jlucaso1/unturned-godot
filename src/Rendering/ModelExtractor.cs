@@ -1198,10 +1198,12 @@ public static class ModelExtractor
         var normals = new[] { Vector3.Up, Vector3.Up, Vector3.Up, Vector3.Up };
         var uvs = new[] { new Vector2(0f, 0f), new Vector2(1f, 0f), new Vector2(1f, 1f), new Vector2(0f, 1f) };
 
-        // Cutout, and culled on neither side: a decal texture is mostly transparent, and which way the
-        // authored rotation ends up pointing the quad is not something the asset says.
+        // Culled on neither side: which way the authored rotation ends up pointing the quad is not
+        // something the asset says. Cutout unless the asset declares Decal_Alpha, whose texture is meant
+        // to fade rather than clip — scissoring that one at half alpha gives it a hard ragged edge.
+        UnityMaterial.Blend blend = asset.DecalBlends ? UnityMaterial.Blend.Alpha : UnityMaterial.Blend.Cutout;
         var submesh = new CachedSubmesh(new[] { 0, 1, 2, 0, 2, 3 }, Colors.White,
-            TextureKey.For(bundleTag, textureId), UnityMaterial.Blend.Cutout, cull: EShaderCull.TwoSided);
+            TextureKey.For(bundleTag, textureId), blend, cull: EShaderCull.TwoSided);
 
         string path = Path.Combine(cacheDir, asset.Guid.ToString("N") + ".mesh");
         using (var stream = File.Create(path))

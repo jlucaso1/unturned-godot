@@ -44,12 +44,17 @@ public sealed class ObjectAsset
     public float DecalX { get; }
     public float DecalY { get; }
 
+    // The bare "Decal_Alpha" flag: this decal's texture blends rather than clips, so its partly
+    // transparent pixels have to survive instead of being scissored away at half alpha.
+    public bool DecalBlends { get; }
+
     private ObjectAsset(Guid guid, ushort id, EObjectType type, string rawType, string? explicitName,
         string? dataName, string? bundleOverridePath, Guid materialPaletteGuid, Guid redirectTargetGuid,
-        float decalX = 0f, float decalY = 0f)
+        float decalX = 0f, float decalY = 0f, bool decalBlends = false)
     {
         DecalX = decalX;
         DecalY = decalY;
+        DecalBlends = decalBlends;
         Guid = guid;
         Id = id;
         Type = type;
@@ -86,9 +91,11 @@ public sealed class ObjectAsset
 
         data.TryGetSingle("Decal_X", out float decalX);
         data.TryGetSingle("Decal_Y", out float decalY);
+        // A bare flag: present with no value at all, which is how Unturned writes its booleans-by-presence.
+        bool decalBlends = data.TryGetString("Decal_Alpha", out _);
 
         asset = new ObjectAsset(guid, id, ClassifyType(rawType), rawType, localizedName,
-            data.GetString("Name"), overridePath, paletteGuid, redirectTarget, decalX, decalY);
+            data.GetString("Name"), overridePath, paletteGuid, redirectTarget, decalX, decalY, decalBlends);
         return true;
     }
 
