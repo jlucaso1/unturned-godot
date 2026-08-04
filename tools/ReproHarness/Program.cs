@@ -127,8 +127,24 @@ public static class Program
         // `--trace ID` prints one line per tick for a single body. The summary says a zombie walked
         // 19 m to gain 1.5, which names the symptom and nothing else; the route it was handed each
         // tick, and where along it the body had got to, is what says why.
-        if (Option(args, "--trace") is { } traced)
-            return Trace(scenario, ushort.Parse(traced), extra);
+        if (Has(args, "--trace"))
+        {
+            // Never on `verify`: returning the trace's exit code would skip every check below, and a
+            // diverging replay would exit 0 because the zombie happened to exist.
+            if (verify)
+            {
+                Console.Error.WriteLine("--trace is for `replay`; `verify` reports a pass or a fail");
+                return 2;
+            }
+            // A malformed id used to throw out of Parse, and a missing one used to run an ordinary
+            // replay while the caller waited for a trace that was never coming.
+            if (Option(args, "--trace") is not { } traced || !ushort.TryParse(traced, out ushort id))
+            {
+                Console.Error.WriteLine("--trace needs a zombie id, as shown by `info`");
+                return 2;
+            }
+            return Trace(scenario, id, extra);
+        }
 
         ReproReplayReport report = scenario.Run(extra);
         Console.Write(report.Describe());

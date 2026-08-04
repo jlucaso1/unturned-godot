@@ -90,12 +90,16 @@ public class ReproEdgeTests
             RecomputePaths = true,
             NavFlags = new[] { ReproWorlds.FlatField() },
         });
-        scenario.System.PathQuery!(new Vector3(0, 0, 0), new Vector3(10, 0, 0), fresh,
-            BakedNavGraph.AgentRadius);
+        Assert.True(scenario.System.PathQuery!(new Vector3(0, 0, 0), new Vector3(10, 0, 0), fresh,
+            BakedNavGraph.AgentRadius)); // it answered, rather than failing into an empty list
         Assert.DoesNotContain(new Vector3(0, 0, 9), fresh); // recomputed: the detour is not repeated
 
-        // And the rest of the oracle is untouched — this is a routing switch, not `--no-oracle`.
+        // And the rest of the oracle still answers — this is a routing switch, not `--no-oracle`.
+        // Readiness is the one exception, and deliberately so: a recording that says the map was not
+        // answering yet would drop the follower onto its direct fallback and the recomputed routes
+        // would never be asked for.
         Assert.NotNull(scenario.Oracle);
+        Assert.True(scenario.System.PathReady!());
     }
 
     // Handing the replay the real map's navmesh (or someone else's pathfinder) is what lifts it out of

@@ -139,7 +139,10 @@ public sealed class ReproScenario
             // from a graph that simply has no triangles there — which is not the same claim.
             _routesAreSliced = _options.PathQuery == null && _options.NavFlags == null;
             System.PathQuery = ResolvePath;
-            System.PathReady = () => Oracle?.Ready() ?? true;
+            // Recomputing routes means the recorded readiness does not apply either: a recording that
+            // says the map was not answering yet would drop the follower onto its direct fallback and
+            // the recomputed routes would never be asked for.
+            System.PathReady = () => _options.RecomputePaths || (Oracle?.Ready() ?? true);
         }
         foreach (ZombieInstance zombie in System.Zombies)
             _byId[zombie.Id] = zombie;

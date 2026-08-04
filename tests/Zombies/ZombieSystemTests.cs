@@ -1343,13 +1343,17 @@ public class ZombieSystemTests
 
     // The tie-break above lets an incumbent refuse a replacement that is not clearly shorter, and an
     // incumbent with nothing left to walk is shorter than everything — so on its own it would let a
-    // route the target has stepped out of reach of hold the body for ever. It does not, and this pins
-    // why: a body parked on a route it has walked out delivers no motion, and BlockedRouteTimeout
-    // throws out a route that stops delivering motion, so the veto expires whether or not it ever
-    // agrees to. That is load-bearing, not incidental — disarm the timeout and this exact geometry
-    // parks the body 2.51 m from its target, in Chase, for ever.
+    // route that no longer arrives hold the body for ever. It does not, and this pins why: the route
+    // still ASKS the body to move, into the wall, so it keeps delivering nothing against a non-zero
+    // request and BlockedRouteTimeout throws it out. That is load-bearing, not incidental — disarm the
+    // timeout and this exact geometry parks the body 2.51 m from its target, in Chase, for ever.
+    //
+    // The target is deliberately stationary and the staleness is injected directly, as the first
+    // answer the graph gives. Walking a player behind the wall instead would move the destination with
+    // it, and `oldError` would leave its 2 m arming radius on its own — disarming the veto, and with
+    // it the whole point of the test.
     [Fact]
-    public void ARouteTheTargetHasSteppedBehind_LosesItsVetoWhenItRunsOut()
+    public void AStaleRouteThatStillScoresAsArriving_DoesNotStrandTheBody()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         var player = Player(1, new Vector3(10f, 5f, 0f));
