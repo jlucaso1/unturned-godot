@@ -233,12 +233,11 @@ public partial class MapPreviewDock : VBoxContainer
             return;
         }
 
-        if (NavigationPreview.Clear(root))
-        {
-            UpdateNavigationButton(shown: false);
-            Log("Navmesh overlay hidden.");
+        // Hides every overlay this dock put up, not only this tab's: the button is one toggle for one
+        // dock, so leaving overlays standing in the scenes it is not looking at would make "Hide" mean
+        // something different depending on which tab happened to be open.
+        if (HideOverlays())
             return;
-        }
 
         SetBusy(true);
         Log($"Reading {map.DisplayName}'s navmesh…");
@@ -264,6 +263,7 @@ public partial class MapPreviewDock : VBoxContainer
             }
 
             NavigationPreview.Attach(root, overlay);
+            RememberOverlayScene(root);
             // The overlay's own checkboxes stay live while it builds, and their handler had nothing to
             // apply to until now, so anything toggled during the build would be silently dropped.
             NavigationPreview.Apply(overlay, NavigationOptions);
@@ -318,6 +318,10 @@ public partial class MapPreviewDock : VBoxContainer
         // Invalidate a cache scan from the previous catalog even when discovery exits early.
         _cacheScanGeneration++;
         _maps.Clear();
+        // Before either failure branch below, not after them. Both clear the map list and disable the
+        // navigation button, so an overlay left standing by an install that has gone away — or by a
+        // rescan that now finds no maps — is one the dock can no longer be used to take back down.
+        DropOverlayFromAnotherMap();
         _unturnedPath = WorldPreview.FindInstall();
         if (_unturnedPath == null)
         {
@@ -342,10 +346,6 @@ public partial class MapPreviewDock : VBoxContainer
             return;
         }
 
-        // The rescan resets the selection itself rather than going through the selection handler, so
-        // an overlay built for whatever was selected before would survive while the dock now names a
-        // different map — and be read as that map's navigation.
-        DropOverlayFromAnotherMap();
         _maps.Selected = 0;
         SetButtonsEnabled(true);
         RefreshCacheState();
@@ -363,13 +363,56 @@ public partial class MapPreviewDock : VBoxContainer
         DropOverlayFromAnotherMap();
     }
 
+    // Every scene this dock has put an overlay into. The editor keeps other open scenes alive in their
+    // own tabs and GetEditedSceneRoot only ever names the current one, so clearing "the" overlay would
+    // leave the previous map's navigation sitting in a tab one click away — with nothing on screen
+    // saying which map it belongs to, and no way to take it down from a dock that has moved on.
+    private readonly List<Node> _overlayScenes = new();
+
+    private void RememberOverlayScene(Node root)
+    {
+        _overlayScenes.RemoveAll(scene => !GodotObject.IsInstanceValid(scene));
+        if (!_overlayScenes.Exists(scene => scene.GetInstanceId() == root.GetInstanceId()))
+            _overlayScenes.Add(root);
+    }
+
+    // Takes down every overlay this dock is responsible for. Returns how many there were.
+    private int ClearOverlays()
+    {
+        int cleared = 0;
+        foreach (Node scene in _overlayScenes)
+            if (GodotObject.IsInstanceValid(scene) && NavigationPreview.Clear(scene))
+                cleared++;
+        _overlayScenes.Clear();
+
+        // The scene in front of the user may hold an overlay this dock did not put there — a reloaded
+        // plugin, or a second dock — and the button in front of them should still take it down.
+        if (EditorInterface.Singleton.GetEditedSceneRoot() is { } edited
+            && NavigationPreview.Clear(edited))
+            cleared++;
+
+        if (cleared > 0)
+            UpdateNavigationButton(shown: false);
+        return cleared;
+    }
+
+    private bool HideOverlays()
+    {
+        int cleared = ClearOverlays();
+        if (cleared > 0)
+            Log(cleared == 1 ? "Navmesh overlay hidden." : $"{cleared} navmesh overlays hidden.");
+        return cleared > 0;
+    }
+
     private void DropOverlayFromAnotherMap()
     {
-        if (EditorInterface.Singleton.GetEditedSceneRoot() is not { } root
-            || !NavigationPreview.Clear(root))
+        int dropped = ClearOverlays();
+        if (dropped == 0)
             return;
-        UpdateNavigationButton(shown: false);
-        Log("Navmesh overlay dropped: it belonged to the previous map.");
+        Log(dropped == 1
+            ? "Navmesh overlay dropped: it belonged to the previous map."
+            : $"{dropped} navmesh overlays dropped across open scenes: they belonged to the "
+              + "previous map.");
     }
 
     private MapEntry? Selected =>
@@ -434,7 +477,12 @@ public partial class MapPreviewDock : VBoxContainer
         {
             // Built detached and attached only at the end: a half-finished world never appears in the
             // viewport, and a failure part-way leaves the scene as it was.
-            Node3D preview = await WorldPreview.BuildAsync(install, map.FolderName, options, this,
+            // SelectionKey, not FolderName: MapCatalog.Find matches the key before it falls back to
+            // folder names, and folder names are not unique across workshop items — so a name resolved
+            // the first matching entry, which need not be the one selected here. That also has to be
+            // the identity stamped on the preview below, or the mismatch warning would compare the
+            // entry the dock MEANT to build against terrain built from a different one and stay quiet.
+            Node3D preview = await WorldPreview.BuildAsync(install, map.SelectionKey, options, this,
                 status => { if (Alive) _preview.Text = status; }, report);
 
             // The staged build yields between slices, so the dock (and the scene) may be gone by now.
@@ -488,7 +536,9 @@ public partial class MapPreviewDock : VBoxContainer
         Log($"Extracting {map.DisplayName} from the masterbundle (this can take a minute)…");
         try
         {
-            string summary = await Task.Run(() => WorldPreview.WarmCache(install, map.FolderName));
+            // Resolved by SelectionKey for the same reason the preview is: a duplicated workshop folder
+            // name would otherwise warm a different item's cache than the one selected.
+            string summary = await Task.Run(() => WorldPreview.WarmCache(install, map.SelectionKey));
             Log($"[color=green]{summary}[/color]");
         }
         catch (Exception e)
