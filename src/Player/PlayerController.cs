@@ -63,9 +63,10 @@ public partial class PlayerController : CharacterBody3D
     // that subtracts one interval per physics frame runs the tick at the FRAME rate while it works off
     // whatever a hitch left in it — six ticks inside a tenth of a second — and the hands count their
     // cooldown in ticks, so the owner would accept and announce a swing the server's real-time rule then
-    // refuses. Here a hitch simply moves the next tick to now: the time a stall ate is gone, not owed.
-    // Advancing by exactly one interval when on schedule is also what keeps this from drifting slow,
-    // which resetting the accumulator would have done.
+    // refuses. Dropping that backlog instead is the opposite error: the counter would then lose the
+    // seconds a stall ate and refuse a swing whose cooldown had really expired. The tick therefore
+    // advances by the intervals that genuinely passed, which is the only reading of it that stays a
+    // measure of real time in both directions. See the tick block in _PhysicsProcess.
     private double _elapsed;
     private double _nextTickAt = UnturnedGodot.Net.ServerSimulation.TickRate;
     private EAttackInputFlags _primaryPending;
@@ -249,9 +250,14 @@ public partial class PlayerController : CharacterBody3D
         _elapsed += dt;
         if (_elapsed >= _nextTickAt)
         {
-            _nextTickAt = System.Math.Max(_nextTickAt + UnturnedGodot.Net.ServerSimulation.TickRate,
-                _elapsed);
-            _tick++;
+            // The counter advances by however many intervals of real time have ACTUALLY elapsed — one on
+            // an ordinary frame, several at once after a hitch. The hands measure their cooldown in it,
+            // so this is what keeps that cooldown measuring real seconds from both directions: it never
+            // runs at the frame rate while a backlog drains, and it never swallows the seconds a stall
+            // ate and leaves the owner unable to punch for a cooldown that has already expired.
+            uint intervals = 1 + (uint)((_elapsed - _nextTickAt) / UnturnedGodot.Net.ServerSimulation.TickRate);
+            _tick += intervals;
+            _nextTickAt += intervals * UnturnedGodot.Net.ServerSimulation.TickRate;
             // The hands run on the fresh press, once. What goes on the wire afterwards is the swing they
             // threw, announced under a number of its own for a few frames; see AttackEdgeRepeats.
             EAttackInputFlags primary = _primaryPending;
