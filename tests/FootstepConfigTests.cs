@@ -41,6 +41,9 @@ public class FootstepConfigTests
         Assert.False(FootstepConfig.IsSilentStance(EPlayerStance.Climb));
         Assert.Equal(2.1f / PlayerConfig.SpeedClimb,
             FootstepConfig.Interval(PlayerConfig.SpeedFor(EPlayerStance.Climb)), 5);
+        // Only crouching is quieter, so a climber's rungs are as loud as a walker's footsteps.
+        Assert.Equal(0.125f, FootstepConfig.VolumeFor(EPlayerStance.Climb, landing: false));
+        Assert.Equal(0.15f, FootstepConfig.VolumeFor(EPlayerStance.Climb, landing: true));
     }
 
     [Fact]

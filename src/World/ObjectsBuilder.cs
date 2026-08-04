@@ -479,7 +479,14 @@ public static class ObjectsBuilder
         foreach (CachedCollider c in colliders)
         {
             if (!c.IsLadder || c.Kind == EColliderKind.Mesh)
-                continue; // every ladder volume in the shipped content is a box
+            {
+                // Every ladder volume in the shipped content is a box. One authored as a mesh collider —
+                // which only workshop content could produce — would fall out of both paths, since
+                // BuildCollision skips ladders entirely, so say so rather than lose it in silence.
+                if (c.IsLadder)
+                    Log.Print("[unturned-godot] a ladder volume is a mesh collider; it is not climbable");
+                continue;
+            }
 
             foreach (Transform3D instance in instances)
             {

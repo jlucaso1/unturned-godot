@@ -79,7 +79,7 @@ public class NetClientRosterTests
         var client = new NetClient(transport, "Me", Level);
 
         transport.Deliver(NetMessages.WriteWelcome(1, 0, 5, new[] { Listing(2, "A") }));
-        transport.Deliver(NetMessages.WritePlayerJoined(9, Listing(3, "C"))); // joined after that roster
+        transport.Deliver(NetMessages.WritePlayerJoined(9, tick: 0, Listing(3, "C"))); // joined after that roster
         client.Update(0);
         Assert.Equal(2, client.Remotes.Count);
 
@@ -99,7 +99,7 @@ public class NetClientRosterTests
         var transport = new FakeClientTransport();
         var client = new NetClient(transport, "Me", Level);
 
-        transport.Deliver(NetMessages.WritePlayerJoined(9, Listing(3, "C")));
+        transport.Deliver(NetMessages.WritePlayerJoined(9, tick: 0, Listing(3, "C")));
         client.Update(0);
 
         transport.Deliver(NetMessages.WriteWelcome(1, 0, 12, new[] { Listing(2, "A") })); // C is gone by 12
@@ -119,7 +119,7 @@ public class NetClientRosterTests
         var transport = new FakeClientTransport();
         var client = new NetClient(transport, "Me", Level);
 
-        transport.Deliver(NetMessages.WritePlayerJoined(4, Listing(3, "C"))); // the newer event
+        transport.Deliver(NetMessages.WritePlayerJoined(4, tick: 0, Listing(3, "C"))); // the newer event
         transport.Deliver(NetMessages.WriteWelcome(1, 0, 3, new[] { Listing(2, "A") }));
         client.Update(0);
 
@@ -158,7 +158,7 @@ public class NetClientRosterTests
 
         transport.Deliver(NetMessages.WriteWelcome(1, 0, 3, new[] { Listing(2, "A") }));
         transport.Deliver(NetMessages.WritePlayerLeft(5, 3));               // C's departure, first
-        transport.Deliver(NetMessages.WritePlayerJoined(4, Listing(3, "C"))); // C's arrival, second
+        transport.Deliver(NetMessages.WritePlayerJoined(4, tick: 0, Listing(3, "C"))); // C's arrival, second
         client.Update(0);
 
         Assert.Equal("A", Assert.Single(client.Remotes).Value.Name);
@@ -174,7 +174,7 @@ public class NetClientRosterTests
 
         transport.Deliver(NetMessages.WriteWelcome(1, 0, 2, new[] { Listing(3, "C") }));
         transport.Deliver(NetMessages.WritePlayerLeft(5, 3));
-        transport.Deliver(NetMessages.WritePlayerJoined(6, Listing(3, "Someone else")));
+        transport.Deliver(NetMessages.WritePlayerJoined(6, tick: 0, Listing(3, "Someone else")));
         client.Update(0);
 
         Assert.Equal("Someone else", Assert.Single(client.Remotes).Value.Name);
@@ -191,8 +191,8 @@ public class NetClientRosterTests
         var client = new NetClient(transport, "Me", Level);
 
         transport.Deliver(NetMessages.WriteWelcome(1, 0, 2, new[] { Listing(2, "A") }));
-        transport.Deliver(NetMessages.WritePlayerJoined(6, Listing(3, "D"))); // the id's occupant now
-        transport.Deliver(NetMessages.WritePlayerJoined(4, Listing(3, "C"))); // its previous one, late
+        transport.Deliver(NetMessages.WritePlayerJoined(6, tick: 0, Listing(3, "D"))); // the id's occupant now
+        transport.Deliver(NetMessages.WritePlayerJoined(4, tick: 0, Listing(3, "C"))); // its previous one, late
         transport.Deliver(NetMessages.WritePlayerLeft(5, 3));                 // and their leave, later
         client.Update(0);
 

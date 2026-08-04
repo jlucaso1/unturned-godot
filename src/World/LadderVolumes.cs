@@ -25,8 +25,8 @@ public partial class LadderVolumes : Node3D
 
     private List<Pending> _pending = new();
     private readonly Dictionary<Rid, Transform3D> _frames = new();
-    // The shapes are shared with the solid collision pool, so hold a reference for as long as the bodies
-    // that use them exist.
+    // Each volume owns its shape — BuildLadderVolumes deliberately does not use the shared collision
+    // pool — and Shape3D is RefCounted, so a reference has to outlive the body that holds its RID.
     private readonly List<Shape3D> _retained = new();
 
     public int Count => _frames.Count > 0 ? _frames.Count : _pending.Count;

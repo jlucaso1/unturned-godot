@@ -393,25 +393,27 @@ public partial class Main : Node3D
         // whatever spawnpoint the map picked. Terrain snapping is skipped: the point is to be exactly here.
         if (OS.GetEnvironment("SPAWN_AT") is { Length: > 0 } at)
         {
+            // Three fields or four, every one of them a real number: a malformed yaw rejects the whole
+            // value rather than quietly becoming zero, and "NaN" parses as a float, so the finite test is
+            // what stops a spawn point that poisons the transform it is written into.
             string[] parts = at.Split(',');
-            if (parts.Length >= 3
-                && float.TryParse(parts[0], System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out float x)
-                && float.TryParse(parts[1], System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out float y)
-                && float.TryParse(parts[2], System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out float z))
+            float spawnYaw = 0f;
+            if ((parts.Length == 3 || parts.Length == 4)
+                && TryParseCoordinate(parts[0], out float x)
+                && TryParseCoordinate(parts[1], out float y)
+                && TryParseCoordinate(parts[2], out float z)
+                && (parts.Length == 3 || TryParseCoordinate(parts[3], out spawnYaw)))
             {
-                float spawnYaw = parts.Length >= 4
-                    && float.TryParse(parts[3], System.Globalization.NumberStyles.Float,
-                        System.Globalization.CultureInfo.InvariantCulture, out float parsedYaw)
-                    ? parsedYaw
-                    : 0f;
                 Log.Print($"[unturned-godot] SPAWN_AT: starting at ({x}, {y}, {z}) yaw {spawnYaw}");
                 return (new Vector3(x, y, z), spawnYaw);
             }
             Log.Print($"[unturned-godot] SPAWN_AT=\"{at}\" is not \"x,y,z[,yaw]\"; ignoring it.");
         }
+
+        static bool TryParseCoordinate(string text, out float value) =>
+            float.TryParse(text, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out value)
+            && float.IsFinite(value);
 
         if (LevelPlayers.Choose(LevelPlayers.Load(mapDir)) is { } spawn)
         {
@@ -787,15 +789,21 @@ public partial class Main : Node3D
             network.Configure(heights, spawnPosition);
         AddChild(network);
 
+        (Node3D? Body, Node3D? Viewmodel) rigs = CharacterModel.BuildPlayerRigs(unturnedPath);
         var player = new PlayerController
         {
             Name = "Player",
             Position = spawnPosition,
             RotationDegrees = new Vector3(0, spawnYaw, 0),
             StartThirdPerson = thirdPerson,
-            BodyModel = CharacterModel.Build(unturnedPath), // real Unturned body, or null -> placeholder
+            // Both rigs out of one read of resources.assets: the body other players see, and the
+            // first-person arms, so a swing is visible from inside the head too. Either may be null —
+            // no game data means the placeholder figure, no Viewmodel rig means no hands in first person.
+            BodyModel = rigs.Body,
+            ViewmodelModel = rigs.Viewmodel,
         };
         (player.Footsteps, _movementAudioFactory) = BuildMovementAudio(unturnedPath);
+        player.Sounds = _oneShotAudio; // BuildMovementAudio created the pool; gestures share it
         AddChild(player);
         _dayNight?.AttachCamera(player.Camera);
 
@@ -847,7 +855,7 @@ public partial class Main : Node3D
             return;
         player.Net = network.Client;
         AddChild(RemotePlayersView.Create(network.Client, unturnedPath, _movementAudioFactory,
-            player.BodyModel));
+            player.BodyModel, _oneShotAudio));
         // The zombies view tracks the LOCAL player's nav bound (Player.PlayerMovement.updateBounds runs client-
         // side in the original too) to drop the avatars of a region it leaves.
         var navBounds = LevelNavigationData.Load(

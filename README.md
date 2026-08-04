@@ -21,7 +21,7 @@ and checked byte-for-byte against the game's own data, using
 | **Foliage** | `Foliage.blob` grass, flowers and pebbles as chunked MultiMeshes (~667k instances on PEI, 7.2M on Germany) |
 | **Roads / water** | Bezier splines lofted through the port of `Road.buildMesh`, real road textures; sea plane from the map's lighting |
 | **Lighting** | Day/night cycle driven by the map's `Lighting.dat` keyframes: sun, ambient, fog, ported skybox (sun disc, stars, moon phases, clouds) |
-| **Player** | Port of `PlayerMovement`/`PlayerLook`/`PlayerStance` with the game's own constants; real character model, skeleton and animations; first/third person; ladders — walk into one or look at it and interact, both through the game's own climb rules |
+| **Player** | Port of `PlayerMovement`/`PlayerLook`/`PlayerStance` with the game's own constants; real character model, skeleton and animations; first/third person. Left click throws a punch (`PlayerEquipment`), replicated so everyone sees it; ladders are climbable — walk into one or look at it and interact, both through the game's own climb rules |
 | **Audio** | Footsteps/landings resolved through the terrain splat like `PhysicsTool.GetTerrainMaterialName`, clips extracted from the master bundle's FSB5 banks |
 | **Zombies** | Spawn tables, navigation bounds and the pre-baked navmeshes; detection, hunting and the `Zombie.cs` animation set |
 | **Vehicles** | The map's own `Spawns/Vehicles.dat` rolled through its spawn tables and redirectors, as many as the level's size allows, each drawn from its real `Vehicle.prefab`. Parked scenery for now: no driving, physics or damage |
@@ -36,10 +36,14 @@ in view.
   needs — it costs one extra forward pass over the bundle on a cold cache, and only when something still
   to be extracted has a streamed buffer. Quantized geometry (`m_CompressedMesh`), which workshop bundles
   lean on heavily, and texture pixels in `.resS` were already decoded.
-- **Gameplay**: no items, inventory, building, damage or survival stats. Zombies exist and hunt, but you
-  cannot fight back. Vehicles spawn and render, but they are scenery: nothing drives, collides with or
-  damages them, and a vehicle sits at the height its spawnpoint was authored at instead of settling onto
-  the ground as its rigidbody would.
+- **Gameplay**: no items, inventory, building, damage or survival stats. Zombies exist and hunt, and you
+  can swing at them, but the punch is an animation only — nothing takes damage yet. Vehicles spawn and
+  render, but they are scenery: nothing drives, collides with or damages them, and a vehicle sits at the
+  height its spawnpoint was authored at instead of settling onto the ground as its rigidbody would.
+- **Ladders**: the ones a map places as objects are climbable. Player-built barricade ladders are not,
+  because barricades do not exist here yet — their prefabs carry the same climbing volume on the same
+  layer, so they come for free once they do. Neither does the climb/swim transition, for the same reason:
+  there is no swimming stance to move between.
 - **Old road bundles**: maps built before Unity 2018 (Alpha Valley, Washington, Yukon, and many workshop
   maps) keep `Environment/Roads.unity3d` in a SerializedFile version this reader does not decode yet, so
   their roads fall back to the procedural asphalt/dirt material. Terrain layers are unaffected: those come

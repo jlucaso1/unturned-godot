@@ -226,6 +226,17 @@ public sealed record ReproNavFlag
     public float[] Vertices { get; init; } = Array.Empty<float>();
     public int[] Triangles { get; init; } = Array.Empty<int>();
     public bool Sliced { get; init; }
+
+    // The faces reconciliation had already taken out of the live graph, indexed into `Triangles`
+    // above — so they survive the slice's renumbering.
+    //
+    // Without these a replay routes over a graph the session never had. The navmesh is baked before
+    // the map's objects exist, so a building stands on walkable faces until PruneAgainstCollisionAsync
+    // probes the collision world and disables them; a freshly built graph therefore answers with a
+    // straight line through a house. That is not a small drift: measured on a real dump, the session's
+    // own route detoured to x2.25 of the plan distance and the replay's went direct at x1.08, so the
+    // route-shaped bug the dump was taken FOR could not be reproduced from it at all.
+    public int[] DisabledFaces { get; init; } = Array.Empty<int>();
 }
 
 public sealed record ReproHeightPatch

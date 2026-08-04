@@ -58,6 +58,12 @@ public delegate bool CapsuleSweepBlocked(Vector3 from, Vector3 to);
 // barricade they were already overlapping.
 public delegate bool CapsuleOccupied(Vector3 at);
 
+// True when a line trace between the two points meets nothing (RayMasks.BLOCK_STANCE).
+public delegate bool LineOfSightClear(Vector3 from, Vector3 to);
+
+// True when the capsule an interact mount would create fits where it would be put.
+public delegate bool MountClearance(Vector3 feet);
+
 // Unturned's ladder rules (PlayerStance.simulate's ladder block, PlayerMovement.simulate's CLIMB branch
 // and InteractableLadder / PlayerStance.ReceiveClimbRequest), as pure functions.
 //
@@ -173,7 +179,7 @@ public static class PlayerLadder
     // hit, NOT from the eye: what it rules out is an angled ladder used to place the capsule on the far
     // side of a thin wall.
     public static bool CanInteractClimb(EPlayerStance stance, in LadderContact? contact,
-        System.Func<Vector3, Vector3, bool> hasLineOfSight, System.Func<Vector3, bool> hasClearance,
+        LineOfSightClear hasLineOfSight, MountClearance hasClearance,
         out Vector3 mountPoint, out float yawDegrees)
     {
         mountPoint = default;

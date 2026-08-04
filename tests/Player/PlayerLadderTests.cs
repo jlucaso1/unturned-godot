@@ -174,12 +174,14 @@ public class PlayerLadderTests
         Transform3D frame = LadderFacing(Vector3.Right, new Vector3(4f, 0f, 0f));
         LadderContact contact = Contact(new Vector3(3.9f, 1f, 0f), Vector3.Right, frame);
         var asked = new List<string>();
+        var swept = new List<(Vector3 From, Vector3 To)>();
         Vector3 tested = default;
 
         PlayerLadder.Resolve(EPlayerStance.Stand, new Vector3(3f, 0f, 0f), contact,
             (from, to) =>
             {
-                asked.Add($"sweep {from} -> {to}");
+                asked.Add("sweep");
+                swept.Add((from, to));
                 return false;
             },
             at =>
@@ -189,7 +191,10 @@ public class PlayerLadderTests
                 return false;
             });
 
-        Assert.Equal(new[] { "sweep (3, 0, 0) -> (4.5, 0.5, 0)", "occupied" }, asked);
+        // The order is the rule; the vectors are compared as vectors, never as formatted text, which
+        // would be a Godot formatting detail and a culture-dependent decimal separator.
+        Assert.Equal(new[] { "sweep", "occupied" }, asked);
+        Assert.Equal((new Vector3(3f, 0f, 0f), new Vector3(4.5f, 0.5f, 0f)), Assert.Single(swept));
         Assert.Equal(new Vector3(4.5f, 0.5f, 0f), tested);
     }
 

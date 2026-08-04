@@ -5,6 +5,9 @@ using UnturnedGodot.Player;
 
 namespace UnturnedGodot.Net;
 
+// One hand animation a player performed on a tick, for the server to replicate.
+public readonly record struct PlayerGestureEvent(byte PlayerId, EPlayerGesture Gesture);
+
 // One player's authoritative state on the server.
 public struct PlayerMoveState
 {
@@ -124,11 +127,49 @@ public sealed class ServerSimulation
     // player by that many ticks — permanently, since the backlog never drains at matched rates.
     public const int MaxQueuedInputs = 4; // 0.32 s of absorbed jitter
 
+    // The least wall-clock time the server will let pass between one player's swings. The same rule as
+    // PlayerEquipment's cooldown, measured the only way a server can measure anything it means to
+    // enforce: on its own clock. Not in ticks, because a stall drops the ones it could not make up
+    // (NetServer.MaxCatchUpTicks) while the player kept swinging through the real seconds; and not in the
+    // client's frame numbers, because the client writes those.
+    public static readonly double PunchCooldownSeconds =
+        (Player.PlayerEquipment.PunchCooldownTicks + 1) * TickRate;
+
+    // The most swings a player can have saved up. Two, so a stall that buffers a legitimate pair of them
+    // into one drained batch pays out both — and no more than that, so idling never buys a flurry.
+    public const double MaxSwingAllowance = 2;
+
     private sealed class Entry
     {
         public PlayerMoveState State;
         public readonly Queue<InputCommand> Inputs = new();
         public InputCommand LastInput;
+
+        // The swing this player is owed on their next tick, and the identity of the last one accepted.
+        //
+        // The server does not re-decide a swing. It cannot usefully: the stance the punch gate reads is
+        // the client's own word (ApplyTrustedPosition takes it verbatim), so re-running that gate here
+        // buys nothing against a modified client and costs correctness against an honest one — a repeat
+        // that outlives the frame it was thrown on would be judged in a stance the swing never happened
+        // in. What the server owes the session is the part a client cannot be trusted with: that a player
+        // cannot swing faster than the rule allows, and that one swing is shown once. The identity
+        // answers the second, the clock answers the first.
+        // A QUEUE, not a slot. The allowance deliberately lets a stall's worth of buffered swings through
+        // together, and NetServer drains the whole transport batch before it steps — so both reach here
+        // before either is broadcast, and a single slot would have the second quietly overwrite the
+        // first, making the allowance buy nothing it claims to. One is emitted per tick, which is also
+        // what keeps two from going out under the same tick number, where the client's freshness guard
+        // would read the second as a retransmission of the first and drop it. Bounded by the allowance,
+        // which is the most that can ever be accepted at once.
+        public readonly Queue<EPlayerGesture> PendingGestures = new();
+        public bool HasSwung;
+        public byte LastSwingSequence;
+
+        // How many swings this player may spend, and when that was last topped up. Starts at one so a
+        // session's opening punch lands.
+        public double SwingAllowance = 1;
+        public bool HasSwingAllowance;
+        public double AllowanceAt;
 
         // Trusted-position bookkeeping: the budget rate-limits CONSECUTIVE client claims, so it needs the
         // last claim we accepted and when. Before any claim exists there is nothing to rate-limit against —
@@ -154,6 +195,12 @@ public sealed class ServerSimulation
     private double _clock;
 
     public uint Tick { get; private set; }
+
+    // The gestures this tick produced, in player order — refilled by every Step, so the caller
+    // broadcasts them before stepping again. A list rather than a callback so the pure simulation stays
+    // free of the transport, exactly as the snapshot list already is.
+    public IReadOnlyList<PlayerGestureEvent> Gestures => _gestures;
+    private readonly List<PlayerGestureEvent> _gestures = new();
 
     // Trusted positions refused for not being finite. Non-zero means a client sent NaN or an infinity —
     // a physics glitch on its end, or a deliberate attempt to wedge its own slot.
@@ -228,7 +275,11 @@ public sealed class ServerSimulation
         return false;
     }
 
-    public void QueueInput(byte id, in InputCommand input)
+    // Inputs off a real socket carry the moment they arrived. That is the clock the swing rate limit is
+    // measured on, and it is NOT the simulation's: QueueInput runs between steps, so _clock still
+    // describes the previous tick — and after a stall it can describe one a long way back, which would
+    // refuse a swing that really had waited out its cooldown.
+    public void QueueInput(byte id, in InputCommand input, double receivedAt)
     {
         if (!_players.TryGetValue(id, out Entry? entry))
             return;
@@ -266,6 +317,14 @@ public sealed class ServerSimulation
         entry.LastReceivedFrame = input.Frame;
         entry.Inputs.Enqueue(input);
 
+        // A swing is answered HERE, as it arrives, and never from the queue below. What the rate limit
+        // measures is real elapsed time, and the queue is precisely where real time stops being legible:
+        // an input can wait several ticks in it, be trimmed off it unplayed, or arrive in a burst beside
+        // the frames around it. Answering on arrival also means the trim can no longer swallow a punch,
+        // so nothing has to be carried past it.
+        if (input.HasSwing)
+            AcceptSwing(entry, input, receivedAt);
+
         // The loop plays one frame per tick, so a client that sends faster than the server ticks builds
         // a backlog that never drains — and a backlog is time: the avatar everyone else sees keeps
         // replaying inputs from seconds ago, further behind after every burst, on top of a queue that
@@ -275,6 +334,42 @@ public sealed class ServerSimulation
         // followed by a flurry — and a hostile client can simply send as fast as it likes.
         while (entry.Inputs.Count > MaxQueuedInputs)
             entry.Inputs.Dequeue();
+    }
+
+    // For callers with no clock of their own — tests, and anything driving the simulation directly —
+    // the last tick is the best date available and the one the loop would have used anyway.
+    public void QueueInput(byte id, in InputCommand input) => QueueInput(id, input, _clock);
+
+    // One swing, judged once. Repeats of it carry the same number and are recognised as the swing already
+    // answered, so losing the first datagram costs nothing and receiving all of them costs nothing either.
+    private void AcceptSwing(Entry entry, in InputCommand input, double receivedAt)
+    {
+        if (entry.HasSwung && input.SwingSequence == entry.LastSwingSequence)
+            return; // a repeat of the swing we already answered
+
+        // Equality, not order: the number wraps, and a client whose swings were lost outright leaves gaps
+        // in it. What matters is only that a NEW number is a new swing.
+        entry.HasSwung = true;
+        entry.LastSwingSequence = input.SwingSequence;
+
+        // Allowance accrues with real time and a swing spends one, rather than the rule being a gap
+        // since the last swing. A gap cannot be measured when a stall makes the transport hand over a
+        // batch of datagrams that really arrived seconds apart: they all carry the single timestamp of
+        // the update that drained them, so the second swing in a batch looks like it arrived no time
+        // after the first, and refusing it would lose a punch the player legitimately threw. What did
+        // pass is the time before the batch, and that is what this counts. The ceiling is what keeps an
+        // idle player from banking a long burst, and it is what a client sending a hundred swings at
+        // once runs into.
+        if (entry.HasSwingAllowance)
+            entry.SwingAllowance = Math.Min(MaxSwingAllowance,
+                entry.SwingAllowance + ((receivedAt - entry.AllowanceAt) / PunchCooldownSeconds));
+        entry.HasSwingAllowance = true;
+        entry.AllowanceAt = receivedAt;
+
+        if (entry.SwingAllowance < 1)
+            return; // faster than the rule allows, whatever the client says its frame numbers were
+        entry.SwingAllowance -= 1;
+        entry.PendingGestures.Enqueue(Player.PlayerGestures.For(input.SwingFist));
     }
 
     // Advances one 0.08 s step on the nominal clock: each call is one tick of simulated time. What the
@@ -287,6 +382,7 @@ public sealed class ServerSimulation
     {
         _clock = now;
         Tick++;
+        _gestures.Clear();
         var states = new List<PlayerSnapshotState>(_players.Count);
         foreach ((byte id, Entry entry) in _players)
         {
@@ -317,6 +413,13 @@ public sealed class ServerSimulation
                 entry.State = _solver.Step(entry.State, input, TickRate);
             if (holdRestoredMovement)
                 entry.State.Moving = restoredMoving;
+
+            // Whatever swing arrived since the last tick goes out on this one. At most one per player per
+            // tick, because an avatar cannot throw two punches inside 0.08 s and a client holds a single
+            // pending swing on that basis — two events under the same tick number would read as a
+            // retransmission of each other anyway.
+            if (entry.PendingGestures.TryDequeue(out EPlayerGesture announced))
+                _gestures.Add(new PlayerGestureEvent(id, announced));
 
             states.Add(new PlayerSnapshotState(id, entry.State.Position,
                 NetAngles.QuantizePitch(entry.State.Pitch), NetAngles.QuantizeYaw(entry.State.Yaw),
