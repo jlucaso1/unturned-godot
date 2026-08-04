@@ -362,7 +362,7 @@ public partial class ObjectStreamer : Node
             _objects = LevelObjects.Load(_level.ObjectsDat);
             List<PlacedTree> trees = LevelTrees.Load(Path.Combine(_level.Path, "Terrain", "Trees.dat"));
             foreach (PlacedTree t in trees)
-                _objects.Add(new PlacedObject(t.Position, t.EulerDegrees, t.Scale, 0, t.Guid));
+                _objects.Add(new PlacedObject(t.Position, t.EulerDegrees, t.Scale, t.Id, t.Guid));
         });
 
         Task assets = Task.Run(() => _db = ContentExtraction.ScanAssets(_sources));
@@ -403,6 +403,12 @@ public partial class ObjectStreamer : Node
         });
 
         Task.WaitAll(placements, assets, foliage);
+
+        // Needs both of the first two: a pre-GUID map names its objects and trees by legacy id, and only
+        // the asset database can turn those into the GUIDs the rest of the load is keyed on.
+        int legacy = LegacyPlacements.ResolveGuids(_objects, _db);
+        if (legacy > 0)
+            Log.Print($"[stream] legacy placements resolved by id: {legacy}");
 
         // After the asset scan, which it resolves its vehicles through, and before the needed set below.
         _vehicles = VehicleSpawnPlan.Load(_level, _sources, _db);

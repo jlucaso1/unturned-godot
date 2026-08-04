@@ -20,13 +20,15 @@ public sealed class UnityTexture
 
     public static UnityTexture Read(Dictionary<string, object> tex)
     {
+        int width = Convert.ToInt32(tex["m_Width"]);
+        int height = Convert.ToInt32(tex["m_Height"]);
         var result = new UnityTexture
         {
             Name = tex.TryGetValue("m_Name", out object? n) ? (string)n : string.Empty,
-            Width = Convert.ToInt32(tex["m_Width"]),
-            Height = Convert.ToInt32(tex["m_Height"]),
+            Width = width,
+            Height = height,
             Format = Convert.ToInt32(tex["m_TextureFormat"]),
-            MipCount = Convert.ToInt32(tex["m_MipCount"]),
+            MipCount = MipLevels(tex, width, height),
             InlineData = tex.TryGetValue("image data", out object? d) ? (byte[])d : Array.Empty<byte>(),
         };
 
@@ -42,6 +44,25 @@ public sealed class UnityTexture
             result.StreamSize = Convert.ToInt32(stream["size"]);
         }
         return result;
+    }
+
+    // How many mip levels the pixel data holds. Unity 4's Texture2D (the pre-2018 per-map bundles) has no
+    // m_MipCount: it stores a m_MipMap bool instead, and a chain is always complete down to 1x1, so the
+    // count follows from the dimensions.
+    private static int MipLevels(Dictionary<string, object> tex, int width, int height)
+    {
+        if (tex.TryGetValue("m_MipCount", out object? count))
+            return Convert.ToInt32(count);
+        if (!tex.TryGetValue("m_MipMap", out object? hasMips) || !Convert.ToBoolean(hasMips))
+            return 1;
+
+        int levels = 1;
+        for (int w = width, h = height; w > 1 || h > 1; levels++)
+        {
+            w = Math.Max(1, w / 2);
+            h = Math.Max(1, h / 2);
+        }
+        return levels;
     }
 
     // The last path segment of an "archive:/CAB-x/CAB-x.resS" reference is the bundle file name.

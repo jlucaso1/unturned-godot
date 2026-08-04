@@ -165,7 +165,7 @@ public static class WorldBuilder
         List<PlacedObject> objects = LevelObjects.Load(level.ObjectsDat);
         List<PlacedTree> trees = LevelTrees.Load(System.IO.Path.Combine(level.Path, "Terrain", "Trees.dat"));
         foreach (PlacedTree t in trees)
-            objects.Add(new PlacedObject(t.Position, t.EulerDegrees, t.Scale, 0, t.Guid));
+            objects.Add(new PlacedObject(t.Position, t.EulerDegrees, t.Scale, t.Id, t.Guid));
 
         // Scan the object/tree asset DB on a worker thread: on the warm path db is only consumed after the
         // main-thread ModelLibrary.Load below (for fallback-box coloring), so the scan overlaps that load and
@@ -205,6 +205,12 @@ public static class WorldBuilder
         // plan and the same batching — only the scene root is its own.
         List<PlacedObject> vehicles = VehicleSpawnPlan.Load(level, sources, dbTask.Result);
         Log.Print($"[unturned-godot] Vehicles: {vehicles.Count} spawned");
+
+        // A pre-GUID map names its objects and trees by legacy id; the needed set below is keyed on GUIDs,
+        // so those placements borrow theirs from the asset database first.
+        int legacy = LegacyPlacements.ResolveGuids(objects, dbTask.Result);
+        if (legacy > 0)
+            Log.Print($"[unturned-godot] Legacy placements resolved by id: {legacy}");
 
         var neededGuids = new HashSet<Guid>();
         foreach (PlacedObject o in objects)

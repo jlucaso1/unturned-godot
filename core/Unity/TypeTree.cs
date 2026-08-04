@@ -20,6 +20,49 @@ public sealed class TypeTreeNode
 
 public static class TypeTree
 {
+    // Unity writes a node's nesting depth as a byte in the blob format, so nothing legitimate nests
+    // deeper than this; the cap keeps a corrupt legacy tree from recursing the stack away.
+    private const int MaxLevel = 255;
+
+    // Reads the pre-blob type tree (format < 12, the Unity 4.x per-map bundles): each node is written
+    // inline as its own fields followed by its children, so the flat list this returns comes from a
+    // depth-first walk. Node order and levels match what ReadBlob produces, which is all TypeTreeReader
+    // needs to rebuild the hierarchy.
+    public static List<TypeTreeNode> ReadLegacy(UnityBinaryReader r)
+    {
+        var nodes = new List<TypeTreeNode>();
+        ReadLegacyNode(r, level: 0, nodes);
+        return nodes;
+    }
+
+    private static void ReadLegacyNode(UnityBinaryReader r, int level, List<TypeTreeNode> nodes)
+    {
+        if (level > MaxLevel)
+            throw new System.NotSupportedException($"Type tree nested deeper than {MaxLevel} levels");
+
+        string type = r.ReadCString();
+        string name = r.ReadCString();
+        int byteSize = r.ReadInt32();
+        r.ReadInt32();          // index
+        int isArray = r.ReadInt32();
+        r.ReadInt32();          // node version
+        int metaFlag = r.ReadInt32();
+
+        nodes.Add(new TypeTreeNode
+        {
+            Level = level,
+            IsArray = isArray != 0,
+            Type = type,
+            Name = name,
+            ByteSize = byteSize,
+            MetaFlag = metaFlag,
+        });
+
+        int childCount = r.ReadInt32();
+        for (int i = 0; i < childCount; i++)
+            ReadLegacyNode(r, level + 1, nodes);
+    }
+
     // Reads the blob-format type tree (Unity 2019+/format >= 12): a flat node array plus a string
     // buffer that node type/name offsets index into (or the shared CommonString table).
     public static List<TypeTreeNode> ReadBlob(UnityBinaryReader r, int formatVersion)

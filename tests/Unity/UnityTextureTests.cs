@@ -111,4 +111,36 @@ public class UnityTextureTests
         Assert.Equal(string.Empty, t.Name);
         Assert.Empty(t.InlineData);
     }
+
+    // Unity 4.x textures (the pre-2018 per-map bundles) have no m_MipCount, only a m_MipMap bool.
+    private static Dictionary<string, object> Unity4Texture(int width, int height, bool mipMap) =>
+        new()
+        {
+            ["m_Name"] = "Trail",
+            ["m_Width"] = width,
+            ["m_Height"] = height,
+            ["m_TextureFormat"] = 4,
+            ["m_MipMap"] = mipMap,
+            ["image data"] = new byte[] { 1, 2, 3, 4 },
+        };
+
+    [Theory]
+    [InlineData(64, 64, 7)]   // the whole chain down to 1x1
+    [InlineData(64, 32, 7)]   // non-square: the longer side sets the length
+    [InlineData(2, 2, 2)]
+    [InlineData(1, 1, 1)]
+    public void Read_MipMapFlag_DerivesTheChainLength(int width, int height, int expected) =>
+        Assert.Equal(expected, UnityTexture.Read(Unity4Texture(width, height, mipMap: true)).MipCount);
+
+    [Fact]
+    public void Read_MipMapFlagOff_IsASingleLevel() =>
+        Assert.Equal(1, UnityTexture.Read(Unity4Texture(32, 32, mipMap: false)).MipCount);
+
+    [Fact]
+    public void Read_MipCountWins_WhenBothFieldsArePresent()
+    {
+        Dictionary<string, object> dict = Unity4Texture(64, 64, mipMap: true);
+        dict["m_MipCount"] = 3;
+        Assert.Equal(3, UnityTexture.Read(dict).MipCount);
+    }
 }

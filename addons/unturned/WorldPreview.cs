@@ -255,10 +255,12 @@ public static class WorldPreview
     {
         List<PlacedObject> objects = LevelObjects.Load(level.ObjectsDat);
         foreach (PlacedTree t in LevelTrees.Load(Path.Combine(level.Path, "Terrain", "Trees.dat")))
-            objects.Add(new PlacedObject(t.Position, t.EulerDegrees, t.Scale, 0, t.Guid));
+            objects.Add(new PlacedObject(t.Position, t.EulerDegrees, t.Scale, t.Id, t.Guid));
 
         IReadOnlyList<ContentSource> sources = ContentSource.Discover(unturnedPath);
         ObjectAssetDatabase db = ContentExtraction.ScanAssets(sources);
+        // Pre-GUID maps place by legacy id; the needed set below is keyed on GUIDs (see LegacyPlacements).
+        LegacyPlacements.ResolveGuids(objects, db);
         LevelFoliage? foliage = LevelFoliage.Load(Path.Combine(level.Path, "Foliage.blob"));
         // The roll is seeded, so the preview shows the same vehicles a session would.
         List<PlacedObject> vehicles = VehicleSpawnPlan.Load(level, sources, db);
