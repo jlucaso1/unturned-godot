@@ -298,7 +298,7 @@ public sealed class NetServer
             ESendType.Reliable);
 
         _rosterVersion++;
-        byte[] joined = NetMessages.WritePlayerJoined(_rosterVersion,
+        byte[] joined = NetMessages.WritePlayerJoined(_rosterVersion, _simulation.Tick,
             Listing(session, _simulation.GetState(session.PlayerId)));
         foreach ((ITransportConnection conn, Session other) in _sessions)
             if (other.Joined && other != session)

@@ -363,20 +363,26 @@ public static class NetMessages
         return (id, tick, rosterVersion, players);
     }
 
-    public static byte[] WritePlayerJoined(uint rosterVersion, PlayerListing player)
+    // `tick` is the simulation tick this player was admitted on. It travels with the roster entry because
+    // it is what dates the avatar: a gesture names only a player id, ids are recycled, and nothing that
+    // happened before this player arrived belongs to them. Carrying it here rather than having the client
+    // guess from the newest tick it happens to have heard also keeps it in the SERVER's own tick space,
+    // so a restarted host counting from zero again needs no special case.
+    public static byte[] WritePlayerJoined(uint rosterVersion, uint tick, PlayerListing player)
     {
         using var ms = new MemoryStream();
         using var w = new BinaryWriter(ms);
         w.Write((byte)ENetMessage.PlayerJoined);
         w.Write(rosterVersion);
+        w.Write(tick);
         WriteListing(w, player);
         return ms.ToArray();
     }
 
-    public static (uint RosterVersion, PlayerListing Player) ReadPlayerJoined(byte[] payload)
+    public static (uint RosterVersion, uint Tick, PlayerListing Player) ReadPlayerJoined(byte[] payload)
     {
         using BinaryReader r = Reader(payload);
-        return (r.ReadUInt32(), ReadListing(r));
+        return (r.ReadUInt32(), r.ReadUInt32(), ReadListing(r));
     }
 
     // The leave is versioned too, so a roster older than it cannot put the player back on the map.

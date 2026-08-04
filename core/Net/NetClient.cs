@@ -29,10 +29,13 @@ public sealed class RemotePlayer
     {
         Name = name;
         KnownAtVersion = knownAtVersion;
-        // The gesture floor starts at the newest server tick we had heard when this avatar appeared.
-        // Player ids are RECYCLED, and a gesture names only an id: without a floor, a swing thrown by
-        // the previous holder of this one and retransmitted late would play on whoever holds it now.
-        // Nothing that happened before we knew this player belongs to them.
+        // The gesture floor is the tick this player was admitted on, carried by the roster entry that
+        // named them. Player ids are RECYCLED, and a gesture names only an id: without a floor, a swing
+        // thrown by the previous holder of this one and retransmitted late would play on whoever holds it
+        // now. Nothing that happened before this player arrived belongs to them — and taking the date
+        // from the message rather than from whatever tick had been heard most recently is what keeps a
+        // punch thrown just after the join, but delivered before its roster entry, from dating too late
+        // to survive its own arrival.
         _lastGestureTick = spawnedAtTick;
         _buffer.UpdateLastSnapshot(initial, now);
         _lastUpdatePos = initial.Position;
@@ -168,14 +171,12 @@ public sealed class NetClient
         {
             // The server stopped talking to us (session dropped, host restarted): rejoin from scratch.
             // The tombstones go too — a host that restarted counts its roster versions from zero, and
-            // stale ones would refuse every listing in the fresh roster it sends us. The tick floor is
-            // the same kind of thing and goes for the same reason: a restarted host counts ticks from
-            // zero as well, and a floor left at the old host's uptime would silence every gesture in the
-            // new session until the new host had run at least as long as the old one.
+            // stale ones would refuse every listing in the fresh roster it sends us. Nothing has to be
+            // done about the gesture tick floors: each one arrives with the roster entry that creates its
+            // avatar, so a restarted host's own low ticks come with the avatars they date.
             Joined = false;
             _remotes.Clear();
             Array.Clear(_leftAtVersion);
-            _serverTick = 0;
             _lastHello = double.NegativeInfinity;
         }
     }
@@ -209,7 +210,6 @@ public sealed class NetClient
                     PlayerId = id;
                     Joined = true;
                     _lastStateAt = now;
-                    ObserveServerTick(welcomeTick);
 
                     // The roster is COMPLETE — "everyone already here" as of rosterVersion — so it
                     // replaces what we hold rather than adding to it. A second Welcome is ordinary (an
@@ -227,7 +227,7 @@ public sealed class NetClient
                             continue; // we already know they left, later than this roster was taken
                         _rosterIds.Add(p.PlayerId);
                         if (!_remotes.ContainsKey(p.PlayerId))
-                            _remotes[p.PlayerId] = SpawnRemote(p, now, rosterVersion);
+                            _remotes[p.PlayerId] = SpawnRemote(p, now, rosterVersion, welcomeTick);
                     }
 
                     if (_remotes.Count > _rosterIds.Count)
@@ -256,7 +256,7 @@ public sealed class NetClient
                         break;
                     }
 
-                    (uint joinedVersion, PlayerListing p) = joined;
+                    (uint joinedVersion, uint joinedTick, PlayerListing p) = joined;
                     // A join can be the stale message. Someone who connects and drops straight back out
                     // produces a join and a leave moments apart, and the leave may arrive first: acting
                     // on the join then leaves that player standing there for good, because nothing
@@ -269,7 +269,7 @@ public sealed class NetClient
                         && (!_remotes.TryGetValue(p.PlayerId, out RemotePlayer? held)
                             || held.KnownAtVersion < joinedVersion))
                     {
-                        _remotes[p.PlayerId] = SpawnRemote(p, now, joinedVersion);
+                        _remotes[p.PlayerId] = SpawnRemote(p, now, joinedVersion, joinedTick);
                     }
                     break;
                 }
@@ -315,9 +315,8 @@ public sealed class NetClient
                         break;
                     }
 
-                    (uint stateTick, List<PlayerSnapshotState> states) = update;
+                    (_, List<PlayerSnapshotState> states) = update;
                     _lastStateAt = now;
-                    ObserveServerTick(stateTick);
                     foreach (PlayerSnapshotState s in states)
                     {
                         if (s.PlayerId == PlayerId)
@@ -358,8 +357,8 @@ public sealed class NetClient
     private static readonly
         Func<byte[], (byte PlayerId, uint Tick, uint RosterVersion, List<PlayerListing> Players)> ReadWelcome =
             NetMessages.ReadWelcome;
-    private static readonly Func<byte[], (uint RosterVersion, PlayerListing Player)> ReadPlayerJoined =
-        NetMessages.ReadPlayerJoined;
+    private static readonly Func<byte[], (uint RosterVersion, uint Tick, PlayerListing Player)>
+        ReadPlayerJoined = NetMessages.ReadPlayerJoined;
     private static readonly Func<byte[], JoinRejection> ReadReject = NetMessages.ReadReject;
     private static readonly Func<byte[], (uint RosterVersion, byte PlayerId)> ReadPlayerLeft =
         NetMessages.ReadPlayerLeft;
@@ -368,18 +367,11 @@ public sealed class NetClient
 
     // The newest server tick heard, from any message that carries one. State updates are unreliable and
     // unordered, so newest-wins rather than last-wins; wrap-safe like every other sequence comparison.
-    private uint _serverTick;
-
-    private void ObserveServerTick(uint tick)
+    private static RemotePlayer SpawnRemote(PlayerListing p, double now, uint knownAtVersion,
+        uint spawnedAtTick)
     {
-        if (unchecked((int)(tick - _serverTick)) > 0)
-            _serverTick = tick;
-    }
-
-    private RemotePlayer SpawnRemote(PlayerListing p, double now, uint knownAtTick)
-    {
-        var remote = new RemotePlayer(p.Name, Pose(p.Position, p.Pitch, p.Yaw), now, knownAtTick,
-            _serverTick);
+        var remote = new RemotePlayer(p.Name, Pose(p.Position, p.Pitch, p.Yaw), now, knownAtVersion,
+            spawnedAtTick);
         remote.Push(Pose(p.Position, p.Pitch, p.Yaw), p.Stance, moving: false, grounded: true, now);
         return remote;
     }

@@ -136,18 +136,52 @@ public class PunchReplicationTests
         sim.AddPlayer(1, Spawn);
 
         // Two clicks six of the player's frames apart — outside the cooldown, so both swing on the
-        // thrower's screen. Every idle frame between them was lost in flight, so what reaches the server
-        // is two attack commands back to back, and it plays them on CONSECUTIVE ticks.
+        // thrower's screen. Every idle frame between them is lost in flight, so the server hears nothing
+        // for those six ticks and plays synthesized idle input through them.
         sim.QueueInput(1, AttackAt(0));
+        sim.Step();
+        Assert.Single(sim.Gestures);
+
+        int starved = 0;
+        for (int i = 0; i < 5; i++)
+        {
+            sim.Step();
+            starved += sim.Gestures.Count;
+        }
+        Assert.Equal(0, starved);
+
         sim.QueueInput(1, AttackAt(6));
-
-        sim.Step();
-        Assert.Single(sim.Gestures);
         sim.Step();
 
-        // Counting the two server ticks would refuse this one, and the punch the thrower already
-        // animated would reach nobody. Counting the six client frames agrees with them.
+        // Counting how many inputs the server got to play would refuse this one — it played two — and the
+        // punch the thrower already animated would reach nobody. Counting the client's six frames agrees
+        // with them.
         Assert.Single(sim.Gestures);
+    }
+
+    // The client writes the counter the cooldown is measured in, so on its own it is a number a modified
+    // client simply inflates: claim six frames passed every tick and every click looks a full cooldown
+    // apart. The ceiling rises at the rate a real client produces frames, so a counter running faster
+    // than that stops being believed.
+    [Fact]
+    public void Server_DoesNotBelieveAFabricatedFrameRate()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        int swings = 0;
+        // Thirty ticks of a client claiming a full cooldown's worth of frames on every one of them.
+        for (uint i = 0; i < 30; i++)
+        {
+            sim.QueueInput(1, AttackAt(i * (PlayerEquipment.PunchCooldownTicks + 1)));
+            sim.Step();
+            swings += sim.Gestures.Count;
+        }
+
+        // Real time bounds it: thirty ticks is thirty frames, which is five cooldowns' worth of swings,
+        // plus what the jitter allowance lets through once. Believing the claim would have paid out all
+        // thirty.
+        Assert.InRange(swings, 1, 10);
     }
 
     // The other direction: server ticks piling up must not buy a swing the client's own clock refuses.

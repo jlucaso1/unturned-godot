@@ -110,6 +110,12 @@ public sealed class ServerSimulation
     // player by that many ticks — permanently, since the backlog never drains at matched rates.
     public const int MaxQueuedInputs = 4; // 0.32 s of absorbed jitter
 
+    // How far a client's frame counter may legitimately run ahead of the server's own count of its ticks
+    // before the difference stops being jitter and starts being a claim. Comfortably wider than the
+    // jitter buffer above, because a burst that arrives inside one tick is ordinary; what it bounds is
+    // the counter's long-run RATE, which is what a fabricated one has to break to be worth anything.
+    public const uint FrameJitterAllowance = 12; // ~1 s at PlayerInput.RATE
+
     private sealed class Entry
     {
         public PlayerMoveState State;
@@ -126,6 +132,21 @@ public sealed class ServerSimulation
         // frame number, which are the only context in which it is the right answer. See the trim in
         // QueueInput.
         public EPlayerGesture CarriedGesture;
+
+        // The highest frame number this client is allowed to be believed about. The punch cooldown is
+        // measured in the client's own frame counter, which is the only clock both ends can agree on
+        // through packet loss — but the client WRITES that counter, so on its own it is a number a
+        // modified client inflates: send 0, 6, 12, 18 on consecutive datagrams and every one of them
+        // looks like a full cooldown apart. This is the ceiling that stops it. It rises by one frame per
+        // server tick, which is the rate a real client produces them at, so a counter running faster than
+        // real time is simply not believed past this. It also never sits more than the jitter allowance
+        // above what the client has actually sent, so idling does not bank credit for a later burst.
+        public bool HasFrameCeiling;
+        public uint FrameCeiling;
+
+        // Never trust a frame beyond the ceiling. Wrap-safe, like every other comparison on this counter.
+        public uint Believable(uint frame) =>
+            unchecked((int)(frame - FrameCeiling)) > 0 ? FrameCeiling : frame;
 
         // Trusted-position bookkeeping: the budget rate-limits CONSECUTIVE client claims, so it needs the
         // last claim we accepted and when. Before any claim exists there is nothing to rate-limit against —
@@ -257,7 +278,7 @@ public sealed class ServerSimulation
             // — and only the verdict travels. Frames reach Simulate in order either way: the trim and
             // the tick loop both take the oldest first, and QueueInput admits none that is not newer.
             InputCommand stale = entry.Inputs.Dequeue();
-            EPlayerGesture owed = entry.Equipment.Simulate(stale.Frame,
+            EPlayerGesture owed = entry.Equipment.Simulate(entry.Believable(stale.Frame),
                 stale.AttackPrimary, stale.AttackSecondary,
                 new HandState { Stance = stale.Stance });
             // A burst deep enough to trim two legal swings at once overwrites rather than queues: they
@@ -295,6 +316,20 @@ public sealed class ServerSimulation
                     entry.State.Stance, entry.State.Grounded);
             entry.LastInput = input;
 
+            // Move the ceiling before anything reads a frame off this input. One frame of credit per
+            // tick; a client that is behind does not accumulate more than the jitter allowance of it.
+            if (!entry.HasFrameCeiling)
+            {
+                entry.FrameCeiling = input.Frame;
+                entry.HasFrameCeiling = true;
+            }
+            else
+            {
+                entry.FrameCeiling++;
+                if (unchecked((int)(entry.FrameCeiling - input.Frame)) > FrameJitterAllowance)
+                    entry.FrameCeiling = unchecked(input.Frame + FrameJitterAllowance);
+            }
+
             if (input.HasPosition)
                 ApplyTrustedPosition(entry, input);
             else
@@ -313,7 +348,7 @@ public sealed class ServerSimulation
             // rejected anything not strictly newer than the last frame seen, so it only ever moves
             // forward here. An edge rescued from a trimmed frame is played on a later one and dates the
             // cooldown from that, which delays the NEXT swing slightly rather than letting one through.
-            EPlayerGesture gesture = entry.Equipment.Simulate(input.Frame,
+            EPlayerGesture gesture = entry.Equipment.Simulate(entry.Believable(input.Frame),
                 input.AttackPrimary, input.AttackSecondary,
                 new HandState { Stance = entry.State.Stance });
 

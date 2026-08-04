@@ -133,9 +133,10 @@ public class NetMessagesTests
     public void JoinedAndLeft_RoundTrip()
     {
         var listing = new PlayerListing { PlayerId = 3, Name = "Cy", Position = Vector3.One, Pitch = 1, Yaw = 2 };
-        (uint joinedVersion, PlayerListing joined) =
-            NetMessages.ReadPlayerJoined(NetMessages.WritePlayerJoined(4321, listing));
+        (uint joinedVersion, uint joinedTick, PlayerListing joined) =
+            NetMessages.ReadPlayerJoined(NetMessages.WritePlayerJoined(4321, 777, listing));
         Assert.Equal(4321u, joinedVersion); // so a roster older than the join cannot bury them
+        Assert.Equal(777u, joinedTick);     // and so a gesture older than the join is not theirs
         Assert.Equal(3, joined.PlayerId);
         Assert.Equal("Cy", joined.Name);
 
