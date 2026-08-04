@@ -15,6 +15,11 @@ public sealed class ObjectAssetDatabase
     // overlaps the object one freely — vehicle 40 and object 40 are unrelated. Keeping them out of _byId
     // is what lets both live in this one GUID-keyed table.
     private readonly Dictionary<ushort, ObjectAsset> _vehiclesById = new();
+    // Resources (the harvestables under Bundles/Trees) are a third namespace, EAssetType.RESOURCE, and it
+    // overlaps the object one just as freely: 69 of the game's own resource ids also name an object, and
+    // every id Monolith's trees are placed with is one of them. A tree resolved out of _byId would render
+    // as somebody's house.
+    private readonly Dictionary<ushort, ObjectAsset> _resourcesById = new();
 
     // How far a redirector chain is followed before giving up. One hop is all the shipped content uses;
     // the bound is only here so a self-referencing mod asset cannot spin.
@@ -29,6 +34,10 @@ public sealed class ObjectAssetDatabase
 
     public ObjectAsset? ResolveById(ushort id) =>
         id != 0 && _byId.TryGetValue(id, out ObjectAsset? a) ? a : null;
+
+    // The resource namespace's own lookup, for what a pre-GUID Trees.dat places.
+    public ObjectAsset? ResolveResourceById(ushort id) =>
+        id != 0 && _resourcesById.TryGetValue(id, out ObjectAsset? a) ? a : null;
 
     // GUID wins for modern placements; the legacy id is the fallback for old ones.
     public ObjectAsset? Resolve(Guid guid, ushort id) =>
@@ -75,16 +84,18 @@ public sealed class ObjectAssetDatabase
     public void Add(ObjectAsset asset)
     {
         _byGuid[asset.Guid] = asset;
-        if (asset.Id == 0)
-            return;
-        if (IsVehicleCategory(asset))
-            _vehiclesById[asset.Id] = asset;
-        else
-            _byId[asset.Id] = asset;
+        if (asset.Id != 0)
+            IdIndexFor(asset)[asset.Id] = asset;
     }
 
-    private static bool IsVehicleCategory(ObjectAsset asset) =>
-        asset.Type is EObjectType.Vehicle or EObjectType.VehicleRedirector;
+    // The legacy-id table this asset's namespace owns. Three of them, because Unturned's EAssetType
+    // separates OBJECT, VEHICLE and RESOURCE and lets their ids collide.
+    private Dictionary<ushort, ObjectAsset> IdIndexFor(ObjectAsset asset) => asset.Type switch
+    {
+        EObjectType.Vehicle or EObjectType.VehicleRedirector => _vehiclesById,
+        EObjectType.Resource => _resourcesById,
+        _ => _byId,
+    };
 
     // Adds only what nothing has claimed yet, so a merge of several bundles keeps whichever registered
     // first. Sources are merged with the game's own content first: a workshop item is free to reuse an
@@ -94,12 +105,8 @@ public sealed class ObjectAssetDatabase
     public void AddIfAbsent(ObjectAsset asset)
     {
         _byGuid.TryAdd(asset.Guid, asset);
-        if (asset.Id == 0)
-            return;
-        if (IsVehicleCategory(asset))
-            _vehiclesById.TryAdd(asset.Id, asset);
-        else
-            _byId.TryAdd(asset.Id, asset);
+        if (asset.Id != 0)
+            IdIndexFor(asset).TryAdd(asset.Id, asset);
     }
 
     // Vehicle redirectors are ".asset" files rather than ".dat", so the vehicle tree is scanned for both.

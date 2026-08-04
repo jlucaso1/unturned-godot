@@ -9,7 +9,7 @@ namespace UnturnedGodot;
 
 // Builds the map's roads: Bezier splines from Paths.dat lofted through RoadMesh — the 1:1 port of
 // Road.buildMesh's banked crown-and-skirt cross-section — at the widths/depths from Roads.dat, textured
-// with the real asphalt/dirt textures from the map's Roads.unity3d (a legacy UnityRaw bundle). One material
+// with the real asphalt/dirt textures from the map's Roads.unity3d (UnityRaw or UnityFS). One material
 // is shared per road-material index (highway, dirt, ...) so the many roads batch. If the bundle can't be
 // read, roads fall back to a procedural asphalt/dirt shader.
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
@@ -251,8 +251,8 @@ public static class RoadsBuilder
         }
         catch (Exception e)
         {
-            // Older maps (Alpha Valley, Monolith, ...) ship a pre-2018 bundle this reader does not
-            // decode. Roads still build, textured by the procedural fallback shader.
+            // A bundle this reader cannot decode (a damaged one, or a format still unaccounted for) must
+            // not cost the map its roads: they still build, textured by the procedural fallback shader.
             Log.Print($"[unturned-godot] Road textures unavailable ({e.GetType().Name}: {e.Message}); "
                 + "falling back to the procedural road material.");
             return new List<ImageTexture?>();
@@ -262,49 +262,33 @@ public static class RoadsBuilder
     private static List<ImageTexture?> ReadRoadTextures(string environmentDir)
     {
         var result = new List<ImageTexture?>();
-        string bundlePath = Path.Combine(environmentDir, "Roads.unity3d");
-        if (!File.Exists(bundlePath))
+        MapBundle? bundle = MapBundle.ReadFile(Path.Combine(environmentDir, "Roads.unity3d"));
+        if (bundle == null)
             return result;
 
-        byte[] data = File.ReadAllBytes(bundlePath);
-        if (!UnityRawBundle.IsRaw(data))
-            return result;
-
-        UnityRawBundle raw = UnityRawBundle.Read(data);
-        byte[]? sfBytes = null;
-        foreach (KeyValuePair<string, byte[]> f in raw.Files)
-            sfBytes = f.Value; // one CAB entry: the SerializedFile
-        if (sfBytes == null)
-            return result;
-
-        SerializedFile file = SerializedFile.Read(sfBytes);
         var byId = new Dictionary<long, SerializedObject>();
-        foreach (SerializedObject o in file.Objects)
+        foreach (SerializedObject o in bundle.Objects)
             byId[o.PathId] = o;
 
-        foreach (SerializedObject o in file.Objects)
+        foreach (SerializedObject o in bundle.Objects)
         {
             if (o.ClassId != 142) // AssetBundle
                 continue;
-            Dictionary<string, object> ab = TypeTreeReader.Read(o.TypeTree, file.ReaderFor(o));
+            Dictionary<string, object> ab = TypeTreeReader.Read(o.TypeTree, bundle.File.ReaderFor(o));
             foreach (object entry in (List<object>)ab["m_Container"])
             {
                 var pair = (Dictionary<string, object>)entry;
                 var info = (Dictionary<string, object>)pair["second"];
                 long assetId = Convert.ToInt64(((Dictionary<string, object>)info["asset"])["m_PathID"]);
-                if (byId.TryGetValue(assetId, out SerializedObject? texObj) && texObj.ClassId == 28) // Texture2D
-                    result.Add(DecodeTexture(texObj, file));
+                // Container order is the material index order Unturned uses (material 0 -> Highway_0,
+                // 5 -> Trail, ...), so EVERY entry takes a slot whether or not it yields a texture:
+                // dropping one would slide every later material onto the wrong image.
+                result.Add(byId.TryGetValue(assetId, out SerializedObject? texObj)
+                    && bundle.TryReadTexture(texObj, out UnityTexture tex, out byte[] pixels)
+                    ? ModelLibrary.BuildTexture(CachedTexture.From(tex, pixels))
+                    : null);
             }
         }
         return result;
-    }
-
-    private static ImageTexture? DecodeTexture(SerializedObject texObj, SerializedFile file)
-    {
-        UnityTexture tex = UnityTexture.Read(TypeTreeReader.Read(texObj.TypeTree, file.ReaderFor(texObj)));
-        byte[]? pixels = tex.GetPixels(_ => null); // inline data (UnityRaw textures have no .resS stream)
-        if (pixels == null || pixels.Length == 0)
-            return null;
-        return ModelLibrary.BuildTexture(CachedTexture.From(tex, pixels));
     }
 }
