@@ -305,7 +305,7 @@ public static class MapCatalog
     {
         try
         {
-            return File.Exists(path) ? File.ReadAllText(path) : null;
+            return File.Exists(path) ? TextFile.ReadAllText(path) : null;
         }
         catch (IOException)
         {

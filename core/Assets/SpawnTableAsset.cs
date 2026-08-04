@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using UnturnedGodot.Dat;
+using UnturnedGodot.Data;
 
 namespace UnturnedGodot.Assets;
 
@@ -195,7 +196,7 @@ public sealed class SpawnTableDatabase
             foreach (string file in EnumerateTableFiles(root))
             {
                 DatDictionary parsed;
-                try { parsed = DatParser.Parse(File.ReadAllText(file)); }
+                try { parsed = DatParser.Parse(TextFile.ReadAllText(file)); }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }
 
                 if (SpawnTableAsset.TryParse(parsed, out SpawnTableAsset? table))
