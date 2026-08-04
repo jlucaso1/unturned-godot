@@ -17,22 +17,34 @@ First person, 1152x648, no world build — `CHAR_ONLY=1 CHAR_FIRST=1` frames the
 game's own view does, so a stance can be read off a render that takes seconds:
 
 ```sh
-CHAR_ONLY=1 CHAR_FIRST=1 CHAR_STANCE=Crouch SCREENSHOT_PATH=after-crouch.png "$GODOT" --path .
+CHAR_ONLY=1 CHAR_FIRST=1 CHAR_STANCE=Crouch                SCREENSHOT_PATH=after-crouch.png "$GODOT" --path .
+CHAR_ONLY=1 CHAR_FIRST=1 CHAR_GESTURE=Punch_Left CHAR_ANIM_TIME=0.10 SCREENSHOT_PATH=after-punch.png "$GODOT" --path .
 ```
 
-`before` adds `CHAR_REST_ANCHOR=1`, which pins the rig to its BIND pose the way the branch did before
-this fix. Unturned parents the first-person camera under the viewmodel skeleton's Skull
-(`firstSkeleton/Spine/Skull/ViewmodelCamera`), so the eye rides the animated head; a bind-pose offset
-only agrees with that while the character is standing.
+`before` adds `CHAR_REST_ANCHOR=1`, which pins the rig to its bind pose the way the branch did before
+the framing was fixed.
+
+The head BONE is a joint at the neck (1.3202 m in the prefab), and the shoulders sit at the identical
+height. Anchoring first person on it put the camera inside the neck: the head hung over the top of the
+screen and the arms swept through the near plane at eye level. The eye is `Skull/Spot`, 0.45 m further
+along the head at 1.7702 m — the same height as the prefab's own `Aim/Fire`, and the point `Player.cs`
+equates with the first-person camera.
 
 | stance | before | after |
 |---|---|---|
-| stand | the frame the fix must not change | byte-identical to before |
-| crouch | the screen filled edge to edge with skin — the camera inside the torso | clean, byte-identical to the standing frame |
-| prone | the body a sliver at the bottom: the eye floating above a character lying down | inside the head, arms framing the view from both sides |
+| stand | ![](https://raw.githubusercontent.com/jlucaso1/unturned-godot/screenshots/pr-79/before-stand.png) | ![](https://raw.githubusercontent.com/jlucaso1/unturned-godot/screenshots/pr-79/after-stand.png) |
+| running | ![](https://raw.githubusercontent.com/jlucaso1/unturned-godot/screenshots/pr-79/before-stand-moving.png) | ![](https://raw.githubusercontent.com/jlucaso1/unturned-godot/screenshots/pr-79/after-stand-moving.png) |
+| crouch | ![](https://raw.githubusercontent.com/jlucaso1/unturned-godot/screenshots/pr-79/before-crouch.png) | ![](https://raw.githubusercontent.com/jlucaso1/unturned-godot/screenshots/pr-79/after-crouch.png) |
+| prone | ![](https://raw.githubusercontent.com/jlucaso1/unturned-godot/screenshots/pr-79/before-prone.png) | ![](https://raw.githubusercontent.com/jlucaso1/unturned-godot/screenshots/pr-79/after-prone.png) |
 
-The `-moving` pair is the same three stances on their `Move_` clips rather than `Idle_`, which is where
-the arms are actually in shot.
+Stand, running, crouch and crouch-running all come out **byte-identical to an empty frame** after: no
+head, no torso, nothing. Prone leaves the forearms resting in the bottom corners with the view down the
+middle. The punch is the case the framing exists for:
+
+![](https://raw.githubusercontent.com/jlucaso1/unturned-godot/screenshots/pr-79/after-punch.png)
+
+A whole fist arriving from the lower left, with none of the sliced-open cross-section the near plane
+used to cut through the arm.
 
 ## pr-80 — [Leave a skinned part where its bones put it, not where its node sits](https://github.com/jlucaso1/unturned-godot/pull/80)
 
