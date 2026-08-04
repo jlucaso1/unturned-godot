@@ -130,7 +130,7 @@ Some objects are decoded again by a later pass, and the suite prices those separ
 
 | decoded more than once | one decode | per load | extra beyond the rows above | applies to |
 |---|---:|---:|---:|---|
-| AssetBundle `m_Container` | 90 ms / 51.5 MiB | 2–4x | **90–271 ms / 51.5–154.4 MiB** | every load |
+| AssetBundle `m_Container` | 100 ms / 51.5 MiB | 2–4x | **100–300 ms / 51.5–154.4 MiB** | every cold pass |
 | Mesh | 82 ms / 145.1 MiB | 2x | ≤ 82 ms / 145.1 MiB | cold mesh cache, placed meshes |
 | GameObject | 30 ms / 42.8 MiB | 2x | ≤ 30 ms / 42.8 MiB | mesh-bearing prefabs only |
 | Shader | 20 ms / 29.5 MiB | 2x | ≤ 20 ms / 29.5 MiB | shaders a resolved material names |
@@ -140,10 +140,14 @@ Repeats are not confined to single objects, either — and that is where the rea
 helpers open the bundle by themselves and re-decode it from the front**, each gated by its own cache,
 because none of them can see the decode the streamer already did: `ReadAudioNodes` (cold audio, no pass
 running — the whole blob, ~14.4 s), `ReadMasterbundleFile` (cold face cache — the SerializedFile node,
-~4.6 s) and `ReadClassTypeTrees` (cold `user://type_trees.cache` — the SerializedFile node again, ~4.6 s,
-and this one runs on **every** load in every tier, since `SetupEnvironment` calls it before the FREECAM
-branch). Together they dwarf every per-object repeat in this table, which prices objects rather than
-passes; `docs/PROFILING.md` has them with the per-cache totals.
+~4.6 s) and `ReadClassTypeTrees` (cold `user://type_trees.cache` — the SerializedFile node again, ~4.6 s).
+
+How much they cost depends on whether the object/texture pass is running beside them, and **the warmer
+the object cache, the more they cost**: with a pass running, audio is served incrementally (~2.2 s) and
+`ExtractMeshesFrom` writes the type-tree cache as a by-product, so the three come to ~6.9 s; with objects
+warm and the other three caches cold, nothing is there to share and they come to **~23.8 s**, more than a
+full cold load. Either way they dwarf every per-object repeat in this table, which prices objects rather
+than passes; `docs/PROFILING.md` has them with the per-cache totals.
 
 **This table is a lower bound on repeated decode work, not a total.** It is a hand-maintained mirror of
 what several `src/` passes happen to do, much of it behind conditions the harness cannot observe — which
@@ -181,11 +185,11 @@ The allocation figures are byte-identical run to run, as they should be for a de
 the clock moves.
 
 **The one object that is decoded again and again.** `m_Container` — the AssetBundle's path-to-asset table
-— is a single object that costs ~99 ms and 51.5 MiB to decode, and every pass that needs to resolve a name
+— is a single object that costs ~100 ms and 51.5 MiB to decode, and every pass that needs to resolve a name
 decodes the whole thing from scratch. Five independent scans of it exist in the port
 (`PrefabGraph.ReadContainer`, `BundleTextures.Locate`, `AudioExtractor.Plan`, `RoadsBuilder`,
 `CharacterModel`); four of those hit *this* bundle — two on every cold load, one when audio is wanted and
-one on a cold face cache. A decode is already in the scanned row, so the **extra** is ~90–271 ms and
+one on a cold face cache. A decode is already in the scanned row, so the **extra** is ~100–300 ms and
 ~52–154 MiB re-deriving something the load already had. Compare it against the whole scanned row: 42,010
 objects cost 216 ms, and re-reading this one object can cost more than all of them. That is the
 cheapest real win in this whole area, and the only reason it is not in this PR is that the fix lives in

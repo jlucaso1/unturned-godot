@@ -1388,6 +1388,11 @@ public static class Program
     // applies it to the whole node; this walks the entire blob and reports the rate per window, which is
     // the measurement that says how wrong a single sample is. Only run when named: it decodes the whole
     // ~1.4 GB blob and so costs far more than every timed suite put together.
+
+    // Bucket for bytes inside no node's declared extent. Named rather than inlined so the read loop and
+    // the report cannot drift apart and start hiding a gap in a node's row.
+    private const string OutsideAnyNode = "(outside every node)";
+
     private static void LzmaDiagnostic(string? unturned)
     {
         string? bundlePath = Environment.GetEnvironmentVariable("BUNDLE_PATH")
@@ -1432,13 +1437,25 @@ public static class Program
         var perNode = new Dictionary<string, (long Bytes, double Seconds)>(StringComparer.Ordinal);
         while (done < stream.TotalSize)
         {
-            // Clip to the next node boundary so no window spans two nodes: the whole point of the table
-            // below is that a node's content, not its position, is what sets its rate, and a straddling
-            // window would average the two together and hide exactly the difference being measured.
+            // Clip to the next EDGE — a node's start or its end, whichever comes first — so no window
+            // spans two nodes or straddles the space between them. The whole point of the table below is
+            // that a node's content, not its position, sets its rate, and a straddling window would
+            // average two together and hide exactly the difference being measured.
+            //
+            // Clipping on starts alone is not enough. `MasterBundleStream` takes Offset and Size from the
+            // directory without requiring that the nodes partition the blob, so a prefix before the first
+            // node, or a gap between two, is representable. Bytes there belong to no node, and billing
+            // them to whichever node happens to precede them would silently pad that node's figure while
+            // the header below calls it exact.
             long boundary = stream.TotalSize;
             foreach (MasterBundleStream.Node node in ordered)
+            {
                 if (node.Offset > done && node.Offset < boundary)
                     boundary = node.Offset;
+                long end = node.Offset + node.Size;
+                if (end > done && end < boundary)
+                    boundary = end;
+            }
 
             long want = Math.Min(window, boundary - done);
             var timer = Stopwatch.StartNew();
@@ -1460,10 +1477,14 @@ public static class Program
             slowest = Math.Min(slowest, rate);
             fastest = Math.Max(fastest, rate);
 
-            string where = "(before first node)";
+            // Inside a node means inside its declared extent, not merely after its start.
+            string where = OutsideAnyNode;
             foreach (MasterBundleStream.Node node in ordered)
-                if (node.Offset <= done)
+                if (node.Offset <= done && done < node.Offset + node.Size)
+                {
                     where = LastSegment(node.Path);
+                    break;
+                }
             perNode.TryGetValue(where, out (long Bytes, double Seconds) acc);
             perNode[where] = (acc.Bytes + got, acc.Seconds + seconds);
 
@@ -1471,7 +1492,17 @@ public static class Program
             done += got;
         }
 
-        Console.WriteLine("\n  by node (windows are clipped to node boundaries, so these are exact)");
+        // Reported before the per-node table rather than folded into it: if the nodes do not partition the
+        // blob, that is a fact about the bundle the reader needs, and hiding it inside a node's row is
+        // what would make the "exact" claim below false.
+        if (perNode.TryGetValue(OutsideAnyNode, out (long Bytes, double Seconds) outside) && outside.Bytes > 0)
+        {
+            Console.WriteLine($"\n  outside every node: {Mb(outside.Bytes)} in {outside.Seconds:0.00} s "
+                + "— a prefix or inter-node gap, billed to no node below");
+        }
+
+        Console.WriteLine("\n  by node (windows are clipped to node starts AND ends, so these count only "
+            + "bytes inside the node and are exact)");
         foreach (MasterBundleStream.Node node in ordered)
         {
             if (!perNode.TryGetValue(LastSegment(node.Path), out (long Bytes, double Seconds) acc)
