@@ -18,9 +18,32 @@ public class FootstepConfigTests
     [InlineData(EPlayerStance.Stand, "FootstepWalk")]
     [InlineData(EPlayerStance.Crouch, "FootstepWalk")]
     [InlineData(EPlayerStance.Prone, "FootstepWalk")]
+    [InlineData(EPlayerStance.Climb, "FootstepWalk")]
     public void FootstepKey_SprintRunsEverythingElseWalks(EPlayerStance stance, string key)
     {
         Assert.Equal(key, FootstepConfig.FootstepKey(stance));
+    }
+
+    // checkGround hardcodes the surface a climber is heard on, and the terrain under a ladder has no say:
+    // "2021-11-16: why does climbing use tile? Sigh."
+    [Fact]
+    public void ClimbingIsHeardOnTile()
+    {
+        Assert.Equal("Tile", FootstepConfig.MaterialOverrideFor(EPlayerStance.Climb));
+        Assert.Null(FootstepConfig.MaterialOverrideFor(EPlayerStance.Stand));
+        Assert.Null(FootstepConfig.MaterialOverrideFor(EPlayerStance.Crouch));
+    }
+
+    // A climber is never prone, but the cadence still comes off the stance: 2.1 / SPEED_CLIMB.
+    [Fact]
+    public void ClimbingIsNotSilent()
+    {
+        Assert.False(FootstepConfig.IsSilentStance(EPlayerStance.Climb));
+        Assert.Equal(2.1f / PlayerConfig.SpeedClimb,
+            FootstepConfig.Interval(PlayerConfig.SpeedFor(EPlayerStance.Climb)), 5);
+        // Only crouching is quieter, so a climber's rungs are as loud as a walker's footsteps.
+        Assert.Equal(0.125f, FootstepConfig.VolumeFor(EPlayerStance.Climb, landing: false));
+        Assert.Equal(0.15f, FootstepConfig.VolumeFor(EPlayerStance.Climb, landing: true));
     }
 
     [Fact]

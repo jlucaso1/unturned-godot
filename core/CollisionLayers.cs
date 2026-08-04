@@ -30,6 +30,21 @@ public static class CollisionLayers
     // VisionBlocker, which is what the two comments above each assumed and neither enforced.
     public const uint Player = 1u << 3;
 
+    // A ladder's climbing volume (Unity's LADDER layer). Nothing collides with it — in Unturned it is a
+    // trigger, and the layer collision matrix does not pair it with the player either — it exists purely
+    // to be raycast against, so it is deliberately absent from CharacterMask below. Before this bit, the
+    // volume was built as ordinary MEDIUM collision: an invisible slab in front of every ladder, which
+    // also blocked the zombie vision rays that mask VisionBlocker.
+    public const uint Ladder = 1u << 4;
+
     // What a character collides against: the solid world plus the furniture it should not walk through.
     public const uint CharacterMask = World | MediumFurniture;
+
+    // RayMasks.LADDER_INTERACT: what a climb probe may hit. The world is in it on purpose — the FIRST
+    // thing the ray meets decides, so a wall between the player and a ladder is a miss, not a mount.
+    public const uint LadderInteractMask = World | MediumFurniture | Ladder;
+
+    // RayMasks.BLOCK_LADDER: what may stand between a player and the ladder they are mounting. The ladder
+    // itself is not in it — the volume is exactly where the player is heading.
+    public const uint BlockLadderMask = World | MediumFurniture;
 }

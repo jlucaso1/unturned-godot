@@ -14,6 +14,7 @@ public class CollisionLayersTests
         ("VisionBlocker", CollisionLayers.VisionBlocker),
         ("MediumFurniture", CollisionLayers.MediumFurniture),
         ("Player", CollisionLayers.Player),
+        ("Ladder", CollisionLayers.Ladder),
     };
 
     // The bug this file exists to prevent: the player sat on VisionBlocker, so the zombie alert raycast —
@@ -41,6 +42,7 @@ public class CollisionLayersTests
     [InlineData("VisionBlocker")]
     [InlineData("MediumFurniture")]
     [InlineData("Player")]
+    [InlineData("Ladder")]
     public void EveryRoleIsASingleBit(string name)
     {
         uint bit = System.Array.Find(Roles, r => r.Name == name).Bit;
@@ -57,5 +59,27 @@ public class CollisionLayersTests
         Assert.Equal(CollisionLayers.World | CollisionLayers.MediumFurniture, CollisionLayers.CharacterMask);
         Assert.Equal(0u, CollisionLayers.CharacterMask & CollisionLayers.Player);
         Assert.Equal(0u, CollisionLayers.CharacterMask & CollisionLayers.VisionBlocker);
+    }
+
+    // A ladder's climbing volume is a trigger in Unturned, on a layer the player capsule is not paired
+    // with: walking at a ladder must reach the ladder itself, not stop against the box that mounts it.
+    // It must also stay off the vision bit, or a ladder would blind every zombie looking through one.
+    [Fact]
+    public void NothingCollidesWithALadderVolume()
+    {
+        Assert.Equal(0u, CollisionLayers.CharacterMask & CollisionLayers.Ladder);
+        Assert.Equal(0u, CollisionLayers.Ladder & CollisionLayers.VisionBlocker);
+    }
+
+    // The climb probe has to see the solid world as well as ladders, because the FIRST thing it meets is
+    // what decides whether there is a ladder to mount; the sweep that clears the way to one must not see
+    // the ladder it is heading for.
+    [Fact]
+    public void TheLadderMasksMatchTheGamesRayMasks()
+    {
+        Assert.Equal(CollisionLayers.CharacterMask | CollisionLayers.Ladder,
+            CollisionLayers.LadderInteractMask);
+        Assert.Equal(CollisionLayers.CharacterMask, CollisionLayers.BlockLadderMask);
+        Assert.Equal(0u, CollisionLayers.BlockLadderMask & CollisionLayers.Ladder);
     }
 }

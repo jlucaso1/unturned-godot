@@ -146,6 +146,11 @@ public sealed class NetServer
             List<PlayerSnapshotState> states = _simulation.Step(stepAt);
             if (states.Count > 0)
                 Broadcast(NetMessages.WriteStateUpdate(_simulation.Tick, states), ESendType.Unreliable);
+            // Everyone but the player who threw it: the owner started its own animation on the frame the
+            // button went down, and playing this too would restart the swing a round-trip later.
+            foreach (PlayerGestureEvent gesture in _simulation.Gestures)
+                BroadcastExcept(gesture.PlayerId,
+                    NetMessages.WritePlayerGesture(gesture.PlayerId, _simulation.Tick, gesture.Gesture), ESendType.Reliable);
             OnTick?.Invoke(_simulation.Tick);
             caughtUp++;
         }
@@ -252,8 +257,10 @@ public sealed class NetServer
                     break;
                 }
             case ENetMessage.Input when session.Joined:
+                // Dated by when it ARRIVED, not by the last tick: the swing rate limit is measured in
+                // real seconds, and a stall is exactly when the two stop being the same thing.
                 if (MalformedPacket.TryDecode(payload, ReadInput, out InputCommand input))
-                    _simulation.QueueInput(session.PlayerId, input);
+                    _simulation.QueueInput(session.PlayerId, input, now);
                 else
                     MalformedPacketsDropped++;
                 break;
@@ -305,7 +312,7 @@ public sealed class NetServer
             ESendType.Reliable);
 
         _rosterVersion++;
-        byte[] joined = NetMessages.WritePlayerJoined(_rosterVersion,
+        byte[] joined = NetMessages.WritePlayerJoined(_rosterVersion, _simulation.Tick,
             Listing(session, _simulation.GetState(session.PlayerId)));
         foreach ((ITransportConnection conn, Session other) in _sessions)
             if (other.Joined && other != session)
@@ -330,6 +337,15 @@ public sealed class NetServer
     {
         foreach ((ITransportConnection conn, Session session) in _sessions)
             if (session.Joined)
+                conn.Send(payload, sendType);
+    }
+
+    // Every joined player except one. Used for what a player already knows because they caused it —
+    // GatherRemoteClientConnectionsExcludingOwner, in the original's terms.
+    public void BroadcastExcept(byte playerId, byte[] payload, ESendType sendType)
+    {
+        foreach ((ITransportConnection conn, Session session) in _sessions)
+            if (session.Joined && session.PlayerId != playerId)
                 conn.Send(payload, sendType);
     }
 

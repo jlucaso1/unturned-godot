@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using Godot;
 using UnturnedGodot.Net;
+using UnturnedGodot.Player;
 using Xunit;
 
 namespace UnturnedGodot.Tests.Net;
@@ -132,9 +133,10 @@ public class NetMessagesTests
     public void JoinedAndLeft_RoundTrip()
     {
         var listing = new PlayerListing { PlayerId = 3, Name = "Cy", Position = Vector3.One, Pitch = 1, Yaw = 2 };
-        (uint joinedVersion, PlayerListing joined) =
-            NetMessages.ReadPlayerJoined(NetMessages.WritePlayerJoined(4321, listing));
+        (uint joinedVersion, uint joinedTick, PlayerListing joined) =
+            NetMessages.ReadPlayerJoined(NetMessages.WritePlayerJoined(4321, 777, listing));
         Assert.Equal(4321u, joinedVersion); // so a roster older than the join cannot bury them
+        Assert.Equal(777u, joinedTick);     // and so a gesture older than the join is not theirs
         Assert.Equal(3, joined.PlayerId);
         Assert.Equal("Cy", joined.Name);
 
@@ -173,6 +175,73 @@ public class NetMessagesTests
         Assert.Equal(new Vector3(300.5f, 34.25f, -84f), read.Position);
         Assert.Equal(UnturnedGodot.Player.EPlayerStance.Prone, read.Stance);
         Assert.False(read.Grounded);
+    }
+
+    [Theory]
+    [InlineData(0, EPlayerPunch.Left)]
+    [InlineData(127, EPlayerPunch.Right)]
+    [InlineData(64, EPlayerPunch.Left)]
+    public void Input_RoundTripsASwing(byte sequence, EPlayerPunch fist)
+    {
+        // Both with and without a trusted position: the swing byte is gated by its own flag bit and is
+        // written before the position, so the two optional tails must not read each other's bytes.
+        var bare = new InputCommand(9, 0, 0, false, false, 1, 2,
+            UnturnedGodot.Player.EPlayerStance.Stand, grounded: true,
+            hasSwing: true, swingSequence: sequence, swingFist: fist);
+        InputCommand readBare = NetMessages.ReadInput(NetMessages.WriteInput(bare));
+        Assert.True(readBare.HasSwing);
+        Assert.Equal(sequence, readBare.SwingSequence);
+        Assert.Equal(fist, readBare.SwingFist);
+
+        var placed = new InputCommand(9, 0, 0, true, true, 1, 2,
+            UnturnedGodot.Player.EPlayerStance.Stand, new Vector3(1, 2, 3), grounded: false,
+            hasSwing: true, swingSequence: sequence, swingFist: fist);
+        InputCommand readPlaced = NetMessages.ReadInput(NetMessages.WriteInput(placed));
+        Assert.True(readPlaced.HasSwing);
+        Assert.Equal(sequence, readPlaced.SwingSequence);
+        Assert.Equal(fist, readPlaced.SwingFist);
+        Assert.True(readPlaced.HasPosition);
+        Assert.Equal(new Vector3(1, 2, 3), readPlaced.Position);
+        Assert.True(readPlaced.Jump);
+        Assert.True(readPlaced.Sprint);
+        Assert.False(readPlaced.Grounded);
+    }
+
+    // The overwhelming majority of input frames carry no swing, and must not pay a byte for one.
+    [Fact]
+    public void Input_WithoutASwing_DoesNotGrow()
+    {
+        var idle = new InputCommand(9, 0, 0, false, false, 1, 2,
+            UnturnedGodot.Player.EPlayerStance.Stand, grounded: true);
+        var swinging = new InputCommand(9, 0, 0, false, false, 1, 2,
+            UnturnedGodot.Player.EPlayerStance.Stand, grounded: true,
+            hasSwing: true, swingSequence: 3);
+
+        Assert.Equal(NetMessages.WriteInput(idle).Length + 1, NetMessages.WriteInput(swinging).Length);
+        Assert.False(NetMessages.ReadInput(NetMessages.WriteInput(idle)).HasSwing);
+    }
+
+    [Fact]
+    public void PlayerGesture_RoundTrips()
+    {
+        byte[] p = NetMessages.WritePlayerGesture(7, 4321, EPlayerGesture.PunchRight);
+        Assert.Equal(ENetMessage.PlayerGesture, NetMessages.TypeOf(p));
+
+        (byte id, uint tick, EPlayerGesture gesture) = NetMessages.ReadPlayerGesture(p);
+        Assert.Equal(7, id);
+        Assert.Equal(4321u, tick); // so a retransmission arriving late cannot replace a newer swing
+        Assert.Equal(EPlayerGesture.PunchRight, gesture);
+    }
+
+    // The pre-join query runs BEFORE the protocol handshake can refuse a mismatched build, so these two
+    // byte values are the one part of the enum two different builds still have to agree on. Pinning them
+    // is what makes a version mismatch report itself instead of timing out as an unreadable message.
+    [Fact]
+    public void PreflightMessageTypes_KeepTheirWireValues()
+    {
+        Assert.Equal(8, (byte)ENetMessage.ServerInfoRequest);
+        Assert.Equal(9, (byte)ENetMessage.ServerInfo);
+        Assert.Equal(10, (byte)ENetMessage.Reject);
     }
 
     [Fact]

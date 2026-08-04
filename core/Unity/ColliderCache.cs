@@ -22,8 +22,14 @@ public readonly struct CachedCollider
     public readonly Vector3[] Vertices;  // Mesh
     public readonly int[] Indices;       // Mesh
 
+    // A ladder's climbing volume rather than solid geometry (UnityLayers.Ladder). It is a trigger in
+    // Unity, on a layer the player capsule does not collide with, and exists only to be raycast against —
+    // so it must become a body a climb probe can find and nothing else can walk into.
+    public readonly bool IsLadder;
+
     public CachedCollider(EColliderKind kind, Transform3D localToRoot, Vector3 center, Vector3 size,
-        float radius, float height, int direction, Vector3[] vertices, int[] indices)
+        float radius, float height, int direction, Vector3[] vertices, int[] indices,
+        bool isLadder = false)
     {
         Kind = kind;
         LocalToRoot = localToRoot;
@@ -34,19 +40,23 @@ public readonly struct CachedCollider
         Direction = direction;
         Vertices = vertices;
         Indices = indices;
+        IsLadder = isLadder;
     }
 
     private static readonly Vector3[] NoVerts = Array.Empty<Vector3>();
     private static readonly int[] NoIndices = Array.Empty<int>();
 
-    public static CachedCollider Box(Transform3D t, Vector3 center, Vector3 size)
-        => new(EColliderKind.Box, t, center, size, 0f, 0f, 0, NoVerts, NoIndices);
-    public static CachedCollider Sphere(Transform3D t, Vector3 center, float radius)
-        => new(EColliderKind.Sphere, t, center, Vector3.Zero, radius, 0f, 0, NoVerts, NoIndices);
-    public static CachedCollider Capsule(Transform3D t, Vector3 center, float radius, float height, int direction)
-        => new(EColliderKind.Capsule, t, center, Vector3.Zero, radius, height, direction, NoVerts, NoIndices);
-    public static CachedCollider Mesh(Transform3D t, Vector3[] vertices, int[] indices)
-        => new(EColliderKind.Mesh, t, Vector3.Zero, Vector3.Zero, 0f, 0f, 0, vertices, indices);
+    public static CachedCollider Box(Transform3D t, Vector3 center, Vector3 size, bool isLadder = false)
+        => new(EColliderKind.Box, t, center, size, 0f, 0f, 0, NoVerts, NoIndices, isLadder);
+    public static CachedCollider Sphere(Transform3D t, Vector3 center, float radius, bool isLadder = false)
+        => new(EColliderKind.Sphere, t, center, Vector3.Zero, radius, 0f, 0, NoVerts, NoIndices, isLadder);
+    public static CachedCollider Capsule(Transform3D t, Vector3 center, float radius, float height,
+        int direction, bool isLadder = false)
+        => new(EColliderKind.Capsule, t, center, Vector3.Zero, radius, height, direction, NoVerts,
+            NoIndices, isLadder);
+    public static CachedCollider Mesh(Transform3D t, Vector3[] vertices, int[] indices,
+        bool isLadder = false)
+        => new(EColliderKind.Mesh, t, Vector3.Zero, Vector3.Zero, 0f, 0f, 0, vertices, indices, isLadder);
 }
 
 // Per-GUID cache of an object's colliders, written once during extraction and read at load — small, so plain
@@ -62,16 +72,21 @@ public readonly struct CachedCollider
 // object would silently load with no collision.
 public static class ColliderCache
 {
-    // "UGCL". Files written before this magic existed have no header at all; they are treated as stale and
-    // re-extracted, which is also how a bad or truncated file recovers.
-    private const uint Magic = 0x4C434755;
+    // "UGC2". The magic doubles as the format version: the previous "UGCL" files carry no flags byte, so
+    // reading one with this reader would misparse every collider after the first. Files written under any
+    // older magic — and the header-less format before that — are treated as stale and re-extracted, which
+    // is also how a bad or truncated file recovers.
+    private const uint Magic = 0x32434755;
 
     // magic + payload length.
     private const int HeaderBytes = 8;
 
-    // Kind byte + a 12-float transform. Every collider costs at least this, so the declared count can be
-    // bounded against the bytes actually present instead of being trusted into an allocation.
-    private const int MinBytesPerCollider = 1 + (12 * 4);
+    // Kind byte + flags byte + a 12-float transform. Every collider costs at least this, so the declared
+    // count can be bounded against the bytes actually present instead of being trusted into an allocation.
+    private const int MinBytesPerCollider = 1 + 1 + (12 * 4);
+
+    // Bit 0 of the per-collider flags byte: this is a ladder's climbing volume, not solid geometry.
+    private const byte LadderFlag = 1;
 
     // True when the file carries the current magic AND its length matches the one recorded in its header —
     // i.e. the write completed. False for the header-less legacy format, a truncated file, a short file, or
@@ -116,6 +131,7 @@ public static class ColliderCache
         foreach (CachedCollider c in colliders)
         {
             w.Write((byte)c.Kind);
+            w.Write((byte)(c.IsLadder ? LadderFlag : 0));
             WriteTransform(w, c.LocalToRoot);
             switch (c.Kind)
             {
@@ -176,17 +192,19 @@ public static class ColliderCache
         for (int n = 0; n < count; n++)
         {
             var kind = (EColliderKind)r.ReadByte();
+            bool isLadder = (r.ReadByte() & LadderFlag) != 0;
             Transform3D t = ReadTransform(r);
             switch (kind)
             {
                 case EColliderKind.Box:
-                    result.Add(CachedCollider.Box(t, ReadVec3(r), ReadVec3(r)));
+                    result.Add(CachedCollider.Box(t, ReadVec3(r), ReadVec3(r), isLadder));
                     break;
                 case EColliderKind.Sphere:
-                    result.Add(CachedCollider.Sphere(t, ReadVec3(r), r.ReadSingle()));
+                    result.Add(CachedCollider.Sphere(t, ReadVec3(r), r.ReadSingle(), isLadder));
                     break;
                 case EColliderKind.Capsule:
-                    result.Add(CachedCollider.Capsule(t, ReadVec3(r), r.ReadSingle(), r.ReadSingle(), r.ReadInt32()));
+                    result.Add(CachedCollider.Capsule(t, ReadVec3(r), r.ReadSingle(), r.ReadSingle(),
+                        r.ReadInt32(), isLadder));
                     break;
                 default:
                     var verts = new Vector3[ReadBoundedCount(r, stream, sizeof(float) * 3, "vertices")];
@@ -195,7 +213,7 @@ public static class ColliderCache
                     var indices = new int[ReadBoundedCount(r, stream, sizeof(int), "indices")];
                     for (int i = 0; i < indices.Length; i++)
                         indices[i] = r.ReadInt32();
-                    result.Add(CachedCollider.Mesh(t, verts, indices));
+                    result.Add(CachedCollider.Mesh(t, verts, indices, isLadder));
                     break;
             }
         }
