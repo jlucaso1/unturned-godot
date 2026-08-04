@@ -1142,8 +1142,9 @@ public class PhysicsBodyOrderTests
     // UGM8 predates source-aware texture tags, UGM9 predates the authored LOD levels, UGMA kept every
     // level a prefab shipped instead of only the ones materially cheaper than the base mesh, UGMB
     // predates both the .resS vertex buffers and the winding fix for mirrored parts — so its meshes are
-    // missing a vehicle's wheels while looking complete by their own rules — and UGMC cached the hidden
-    // Dead/Ragdoll states as if they were the object's own geometry.
+    // missing a vehicle's wheels while looking complete by their own rules — UGMC cached the hidden
+    // Dead/Ragdoll states as if they were the object's own geometry, and UGMD baked every skinned part
+    // through its GameObject chain, which laid the display cases' glass out flat.
     [Fact]
     public void MeshCacheMagicInvalidatesEveryOlderExtraction()
     {
@@ -1151,7 +1152,7 @@ public class PhysicsBodyOrderTests
             return;
 
         string source = File.ReadAllText(path);
-        Assert.Contains("private const uint Magic = 0x444D4755;", source); // "UGMD"
+        Assert.Contains("private const uint Magic = 0x454D4755;", source); // "UGME"
     }
 
     // The source check above pins the constant; this one proves the constant does its job. A cache
@@ -1168,8 +1169,11 @@ public class PhysicsBodyOrderTests
         byte[] current = written.ToArray();
         Assert.True(MeshCache.IsCurrent(current));
 
-        // UGMC..UGM8
-        foreach (uint stale in new uint[] { 0x434D4755, 0x424D4755, 0x414D4755, 0x394D4755, 0x384D4755 })
+        // UGMD..UGM8
+        foreach (uint stale in new uint[]
+        {
+            0x444D4755, 0x434D4755, 0x424D4755, 0x414D4755, 0x394D4755, 0x384D4755,
+        })
         {
             byte[] older = (byte[])current.Clone();
             System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(older, stale);
