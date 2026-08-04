@@ -88,11 +88,15 @@ the object table, then the TypeTree-driven object reader over four sets:
   reached, so calling them scanned would overstate that row as badly as calling them targeted understates
   it. Some fixed part of this row is unavoidable load work; the suite cannot say how much without
   re-running the walk.
-- **targeted classes** — Mesh, Material, Texture2D, Shader, AudioClip and the audio MonoBehaviours, which
-  the port reaches only by path-id or GUID lookup from an asset that names them. `ModelExtractor` skips
-  GUIDs the map does not need before it touches any of them, so a map that places a small subset of the
-  bundle decodes a small subset of this row — but a material is also re-decoded once per submesh that uses
-  it, so the row bounds *which* objects are read without bounding *how often*.
+- **targeted classes** — Mesh, Material, Texture2D and Shader, which the port reaches only by path-id or
+  GUID lookup from an asset that names them. `ModelExtractor` skips GUIDs the map does not need before it
+  touches any of them, so a map that places a small subset of the bundle decodes a small subset of this
+  row — but a material is also re-decoded once per submesh that uses it, so the row bounds *which* objects
+  are read without bounding *how often*.
+- **audio classes** — AudioClip and the definition MonoBehaviours. Targeted in the same sense, but broken
+  out because a **different cache decides whether they are read at all**: every decode of them happens
+  inside `AudioExtractor.Plan`, and `ModelExtractor.ReadSerializedNode` calls that only when it was handed
+  an audio request. Their cost belongs to the audio cache, not to the object/texture pass.
 - **every object** — the loosest of the four. A class in neither list is not a class the port never
   reads (`CharacterModel` walks the player rig's own AnimationClips by id); it means nothing decodes every
   object of it.
@@ -105,14 +109,22 @@ interleaved runs in one session — the range across those runs is the last colu
 | `SerializedFile.Read`, all nodes | 103,549 objects | 170.9 MiB | 9.8 ms | 9.9 MiB | 9.2–10.3 ms |
 | `TypeTreeReader.Read`, scanned | 42,010 | 5.5 MiB | 216 ms | 125 MiB | 201–221 ms |
 | `TypeTreeReader.Read`, partly scanned | 33,688 | 2.6 MiB | 59 ms | 82 MiB | 57–59 ms |
-| `TypeTreeReader.Read`, targeted | 17,051 | 100.1 MiB | 207 ms | 302 MiB | 197–209 ms |
+| `TypeTreeReader.Read`, targeted | 15,320 | 99.8 MiB | 192 ms | 298 MiB | 184–195 ms |
+| `TypeTreeReader.Read`, audio | 1,731 | 0.3 MiB | 3.5 ms | 4.2 MiB | 3.4–3.5 ms |
 | `TypeTreeReader.Read`, every object | 103,549 | 167.9 MiB | 2,558 ms | 2,121 MiB | 2,541–2,815 ms |
 
 Every row decodes each object **exactly once**, and only the *scanned* row is a genuine floor — those
-classes are swept whatever the map. The *partly scanned* row contains a fixed unavoidable share the suite
-cannot isolate, and the *targeted* row is neither a floor nor a ceiling: a map placing a subset decodes
-fewer of those objects, while a shared material is decoded once per submesh, so it can err in both
-directions at once and its 207 ms is not unavoidable load work.
+classes are swept whatever the map. The *partly scanned* row is a ceiling: the sweeps reach only the
+GameObjects and MeshRenderers attached to a swept component, and the suite cannot isolate that subset
+without re-running the walk. The *targeted* row is neither a floor nor a ceiling: a map placing a subset
+decodes fewer of those objects, while a shared material is decoded once per submesh, so it can err in both
+directions at once and its 192 ms is not unavoidable load work.
+
+The *audio* row is split out because a **different cache gates it**. AudioClip and the definition
+MonoBehaviours are decoded only inside `AudioExtractor.Plan`, which `ModelExtractor.ReadSerializedNode`
+calls only when it was given an audio request — so a load with a warm audio cache decodes none of them,
+and they belong with the audio block rather than with the object/texture pass. At 1,731 objects and 3.5 ms
+it changes no conclusion; it was simply filed under the wrong condition.
 
 Some objects are decoded again by a later pass, and the suite prices those separately:
 
@@ -143,9 +155,14 @@ The container's count is a **range**, not a constant. `PrefabGraph.ReadContainer
 `BundleTextures.Locate` always walk it; `AudioExtractor.Plan` adds a third only when the pass was given an
 audio request (`ObjectStreamer.PlanAudio` wants nothing under `FREECAM`/`STEP_PROBE` or once the audio
 cache is warm), and `CharacterModel.ExtractInlineTexture` a fourth on a cold face cache — against *this*
-bundle, since the path it resolves is `assets/coremasterbundle/items/faces/...`. Those two env flags are
-exactly the modes the benchmarks run in, so **a measured load sees the low end and an ordinary cold
-session more**, which is worth knowing before quoting either.
+bundle, since the path it resolves is `assets/coremasterbundle/items/faces/...`.
+
+**Which end a benchmark sees depends on the tier, and not every tier sees the low one.** `FREECAM` and
+`STEP_PROBE` spawn no player, so those two modes want no audio and load no face: they see 2. But **Tier 3
+(`UG_RUNTIME_BENCH_SECS=12 SOLO=1`) sets neither flag and does spawn a player**, so on a fresh `user://`
+it pays both conditional decodes and sees 4 — and it is a *runtime* benchmark, exactly where a cold cache
+is most likely. Do not discount the conditional rows because "benchmarks run under the env flags"; check
+which tier and which cache state. `docs/PROFILING.md` has the per-cache totals.
 
 The other four apply to a subset the suite cannot identify — which objects a given map's placements reach,
 and whether the mesh cache is cold — so they are priced over the whole class, the widest that subset could
@@ -174,7 +191,7 @@ cheapest real win in this whole area, and the only reason it is not in this PR i
 Three more things fall out. The object table itself is free — ~10 ms to index 103k objects, so nothing is
 to be gained by making it lazier. The unique-object decode a cold object/texture pass pays is **216 ms**
 scanned plus some
-fixed part of the 59 ms partly-scanned row, which against that pass's ~12.3 s of LZMA is under 2%. (A load
+fixed part of the 59 ms partly-scanned row, which against that pass's 4.6–12.3 s of LZMA is 2–5%. (A load
 whose caches are warm runs no pass and pays neither — see `docs/PROFILING.md` for which caches gate what.)
 And **the reader's cost is allocation, not
 parsing**: the scanned set turns 5.5 MiB of object bytes into 125 MiB of managed objects — **22.9x** —

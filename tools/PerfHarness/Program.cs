@@ -392,6 +392,17 @@ public static class Program
         28,  // Texture2D      — from a material's texture properties
         43,  // Mesh           — from a MeshFilter/collider part, GUID-filtered
         48,  // Shader         — from a material
+    };
+
+    // Split out of the targeted row because a different cache gates them. Every decode of these two classes
+    // in the port happens inside AudioExtractor — `Plan` reads the definition MonoBehaviour
+    // (AudioExtractor.cs:186) and the AudioClip it names (:377) — and `ModelExtractor.ReadSerializedNode`
+    // calls `Plan` only when `audio != null`. So a load whose audio cache is warm decodes none of these,
+    // and charging them to the object/texture pass puts them under the wrong condition entirely. Still an
+    // upper bound within their own block, for the same reason the targeted row is: only the definitions a
+    // map's surfaces actually name get read.
+    private static readonly int[] AudioClasses =
+    {
         83,  // AudioClip      — from an audio definition
         114, // MonoBehaviour  — the audio definitions themselves
     };
@@ -556,9 +567,11 @@ public static class Program
         var scanned = new HashSet<int>(ScannedClasses);
         var partly = new HashSet<int>(PartlyScannedClasses);
         var targeted = new HashSet<int>(TargetedClasses);
+        var audio = new HashSet<int>(AudioClasses);
         var scannedSet = new List<(SerializedObject Obj, SerializedFile File)>();
         var partlySet = new List<(SerializedObject Obj, SerializedFile File)>();
         var targetedSet = new List<(SerializedObject Obj, SerializedFile File)>();
+        var audioSet = new List<(SerializedObject Obj, SerializedFile File)>();
         foreach ((SerializedObject o, SerializedFile f) in readable)
         {
             if (scanned.Contains(o.ClassId))
@@ -567,6 +580,8 @@ public static class Program
                 partlySet.Add((o, f));
             else if (targeted.Contains(o.ClassId))
                 targetedSet.Add((o, f));
+            else if (audio.Contains(o.ClassId))
+                audioSet.Add((o, f));
         }
 
         if (readable.Count < totalObjects)
@@ -584,6 +599,7 @@ public static class Program
         ReadPass("TypeTreeReader.Read (scanned classes, once each)", scannedSet, iters: 5);
         ReadPass("TypeTreeReader.Read (partly scanned, once each)", partlySet, iters: 5);
         ReadPass("TypeTreeReader.Read (targeted classes, once each)", targetedSet, iters: 5);
+        ReadPass("TypeTreeReader.Read (audio classes, once each)", audioSet, iters: 5);
         ReadPass("TypeTreeReader.Read (every object, once each)", readable, iters: 3);
 
         RepeatDecodeTable(readable);
@@ -745,6 +761,7 @@ public static class Program
         var scannedClasses = new HashSet<int>(ScannedClasses);
         var partlyClasses = new HashSet<int>(PartlyScannedClasses);
         var targetedClasses = new HashSet<int>(TargetedClasses);
+        var audioClasses = new HashSet<int>(AudioClasses);
 
         var byClass = new Dictionary<int, List<(SerializedObject Obj, SerializedFile File)>>();
         foreach ((SerializedObject o, SerializedFile f) in objects)
@@ -775,7 +792,8 @@ public static class Program
         ordered.Sort((a, b) => b.Value.Ms.CompareTo(a.Value.Ms));
 
         Console.WriteLine("    by class (one batch each, GC levelled between; 'how' is scan = every object "
-            + "decoded, partly = swept subset, targeted = by id)");
+            + "decoded, partly = swept subset, targeted = by id, audio = only when the audio cache is "
+            + "cold)");
         Console.WriteLine("      class                      count      input        ms      alloc  how");
         int shown = 0;
         foreach (KeyValuePair<int, (int Count, double Ms, long Input, long Alloc)> entry in ordered)
@@ -784,7 +802,7 @@ public static class Program
                 break;
             string name = ClassNames.TryGetValue(entry.Key, out string? n) ? $"{n} ({entry.Key})" : entry.Key.ToString();
             Console.WriteLine($"      {name,-24} {entry.Value.Count,7:N0} {Mb(entry.Value.Input),10} "
-                + $"{entry.Value.Ms,9:0} {Mb(entry.Value.Alloc),10}  {(scannedClasses.Contains(entry.Key) ? "scan" : partlyClasses.Contains(entry.Key) ? "partly" : targetedClasses.Contains(entry.Key) ? "targeted" : "-"),-8}");
+                + $"{entry.Value.Ms,9:0} {Mb(entry.Value.Alloc),10}  {(scannedClasses.Contains(entry.Key) ? "scan" : partlyClasses.Contains(entry.Key) ? "partly" : targetedClasses.Contains(entry.Key) ? "targeted" : audioClasses.Contains(entry.Key) ? "audio" : "-"),-8}");
         }
     }
 

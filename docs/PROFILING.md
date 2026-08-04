@@ -70,23 +70,33 @@ whose caches are all warm touches the masterbundle *not at all* — `ObjectStrea
 owed. Read the block for each cold cache and add them up; the combinations are tabulated below.
 
 **Block A — the object/texture pass**, when `ContentExtraction.TotalMissing > 0` or a terrain layer is
-uncached. The last row is the only map-dependent one, so the total is given as a fixed part plus a bound:
+uncached. **Only four of its rows are fixed; the rest are measured ceilings**, marked `≤`, because what
+the pass reaches depends on the map and on which textures are already cached:
 
-| when object/texture/layer caches are cold | bytes | time | share of 12.71 s |
-|---|---:|---:|---:|
-| LZMA, SerializedFile node | 170.9 MiB | 4.60 s | 36.2% |
-| LZMA, `.resS` texture node | 1,180.2 MiB | 7.73 s | 60.8% |
-| `SerializedFile.Read` | 103,549 objects | 0.01 s | 0.1% |
-| `TypeTreeReader.Read`, classes the pass scans, once each | 42,010 objects | 0.22 s | 1.7% |
-| `TypeTreeReader.Read`, partly scanned (a fixed share is unavoidable) | 33,688 objects | 0.06 s | 0.5% |
-| re-decoding the AssetBundle container (1 *extra* pass) | 1 object | 0.09 s | 0.7% |
-| **fixed subtotal** | | **12.71 s** | 100% |
-| `TypeTreeReader.Read`, classes a map places — **whole-bundle bound** | ≤ 17,051 objects | ≤ 0.21 s | ≤ 1.7% |
+| when object/texture/layer caches are cold | bytes | time | |
+|---|---:|---:|---|
+| LZMA, SerializedFile node | 170.9 MiB | 4.60 s | fixed — read whole |
+| `SerializedFile.Read` | 103,549 objects | 0.01 s | fixed |
+| `TypeTreeReader.Read`, classes the pass sweeps, once each | 42,010 objects | 0.22 s | fixed — swept on class id alone |
+| re-decoding the AssetBundle container (1 *extra* pass) | 1 object | 0.09 s | fixed — two scans always run |
+| LZMA, `.resS` texture node | ≤ 1,180.2 MiB | ≤ 7.73 s | **ceiling** |
+| `TypeTreeReader.Read`, partly scanned | ≤ 33,688 objects | ≤ 0.06 s | **ceiling** |
+| `TypeTreeReader.Read`, classes a map places | ≤ 15,320 objects | ≤ 0.19 s | **ceiling** |
+| | | **4.92 – 12.90 s** | |
 
-`ModelExtractor` skips GUIDs the map does not place *before* decoding, so the last row is what a map
-placing all of them would pay. A map placing a subset pays less; a shared material decoded once per
-submesh pays more. **Block A is therefore 12.71 s plus a map-dependent term, ~12.92 s at the whole-bundle
-bound** — and every percentage above is against the fixed subtotal, not against that bound.
+Why each ceiling is a ceiling, in the order they matter:
+
+- **The `.resS` tail is not always read to the end.** `CollectOwed` drops textures that are already cached
+  or stored inline, and the stream loop then sets `readTo` to the last owed range — or to 0 when nothing
+  in the node is owed — provided no *later* node is owed either (`ModelExtractor.cs:340-343`, `:463-479`).
+  A pass entered because meshes or terrain layers are cold, with its textures already cached, can stop
+  early or skip the node outright. This is by far the widest of the three, which is why Block A's range is
+  so wide.
+- **Partly scanned** is what `PrefabGraph`'s sweeps decode before GUID filtering, but only for objects
+  *attached to a swept component* — not every GameObject and MeshRenderer in the file. The suite cannot
+  split that subset without re-running the walk, so it prices the whole class and marks the row.
+- **Targeted** is GUID-filtered before decoding, so a map placing a subset pays less — while a shared
+  material, which `MaterialResolver.Resolve` re-decodes per submesh with no cache, can push it higher.
 
 **Block B — a cold audio cache**, gated by `ObjectStreamer.PlanAudio`. What it costs depends entirely on
 whether Block A is running, because the two paths that serve it are different code:
@@ -96,11 +106,22 @@ whether Block A is running, because the two paths that serve it are different co
 | *if Block A is running* — the pass is already streaming the blob, so audio is incremental: | | |
 |   LZMA, `.resource` audio node | 20.8 MiB | 2.11 s |
 |   a second *extra* container decode (`AudioExtractor.Plan`) | 1 object | 0.09 s |
+|   `TypeTreeReader.Read`, AudioClip + the definition MonoBehaviours | ≤ 1,731 objects | ≤ 0.004 s |
+|   *and* it forces `.resS` to its ceiling — see below | | |
 | *if Block A is not running* — `Main.BuildMovementAudio`'s deferred fallback runs `AudioExtractor.Extract`, which opens the bundle by itself: | | |
 |   LZMA, **the whole blob** — `ReadAudioNodes` must decompress and discard the 1,180.2 MiB `.resS` to reach `.resource` behind it | 1,371.9 MiB | 14.44 s |
-|   `SerializedFile.Read` + the container decode | 103,549 objects | 0.10 s |
+|   `SerializedFile.Read` + the container decode + the audio classes | 103,549 objects | 0.10 s |
 
-That second case is the expensive one and it is not exotic: a warm object cache with a cold audio cache
+Two things in that table are easy to miss. **Wanting audio removes Block A's largest ceiling**: with the
+`.resource` node owed, `AnyLaterNodeOwed` is true, so `readTo` stays at the full node size and the whole
+1,180.2 MiB `.resS` must be traversed to reach the audio behind it. A cold audio cache therefore costs
+2.20 s *plus* whatever truncation it just took away. And the **audio TypeTree work belongs here, not in
+Block A** — every decode of AudioClip and the definition MonoBehaviours in the port happens inside
+`AudioExtractor.Plan` (`AudioExtractor.cs:186`, `:377`), which `ReadSerializedNode` calls only when
+`audio != null`. It is 1,731 objects and ~3.5 ms, so moving it changes no conclusion, but it was under the
+wrong condition.
+
+The standalone case is the expensive one and it is not exotic: a warm object cache with a cold audio cache
 is what you get after clearing `user://audio_cache`, or after any load whose meshes were already
 extracted. It costs **~14.5 s to fetch 20.8 MiB**, because a forward-only single-LZMA-block bundle has no
 way to reach its last node without decoding everything before it.
@@ -114,23 +135,29 @@ standalone, never incremental:
 | `SerializedFile.Read` again | 103,549 objects | 0.01 s |
 | a third *extra* container decode (`CharacterModel.ExtractInlineTexture`) | 1 object | 0.09 s |
 
-Adding the blocks up. Ranges span the map-dependent term in Block A; the warm row is exact because it
-runs no masterbundle code at all:
+Adding the blocks up. Ranges span Block A's three ceilings, so a session's *upper* bound is the figure to
+quote when you want "what a first load can cost"; the warm row is exact because it runs no masterbundle
+code at all, and the standalone rows are narrow because they have no truncation to take:
 
 | session | blocks | total | LZMA share |
 |---|---|---:|---:|
 | everything warm | — | **0 s** | — |
-| first load, audio + face warm | A | 12.71–12.92 s | 95.4–97.0% |
-| first load, cold audio | A+B | 14.91–15.12 s | 95.5–96.8% |
-| first load, cold face | A+C | 17.41–17.62 s | 96.1–97.2% |
-| first load, everything cold | A+B+C | **19.61–19.82 s** | 96.1–97.1% |
+| first load, audio + face warm | A | 4.92–12.90 s | 93.5–95.6% |
+| first load, cold audio | A+B | 14.85–15.10 s | 95.6–97.2% |
+| first load, cold face | A+C | 9.62–17.60 s | 95.6–96.2% |
+| first load, everything cold | A+B+C | **19.55–19.80 s** | 96.2–97.4% |
 | warm objects, cold face only | C | 4.70 s | 97.9% |
 | warm objects, cold audio only | B (standalone) | ~14.5 s | 99.3% |
 | warm objects, cold audio + face | B+C | ~19.2 s | 99.0% |
 
-The last row is worth staring at: **clearing two small caches costs almost exactly what a full cold load
-costs**, without a single mesh being extracted, because both fallbacks re-decompress the bundle from the
-front.
+Note how the ranges *narrow* the moment audio is wanted: the same condition that adds 2.20 s also pins
+`.resS` to its full 1,180.2 MiB, so A+B is far more predictable than A alone. The last row is worth
+staring at from the other direction: **clearing two small caches costs almost exactly what a full cold
+load costs**, without a single mesh being extracted, because both fallbacks re-decompress from the front.
+
+Whatever the cache state, **LZMA is never below 93% of it** — that is the one conclusion here that no
+ceiling can move, because truncating the `.resS` read removes time from the numerator and denominator
+together.
 
 **Which of those a benchmark measures depends on the tier, not on a blanket rule.** `FREECAM` and
 `STEP_PROBE` spawn no player, so they skip Blocks B and C entirely. Tier 3
@@ -142,21 +169,20 @@ before comparing anything; a benchmark that straddles the transition is measurin
 
 **The cold face path deserves its own note**: `CharacterModel.LoadFace` falls through to
 `ModelExtractor.ReadMasterbundleFile`, which re-reads the bundle from disk and decodes the whole
-SerializedFile node a second time — 4.7 s, more than a third of Block A — to fetch one
+SerializedFile node a second time — 4.7 s, of the same order as Block A itself — to fetch one
 small inline face texture. Everything it needs was already decoded minutes earlier by the streamer's own
 pass. That is the largest single piece of avoidable work this measurement found, and like the container
 repeats the fix is a `src/` change: hand the already-decoded `SerializedFile` to the face loader instead
 of letting it start over. The same shape produces Block B's standalone case, and the same fix applies:
 neither fallback needs its own pass over the blob when one has already run.
 
-**Every block is LZMA-bound and nothing else is close.** Block A's two LZMA rows are 12.33 s of its
-12.71 s fixed subtotal — **97.0%**, or 95.4% if a map places the whole bundle — and the share only rises
-as the other blocks come in, since both are almost entirely LZMA (99.3% for standalone audio).
+**Every block is LZMA-bound and nothing else is close**, as the share column above shows: 93.5% at the
+narrowest, and higher everywhere else.
 The object table is free, and the TypeTree reader — the obvious-looking target, and the only part of this
-that is the port's own code — is **1.7%** of Block A for what the pass unconditionally scans, 2.2% adding
-the partly-scanned row, and 4.5% of the 12.92 s whole-bundle bound counting the container repeat and
-everything a map could place. Eliminating
-it entirely would take well under a second off a 13–20 s load. Work aimed at cold load time should go at
+that is the port's own code — is **0.22 s** of unconditional sweep, at most 0.06 s more from the
+partly-scanned row and 0.19 s from everything a map could place. Against Block A that is 1.7% at the
+ceiling and 4.5% at the floor, where there is far less LZMA to be dwarfed by. Eliminating
+it entirely would take well under a second off a 5–20 s load. Work aimed at cold load time should go at
 *what is decoded and when* (`ress`, deferral, caching) rather than at how fast the port turns
 already-decoded bytes into values — and the two exceptions below are both of exactly that kind: decoding
 something a second time rather than decoding it slowly.
