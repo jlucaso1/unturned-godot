@@ -388,14 +388,25 @@ public static class Program
     // so the whole-file figure is an UPPER BOUND on load work and must not be read as a measurement of it.
     private static readonly int[] TargetedClasses =
     {
-        1,   // GameObject     — GameObjectOf(goId), by id
         21,  // Material       — from a renderer's material list
-        23,  // MeshRenderer   — from its GameObject's component list
         28,  // Texture2D      — from a material's texture properties
         43,  // Mesh           — from a MeshFilter/collider part, GUID-filtered
         48,  // Shader         — from a material
         83,  // AudioClip      — from an audio definition
         114, // MonoBehaviour  — the audio definitions themselves
+    };
+
+    // Classes neither row can claim. `PrefabGraph.Read` runs its mesh and collider sweeps before any GUID
+    // filtering, so for every swept component it decodes the attached GameObject (through
+    // AnchorOf/NameOf/LayerOf) and its renderer (through MeshRendererMaterials) — unconditionally, on any
+    // load, whatever the map. But only objects attached to a swept component are reached, not every object
+    // of the class, so calling them scanned would overstate that row as badly as leaving them in targeted
+    // understates it. The suite cannot split them without re-running the walk, so it reports them apart and
+    // says which way each bound runs.
+    private static readonly int[] PartlyScannedClasses =
+    {
+        1,   // GameObject   — AnchorOf/NameOf/LayerOf, from both sweeps
+        23,  // MeshRenderer — MeshRendererMaterials, called for every swept mesh part
     };
 
     // A class in neither list is not a class the port never reads: CharacterModel walks the player rig's
@@ -541,13 +552,17 @@ public static class Program
                     readable.Add((o, f));
 
         var scanned = new HashSet<int>(ScannedClasses);
+        var partly = new HashSet<int>(PartlyScannedClasses);
         var targeted = new HashSet<int>(TargetedClasses);
         var scannedSet = new List<(SerializedObject Obj, SerializedFile File)>();
+        var partlySet = new List<(SerializedObject Obj, SerializedFile File)>();
         var targetedSet = new List<(SerializedObject Obj, SerializedFile File)>();
         foreach ((SerializedObject o, SerializedFile f) in readable)
         {
             if (scanned.Contains(o.ClassId))
                 scannedSet.Add((o, f));
+            else if (partly.Contains(o.ClassId))
+                partlySet.Add((o, f));
             else if (targeted.Contains(o.ClassId))
                 targetedSet.Add((o, f));
         }
@@ -565,6 +580,7 @@ public static class Program
         // milliseconds, and fifteen of them would cost more than the rest of the harness put together.
         // The coarser the row, the smaller its budget.
         ReadPass("TypeTreeReader.Read (scanned classes, once each)", scannedSet, iters: 5);
+        ReadPass("TypeTreeReader.Read (partly scanned, once each)", partlySet, iters: 5);
         ReadPass("TypeTreeReader.Read (targeted classes, once each)", targetedSet, iters: 5);
         ReadPass("TypeTreeReader.Read (every object, once each)", readable, iters: 3);
 
@@ -610,28 +626,33 @@ public static class Program
     // suite has no way to know which objects a given map's placements actually reach — pricing it over the
     // whole class is the widest that subset could be. Each entry names its sites so the count can be
     // checked against the code rather than trusted.
-    private static readonly (int ClassId, int Decodes, bool EveryObject, string Where)[] RepeatDecoded =
+    private static readonly (int ClassId, int MinDecodes, int MaxDecodes, bool EveryObject, string Where)[]
+        RepeatDecoded =
     {
-        // PrefabGraph.ReadContainer, BundleTextures.Locate and AudioExtractor.Plan each walk m_Container
-        // by decoding the whole AssetBundle object again, on every load. RoadsBuilder and CharacterModel
-        // scan one too, but their own bundle rather than this one, so they are not counted.
-        (AssetBundleClassId, 3, true,
-            "PrefabGraph.ReadContainer + BundleTextures.Locate + AudioExtractor.Plan"),
+        // PrefabGraph.ReadContainer and BundleTextures.Locate always walk m_Container by decoding the whole
+        // AssetBundle object again. AudioExtractor.Plan makes a third, but only when the pass was given an
+        // audio request: ModelExtractor.ReadSerializedNode skips it when `audio` is null, and
+        // ObjectStreamer.PlanAudio wants nothing under FREECAM/STEP_PROBE or once the audio cache is warm.
+        // Those two flags are exactly the modes the benchmarks run in, so a measured load sees the low end
+        // and an ordinary cold session the high one. RoadsBuilder and CharacterModel scan a container too,
+        // but their own bundle rather than this one, so they are not counted.
+        (AssetBundleClassId, 2, 3, true,
+            "PrefabGraph.ReadContainer + BundleTextures.Locate (+ AudioExtractor.Plan when audio is wanted)"),
 
         // MapObjectKeysToMeshes decodes each skinned renderer in its class-id sweep, then
         // MeshRendererMaterials reaches the same component from its GameObject and decodes it again — but
         // only for parts that clear the mesh and anchor checks, so this is a bound over the class.
-        (137, 2, false, "MapObjectKeysToMeshes sweep + MeshRendererMaterials"),
+        (137, 2, 2, false, "MapObjectKeysToMeshes sweep + MeshRendererMaterials"),
 
         // AnchorOf decodes a GameObject (and caches it) for the part name, then MeshRendererMaterials
         // decodes the same GameObject again to walk m_Component — it is a separate static and cannot see
         // that cache. Only mesh-bearing prefab GameObjects take both paths.
-        (1, 2, false, "PrefabWalk.AnchorOf's cache + MeshRendererMaterials"),
+        (1, 2, 2, false, "PrefabWalk.AnchorOf's cache + MeshRendererMaterials"),
 
         // BlendOf and CullOf both go through ShaderOf but with SEPARATE caches (_shaderBlends,
         // _shaderCulls), so the first material using a shader decodes it once for each. Only shaders a
         // resolved material actually names are reached.
-        (48, 2, false, "MaterialResolver.BlendOf + CullOf (separate shader caches)"),
+        (48, 2, 2, false, "MaterialResolver.BlendOf + CullOf (separate shader caches)"),
     };
 
     // Materials have no fixed multiplicity to report: MaterialResolver.Resolve decodes the material on
@@ -652,7 +673,8 @@ public static class Program
         }
 
         bool header = false;
-        foreach ((int classId, int decodes, bool everyObject, string where) in RepeatDecoded)
+        foreach ((int classId, int minDecodes, int maxDecodes, bool everyObject, string where)
+            in RepeatDecoded)
         {
             if (!byClass.TryGetValue(classId, out List<(SerializedObject Obj, SerializedFile File)>? objects)
                 || objects.Count == 0)
@@ -673,8 +695,14 @@ public static class Program
             string name = ClassNames.TryGetValue(classId, out string? n) ? n : classId.ToString();
             double median = Bench($"  {name} x{objects.Count:N0}, one decode", Pass, warmup: 1, iters: 5);
             long alloc = AllocatedBy(Pass);
-            Console.WriteLine($"      {decodes} decodes per load, so {decodes - 1} extra: "
-                + $"{median * (decodes - 1):N0} ms and {Mb(alloc * (decodes - 1))}"
+            string count = minDecodes == maxDecodes
+                ? $"{maxDecodes} decodes per load, so {maxDecodes - 1} extra"
+                : $"{minDecodes}-{maxDecodes} decodes per load, so {minDecodes - 1}-{maxDecodes - 1} extra";
+            string cost = minDecodes == maxDecodes
+                ? $"{median * (maxDecodes - 1):N0} ms and {Mb(alloc * (maxDecodes - 1))}"
+                : $"{median * (minDecodes - 1):N0}-{median * (maxDecodes - 1):N0} ms and "
+                    + $"{Mb(alloc * (minDecodes - 1))}-{Mb(alloc * (maxDecodes - 1))}";
+            Console.WriteLine($"      {count}: {cost}"
                 + (everyObject
                     ? " beyond the rows above"
                     : " AT MOST — only the objects a placement reaches take both paths"));
@@ -696,6 +724,7 @@ public static class Program
     private static void PerClassTable(List<(SerializedObject Obj, SerializedFile File)> objects)
     {
         var scannedClasses = new HashSet<int>(ScannedClasses);
+        var partlyClasses = new HashSet<int>(PartlyScannedClasses);
         var targetedClasses = new HashSet<int>(TargetedClasses);
 
         var byClass = new Dictionary<int, List<(SerializedObject Obj, SerializedFile File)>>();
@@ -727,7 +756,7 @@ public static class Program
         ordered.Sort((a, b) => b.Value.Ms.CompareTo(a.Value.Ms));
 
         Console.WriteLine("    by class (one batch each, GC levelled between; 'how' is scan = every object "
-            + "decoded, targeted = by id)");
+            + "decoded, partly = swept subset, targeted = by id)");
         Console.WriteLine("      class                      count      input        ms      alloc  how");
         int shown = 0;
         foreach (KeyValuePair<int, (int Count, double Ms, long Input, long Alloc)> entry in ordered)
@@ -736,7 +765,7 @@ public static class Program
                 break;
             string name = ClassNames.TryGetValue(entry.Key, out string? n) ? $"{n} ({entry.Key})" : entry.Key.ToString();
             Console.WriteLine($"      {name,-24} {entry.Value.Count,7:N0} {Mb(entry.Value.Input),10} "
-                + $"{entry.Value.Ms,9:0} {Mb(entry.Value.Alloc),10}  {(scannedClasses.Contains(entry.Key) ? "scan" : targetedClasses.Contains(entry.Key) ? "targeted" : "-"),-8}");
+                + $"{entry.Value.Ms,9:0} {Mb(entry.Value.Alloc),10}  {(scannedClasses.Contains(entry.Key) ? "scan" : partlyClasses.Contains(entry.Key) ? "partly" : targetedClasses.Contains(entry.Key) ? "targeted" : "-"),-8}");
         }
     }
 

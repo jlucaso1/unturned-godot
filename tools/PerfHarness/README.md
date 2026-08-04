@@ -74,20 +74,26 @@ them — only a real want set does that, which is what the map-scoped lower boun
 
 The masterbundle's first node is a ~171 MiB SerializedFile holding ~103k objects. Everything the port
 builds a scene from comes through it, and until this suite existed none of it was measured. It reports
-the object table, then the TypeTree-driven object reader over three sets:
+the object table, then the TypeTree-driven object reader over four sets:
 
 - **scanned classes** — classes a bundle-wide loop decodes *every* object of, on any load, whatever the
   map: `PrefabGraph`'s `ReadContainer` (AssetBundle), `BuildTransformMaps` (Transform), the
   MeshFilter/SkinnedMeshRenderer sweep and the collider sweep. Each filters on class id alone. The row is
   each such object decoded **once** — a floor, since two of these classes are decoded again by a later
   pass (see the repeat table below).
-- **targeted classes** — Mesh, Material, Texture2D, Shader, MeshRenderer, GameObject, AudioClip and the
-  audio MonoBehaviours, which the port reaches only by path-id or GUID lookup from an asset that names
-  them. `ModelExtractor` skips GUIDs the map does not need before it touches any of them, so a map that
-  places a small subset of the bundle decodes a small subset of this row — but a material is also
-  re-decoded once per submesh that uses it, so the row bounds *which* objects are read without bounding
-  *how often*. Neither a measurement nor a clean ceiling.
-- **every object** — the loosest of the three. A class in neither list is not a class the port never
+- **partly scanned** — GameObject and MeshRenderer, which neither other row can claim. `PrefabGraph.Read`
+  runs its mesh and collider sweeps *before* any GUID filtering, decoding the attached GameObject (through
+  `AnchorOf`/`NameOf`/`LayerOf`) and its renderer (through `MeshRendererMaterials`) for every swept
+  component — unconditionally, whatever the map. But only objects attached to a swept component are
+  reached, so calling them scanned would overstate that row as badly as calling them targeted understates
+  it. Some fixed part of this row is unavoidable load work; the suite cannot say how much without
+  re-running the walk.
+- **targeted classes** — Mesh, Material, Texture2D, Shader, AudioClip and the audio MonoBehaviours, which
+  the port reaches only by path-id or GUID lookup from an asset that names them. `ModelExtractor` skips
+  GUIDs the map does not need before it touches any of them, so a map that places a small subset of the
+  bundle decodes a small subset of this row — but a material is also re-decoded once per submesh that uses
+  it, so the row bounds *which* objects are read without bounding *how often*.
+- **every object** — the loosest of the four. A class in neither list is not a class the port never
   reads (`CharacterModel` walks the player rig's own AnimationClips by id); it means nothing decodes every
   object of it.
 
@@ -97,31 +103,39 @@ interleaved runs in one session — the range across those runs is the last colu
 | | count | input | median | allocated | across runs |
 |---|---:|---:|---:|---:|---:|
 | `SerializedFile.Read`, all nodes | 103,549 objects | 170.9 MiB | 9.8 ms | 9.9 MiB | 9.2–10.3 ms |
-| `TypeTreeReader.Read`, scanned | 42,010 | 5.5 MiB | 211 ms | 125 MiB | 196–225 ms |
-| `TypeTreeReader.Read`, targeted | 50,739 | 102.7 MiB | 283 ms | 384 MiB | 248–294 ms |
-| `TypeTreeReader.Read`, every object | 103,549 | 167.9 MiB | 2,774 ms | 2,121 MiB | 2,668–2,936 ms |
+| `TypeTreeReader.Read`, scanned | 42,010 | 5.5 MiB | 216 ms | 125 MiB | 201–221 ms |
+| `TypeTreeReader.Read`, partly scanned | 33,688 | 2.6 MiB | 59 ms | 82 MiB | 57–59 ms |
+| `TypeTreeReader.Read`, targeted | 17,051 | 100.1 MiB | 207 ms | 302 MiB | 197–209 ms |
+| `TypeTreeReader.Read`, every object | 103,549 | 167.9 MiB | 2,558 ms | 2,121 MiB | 2,541–2,815 ms |
 
-Every row decodes each object **exactly once**. For the *scanned* row that is a genuine floor — those
-classes are swept whatever the map. For the *targeted* row it is neither a floor nor a ceiling: a map
-placing a small subset decodes fewer of those 50,739 objects, while a shared material is decoded once per
-submesh using it, so the row can be wrong in either direction and its 283 ms is not unavoidable load work.
+Every row decodes each object **exactly once**, and only the *scanned* row is a genuine floor — those
+classes are swept whatever the map. The *partly scanned* row contains a fixed unavoidable share the suite
+cannot isolate, and the *targeted* row is neither a floor nor a ceiling: a map placing a subset decodes
+fewer of those objects, while a shared material is decoded once per submesh, so it can err in both
+directions at once and its 207 ms is not unavoidable load work.
 
 Some objects are decoded again by a later pass, and the suite prices those separately:
 
 | decoded more than once | one decode | per load | extra beyond the rows above | applies to |
 |---|---:|---:|---:|---|
-| AssetBundle `m_Container` | 95 ms / 51.5 MiB | 3x | **190 ms / 102.9 MiB** | every load |
-| GameObject | 38 ms / 42.8 MiB | 2x | ≤ 38 ms / 42.8 MiB | mesh-bearing prefabs only |
-| Shader | 26 ms / 29.5 MiB | 2x | ≤ 26 ms / 29.5 MiB | shaders a resolved material names |
-| SkinnedMeshRenderer | 0.8 ms / 0.7 MiB | 2x | ≤ 1 ms / 0.7 MiB | parts clearing mesh+anchor checks |
+| AssetBundle `m_Container` | 91 ms / 51.5 MiB | 2–3x | **91–181 ms / 51.5–102.9 MiB** | every load |
+| GameObject | 30 ms / 42.8 MiB | 2x | ≤ 30 ms / 42.8 MiB | mesh-bearing prefabs only |
+| Shader | 20 ms / 29.5 MiB | 2x | ≤ 20 ms / 29.5 MiB | shaders a resolved material names |
+| SkinnedMeshRenderer | 0.6 ms / 0.7 MiB | 2x | ≤ 1 ms / 0.7 MiB | parts clearing mesh+anchor checks |
 
 Only the decodes *beyond the first* are additional, since the rows above already contain one of each.
-Only the AssetBundle figure is exact: it is one object every load decodes three times. The rest apply to
-a subset the suite cannot identify — which objects a given map's placements reach — so they are priced
-over the whole class, which is the widest that subset could be, and marked `≤`. Each is a separate
-oversight rather than one pattern: `MeshRendererMaterials` is a static that cannot see `AnchorOf`'s
-GameObject cache, and `BlendOf`/`CullOf` go through the same `ShaderOf` helper with *separate* caches
-(`_shaderBlends`, `_shaderCulls`), so the first material naming a shader decodes it once for each.
+
+The container's count is a **range**, not a constant: `PrefabGraph.ReadContainer` and
+`BundleTextures.Locate` always walk it, but `AudioExtractor.Plan` makes a third only when the pass was
+given an audio request — `ObjectStreamer.PlanAudio` wants nothing under `FREECAM`/`STEP_PROBE` or once the
+audio cache is warm. Those two flags are exactly the modes the benchmarks run in, so **a measured load
+sees the low end and an ordinary cold session the high one**, which is worth knowing before quoting either.
+
+The other three apply to a subset the suite cannot identify — which objects a given map's placements
+reach — so they are priced over the whole class, the widest that subset could be, and marked `≤`. Each is
+a separate oversight: `MeshRendererMaterials` is a static that cannot see `AnchorOf`'s GameObject cache,
+and `BlendOf`/`CullOf` go through the same `ShaderOf` helper with *separate* caches (`_shaderBlends`,
+`_shaderCulls`), so the first material naming a shader decodes it once for each.
 
 Materials have no fixed multiplicity to quote at all — `MaterialResolver.Resolve` decodes the material on
 every call with no cache, and it is called per submesh, so the count belongs to the map's placements.
@@ -133,16 +147,16 @@ the clock moves.
 — is a single object that costs ~99 ms and 51.5 MiB to decode, and every pass that needs to resolve a name
 decodes the whole thing from scratch. Five independent scans of it exist in the port
 (`PrefabGraph.ReadContainer`, `BundleTextures.Locate`, `AudioExtractor.Plan`, `RoadsBuilder`,
-`CharacterModel`); at least the first three run against the core masterbundle on a cold load. One of those
-decodes is already in the scanned row, so the **extra** is ~190 ms and ~103 MiB re-deriving something the
-load already had. Compare it against the whole scanned row: 42,010 objects cost 211 ms, and re-reading
-this one object twice costs almost as much again. That is the
+`CharacterModel`); the first two run against the core masterbundle on every cold load and the third
+whenever audio is wanted. One decode is already in the scanned row, so the **extra** is ~91–181 ms and
+~52–103 MiB re-deriving something the load already had. Compare it against the whole scanned row: 42,010
+objects cost 216 ms, and re-reading this one object once or twice costs a comparable amount. That is the
 cheapest real win in this whole area, and the only reason it is not in this PR is that the fix lives in
 `src/` — decode the container once and hand it around — which is another lane's call.
 
 Three more things fall out. The object table itself is free — ~10 ms to index 103k objects, so nothing is
-to be gained by making it lazier. The unique-object decode every load pays is **211 ms**, which against a
-~15 s LZMA pass is 1.5%; even the loosest bound is 2%. And **the reader's cost is allocation, not
+to be gained by making it lazier. The unique-object decode every load pays is **216 ms** scanned plus some
+fixed part of the 59 ms partly-scanned row, which against a ~15 s LZMA pass is under 2%. And **the reader's cost is allocation, not
 parsing**: the scanned set turns 5.5 MiB of object bytes into 125 MiB of managed objects — **22.9x** —
 because a Transform or a BoxCollider is a handful of floats that becomes nested `Dictionary` objects with
 a boxed leaf each. Over the whole file it is 168 MiB into 2,121 MiB. That is inherent in the output shape
