@@ -1296,6 +1296,51 @@ public class ZombieSystemTests
         Assert.False(float.IsNaN(zombie.Yaw), "yaw went NaN");
     }
 
+    // Two ways round the same obstacle, of near-equal cost, and the body standing where the choice
+    // between them flips. Every repath the graph answers with the other one — both COMPLETE, both
+    // ending on the player — and the follower turns to face whichever arrived last.
+    //
+    // Reproduced from a capture: a chaser turned 13,872 degrees and covered 164 m to move 2 m, while
+    // BlockedRouteTime stayed at zero the whole time, because it WAS delivering motion. That is the
+    // hole this pins. The blocked-route timeout measures whether the body moves, and a body shuttling
+    // between two spots moves beautifully; nothing measured whether it was getting anywhere.
+    [Fact]
+    public void TwoEqualRoutesArrivingByTurns_DoNotSpinTheBodyInPlace()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        var player = Player(1, new Vector3(14f, 5f, 0f), UnturnedGodot.Player.EPlayerStance.Sprint);
+
+        // Both reach the player; they differ only in which side they leave by, which is what makes a
+        // near-tie flip on sub-metre movement in the real case.
+        bool other = false;
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            other = !other;
+            path.Add(from);
+            path.Add(new Vector3(from.X + 2f, from.Y, from.Z + (other ? 5f : -5f)));
+            path.Add(to);
+            return true;
+        };
+        system.MoveResolver = (from, to, radius) => to; // open ground: the body is never blocked
+
+        float turned = 0f, previousYaw = zombie.Yaw;
+        for (int tick = 0; tick < 200; tick++)
+        {
+            system.Tick(new[] { player }, ImpassableDt);
+            if (zombie.State != EZombieState.Chase)
+                continue;
+            turned += MathF.Abs(Mathf.Wrap(zombie.Yaw - previousYaw, -180f, 180f));
+            previousYaw = zombie.Yaw;
+        }
+
+        float closed = 14f - new Vector2(zombie.Position.X - 14f, zombie.Position.Z).Length();
+        Assert.True(closed > 8f,
+            $"closed only {closed:F2} m of 14 while turning {turned:F0} degrees");
+        // A body that keeps changing its mind spends its distance on rotation. One full turn is
+        // generous for a chase that is supposed to run more or less straight at a stationary target.
+        Assert.True(turned < 360f, $"turned {turned:F0} degrees to close {closed:F2} m");
+    }
+
     private const float ImpassableDt = 0.1f;
 
     private readonly record struct ImpassableRun(int FirstBlockedTick, int InvalidatedAtTick,

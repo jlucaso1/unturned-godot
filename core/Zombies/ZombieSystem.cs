@@ -655,7 +655,29 @@ public sealed partial class ZombieSystem
                 bool complete = newError <= 4f;
                 bool improvesFrom = newError + 0.01f < fromError;
                 bool improvesRoute = newError + 0.01f < oldError;
-                if (complete || (improvesFrom && improvesRoute))
+
+                // A complete replacement no longer displaces a complete incumbent for free. Where two
+                // ways round an obstacle cost about the same, which one the graph returns flips on
+                // sub-metre movement, so every repath handed the follower the OTHER one; it turned to
+                // face it, walked far enough to flip the answer back, and turned again. Both routes end
+                // on the target, so endpoint error — all this gate used to compare — cannot tell them
+                // apart, and BlockedRouteTime cannot either, because a body shuttling between two spots
+                // is delivering motion the whole time. Captured from play at 13,872 degrees of turning
+                // and 164 m travelled for 2 m of progress.
+                //
+                // So the tie is broken by the route already being walked. A replacement has to be
+                // shorter than what is left of the incumbent, by more than the distance a body covers
+                // between repaths, or the incumbent stands. Anything genuinely better still wins, and
+                // an incumbent that stops delivering motion is still thrown out by the blocked-route
+                // timeout — this only stops a coin-flip from costing a turn every half second.
+                // `oldError <= 4f` is what stops this becoming stickiness: the incumbent may only refuse
+                // a replacement while it still ARRIVES at the target as it now stands. A route whose
+                // endpoint the target has walked away from is stale, scores as incomplete, and is
+                // replaced as it always was — otherwise a body chasing a moving mark would keep walking
+                // to where the mark used to be.
+                bool keepsWalking = complete && oldError <= 4f
+                    && KeepsWalkingTheCurrentRoute(zombie, _scratchPath);
+                if (!keepsWalking && (complete || (improvesFrom && improvesRoute)))
                 {
                     zombie.PathPoints.Clear();
                     zombie.PathPoints.AddRange(_scratchPath);
@@ -697,6 +719,37 @@ public sealed partial class ZombieSystem
     }
 
     private readonly List<Vector3> _scratchPath = new();
+
+    // How much shorter a replacement must be before it is worth turning for: one repath's worth of
+    // travel. Below that the two answers are a tie the body cannot act on, because it will have moved
+    // this far by the time it is asked again.
+    private const float RouteSwapMargin = 2f;
+
+    // Is the route in hand still the one to walk? Only asked of a complete replacement against a
+    // complete incumbent that was built for this target: a partial incumbent, or one inherited from
+    // another target, has no standing to refuse.
+    private static bool KeepsWalkingTheCurrentRoute(ZombieInstance zombie, List<Vector3> replacement)
+    {
+        if (zombie.PathPoints.Count == 0 || zombie.PathIsPartial || zombie.RouteServedAnotherTarget)
+            return false;
+        float remaining = RouteLengthFrom(zombie.Position, zombie.PathPoints,
+            zombie.CurrentWaypointIndex);
+        float offered = RouteLengthFrom(zombie.Position, replacement, 0);
+        return offered + RouteSwapMargin >= remaining;
+    }
+
+    // The ground still to cover: from where the body is to the waypoint it is heading for, then the
+    // rest of the route. Measured in XZ, like everything else the follower decides on.
+    private static float RouteLengthFrom(Vector3 position, List<Vector3> route, int from)
+    {
+        if (route.Count == 0)
+            return 0f;
+        int at = Math.Clamp(from, 0, route.Count - 1);
+        float total = MathF.Sqrt(HorizontalDistanceSquared(position, route[at]));
+        for (int i = at; i + 1 < route.Count; i++)
+            total += MathF.Sqrt(HorizontalDistanceSquared(route[i], route[i + 1]));
+        return total;
+    }
 
     // LegacyAIPathNoRedist.CalculateVelocity, ported: advance waypoints within pickNextWaypointDist
     // (XZ), aim at the forwardLook point interpolated ON THE CURRENT SEGMENT, stop within
