@@ -44,8 +44,8 @@ public class TextFileTests
                 new UTF32Encoding(bigEndian: true, byteOrderMark: false).GetBytes("Grüße 🧟")));
         // 0x0000FEFF is only UTF-32 BE when all four bytes are there; two NULs alone are UTF-8 NULs.
         Add("two nulls", new byte[] { 0x00, 0x00 });
-        // Past one pooled bucket, so the rented array is a different (and much larger) size class than
-        // every other case here.
+        // Large enough to be a large-object allocation rather than a small one, so the size class the
+        // read allocates is nothing like every other case here.
         Add("4 MiB", Encoding.ASCII.GetBytes(new string('z', 4 * 1024 * 1024)));
         return data;
     }
@@ -181,41 +181,38 @@ public class TextFileTests
     }
 
     // The other half of the claim, and the reason this does not rent from ArrayPool: a read must leave
-    // nothing behind once its string exists. A pool would hold the buckets it grew for the rest of the
-    // process, which is steady-state residency bought with load-time allocation — a trade rather than a
-    // saving, and not this change's to make.
+    // nothing behind once its string exists, and a pool would hold the buckets it grew for the rest of
+    // the process — steady-state residency bought with load-time allocation, which is a trade rather
+    // than a saving and not this change's to make.
+    //
+    // Asserted as "the bytes were allocated" rather than as "nothing was retained", because retention is
+    // a property of the whole heap and this suite runs its collections in parallel: a GetTotalMemory
+    // delta around these reads also counts whatever every other test happens to be holding at the time.
+    // Written that way it passed alone and failed inside the suite on a 24-core machine, off 6 MB of
+    // other tests' live objects. GetAllocatedBytesForCurrentThread is per-thread, so this form measures
+    // only these reads, and it pins the same decision from the other side: an implementation that rented
+    // its buffer would stop allocating the file's bytes, which is exactly what would let it retain them.
     [Fact]
-    public void ReadAllText_RetainsNothingOnceTheStringExists()
+    public void ReadAllText_AllocatesTheFileSBytesRatherThanRentingThem()
     {
+        const int length = 256 * 1024;
         using var dir = new TempDir();
-        var paths = new string[256];
-        for (int i = 0; i < paths.Length; i++)
-            paths[i] = dir.Write($"asset{i}.dat", new string('x', 4096));
+        string path = dir.Write("big.dat", new string('x', length));
+        _ = TextFile.ReadAllText(path); // one-time statics and encoder
 
-        Warm(paths);
-        long baseline = Settled();
-        foreach (string path in paths)
-            _ = TextFile.ReadAllText(path);
-        long retained = Settled() - baseline;
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        _ = TextFile.ReadAllText(path);
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
 
-        // 256 reads of a 4 KB file move a megabyte of bytes through this method. A pooled version of it
-        // measured ~1.2 MB still held at this point; nothing here should survive its own read, so the
-        // bound is one file's worth of slack for whatever else the run happens to be holding.
-        Assert.True(retained < 64 * 1024, $"{retained} bytes survived a full collection");
+        // An ASCII file of this length costs 2 * length for the string it decodes into, plus length for
+        // the bytes it is read through. A version that rented the buffer would allocate only the string,
+        // so the threshold sits between the two rather than at either.
+        Assert.True(allocated > 2.5 * length,
+            $"a {length} byte file allocated {allocated} bytes — the buffer looks rented, not allocated");
     }
 
-    private static long Settled()
-    {
-        for (int i = 0; i < 3; i++)
-        {
-            GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
-            GC.WaitForPendingFinalizers();
-        }
-        return GC.GetTotalMemory(forceFullCollection: true);
-    }
-
-    // First touch of either path allocates its statics, its encoder and the pool's first buckets; that is
-    // a one-off, and counting it would measure whichever side ran first.
+    // First touch of either path allocates its statics and its encoder; that is a one-off, and counting
+    // it would measure whichever side ran first.
     private static void Warm(string[] paths)
     {
         for (int i = 0; i < 2; i++)
