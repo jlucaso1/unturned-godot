@@ -153,12 +153,14 @@ public class PrefabGraphRealDataTests
     // Every renderable part of a prefab has to resolve into ONE frame — the prefab's own — whether it
     // hangs off a MeshFilter or a SkinnedMeshRenderer.
     //
-    // These three carry both kinds. Their static geometry sits on a "Model_0" whose -90 degrees about X
-    // cancel the +90 its "Root" parent carries; their glass, hinges, hobs and counter tops are skinned,
-    // and Unity poses those from the bones alone, so the renderer's own chain never applies to them. The
-    // graph used to compose that chain for the skinned ones too, handing them the +90 that nothing
+    // These three carry both kinds, and all three hang an Animation off their "Root" — the "Close"/"Open"
+    // pair that works the doors — so what the bones are posed at in the saved prefab is not what a level
+    // that has just loaded shows. Their static geometry sits on a "Model_0" whose -90 degrees about X
+    // cancel the +90 its "Root" parent carries; their glass, hinges, hobs and counter doors are skinned,
+    // and those render at their bind pose, which is the frame the vertices are already in. The graph used
+    // to compose the GameObject chain for the skinned ones too, handing them the +90 that nothing
     // cancelled: PEI's diner showed its display cases with the glass lying flat outside the building, and
-    // its ovens and counters with their tops thrown clear of the bodies.
+    // its ovens and counters with their doors thrown clear of the bodies.
     [RealDataTheory(RequiresMasterBundle = true)]
     [InlineData("objects/medium/business/cooler_0")]
     [InlineData("objects/medium/furniture/counter_2")]
@@ -213,5 +215,40 @@ public class PrefabGraphRealDataTests
         // Every part spans most of the case's height. Applying the chain to the skinned ones turned that
         // extent into a 0.2-unit-thick slab lying across the Z axis instead.
         Assert.All(heights, h => Assert.InRange(h, 2.0f, 2.6f));
+    }
+
+    // The three above named on purpose; this is the whole population, so the rule cannot be right for the
+    // cases someone thought to name and wrong everywhere else. Every skinned part the shipped bundle
+    // resolves — the cabinet and container doors, the prison and blast doors, the crossing arms, the car
+    // lift, the quest engine — hangs under an Animation, so every one of them renders at its bind pose.
+    //
+    // That is a fact about this content, not a law: a skeleton nothing drives keeps its GameObject chain
+    // instead, which is what SkinnedLocalToRootTests pins. The official prefabs that skin something nobody
+    // animates are the Tank's and the Explorer's, and PrefabParts drops those before they reach a key.
+    [RealDataFact(RequiresMasterBundle = true)]
+    public void RealPrefabs_ResolveEverySkinnedPartAtItsBindPose()
+    {
+        PrefabGraph graph = GameData.Prefabs;
+        var skinned = new HashSet<long>();
+        foreach (SerializedObject o in graph.File.Objects)
+            if (o.ClassId == 137) // SkinnedMeshRenderer
+                skinned.Add(PrefabGraph.PathId((Dictionary<string, object>)TypeTreeReader.Read(
+                    o.TypeTree, graph.File.ReaderFor(o))["m_Mesh"]));
+
+        int found = 0;
+        foreach (KeyValuePair<string, List<MeshPart>> entry in graph.PartsByKey)
+            foreach (MeshPart part in entry.Value)
+            {
+                if (!skinned.Contains(part.MeshId))
+                    continue;
+                found++;
+                Assert.Equal(Godot.Vector3.Zero, part.LocalToRoot.Origin);
+                Assert.True(part.LocalToRoot.Basis.X.IsEqualApprox(Godot.Vector3.Right)
+                    && part.LocalToRoot.Basis.Y.IsEqualApprox(Godot.Vector3.Up)
+                    && part.LocalToRoot.Basis.Z.IsEqualApprox(Godot.Vector3.Back),
+                    $"{entry.Key}'s {MeshName(graph, part.MeshId)} is posed out of its bind frame");
+            }
+
+        Assert.Equal(37, found); // so a graph that stopped finding them cannot pass by having none
     }
 }
