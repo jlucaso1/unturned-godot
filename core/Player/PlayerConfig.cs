@@ -1,3 +1,5 @@
+using System;
+
 namespace UnturnedGodot.Player;
 
 // Unturned's on-foot stances (SDG.Unturned.EPlayerStance, on-foot subset). Order kept for parity — the
@@ -137,4 +139,14 @@ public static class PlayerConfig
         EPlayerStance.Climb => (-10f, 45f),
         _ => (-89f, 89f),
     };
+
+    // PlayerLook.updateLook clamps the pitch against the CURRENT stance every frame, so a stance change
+    // re-clamps a view that has just become illegal. Doing it only where the look changes leaves a player
+    // who mounts a ladder while staring straight down holding that view for as long as they keep the
+    // mouse still — and the same for anyone who crouches or goes prone looking too far up or down.
+    public static float ClampPitch(float pitchDegrees, EPlayerStance stance)
+    {
+        (float down, float up) = PitchLimitsFor(stance);
+        return Math.Clamp(pitchDegrees, down, up);
+    }
 }

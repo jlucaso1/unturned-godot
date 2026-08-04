@@ -46,6 +46,23 @@ public sealed class HeightfieldMoveSolver : IMoveSolver
         next.Stance = input.Stance;
         next.Moving = input.InputX != 0 || input.InputY != 0;
 
+        // A climber is on a ladder, and PlayerMovement.simulate's CLIMB branch is what the server
+        // re-simulates for them too: vertical only, no gravity, and checkGround forces them grounded.
+        // Without this branch a tick with no input of its own — a lost or late datagram, which is
+        // ordinary — hands the climber to the walking branch below, whose terrain clamp finds them
+        // metres above the ground and calls them airborne. The next frame that arrives says grounded
+        // again, and every client watching derives a landing from that edge: a thud on the ladder, and
+        // the climbing footsteps cut short, on every dropped packet. Momentum is not integrated either,
+        // so a burst of loss cannot start the avatar falling down the shaft it is holding onto.
+        if (next.Stance == EPlayerStance.Climb)
+        {
+            // Unturned's own input convention is the mirror of ours: -1 is forward on the wire.
+            next.Velocity = PlayerLadder.ClimbVelocity(-input.InputY, PlayerConfig.SpeedClimb);
+            next.Position += next.Velocity * dt;
+            next.Grounded = true;
+            return next;
+        }
+
         bool moving = next.Moving;
         Vector3 wishDir = Vector3.Zero;
         if (moving)

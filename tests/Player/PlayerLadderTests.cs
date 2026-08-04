@@ -407,6 +407,22 @@ public class PlayerLadderTests
         Assert.Equal(45f, up);
     }
 
+    // The clamp is against the stance the player is in NOW, so it has to be re-applied when that
+    // changes: mounting a ladder while staring at the ground would otherwise keep a view a climber is
+    // not allowed, for as long as they held the mouse still.
+    [Fact]
+    public void MountingWhileLookingSomewhereAClimberMayNotClampsTheView()
+    {
+        Assert.Equal(-10f, PlayerConfig.ClampPitch(-89f, EPlayerStance.Climb));
+        Assert.Equal(45f, PlayerConfig.ClampPitch(89f, EPlayerStance.Climb));
+        Assert.Equal(20f, PlayerConfig.ClampPitch(20f, EPlayerStance.Climb)); // already legal: untouched
+
+        // The same rule covers the stances that had it too, which nothing re-applied either.
+        Assert.Equal(-70f, PlayerConfig.ClampPitch(-89f, EPlayerStance.Crouch));
+        Assert.Equal(30f, PlayerConfig.ClampPitch(89f, EPlayerStance.Prone));
+        Assert.Equal(-89f, PlayerConfig.ClampPitch(-89f, EPlayerStance.Stand));
+    }
+
     // The whole crouch/prone/sprint block sits behind `stance != CLIMB`, and the intents are cleared while
     // it does, so a toggle pressed on a ladder is not waiting to fire when the player steps off.
     [Fact]

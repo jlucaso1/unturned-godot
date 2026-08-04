@@ -142,9 +142,7 @@ public partial class PlayerController : CharacterBody3D
         {
             RotateY(-Mathf.DegToRad(motion.Relative.X * _settings.MouseSensitivity)); // yaw the whole body
             float dir = _settings.InvertLook ? 1f : -1f;
-            (float down, float up) = PlayerConfig.PitchLimitsFor(_stance);
-            _pitch = Mathf.Clamp(_pitch + (dir * motion.Relative.Y * _settings.MouseSensitivity), down, up);
-            _head.RotationDegrees = new Vector3(_pitch, 0, 0);
+            ApplyPitch(_pitch + (dir * motion.Relative.Y * _settings.MouseSensitivity));
             return;
         }
 
@@ -473,7 +471,17 @@ public partial class PlayerController : CharacterBody3D
         float height = PlayerConfig.HeightFor(next);
         _capsule.Height = height;
         _collider.Position = Vector3.Up * (height * 0.5f);
+        // The new stance may not allow the view the old one did — mounting a ladder while looking
+        // straight down is the sharpest case, since a climber may not look below 10 degrees at all.
+        ApplyPitch(_pitch);
         return true;
+    }
+
+    // PlayerLook's per-frame pitch clamp, against whatever stance is current.
+    private void ApplyPitch(float pitchDegrees)
+    {
+        _pitch = PlayerConfig.ClampPitch(pitchDegrees, _stance);
+        _head.RotationDegrees = new Vector3(_pitch, 0, 0);
     }
 
     // True when a standing/crouching capsule of the given height fits at the current position (headroom).
