@@ -69,6 +69,9 @@ public sealed class ZombieInstance
     public float RepathTimer;         // counts down to the next path recalculation
     public float BlockedRouteTime;    // sustained physical failure while following the current route
     public bool RouteServedAnotherTarget; // route kept across a retarget: it may not veto its replacement
+    // The last route was disproved by collision, so keep the first replacement that physically moves
+    // instead of swapping back to a shorter route through the same obstacle on the next repath.
+    public bool RouteEscapingCollision;
 
     // ZombieManager.getZombieSpeed with Slow_Movement=false (NORMAL difficulty).
     public float Speed => Speciality switch
@@ -471,6 +474,7 @@ public sealed partial class ZombieSystem
         // blocked tick on the replacement would discard it before it had turned far enough to move,
         // which is the mid-chase freeze this whole change exists to remove.
         zombie.BlockedRouteTime = 0f;
+        zombie.RouteEscapingCollision = false;
         // And the route stops being the incumbent a replacement has to beat. Move scores a partial
         // replacement against the endpoint of the route in hand, measured to the CURRENT target — a
         // route built for someone else can happen to end nearer the new player than anything actually
@@ -586,15 +590,22 @@ public sealed partial class ZombieSystem
         Vector3 directDirection = default;
         if (sqrHorizontal > 4f)
         {
-            float yawRad = Mathf.DegToRad(zombie.Yaw);
-            Vector3 forward = new(-MathF.Sin(yawRad), 0f, -MathF.Cos(yawRad));
-            var right = new Vector3(forward.Z, 0f, -forward.X);
-            destination += zombie.Path switch
+            // The lateral formation offset is useful in open ground, but after collision has disproved
+            // a route it can put the next destination inside the very obstacle being escaped. In the
+            // captured PEI corner the body is 2.1 m from the player, so LEFT turns the physical recovery
+            // target one metre into the house. Recover toward the real target until line of sight clears.
+            if (!zombie.RouteEscapingCollision)
             {
-                EZombiePath.Left => -right,
-                EZombiePath.Right => right,
-                _ => -forward, // RUSH
-            };
+                float yawRad = Mathf.DegToRad(zombie.Yaw);
+                Vector3 forward = new(-MathF.Sin(yawRad), 0f, -MathF.Cos(yawRad));
+                var right = new Vector3(forward.Z, 0f, -forward.X);
+                destination += zombie.Path switch
+                {
+                    EZombiePath.Left => -right,
+                    EZombiePath.Right => right,
+                    _ => -forward, // RUSH
+                };
+            }
         }
         else
         {
@@ -608,7 +619,13 @@ public sealed partial class ZombieSystem
                 zombie.Position + (Vector3.Up * ZombieBody.EyeHeight), target.Position) == true;
             canTurn = blocked;
             if (!blocked)
+            {
+                // Collision recovery only has to outrank the lying shortcut until the obstacle is
+                // genuinely behind the body. Once the target is visible, ordinary moving-target
+                // repaths may take over again.
+                zombie.RouteEscapingCollision = false;
                 directDirection = target.Position - zombie.Position;
+            }
         }
         Move(zombie, destination, canTurn, directDirection, dt);
     }
@@ -691,8 +708,15 @@ public sealed partial class ZombieSystem
                 // endpoint the target has walked away from is stale, scores as incomplete, and is
                 // replaced as it always was — otherwise a body chasing a moving mark would keep walking
                 // to where the mark used to be.
+                // A route adopted after physics invalidated its predecessor is not a near-tie: it is the
+                // known escape from an obstacle the graph failed to represent. In PEI the escape starts
+                // west around a wall, then the yaw-dependent approach point offers a six-point shortcut
+                // back through that wall 0.5 s later. It is materially shorter, so RouteTieBand quite
+                // correctly cannot reject it — but physical evidence can. Commit to the moving escape
+                // until it reaches line of sight, retargets, or itself times out.
                 bool keepsWalking = complete && oldError <= 4f
-                    && KeepsWalkingTheCurrentRoute(zombie, _scratchPath);
+                    && (zombie.RouteEscapingCollision
+                        || KeepsWalkingTheCurrentRoute(zombie, _scratchPath));
                 if (!keepsWalking && (complete || (improvesFrom && improvesRoute)))
                 {
                     zombie.PathPoints.Clear();
@@ -939,6 +963,7 @@ public sealed partial class ZombieSystem
         zombie.PathPoints.Clear();
         zombie.BlockedRouteTime = 0f;
         zombie.RouteServedAnotherTarget = false;
+        zombie.RouteEscapingCollision = false;
         zombie.PathIsPartial = false;
         zombie.CurrentWaypointIndex = 0;
         zombie.TargetReached = false;
@@ -991,7 +1016,9 @@ public sealed partial class ZombieSystem
     // The physics leg of a movement step: world collision (the host's capsule collide-and-slide),
     // then the other zombies' capsules (CharacterController semantics: the mover is pushed out,
     // the blocker never budges), re-resolved against the world so separation can't shove anyone
-    // through a wall, and finally the ground snap. Sustained physical non-delivery invalidates only the
+    // through a wall, and finally the ground snap. Only the first, route-requested world move is
+    // evidence about the route: a neighbour holding the final position back means "wait for the
+    // crowd", not "the nav route crosses a wall". Sustained world non-delivery invalidates only the
     // stale route so a newly reconciled door route is allowed to replace it on the next bounded repath.
     private void ApplyStep(ZombieInstance zombie, Vector3 step, float dt, bool routeGuided)
     {
@@ -1010,6 +1037,10 @@ public sealed partial class ZombieSystem
             // (the host's collide-and-slide), which is where the escape belongs — picking a side
             // here re-decided every tick and produced a visible left-right shuffle at window sills.
         }
+        // Preserve what the collision world delivered before zombie separation changes the result.
+        // The second resolve below protects the world from a separation push, but neither crowd
+        // displacement nor its clamp says anything about whether the requested nav segment is valid.
+        Vector3 worldNext = next;
 
         bool separated = false;
         foreach (ZombieInstance other in _byBound[zombie.Bound])
@@ -1050,11 +1081,13 @@ public sealed partial class ZombieSystem
         }
 
         float requestedSquared = (step.X * step.X) + (step.Z * step.Z);
-        float deliveredX = next.X - before.X, deliveredZ = next.Z - before.Z;
-        float deliveredSquared = (deliveredX * deliveredX) + (deliveredZ * deliveredZ);
-        float minimumSquared = requestedSquared
-            * MinRouteProgressFraction * MinRouteProgressFraction;
-        if (deliveredSquared >= minimumSquared)
+        float deliveredX = worldNext.X - before.X, deliveredZ = worldNext.Z - before.Z;
+        // Magnitude alone calls a wall slide "progress" even when all of it is perpendicular to the
+        // requested segment. Project onto the requested step so only forward world delivery clears
+        // the evidence. (Crowd separation remains deliberately absent: worldNext predates it.)
+        float deliveredAlongStep = (deliveredX * step.X) + (deliveredZ * step.Z);
+        float minimumAlongStep = requestedSquared * MinRouteProgressFraction;
+        if (deliveredAlongStep >= minimumAlongStep)
         {
             zombie.BlockedRouteTime = 0f;
             return;
@@ -1066,8 +1099,11 @@ public sealed partial class ZombieSystem
 
         // The physics world is authoritative: after sustained failure this route is demonstrably stale.
         // Clear it before the next repath so a partial route with a worse endpoint can be considered on
-        // executability instead of losing forever to the blocked route's perfect endpoint score.
+        // executability instead of losing forever to the blocked route's perfect endpoint score. Remember
+        // WHY it was cleared: once an alternative starts moving, a later geometrically-shorter query must
+        // not immediately steer the body back into the same collision-only wall.
         zombie.BlockedRouteTime = 0f;
+        zombie.RouteEscapingCollision = true;
         zombie.PathPoints.Clear();
         zombie.PathIsPartial = false;
         zombie.RouteServedAnotherTarget = false;

@@ -151,7 +151,7 @@ public class PhysicsBodyOrderTests
 
         string source = File.ReadAllText(path);
         Assert.Contains("await Task.Run(() =>", source);
-        Assert.Contains("BakedNavGraph.Build(_flags, _unreachable)", source);
+        Assert.Contains("BakedNavGraph.Build(_flags, _unreachable, _portalProbe)", source);
         Assert.Contains("await PublishAsync(fingerprint, cachePath + \".csr\")", source);
         Assert.Contains("await PublishAsync(fingerprint, cachePath == null ? null : cachePath + \".csr\")", source);
         Assert.Contains("BakedNavGraph.TryRead", source);

@@ -241,7 +241,8 @@ public partial class NetworkManager : Node
         // The pre-baked navmesh drives the Seeker port: zombies path around buildings and props
         // exactly over the triangles the original game baked. Prefer the data parsed at the start of the
         // world load; until collision reconciliation publishes it, PathReady selects direct movement.
-        _zombieNavigation = ZombieNavigation.TakePreloaded() ?? ZombieNavigation.Build(zombies.Navmesh);
+        _zombieNavigation = ZombieNavigation.TakePreloaded(zombies.MoveResolver)
+            ?? ZombieNavigation.Build(zombies.Navmesh, zombies.MoveResolver);
         if (_zombieNavigation != null)
         {
             zombies.PathQuery = _zombieNavigation.Query;

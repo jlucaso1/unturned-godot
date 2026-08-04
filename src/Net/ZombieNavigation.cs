@@ -24,11 +24,12 @@ public sealed class ZombieNavigation
 
     public bool IsReady => !_disposed && _ready && _bakedGraph != null;
 
-    public static ZombieNavigation? Build(IReadOnlyList<NavFlag>? flags)
+    public static ZombieNavigation? Build(IReadOnlyList<NavFlag>? flags,
+        ZombieMoveResolver? moveResolver = null)
     {
         if (flags == null || flags.Count == 0)
             return null;
-        return new ZombieNavigation(flags, publishImmediately: true);
+        return new ZombieNavigation(flags, publishImmediately: true, moveResolver: moveResolver);
     }
 
     // Interactive loading parses the baked data early, but deliberately does not build its graph yet.
@@ -44,14 +45,14 @@ public sealed class ZombieNavigation
         PreloadedLevelDir = levelDir;
     }
 
-    public static ZombieNavigation? TakePreloaded()
+    public static ZombieNavigation? TakePreloaded(ZombieMoveResolver? moveResolver = null)
     {
         IReadOnlyList<NavFlag>? flags = PreloadedFlags;
         string? levelDir = PreloadedLevelDir;
         PreloadedFlags = null;
         PreloadedLevelDir = null;
         return flags is { Count: > 0 }
-            ? new ZombieNavigation(flags, publishImmediately: false, levelDir) : null;
+            ? new ZombieNavigation(flags, publishImmediately: false, levelDir, moveResolver) : null;
     }
 
     // Drops parsed data nobody claimed. A load that fails between Preload and TakePreloaded must not let
@@ -63,10 +64,15 @@ public sealed class ZombieNavigation
     }
 
     private readonly string? _levelDir;
+    private readonly BakedNavPortalProbe? _portalProbe;
 
-    private ZombieNavigation(IReadOnlyList<NavFlag> flags, bool publishImmediately, string? levelDir = null)
+    private ZombieNavigation(IReadOnlyList<NavFlag> flags, bool publishImmediately,
+        string? levelDir = null, ZombieMoveResolver? moveResolver = null)
     {
         _levelDir = levelDir;
+        _portalProbe = moveResolver == null
+            ? null
+            : (from, to, radius) => moveResolver(from, to, radius);
         _flags = flags;
         if (publishImmediately)
             Publish();
@@ -129,7 +135,7 @@ public sealed class ZombieNavigation
             return;
 
         var watch = Stopwatch.StartNew();
-        _bakedGraph = BakedNavGraph.Build(_flags, _unreachable);
+        _bakedGraph = BakedNavGraph.Build(_flags, _unreachable, _portalProbe);
         _ready = true;
         int graphTriangles = 0, graphDropped = 0;
         foreach (NavFlag flag in _flags)
@@ -154,10 +160,11 @@ public sealed class ZombieNavigation
             if (fingerprint != null && graphCachePath != null && System.IO.File.Exists(graphCachePath))
             {
                 using System.IO.FileStream input = System.IO.File.OpenRead(graphCachePath);
-                if (BakedNavGraph.TryRead(input, fingerprint, _flags, out BakedNavGraph? cached))
+                if (BakedNavGraph.TryRead(input, fingerprint, _flags, out BakedNavGraph? cached,
+                        _portalProbe))
                     return (cached!, true);
             }
-            BakedNavGraph built = BakedNavGraph.Build(_flags, _unreachable);
+            BakedNavGraph built = BakedNavGraph.Build(_flags, _unreachable, _portalProbe);
             if (fingerprint != null && graphCachePath != null)
             {
                 try
@@ -801,7 +808,8 @@ public sealed class ZombieNavigation
     {
         if (_bakedGraph != null)
             return;
-        BakedNavGraph graph = await Task.Run(() => BakedNavGraph.Build(_flags, _unreachable));
+        BakedNavGraph graph = await Task.Run(
+            () => BakedNavGraph.Build(_flags, _unreachable, _portalProbe));
         if (_disposed || AppShutdown.IsShuttingDown)
             return;
         _bakedGraph = graph;

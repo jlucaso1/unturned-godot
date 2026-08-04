@@ -1137,6 +1137,86 @@ public class ZombieSystemTests
         Assert.Equal(first, second);
     }
 
+    [Fact]
+    public void CollisionRecovery_TargetsThePlayerInsteadOfAFormationOffsetInsideTheObstacle()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        var destinations = new List<(Vector3 Point, bool Recovering)>();
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            destinations.Add((to, zombie.RouteEscapingCollision));
+            path.Add(from);
+            path.Add(to);
+            return true;
+        };
+        system.MoveResolver = (from, to, radius) => from;
+
+        Vector3 playerPosition = new(10f, 5f, 0f);
+        var player = Player(1, playerPosition, UnturnedGodot.Player.EPlayerStance.Sprint);
+        for (int tick = 0; tick < 40; tick++)
+            system.Tick(new[] { player }, ImpassableDt);
+
+        Assert.Contains(destinations, sample => !sample.Recovering
+            && Horizontal(sample.Point, playerPosition) > 0.5f);
+        Assert.Contains(destinations, sample => sample.Recovering
+            && Horizontal(sample.Point, playerPosition) < 0.001f);
+
+        static float Horizontal(Vector3 a, Vector3 b) =>
+            new Vector2(a.X - b.X, a.Z - b.Z).Length();
+    }
+
+    [Fact]
+    public void CollisionEscape_IsNotReplacedByTheShortWallRouteOnTheNextRepath()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        bool escapeIssued = false;
+        int shortcutsAfterEscape = 0;
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            path.Add(from);
+            if (zombie.RouteEscapingCollision && !escapeIssued)
+            {
+                escapeIssued = true;
+                path.Add(new Vector3(3f, 5f, 3f));
+                path.Add(new Vector3(5f, 5f, 3f));
+            }
+            else if (escapeIssued)
+            {
+                shortcutsAfterEscape++;
+            }
+            path.Add(to);
+            return true;
+        };
+        system.MoveResolver = (from, to, radius) =>
+        {
+            // An infinite-in-Y wall at x=4, open outside |z|<2. The baked shortcut crosses its
+            // middle; the recovery's two corners pass around the end.
+            float dx = to.X - from.X;
+            if (MathF.Abs(dx) <= 1e-6f)
+                return to;
+            float crossing = (4f - from.X) / dx;
+            if (crossing >= 0f && crossing <= 1f)
+            {
+                float z = from.Z + ((to.Z - from.Z) * crossing);
+                if (MathF.Abs(z) < 2f)
+                    return from;
+            }
+            return to;
+        };
+
+        var player = Player(1, new Vector3(10f, 5f, 0f),
+            UnturnedGodot.Player.EPlayerStance.Sprint);
+        for (int tick = 0; tick < 200; tick++)
+            system.Tick(new[] { player }, ImpassableDt);
+
+        Assert.True(escapeIssued, "the blocked shortcut never armed collision recovery");
+        Assert.True(shortcutsAfterEscape > 0, "no later repath offered the lying shorter route");
+        Assert.True(zombie.Position.X > 8f, $"the shortcut pulled it back into the wall: {zombie.Position}");
+        Assert.Equal(EZombieState.Attack, zombie.State);
+    }
+
     // The other side of the same rule: evidence is about DELIVERED motion, so a route that keeps
     // moving the body must never accumulate any, however many times it is repathed.
     [Fact]
@@ -1633,6 +1713,55 @@ public class ZombieSystemTests
         // Separation pushed the mover up-Z past the wall line at least once, and the re-resolve
         // clamped it back: the mover never ends a tick beyond the wall.
         Assert.True(mover.Position.Z <= 0.5f + 0.001f, $"pushed through the wall: {mover.Position}");
+    }
+
+    [Fact]
+    public void ARouteBlockedOnlyByAnotherZombie_IsNotInvalidatedAsAWorldCollision()
+    {
+        var system = new ZombieSystem(new[] { Table() }, TwoBounds(), FlatGround);
+        system.Spawn(Enumerable.Range(0, 8).Select(i => At(i * 0.01f, 0)).ToList(), new Random(2));
+        Assert.Equal(2, system.Zombies.Count);
+        ZombieInstance mover = system.Zombies[0];
+        ZombieInstance blocker = system.Zombies[1];
+        mover.Speciality = blocker.Speciality = EZombieSpeciality.Normal;
+        mover.Yaw = blocker.Yaw = -90f;
+        mover.Position = new Vector3(0f, 5f, 0f);
+        blocker.Position = new Vector3(1f, 5f, 0f);
+
+        int queries = 0;
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            queries++;
+            path.Add(from);
+            path.Add(to);
+            return true;
+        };
+        // A narrow straight corridor accepts the route's forward component while preventing the
+        // separation response from simply walking around the idle capsule.
+        system.MoveResolver = (from, to, radius) => to with { Z = 0f };
+        // Only the rear zombie acquires the player; the front body remains a stable idle member of
+        // the same crowd instead of walking away and turning this into an open-ground fixture.
+        system.VisionBlocked = (from, to) => from.X > 0.5f;
+
+        // The idle front zombie's capsule holds the chaser in place for longer than the
+        // route-collision timeout.
+        var player = Player(1, new Vector3(1.75f, 5f, 0f),
+            UnturnedGodot.Player.EPlayerStance.Sprint);
+        int ticks = (int)MathF.Ceiling(ZombieSystem.BlockedRouteTimeout / ImpassableDt) * 3;
+        float farthest = mover.Position.X;
+        for (int tick = 0; tick < ticks; tick++)
+        {
+            system.Tick(new[] { player }, ImpassableDt);
+            farthest = MathF.Max(farthest, mover.Position.X);
+        }
+
+        Assert.True(queries >= 2, "the fixture never crossed a repath boundary");
+        Assert.True(farthest < 0.3f, $"the rear zombie was not actually crowd-blocked: x={farthest}; "
+            + $"mover={mover.Position}/{mover.State}/{mover.TargetPlayer}, "
+            + $"blocker={blocker.Position}/{blocker.State}/{blocker.TargetPlayer}");
+        Assert.Equal(0f, mover.BlockedRouteTime);
+        Assert.False(mover.RouteEscapingCollision);
+        Assert.NotEmpty(mover.PathPoints);
     }
 
     [Fact]

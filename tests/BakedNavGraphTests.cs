@@ -39,7 +39,7 @@ public class BakedNavGraphTests
     public void ConnectedTrianglesProducePortalPath()
     {
         BakedNavGraph graph = BakedNavGraph.Build(new[] { Strip(4) });
-        Assert.Equal((14, 204L), graph.AdjacencyStorage);
+        Assert.Equal((14, 218L), graph.AdjacencyStorage);
         // 912 before the T-junction broad phase was counted into this. The rise is the grid, its
         // buckets, the border list and the pair set — transient, freed when Build returns, and
         // deliberately included so the figure the perf harness prints is not an understatement of what
@@ -304,7 +304,7 @@ public class BakedNavGraphTests
         Assert.Equal(triangles + 1, reader.ReadInt32());
         reader.BaseStream.Seek((triangles + 1L) * sizeof(int), SeekOrigin.Current);
         int edges = reader.ReadInt32();
-        reader.BaseStream.Seek(edges * 3L * sizeof(int), SeekOrigin.Current);
+        reader.BaseStream.Seek(edges * ((3L * sizeof(int)) + sizeof(byte)), SeekOrigin.Current);
         reader.ReadInt32(); // columns
         reader.ReadInt32(); // rows
         reader.ReadSingle(); // cellSize
@@ -626,6 +626,75 @@ public class BakedNavGraphTests
         Assert.Equal(to, back[0]);
         Assert.Equal(from, back[^1]);
         Assert.True(Plan(back) < 3.2f, $"the return route materially detoured: {Plan(back):F2} m");
+    }
+
+    [Fact]
+    public void AStitchedPortalBlockedByPhysics_IsExcludedAndTheAnswerIsCached()
+    {
+        int probes = 0;
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { TJunction() }, portalProbe:
+            (from, _, _) =>
+            {
+                probes++;
+                return from;
+            });
+        Vector3 from = new(0.5f, 0, 1f), target = new(3.5f, 0, 1f);
+
+        var first = new List<Vector3>();
+        Assert.True(graph.TryPath(from, target, first));
+        Assert.NotEqual(target, first[^1]);
+        Assert.InRange(first[^1].X, 0f, 2f);
+        Assert.True(probes > 0, "the inferred seam was trusted without consulting collision");
+
+        int afterFirst = probes;
+        var second = new List<Vector3>();
+        Assert.True(graph.TryPath(from, target, second));
+        Assert.Equal(first, second);
+        Assert.Equal(afterFirst, probes);
+    }
+
+    [Fact]
+    public void AnOpenStitchedPortal_RemainsWalkableAndItsProbeIsCached()
+    {
+        int probes = 0;
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { TJunction() }, portalProbe:
+            (_, to, _) =>
+            {
+                probes++;
+                return to;
+            });
+        Vector3 from = new(0.5f, 0, 1f), target = new(3.5f, 0, 1f);
+
+        var first = new List<Vector3>();
+        Assert.True(graph.TryPath(from, target, first));
+        Assert.Equal(target, first[^1]);
+        Assert.True(probes > 0);
+
+        int afterFirst = probes;
+        Assert.True(graph.TryPath(from, target, new List<Vector3>()));
+        Assert.Equal(afterFirst, probes);
+    }
+
+    [Fact]
+    public void CsrCache_PreservesWhichPortalsRequireCollisionValidation()
+    {
+        NavFlag flag = TJunction();
+        using var cache = new MemoryStream();
+        BakedNavGraph.Build(new[] { flag }).Write(cache, "stitched-v1");
+
+        int probes = 0;
+        Assert.True(BakedNavGraph.TryRead(new MemoryStream(cache.ToArray()), "stitched-v1",
+            new[] { flag }, out BakedNavGraph? loaded, (from, _, _) =>
+            {
+                probes++;
+                return from;
+            }));
+
+        var path = new List<Vector3>();
+        Vector3 target = new(3.5f, 0, 1f);
+        Assert.True(loaded!.TryPath(new Vector3(0.5f, 0, 1f), target, path));
+        Assert.NotEqual(target, path[^1]);
+        Assert.True(probes > 0);
     }
 
     // A 6 m tent-shaped ridge — 2 m of run either side of the crest — laid along +Z from z = -2 to the

@@ -41,6 +41,7 @@ public class ReproStateTests
         TargetReached = true,
         PathIsPartial = true,
         RouteServedAnotherTarget = true,
+        RouteEscapingCollision = true,
         SteerDirection = new Vector3(0.5f, 0f, -0.5f),
     };
 
@@ -78,6 +79,7 @@ public class ReproStateTests
         Assert.Equal(original.TargetReached, restored.TargetReached);
         Assert.Equal(original.PathIsPartial, restored.PathIsPartial);
         Assert.Equal(original.RouteServedAnotherTarget, restored.RouteServedAnotherTarget);
+        Assert.Equal(original.RouteEscapingCollision, restored.RouteEscapingCollision);
         Assert.Equal(original.SteerDirection, restored.SteerDirection);
         Assert.Equal(original.PathPoints, restored.PathPoints);
     }

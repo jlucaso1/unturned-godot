@@ -176,7 +176,7 @@ public sealed class ReproScenario
     // numbered differently from the slice, and applying the slice's indices to it would take out faces
     // chosen at random — a worse lie than not applying them at all. A dump from before this was
     // recorded carries none, and behaves as it always did.
-    private static ZombiePathQuery BuildGraph(IReadOnlyList<NavFlag> flags, ReproWorldData world,
+    private ZombiePathQuery BuildGraph(IReadOnlyList<NavFlag> flags, ReproWorldData world,
         bool flagsAreTheDumps)
     {
         // Excluded at BUILD time, the way the session's own graph was built, rather than disabled
@@ -194,7 +194,11 @@ public sealed class ReproScenario
                 if (off is { Length: > 0 })
                     exclusions[flags[i]] = new HashSet<int>(off);
             }
-        return BakedNavGraph.Build(flags, exclusions.Count > 0 ? exclusions : null).TryPath;
+        BakedNavPortalProbe? portalProbe = Collision == null
+            ? null
+            : (from, to, radius) => Collision.Resolve(from, to, radius);
+        return BakedNavGraph.Build(flags, exclusions.Count > 0 ? exclusions : null,
+            portalProbe).TryPath;
     }
 
     public void Step()
