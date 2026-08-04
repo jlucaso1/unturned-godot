@@ -1,5 +1,5 @@
 {
-  "estimatedGeometryBytes": 23868120,
+  "estimatedGeometryBytes": 20190528,
   "meshInstances": 16,
   "multiMeshInstances": 2020,
   "multiMeshTotalInstances": 676968,
@@ -11,5 +11,5 @@
   "uniqueMeshes": 624,
   "uploadedIndices": 2017104,
   "uploadedTriangles": 672368,
-  "uploadedVertices": 658321
+  "uploadedVertices": 505088
 }
