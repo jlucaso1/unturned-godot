@@ -149,6 +149,7 @@ player's disk through the browser's directory picker, so a web build would ship 
 | `core/` (`UnturnedGodot.Core`) | Pure logic: binary/text parsers, terrain math, netcode, zombie AI, asset/extraction planning. Only uses managed Godot structs. | none, runs under xUnit |
 | `src/` (`unturned-godot`) | Godot glue: `Main`, world builders, UI, player/zombie nodes. `[ExcludeFromCodeCoverage]`. | Godot.NET.Sdk |
 | `tests/` (`UnturnedGodot.Tests`) | xUnit suite; CI requires more than 95% line and branch coverage of `core/`. | none |
+| `addons/unturned/` | Editor add-on: the "Unturned" dock (map preview, cache warming, navigation overlay, camera readout). Debug/editor builds only. | GodotSharpEditor |
 | `tools/PerfHarness` | Standalone micro-benchmarks over the Core parsers. | none |
 | `tools/ReproHarness` | Replays a bug-repro dump: `info`, `verify`, `replay`. | none |
 | `web/` | Browser file layer: directory picker, read-only VFS over the picked folder, install/map probe, demo page. Vanilla ES modules, no build step. | none, runs in Chromium |
@@ -158,6 +159,29 @@ Keeping the parsers engine-free is what makes full unit-test coverage possible. 
 
 Non-Godot binaries (core + tests, Debug and Release) go to `build/<project>/<config>/` instead of scattered
 `bin`/`obj`; the game keeps its Godot-managed output under `.godot/`. All of `build/` is git-ignored.
+
+### Editor add-on
+
+Enable **Unturned** under Project > Project Settings > Plugins to get a dock that builds a map into the
+edited scene, warms its mesh cache in the background, tunes the viewport for the map's scale, and lifts the
+editor camera's pose back out as a `SHOT_CAM` the headless screenshot path reproduces. Everything it adds is
+unowned, so saving the scene never writes it into the `.tscn`.
+
+**Show navmesh** draws the map's baked navigation on top of all that, for finding the defects that are
+invisible in game — a zombie takes the long way round, or stands somewhere forever, and nothing on screen
+says why. Each defect has a shape you can recognise once it is drawn:
+
+| What you see | What it is |
+|---|---|
+| A red rim line in the middle of open floor | A hole: the walkable surface stops there |
+| A patch in its own colour with a beacon over it | An island nothing can walk to from the rest of the map |
+| Magenta box reaching well past the coloured surface | Spawn ground (Bounds.dat, expanded 64 m) with no navmesh under it |
+
+It reads only the map's `Environment/` folder — no masterbundle, no warm cache, no map preview — so it is up
+in well under a second, and the dock's log summarizes what it found. Islands, rims and everything else come
+from [`BakedNavGraph.Survey`](core/Data/NavmeshSurvey.cs), which measures the **pathfinder's own
+adjacency** rather than the raw triangles: on PEI those disagree about 3 449 edges, every one of which the
+raw reading would have drawn as a hole that is not there.
 
 ### How the content is read
 

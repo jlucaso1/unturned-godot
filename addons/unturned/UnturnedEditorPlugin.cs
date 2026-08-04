@@ -28,9 +28,12 @@ public partial class UnturnedEditorPlugin : EditorPlugin
             return;
 
         // Drop any preview still in the edited scene, so disabling the plugin does not leave hundreds of
-        // orphaned mesh nodes behind.
+        // orphaned mesh nodes behind. The navigation overlay is its own root and has to be named too.
         if (EditorInterface.Singleton.GetEditedSceneRoot() is { } root)
+        {
             WorldPreview.Clear(root);
+            NavigationPreview.Clear(root);
+        }
 
         // Put the editor's own viewport settings back. These live in EditorSettings, which is editor-wide
         // rather than project-scoped, so leaving them tuned follows the user into every other Godot

@@ -36,6 +36,12 @@ public partial class MapPreviewDock : VBoxContainer
     private CheckBox _objects = null!;
     private CheckBox _foliage = null!;
     private CheckBox _shadows = null!;
+    private Button _navigation = null!;
+    private CheckBox _navRim = null!;
+    private CheckBox _navBeacons = null!;
+    private CheckBox _navBounds = null!;
+    private CheckBox _navXray = null!;
+    private SpinBox _navLift = null!;
 
     private string? _unturnedPath;
     private IReadOnlyList<MapEntry> _catalog = Array.Empty<MapEntry>();
@@ -52,7 +58,7 @@ public partial class MapPreviewDock : VBoxContainer
         AddChild(_install);
 
         _maps = new OptionButton { TooltipText = "Maps found in the Unturned install (official + workshop)" };
-        _maps.ItemSelected += _ => RefreshCacheState();
+        _maps.ItemSelected += _ => OnMapSelected();
         AddChild(_maps);
 
         _cache = new Label { AutowrapMode = TextServer.AutowrapMode.WordSmart };
@@ -78,6 +84,9 @@ public partial class MapPreviewDock : VBoxContainer
             "Scale the editor's freelook speed and far plane to this map's size. These are editor-wide "
             + "settings; the original values are backed up so this button can put them back.");
         _refresh = AddButton("Rescan maps", () => { ScanInstall(); }, "Re-read the install's map list.");
+
+        AddChild(new HSeparator());
+        BuildNavigationSection();
 
         AddChild(new HSeparator());
         _camera = new Label
@@ -138,12 +147,135 @@ public partial class MapPreviewDock : VBoxContainer
         return button;
     }
 
-    private CheckBox AddCheck(string text, bool on, string tooltip)
+    private CheckBox AddCheck(string text, bool on, string tooltip, Container? parent = null)
     {
         var box = new CheckBox { Text = text, ButtonPressed = on, TooltipText = tooltip };
-        AddChild(box);
+        (parent ?? (Container)this).AddChild(box);
         return box;
     }
+
+    // The navigation overlay's own controls. Separate from the preview's, because it is built from
+    // different data (Environment/*.dat alone — no masterbundle, no cache) and is quick enough to put
+    // up on its own while the world stays empty.
+    private void BuildNavigationSection()
+    {
+        AddChild(new Label { Text = "Navigation" });
+        _navigation = AddButton("Show navmesh", OnToggleNavigation,
+            "Draw this map's baked navmesh into the edited scene: walkable surface coloured by island, "
+            + "the rim where it stops, and a beacon over every patch nothing can walk to. Reads only "
+            + "the map's Environment folder, so it does not need a warm cache.");
+
+        var grid = new GridContainer { Columns = 2 };
+        AddChild(grid);
+        _navRim = AddCheck("Rim", true,
+            "The outline of the walkable surface. A rim line in the middle of open ground is a hole.",
+            grid);
+        _navBeacons = AddCheck("Beacons", true,
+            "A vertical marker over every island that is cut off from its flag's main surface — a "
+            + "rooftop with no way up, a sealed cellar, a ledge. Drawn through terrain so they can be "
+            + "spotted from the air.", grid);
+        _navBounds = AddCheck("Bounds", false,
+            "Yellow: the baked navmesh's own extent. Magenta: the same box expanded by 64 m, which is "
+            + "where zombies may spawn. Magenta reaching well past the coloured surface is spawn "
+            + "ground with no navmesh under it.", grid);
+        _navXray = AddCheck("X-ray", false,
+            "Draw the surface and rim through everything, so a navmesh inside a building can be read "
+            + "from outside it.", grid);
+        foreach (CheckBox box in new[] { _navRim, _navBeacons, _navBounds, _navXray })
+            box.Toggled += _ => ApplyNavigationOptions();
+
+        var lift = new HBoxContainer();
+        AddChild(lift);
+        lift.AddChild(new Label { Text = "Lift" });
+        _navLift = new SpinBox
+        {
+            MinValue = 0,
+            MaxValue = 5,
+            Step = 0.05,
+            Value = NavigationPreview.Options.Default.Lift,
+            Suffix = "m",
+            SizeFlagsHorizontal = SizeFlags.ExpandFill,
+            TooltipText = "How far above the world to float the overlay. The baked mesh sits ON the "
+                + "ground it describes, so without a little lift the two z-fight and the surface "
+                + "shimmers as you move.",
+        };
+        _navLift.ValueChanged += _ => ApplyNavigationOptions();
+        lift.AddChild(_navLift);
+    }
+
+    private NavigationPreview.Options NavigationOptions => new(
+        Rim: _navRim.ButtonPressed,
+        Beacons: _navBeacons.ButtonPressed,
+        Bounds: _navBounds.ButtonPressed,
+        XRay: _navXray.ButtonPressed,
+        Lift: (float)_navLift.Value);
+
+    // Every one of these is a property write on nodes that already exist, so the overlay reacts while
+    // the camera keeps moving instead of being rebuilt under it.
+    private void ApplyNavigationOptions()
+    {
+        if (EditorInterface.Singleton.GetEditedSceneRoot() is not { } root)
+            return;
+        if (NavigationPreview.Find(root) is { } overlay)
+            NavigationPreview.Apply(overlay, NavigationOptions);
+    }
+
+    private async void OnToggleNavigation()
+    {
+        if (_unturnedPath is not { } install || Selected is not { } map || _busy)
+            return;
+
+        if (EditorInterface.Singleton.GetEditedSceneRoot() is not { } root)
+        {
+            Log("[color=orange]Open a scene first — the overlay is added to the edited scene.[/color]");
+            return;
+        }
+
+        if (NavigationPreview.Clear(root))
+        {
+            UpdateNavigationButton(shown: false);
+            Log("Navmesh overlay hidden.");
+            return;
+        }
+
+        SetBusy(true);
+        Log($"Reading {map.DisplayName}'s navmesh…");
+        var report = new List<string>();
+        try
+        {
+            Node3D overlay = await NavigationPreview.BuildAsync(
+                MapCatalog.ResolvePath(install, map.FolderName), NavigationOptions, this,
+                status => { if (Alive) _navigation.Text = status; }, report);
+
+            // The staged build yields between flags, so the scene may have closed in the meantime.
+            if (!Alive || !GodotObject.IsInstanceValid(root))
+            {
+                overlay.Free();
+                return;
+            }
+
+            NavigationPreview.Attach(root, overlay);
+            foreach (string line in report)
+                Log(line);
+            Log($"[color=green]Overlay under {root.Name}/{NavigationPreview.RootName}.[/color]");
+        }
+        catch (Exception e)
+        {
+            Log($"[color=orange]Navmesh overlay failed: {e.GetType().Name}: {e.Message}[/color]");
+        }
+        finally
+        {
+            if (Alive)
+            {
+                SetBusy(false);
+                UpdateNavigationButton(shown:
+                    GodotObject.IsInstanceValid(root) && NavigationPreview.Find(root) != null);
+            }
+        }
+    }
+
+    private void UpdateNavigationButton(bool shown) =>
+        _navigation.Text = shown ? "Hide navmesh" : "Show navmesh";
 
     private void ScanInstall()
     {
@@ -176,6 +308,18 @@ public partial class MapPreviewDock : VBoxContainer
         SetButtonsEnabled(true);
         _maps.Selected = 0;
         RefreshCacheState();
+    }
+
+    // Picking another map leaves the navmesh overlay describing the previous one, in the previous one's
+    // coordinates. Dropping it says so rather than letting it be read as this map's.
+    private void OnMapSelected()
+    {
+        RefreshCacheState();
+        if (EditorInterface.Singleton.GetEditedSceneRoot() is { } root && NavigationPreview.Clear(root))
+        {
+            UpdateNavigationButton(shown: false);
+            Log("Navmesh overlay dropped: it belonged to the previous map.");
+        }
     }
 
     private MapEntry? Selected =>
@@ -362,6 +506,7 @@ public partial class MapPreviewDock : VBoxContainer
         _clear.Disabled = !enabled;
         _warm.Disabled = !enabled;
         _refresh.Disabled = !enabled;
+        _navigation.Disabled = !enabled;
         _maps.Disabled = !enabled;
     }
 
