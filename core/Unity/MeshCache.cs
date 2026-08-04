@@ -37,16 +37,26 @@ public readonly struct CachedSubmesh
 // texture keys), so the 1.4 GB bundle is parsed once and runtime loads only the small meshes it needs.
 public static class MeshCache
 {
-    // "UGMC": extraction no longer reads a prefab's hidden alternate states (Dead/Ragdoll) as geometry, so
+    // "UGMB": extraction now also caches each prefab's authored lower LOD level beside its mesh, and keeps
+    // a level only when it is materially cheaper than the base one. A cache written by an earlier magic is
+    // complete by its own rules but has no <guid>.lod1.mesh anywhere, and completeness is decided per mesh
+    // — a missing lower level is indistinguishable from a prefab that never had one. Bumping is what
+    // forces one more extraction pass so the levels exist at all and match the current selection rule;
+    // without it the feature stays silently off for every install that already has a warm cache.
+    //
+    // "UGMC": extraction now reads the vertex buffers Unity keeps in a bundle's .resS, and reverses the
+    // winding of a part placed through a mirroring transform. A cache written by "UGMB" is complete by its
+    // own rules and cannot be told apart from one that simply had nothing streamed or mirrored — a mesh
+    // missing its wheels looks exactly like a prefab that never had any. Bumping is what re-extracts them;
+    // without it, every install with a warm cache keeps the wheel-less meshes indefinitely.
+    //
+    // "UGMD": extraction no longer reads a prefab's hidden alternate states (Dead/Ragdoll) as geometry, so
     // the objects that were caching their wreck — or their debris on top of themselves — now cache the live
-    // model, and the ragdoll colliders that came with them are gone. Nothing about the FORMAT changed, but
-    // an entry written by the old rules is indistinguishable from a correct one, and completeness is
+    // model, and the ragdoll colliders that came with them are gone. Nothing about the FORMAT changed here,
+    // but an entry written by the old rules is indistinguishable from a correct one, and completeness is
     // decided per GUID: bumping is what makes an install with a warm cache extract those meshes again
     // instead of drawing the wreck forever.
-    //
-    // ("UGMB" was the bump before this one: it forced the pass that first cached each prefab's authored
-    // lower LOD level beside its mesh.)
-    private const uint Magic = 0x434D4755;
+    private const uint Magic = 0x444D4755;
 
     // A prefab's authored lower level is cached beside its mesh as "<guid>.lod1.mesh". The suffix still
     // ends in ".mesh" so a directory scan finds both levels; callers that want only the base level filter

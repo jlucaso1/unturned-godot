@@ -32,9 +32,10 @@ in view.
 
 ### Not done yet
 
-- **Stream-data meshes**: vertex data kept in the `.resS` stream is not decoded, so those meshes fall back
-  to boxes. Quantized geometry (`m_CompressedMesh`), which workshop bundles lean on heavily, *is* decoded,
-  as are texture pixels in `.resS`.
+- **Stream-data meshes**: vertex data kept in the `.resS` stream *is* decoded now, for the prefabs a map
+  needs — it costs one extra forward pass over the bundle on a cold cache, and only when something still
+  to be extracted has a streamed buffer. Quantized geometry (`m_CompressedMesh`), which workshop bundles
+  lean on heavily, and texture pixels in `.resS` were already decoded.
 - **Gameplay**: no items, inventory, building, damage or survival stats. Zombies exist and hunt, but you
   cannot fight back. Vehicles spawn and render, but they are scenery: nothing drives, collides with or
   damages them, and a vehicle sits at the height its spawnpoint was authored at instead of settling onto
@@ -87,7 +88,9 @@ never extracted streams in just those.
 
 **Controls** (Unturned's own defaults, from `PlayerSettings`): `WASD` move, mouse look, `Space` jump,
 `Shift` sprint, `X` crouch, `Z` prone, `H` (or `F5`) toggle first/third person, `Esc` pause. In free-camera
-mode: `WASD` + `Q`/`E` down/up, `Shift` to boost. `F3` toggles the performance HUD.
+mode: `WASD` + `Q`/`E` down/up, `Shift` to boost. `F3` toggles the performance HUD, and `F7` writes a
+bug-repro dump — the last few seconds of the simulation, replayable headless or back inside the game
+(see [docs/REPRO.md](docs/REPRO.md)).
 
 **Multiplayer.** The main menu's *Connect* joins a `host:port`. You do not pick the map: the client asks
 the server which one it is running and loads that, so both ends are always on the same world — and a
@@ -102,7 +105,7 @@ to LAN* in the pause menu, or run a dedicated server:
 **Useful environment flags** (mostly for automation and screenshots): `UNTURNED_PATH`, `MAP=Washington`
 (skip the browser and load that map), `SOLO=1` (boot straight into a local session), `FREECAM=1`,
 `JOIN=host:port`, `OPEN_LAN=1`, `PLAYER=1`, `SCREENSHOT_PATH`, `TIME_OF_DAY=0..1`, `DAY_SPEED=N`,
-`NAV_DEBUG=1`, `AUDIO_DEBUG=1`.
+`NAV_DEBUG=1`, `AUDIO_DEBUG=1`, `REPRO_*` ([docs/REPRO.md](docs/REPRO.md)).
 
 ### Export
 
@@ -142,6 +145,7 @@ player's disk through the browser's directory picker, so a web build would ship 
 | `src/` (`unturned-godot`) | Godot glue: `Main`, world builders, UI, player/zombie nodes. `[ExcludeFromCodeCoverage]`. | Godot.NET.Sdk |
 | `tests/` (`UnturnedGodot.Tests`) | xUnit suite; CI requires more than 95% line and branch coverage of `core/`. | none |
 | `tools/PerfHarness` | Standalone micro-benchmarks over the Core parsers. | none |
+| `tools/ReproHarness` | Replays a bug-repro dump: `info`, `verify`, `replay`. | none |
 | `web/` | Browser file layer: directory picker, read-only VFS over the picked folder, install/map probe, demo page. Vanilla ES modules, no build step. | none, runs in Chromium |
 
 Keeping the parsers engine-free is what makes full unit-test coverage possible. `core/`, `tests/` and
@@ -220,6 +224,13 @@ dotnet nuget add source /usr/lib/godot-mono/GodotSharp/Tools/nupkgs -n GodotLoca
 ```
 
 Benchmarking and profiling: see [docs/PROFILING.md](docs/PROFILING.md).
+
+Saw something go wrong in play? Press `F7` and hand over the file:
+[docs/REPRO.md](docs/REPRO.md) explains what a dump carries and how to replay it.
+
+```sh
+dotnet run -c Release --project tools/ReproHarness -- verify dump.json    # does this build still do it?
+```
 
 ## License
 

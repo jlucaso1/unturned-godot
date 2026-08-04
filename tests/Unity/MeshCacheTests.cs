@@ -67,7 +67,7 @@ public class MeshCacheTests
         using var expected = new MemoryStream();
         using (var w = new BinaryWriter(expected, System.Text.Encoding.UTF8, leaveOpen: true))
         {
-            w.Write(0x434D4755u); // MeshCache.Magic
+            w.Write(0x444D4755u); // MeshCache.Magic
             w.Write(verts.Length);
             foreach (Vector3 v in verts) { w.Write(v.X); w.Write(v.Y); w.Write(v.Z); }
             w.Write(true);

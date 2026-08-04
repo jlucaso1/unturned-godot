@@ -78,6 +78,7 @@ public sealed class ZombieHost
                 _playerBounds.Remove(id);
         }
 
+        _system.AuthoritativeTick = tick; // stamps anything recording alongside the simulation
         _system.Tick(_views, ServerSimulation.TickRate);
 
         // Replicate every awake zombie (plus one final snapshot when it settles back to idle so clients
@@ -111,6 +112,16 @@ public sealed class ZombieHost
                 connection.Send(payload, ESendType.Unreliable);
             }
         }
+    }
+
+    // Forgets which region each player has been sent, so the next tick ships the current population
+    // again. Loading a bug-repro dump replaces every zombie wholesale — ids, types, clothing, the lot —
+    // and the per-tick state snapshots carry none of that: without this the client keeps rendering the
+    // avatars of a population that no longer exists.
+    public void ResendRegions()
+    {
+        _playerBounds.Clear();
+        _lastSent.Clear();
     }
 
     // SendZombies: the region's complete zombie list, reliable, to one connection, in MTU-sized chunks.

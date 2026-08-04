@@ -980,12 +980,40 @@ public class PhysicsBodyOrderTests
         Assert.True(guard >= 0 && cache > guard && result > cache);
     }
 
+    // RecordMisses blacklists every needed GUID a pass did NOT produce, and deletes its cache. A pass cut
+    // short has produced nothing, so committing its misses turns every GUID it never reached into a
+    // permanent fallback box — extraction is suppressed from then on, until the bundle stamp changes.
+    // Both extraction paths must therefore check before calling it, and neither check is expressible as a
+    // unit test over the real bundle: this pins the guard where it sits.
+    [Fact]
+    public void NeitherExtractionPathRecordsMissesFromACancelledPass()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ModelExtractor.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        int at = 0;
+        int guarded = 0;
+        while ((at = source.IndexOf("RecordMisses(bundlePath", at, StringComparison.Ordinal)) >= 0)
+        {
+            // The guard is the nearest cancellation check above the call, within the same block.
+            string before = source[Math.Max(0, at - 600)..at];
+            if (before.Contains("cancellationToken.IsCancellationRequested", StringComparison.Ordinal))
+                guarded++;
+            at += "RecordMisses(bundlePath".Length;
+        }
+
+        Assert.Equal(2, guarded); // the file-based pass and the streaming pass
+    }
+
     // Cache completeness is decided per mesh, so a format that gains a new per-prefab artifact cannot be
     // detected by a missing file — an absent lower level looks the same as a prefab that never had one.
     // The magic is the only thing that forces one more extraction pass, and it must never go backwards:
-    // UGM8 predates source-aware texture tags, UGM9 predates the authored LOD levels, UGMA kept every level
-    // a prefab shipped instead of only the ones materially cheaper than the base mesh, and UGMB cached the
-    // hidden Dead/Ragdoll states as if they were the object's own geometry.
+    // UGM8 predates source-aware texture tags, UGM9 predates the authored LOD levels, UGMA kept every
+    // level a prefab shipped instead of only the ones materially cheaper than the base mesh, UGMB
+    // predates both the .resS vertex buffers and the winding fix for mirrored parts — so its meshes are
+    // missing a vehicle's wheels while looking complete by their own rules — and UGMC cached the hidden
+    // Dead/Ragdoll states as if they were the object's own geometry.
     [Fact]
     public void MeshCacheMagicInvalidatesEveryOlderExtraction()
     {
@@ -993,7 +1021,7 @@ public class PhysicsBodyOrderTests
             return;
 
         string source = File.ReadAllText(path);
-        Assert.Contains("private const uint Magic = 0x434D4755;", source); // "UGMC"
+        Assert.Contains("private const uint Magic = 0x444D4755;", source); // "UGMD"
     }
 
     // The source check above pins the constant; this one proves the constant does its job. A cache
@@ -1010,8 +1038,8 @@ public class PhysicsBodyOrderTests
         byte[] current = written.ToArray();
         Assert.True(MeshCache.IsCurrent(current));
 
-        // UGMB, UGMA, UGM9, UGM8
-        foreach (uint stale in new uint[] { 0x424D4755, 0x414D4755, 0x394D4755, 0x384D4755 })
+        // UGMC..UGM8
+        foreach (uint stale in new uint[] { 0x434D4755, 0x424D4755, 0x414D4755, 0x394D4755, 0x384D4755 })
         {
             byte[] older = (byte[])current.Clone();
             System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(older, stale);
