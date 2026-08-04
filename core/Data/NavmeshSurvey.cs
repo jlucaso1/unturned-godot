@@ -247,9 +247,17 @@ public sealed partial class BakedNavGraph
                 return false; // a vertical or zero-length edge in plan: nothing to draw a line along
 
             covered.Clear();
-            float here = SideOfEdge(v0, v1, OppositeVertex(triangle, v0, v1));
-            // A zero-area face lies ALONG the edge rather than to one side of it, so it has no opinion
-            // to offer on what is across. The same rule the snap and the stitch already apply.
+            // A face can name an edge and still have no third corner to be on a side OF: welding two
+            // of a triangle's corners onto the same quantised position leaves an index repeated, and
+            // {5, 5, 7} has nothing off the edge (5, 7). OppositeVertex says so with -1, which reads
+            // straight through to Vertices[-1] if it is handed on — so the same guard the neighbour
+            // test already carries has to come first here.
+            int mine = OppositeVertex(triangle, v0, v1);
+            if (mine < 0)
+                return false;
+            // And a zero-area face lies ALONG the edge rather than to one side of it, so it has no
+            // opinion to offer on what is across. The same rule the snap and the stitch already apply.
+            float here = SideOfEdge(v0, v1, mine);
             if (MathF.Abs(here) <= 1e-6f)
                 return false;
 
@@ -259,6 +267,13 @@ public sealed partial class BakedNavGraph
                 if (!_enabled[c.To]
                     || !OnEdge(a, ex, ez, lengthSquared, c.VertexA, out float from)
                     || !OnEdge(a, ex, ez, lengthSquared, c.VertexB, out float to))
+                    continue;
+
+                // A neighbour covering no ground is not floor across anything, whatever its indices
+                // say. This has to be tested on its own because the across test below cannot reach it:
+                // a welded face has no vertex off the edge, so it takes the stitched-portal exemption
+                // and would be counted as the floor that closes the edge.
+                if (IsFlatInPlan(c.To))
                     continue;
 
                 // Across, not merely alongside — the same question the router's own wall test asks, so
@@ -284,6 +299,16 @@ public sealed partial class BakedNavGraph
             }
             Emit(a, b, open, 1f, rim);
             return true;
+        }
+
+        // Whether a face covers no ground at all: collinear in plan, or welded onto a repeated corner.
+        // Twice the signed XZ area, which is the same quantity the snap rejects a face on.
+        private bool IsFlatInPlan(int triangle)
+        {
+            Vector3 a = Source.Vertices[Source.Triangles[triangle * 3]];
+            Vector3 b = Source.Vertices[Source.Triangles[(triangle * 3) + 1]];
+            Vector3 c = Source.Vertices[Source.Triangles[(triangle * 3) + 2]];
+            return MathF.Abs(((b.X - a.X) * (c.Z - a.Z)) - ((c.X - a.X) * (b.Z - a.Z))) <= 1e-6f;
         }
 
         // Below this the leftover is the float noise between two portals that meet, not a gap a body

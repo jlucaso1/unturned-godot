@@ -216,6 +216,29 @@ public class NavmeshSurveyTests
         Assert.Equal(4, survey.Rim.Count);
     }
 
+    // LevelNavmesh welds vertices by their exact quantised position, so two corners of one recast
+    // triangle landing on the same Int3 come back as the SAME index — a face like {0, 0, 2}. Its edge
+    // (0, 2) has no third corner off it, and asking which side that corner is on read Vertices[-1].
+    [Fact]
+    public void AFaceWithARepeatedCorner_DoesNotReachPastTheVertexArray()
+    {
+        NavFlagSurvey survey = SurveyOf(new NavFlag
+        {
+            Center = new Vector3(0.5f, 0, 0.5f),
+            Size = new Vector3(4, 4, 4),
+            Vertices = new[]
+            {
+                new Vector3(0, 0, 0), new Vector3(0, 0, 1), new Vector3(1, 0, 0),
+            },
+            // The welded face first, so it is the one that reaches each of its edges first.
+            Triangles = new[] { 0, 0, 2, 0, 1, 2 },
+        });
+
+        // The real face still describes itself: three free edges, none of them from the welded one.
+        Assert.Equal(3, survey.Rim.Count);
+        Assert.Equal(2, Assert.Single(survey.Islands).TriangleCount);
+    }
+
     [Fact]
     public void RimIsTheOuterBoundary_CountedOnce()
     {

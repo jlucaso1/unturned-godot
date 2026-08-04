@@ -251,16 +251,25 @@ public partial class MapPreviewDock : VBoxContainer
             Node3D overlay = await NavigationPreview.BuildAsync(map.Path, NavigationOptions, this,
                 status => { if (Alive) _navigation.Text = status; }, report);
 
-            // The staged build yields between flags, so the scene may have closed in the meantime.
-            if (!Alive || !GodotObject.IsInstanceValid(root))
+            // The staged build yields between flags, so the scene can close in the meantime — or be
+            // SWITCHED, which validity alone does not catch: the scene the build started in is still
+            // a live object while it stays open in another tab, so attaching to it would hide this
+            // overlay in a scene the user has left and that nothing here will clear again.
+            Node? edited = EditorInterface.Singleton.GetEditedSceneRoot();
+            if (!Alive || !GodotObject.IsInstanceValid(root) || edited == null
+                || edited.GetInstanceId() != root.GetInstanceId())
             {
                 overlay.Free();
                 return;
             }
 
             NavigationPreview.Attach(root, overlay);
+            // The overlay's own checkboxes stay live while it builds, and their handler had nothing to
+            // apply to until now, so anything toggled during the build would be silently dropped.
+            NavigationPreview.Apply(overlay, NavigationOptions);
             foreach (string line in report)
                 Log(line);
+            WarnIfPreviewIsAnotherMap(root, map);
             Log($"[color=green]Overlay under {root.Name}/{NavigationPreview.RootName}.[/color]");
         }
         catch (Exception e)
@@ -277,6 +286,29 @@ public partial class MapPreviewDock : VBoxContainer
             }
         }
     }
+
+    // A world preview is expensive — minutes, on a cold cache — so selecting another map does not throw
+    // it away. That leaves one way to be misled: the navmesh of map B drawn over the terrain of map A,
+    // where every rim and every island lands on ground that has nothing to do with it. Saying so costs
+    // a line and keeps the preview; silently clearing it would cost the build.
+    private void WarnIfPreviewIsAnotherMap(Node root, MapEntry map)
+    {
+        if (root.GetNodeOrNull<Node3D>(WorldPreview.RootName) is not { } preview)
+            return;
+        string previewMap = preview.HasMeta(PreviewMapMeta)
+            ? preview.GetMeta(PreviewMapMeta).AsString()
+            : "";
+        if (previewMap == map.SelectionKey)
+            return;
+
+        Log(previewMap.Length == 0
+            ? "[color=orange]The world preview in this scene was not built by this dock, so the "
+              + "navmesh may be drawn over another map's ground.[/color]"
+            : $"[color=orange]The world preview in this scene is {previewMap}, not {map.DisplayName} — "
+              + "this navmesh is drawn over another map's ground. Reload the preview to match.[/color]");
+    }
+
+    private const string PreviewMapMeta = "unturned_preview_map";
 
     private void UpdateNavigationButton(bool shown) =>
         _navigation.Text = shown ? "Hide navmesh" : "Show navmesh";
@@ -413,6 +445,10 @@ public partial class MapPreviewDock : VBoxContainer
             }
 
             WorldPreview.Attach(root, preview);
+            // Which map's ground this is, so the navmesh overlay can tell whether it is being drawn
+            // over the terrain it describes. Metadata rather than a field: the preview outlives any
+            // dock state (another dock, a reloaded plugin, the one-shot EditorScript).
+            preview.SetMeta(PreviewMapMeta, map.SelectionKey);
             foreach (string line in report)
                 Log(line.StartsWith("FAIL") ? $"[color=orange]{line}[/color]" : line);
             Log($"[color=green]Preview under {root.Name}/{WorldPreview.RootName} " +
