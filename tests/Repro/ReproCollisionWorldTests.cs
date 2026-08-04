@@ -1,4 +1,6 @@
 using Godot;
+using UnturnedGodot.Assets;
+using UnturnedGodot.Dat;
 using UnturnedGodot.Data;
 using UnturnedGodot.Repro;
 using UnturnedGodot.Zombies;
@@ -51,6 +53,41 @@ public class ReproCollisionWorldTests
         Assert.True(result.X <= 9.36f, $"passed into the wall: {result}");
     }
 
+    [Fact]
+    public void AnInitiallyOverlappingCapsule_IsRecoveredAwayFromItsRequestedBarrierSide()
+    {
+        var geometry = new ReproWorlds.Geometry().Ground()
+            .Box("thin wall", new Vector3(0f, 1.5f, 0f), new Vector3(0.1f, 1.5f, 5f));
+        ReproCollisionWorld world = World(geometry);
+
+        // This is an already-corrupt state: the centre is inside the wall. Recovery must put it back
+        // on the side opposite the requested +X motion, never use the overlap to cross the thin wall.
+        Vector3 result = world.Resolve(new Vector3(-0.05f, 0f, 0f),
+            new Vector3(1f, 0f, 0f), Radius);
+
+        Assert.True(result.X < -0.49f, $"overlap recovery crossed the wall: {result}");
+        Assert.Equal("thin wall", world.LastBlocker);
+        Vector3 away = world.Resolve(result, result + new Vector3(-0.5f, 0f, 0f), Radius);
+        Assert.True(away.X < result.X - 0.45f, $"recovered body remained embedded: {away}");
+    }
+
+    [Fact]
+    public void ARecoveredLongProbeStillEndsAtTheRequestedDestination()
+    {
+        var geometry = new ReproWorlds.Geometry().Ground()
+            // The capsule begins intersecting the top of a very short ledge. Recovery is vertical;
+            // once raised, the long +X leg is clear and has no reason to change its requested endpoint.
+            .Box("ledge", new Vector3(0f, 0.25f, 0f), new Vector3(0.1f, 0.25f, 5f));
+        ReproCollisionWorld world = World(geometry);
+        var from = new Vector3(0f, 0f, 0f);
+        var target = new Vector3(5f, 0.401f, 0f);
+
+        Vector3 result = world.Resolve(from, target, Radius);
+
+        Assert.True(result.DistanceTo(target) < 0.002f,
+            $"depenetration translated the requested endpoint: {result} instead of {target}");
+    }
+
     // A kerb inside the CharacterController's step offset is climbed; a wall is not. (Anything under
     // 0.4 m never touches the capsule at all — it starts at the knees — and the ground snap lifts the
     // body over it, which is how the host models a CharacterController's grounding pass.)
@@ -68,6 +105,39 @@ public class ReproCollisionWorldTests
         Vector3 stopped = wall.Resolve(new Vector3(9f, 0f, 0f), new Vector3(9.45f, 0f, 0f), Radius);
         Assert.Equal(9.35f, stopped.X, 2);
         Assert.Equal(0f, stopped.Y, 3);
+    }
+
+    [Fact]
+    public void ARouteLengthProbeCannotUseStepUpToTeleportAcrossALowObstacle()
+    {
+        var counter = new ReproWorlds.Geometry().Ground()
+            .Box("counter", new Vector3(2f, 0.225f, 0f), new Vector3(1f, 0.225f, 8f));
+        ReproCollisionWorld world = World(counter);
+
+        // The same 0.45 m obstacle is a valid step over one real 0.5 m movement above. A route validator
+        // asking about the whole 3.45 m leg at once must not reuse that rule: the body cannot land on the
+        // far side in one tick, and accepting it certified the three-point routes captured in 155709.
+        Vector3 result = world.Resolve(new Vector3(0.55f, 0f, 0f), new Vector3(4f, 0f, 0f), Radius);
+
+        Assert.True(result.X < 1f, $"long clearance probe crossed the counter: {result}");
+        Assert.Equal("counter", world.LastBlocker);
+    }
+
+    [Fact]
+    public void ALongClearanceProbeCannotSkipAThinFenceBetweenFixedSamples()
+    {
+        var geometry = new ReproWorlds.Geometry().Ground()
+            // A fixed 16-sample sweep from -7 to +7 checks x=0 and x=0.875 around this fence.
+            // Neither capsule overlaps there, despite the continuous motion crossing the barrier.
+            .Box("thin fence", new Vector3(0.43f, 1.5f, 0f),
+                new Vector3(0.01f, 1.5f, 5f));
+        ReproCollisionWorld world = World(geometry);
+
+        Vector3 result = world.Resolve(new Vector3(-7f, 0f, 0f),
+            new Vector3(7f, 0f, 0f), Radius);
+
+        Assert.True(result.X < 0.1f, $"long clearance probe skipped the thin fence: {result}");
+        Assert.Equal("thin fence", world.LastBlocker);
     }
 
     [Fact]
@@ -113,6 +183,19 @@ public class ReproCollisionWorldTests
         Assert.Equal(0f, open, 3);
     }
 
+    [Fact]
+    public void NavSurfaceProbeUsesTheCapturedColliderThenGround()
+    {
+        var geometry = new ReproWorlds.Geometry().Ground()
+            .Box("sill", new Vector3(4f, 0.5f, 0f), new Vector3(1f, 0.5f, 1f));
+        ReproCollisionWorld world = World(geometry);
+
+        Assert.True(world.ProbeNavSurface(new Vector3(4f, 0f, 0f), 0.5f, out float sill));
+        Assert.Equal(1f, sill, 2);
+        Assert.True(world.ProbeNavSurface(new Vector3(8f, 0f, 0f), 0.5f, out float ground));
+        Assert.Equal(0f, ground, 2);
+    }
+
     // Off the slice entirely: the heightfield patch answers, and where there is none, nothing does.
     [Fact]
     public void GroundSnap_FallsBackToTheHeightPatch()
@@ -150,6 +233,25 @@ public class ReproCollisionWorldTests
     }
 
     [Fact]
+    public void PhysicalLine_SeesTheFinalFivePercentAndWorldOnlyGeometry()
+    {
+        var geometry = new ReproWorlds.Geometry()
+            .Box("near-target fence", new Vector3(9.8f, 1f, 0f),
+                new Vector3(0.1f, 1f, 1f))
+            .Box("world resource", new Vector3(5f, 1f, 3f),
+                new Vector3(0.1f, 1f, 1f), CollisionLayers.World);
+        ReproCollisionWorld world = World(geometry);
+
+        Vector3 from = new(0f, 1f, 0f), to = new(10f, 1f, 0f);
+        Assert.False(world.VisionBlocked(from, to));
+        Assert.True(world.PhysicalLineBlocked(from, to));
+        Assert.False(world.VisionBlocked(new Vector3(from.X, from.Y, 3f),
+            new Vector3(to.X, to.Y, 3f)));
+        Assert.True(world.PhysicalLineBlocked(new Vector3(from.X, from.Y, 3f),
+            new Vector3(to.X, to.Y, 3f)));
+    }
+
+    [Fact]
     public void ARayOfNoLengthHitsNothing()
     {
         ReproCollisionWorld world = World(Wall());
@@ -168,5 +270,27 @@ public class ReproCollisionWorldTests
         Assert.True(result.X > 4.4f, $"furniture stopped the body: {result}");
         Assert.True(world.GroundSnap(new Vector3(5f, 0.5f, 0f), out float y));
         Assert.Equal(0.6f, y, 2);
+    }
+
+    [Fact]
+    public void AMediumFence_BlocksZombieMovementAndVision()
+    {
+        DatDictionary data = DatParser.Parse(
+            "GUID 40921a1a3cd742f69cc25cc25b856572\nType Medium\nID 2\n");
+        Assert.True(ObjectAsset.TryParse(data, null, out ObjectAsset? fence));
+        fence.Directory = "/Bundles/Objects/Medium/Fences/Fence_Wood_0";
+        uint layer = ObjectCollisionPolicy.PhysicsLayer(fence);
+
+        var geometry = new ReproWorlds.Geometry().Ground()
+            .Box("Fence_Wood_0", new Vector3(0f, 1.1f, 0f),
+                new Vector3(20f, 1.1f, 0.1f), layer);
+        ReproCollisionWorld world = World(geometry);
+
+        Vector3 stopped = world.Resolve(new Vector3(0f, 0f, -1f),
+            new Vector3(0f, 0f, 1f), Radius);
+        Assert.True(stopped.Z < -0.45f, $"the zombie crossed the fence: {stopped}");
+        Assert.Equal("Fence_Wood_0", world.LastBlocker);
+        Assert.True(world.VisionBlocked(new Vector3(0f, 1f, -1f),
+            new Vector3(0f, 1f, 1f)));
     }
 }

@@ -32,6 +32,19 @@ public struct ZombieSnapshotState
     public EZombieState State;
 }
 
+// Zombie.OnUpdate decides whether the client should leave idle/startle for the movement clip by
+// comparing each component of the latest authoritative position with the currently rendered body.
+// Keep this next to the snapshot shape so every client uses the exact original 1 cm threshold.
+public static class ZombieClientMotion
+{
+    public const float MovementThreshold = 0.01f;
+
+    public static bool IsMoving(Vector3 latest, Vector3 rendered) =>
+        MathF.Abs(latest.X - rendered.X) > MovementThreshold
+        || MathF.Abs(latest.Y - rendered.Y) > MovementThreshold
+        || MathF.Abs(latest.Z - rendered.Z) > MovementThreshold;
+}
+
 public static class ZombieNetMessages
 {
     // Reliable datagrams are not fragmented, so the full population ships in MTU-sized chunks.

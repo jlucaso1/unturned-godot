@@ -27,20 +27,22 @@ public static class NavmeshSurfaceSampling
     public static float BottomOf(Vector3 point) => point.Y - ProbeReach;
 
     public readonly record struct FlagSurfaces(
-        float[] Surface,
+        float[] Clearance,
         bool[] Known,
         float[] Slack,
         bool[] Uncertain,
         int Samples,
         int UncertainSamples);
 
-    // Every face of `flag`, sampled at the seven points NavmeshReachability asks for, keeping the highest
-    // surface found — the one a body crossing the face would have to climb onto.
+    // Every face of `flag`, sampled at the seven points NavmeshReachability asks for. The resulting
+    // clearance is the climb a body crossing the face would actually have to make: height above the
+    // authored plane or a discontinuity within it. Absolute heights are never compared across broad,
+    // sloping faces.
     public static FlagSurfaces Sample(NavFlag flag, CollisionField field, float stepOffset,
         CancellationToken cancellation = default)
     {
         int count = flag.Triangles.Length / 3;
-        var surface = new float[count];
+        var clearance = new float[count];
         var known = new bool[count];
         var slack = new float[count];
         var uncertain = new bool[count];
@@ -53,7 +55,10 @@ public static class NavmeshSurfaceSampling
             Vector3 b = flag.Vertices[flag.Triangles[(triangle * 3) + 1]];
             Vector3 c = flag.Vertices[flag.Triangles[(triangle * 3) + 2]];
 
-            float highest = float.MinValue;
+            float highestClearance = float.MinValue;
+            Span<Vector3> points = stackalloc Vector3[7];
+            Span<float> surfaces = stackalloc float[7];
+            int hitSamples = 0;
             float worstSlack = 0f;
             bool doubtful = false;
             foreach (Vector3 point in NavmeshReachability.SamplePoints(a, b, c))
@@ -67,15 +72,19 @@ public static class NavmeshSurfaceSampling
                 }
                 if (!sample.Hit)
                     continue;
-                if (sample.Y > highest)
-                    highest = sample.Y;
+                float clearance = sample.Y - point.Y;
+                if (clearance > highestClearance)
+                    highestClearance = clearance;
+                points[hitSamples] = point;
+                surfaces[hitSamples++] = sample.Y;
                 if (sample.Slack > worstSlack)
                     worstSlack = sample.Slack;
             }
 
-            if (highest != float.MinValue)
+            if (highestClearance != float.MinValue)
             {
-                surface[triangle] = highest;
+                clearance[triangle] = NavmeshReachability.RequiredClimbForFace(a, b, c, stepOffset,
+                    highestClearance, points[..hitSamples], surfaces[..hitSamples]);
                 known[triangle] = true;
             }
             slack[triangle] = worstSlack;
@@ -88,6 +97,6 @@ public static class NavmeshSurfaceSampling
             Interlocked.Add(ref uncertainSamples, local.Uncertain);
         });
 
-        return new FlagSurfaces(surface, known, slack, uncertain, samples, uncertainSamples);
+        return new FlagSurfaces(clearance, known, slack, uncertain, samples, uncertainSamples);
     }
 }

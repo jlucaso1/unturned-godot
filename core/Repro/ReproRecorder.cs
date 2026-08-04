@@ -44,6 +44,7 @@ public sealed class ReproRecorder : IZombieTickObserver
     private ZombieMoveResolver? _innerMove;
     private ZombieGroundSnap? _innerGround;
     private VisionBlocked? _innerVision;
+    private PhysicalLineBlocked? _innerPhysical;
     private ZombiePathQuery? _innerPath;
     private Func<bool>? _innerReady;
     private IZombieTickObserver? _innerObserver;
@@ -86,15 +87,15 @@ public sealed class ReproRecorder : IZombieTickObserver
 
     public int RecordedTicks => _recorded;
 
-    // Which of the world's questions the session was actually able to ask. A dedicated server installs
-    // only a pathfinder — no collision, no ground, no vision — and a replay that helpfully installs all
-    // four is not a more faithful reproduction, it is a different simulation: ZombieSystem branches on
-    // each of them being null.
+    // Which of the world's questions the session was actually able to ask. Legacy dumps and deliberately
+    // bare tests can lack seams; a replay that helpfully installs absent ones is not more faithful, it is
+    // a different simulation because ZombieSystem branches on each delegate being null.
     public ReproWorldSeams Seams => new()
     {
         MoveResolver = _innerMove != null,
         GroundSnap = _innerGround != null,
         VisionBlocked = _innerVision != null,
+        PhysicalLineBlocked = _innerPhysical != null,
         PathQuery = _innerPath != null,
     };
 
@@ -126,6 +127,7 @@ public sealed class ReproRecorder : IZombieTickObserver
         _innerMove = _system.MoveResolver;
         _innerGround = _system.GroundSnap;
         _innerVision = _system.VisionBlocked;
+        _innerPhysical = _system.PhysicalLineBlocked;
         _innerPath = _system.PathQuery;
         _innerReady = _system.PathReady;
         _innerObserver = _system.Observer;
@@ -136,6 +138,8 @@ public sealed class ReproRecorder : IZombieTickObserver
             _system.GroundSnap = RecordGround;
         if (_innerVision != null)
             _system.VisionBlocked = RecordVision;
+        if (_innerPhysical != null)
+            _system.PhysicalLineBlocked = RecordPhysical;
         if (_innerPath != null)
             _system.PathQuery = RecordPath;
         if (_innerReady != null)
@@ -151,6 +155,7 @@ public sealed class ReproRecorder : IZombieTickObserver
         _system.MoveResolver = _innerMove;
         _system.GroundSnap = _innerGround;
         _system.VisionBlocked = _innerVision;
+        _system.PhysicalLineBlocked = _innerPhysical;
         _system.PathQuery = _innerPath;
         _system.PathReady = _innerReady;
         _system.Observer = _innerObserver;
@@ -234,6 +239,16 @@ public sealed class ReproRecorder : IZombieTickObserver
     private bool RecordVision(Vector3 from, Vector3 to)
     {
         bool blocked = _innerVision!(from, to);
+        if (TryRecord(out TickBuffer? buffer))
+            buffer!.Visions.Add(new VisionCall(Asking, from, to, blocked));
+        return blocked;
+    }
+
+    private bool RecordPhysical(Vector3 from, Vector3 to)
+    {
+        bool blocked = _innerPhysical!(from, to);
+        // The oracle stores segment answers in one ordered column. Visual and physical calls may share
+        // endpoints but remain distinct rows, so replay consumes the same sequence without a schema fork.
         if (TryRecord(out TickBuffer? buffer))
             buffer!.Visions.Add(new VisionCall(Asking, from, to, blocked));
         return blocked;

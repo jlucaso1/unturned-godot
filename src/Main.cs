@@ -210,6 +210,34 @@ public partial class Main : Node3D
             AddSubsystem("nodes", () => NodesBuilder.Build(environmentDir));
             RunSubsystem("environment", () => SetupEnvironment(lighting, water, unturnedPath));
 
+            // The editor preview is useful precisely because it can be X-rayed through realised world
+            // geometry. Make that comparison reproducible in the screenshot path: NAV_XRAY changes only
+            // the material depth test, while camera, lift and mesh stay identical between the pair.
+            if (!string.IsNullOrEmpty(shot)
+                && EnvFlag.IsOn(OS.GetEnvironment("NAV_PREVIEW"), whenUnset: false))
+            {
+                float lift = NavigationOverlay.DefaultLift;
+                if (OS.GetEnvironment("NAV_LIFT") is { Length: > 0 } liftText
+                    && float.TryParse(liftText, System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out float parsedLift)
+                    && float.IsFinite(parsedLift))
+                {
+                    lift = Mathf.Clamp(parsedLift, -10f, 10f);
+                }
+                System.Collections.Generic.List<NavFlag> flags = LevelNavmesh.Load(environmentDir);
+                System.Collections.Generic.IReadOnlyList<NavFlagSurvey> survey =
+                    BakedNavGraph.Build(flags).Survey();
+                bool xray = EnvFlag.IsOn(OS.GetEnvironment("NAV_XRAY"), whenUnset: false);
+                bool rim = EnvFlag.IsOn(OS.GetEnvironment("NAV_RIM"), whenUnset: true);
+                bool beacons = EnvFlag.IsOn(OS.GetEnvironment("NAV_BEACONS"), whenUnset: true);
+                bool bounds = EnvFlag.IsOn(OS.GetEnvironment("NAV_BOUNDS"), whenUnset: false);
+                AddChild(NavigationOverlay.Build(flags, survey,
+                    LevelNavigationData.Load(environmentDir), "ScreenshotNavigation", rim, beacons,
+                    bounds, xray, lift));
+                Log.Print($"[navigation] screenshot overlay: {survey.Count} flags, "
+                    + $"xray={xray}, lift={lift.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+            }
+
             if (headless)
             {
                 Log.Print("[unturned-godot] Headless: data loaded, quitting.");
@@ -473,10 +501,9 @@ public partial class Main : Node3D
         string environmentDir = EnvironmentDir(unturnedPath, _mapName);
         LevelLighting? lighting = LevelLighting.Load(System.IO.Path.Combine(environmentDir, "Lighting.dat"));
 
-        // The navigation map goes up next, not before the screen: parsing the pre-baked navmesh and handing
-        // it to the NavigationServer takes a couple of seconds on a large map, and doing that first meant
-        // the window stayed black for all of it. Its own sync still runs async and finishes behind the
-        // world build, so pathfinding is ready on first aggro either way.
+        // Parse the pre-baked navmesh next, not before the screen. The graph is published asynchronously
+        // behind the world build after collision reconciliation, so pathfinding is ready on first aggro
+        // without holding the loading window black during this early data read.
         ZombieNavigation.Preload(MapCatalog.ResolvePath(unturnedPath, _mapName));
 
         // Nothing above the await chain observes this task, so an exception here would otherwise vanish

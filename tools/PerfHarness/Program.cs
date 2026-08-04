@@ -335,21 +335,21 @@ public static class Program
         {
             for (int i = 0; i < flags.Count; i++)
                 GC.KeepAlive(NavmeshReachability.NeedsConfirmation(flags[i], StepOffset,
-                    sampledFlags[i].Surface, sampledFlags[i].Known, sampledFlags[i].Slack,
+                    sampledFlags[i].Clearance, sampledFlags[i].Known, sampledFlags[i].Slack,
                     sampledFlags[i].Uncertain, margin: 0.05f));
         }, warmup: 1, iters: 5);
         Bench("Unreachable (all flags)", () =>
         {
             for (int i = 0; i < flags.Count; i++)
                 GC.KeepAlive(NavmeshReachability.Unreachable(flags[i], StepOffset,
-                    sampledFlags[i].Surface, sampledFlags[i].Known));
+                    sampledFlags[i].Clearance, sampledFlags[i].Known));
         }, warmup: 1, iters: 5);
 
         int confirm = 0, uncertain = 0, unknown = 0;
         for (int i = 0; i < flags.Count; i++)
         {
             NavmeshSurfaceSampling.FlagSurfaces sampled = sampledFlags[i];
-            confirm += NavmeshReachability.NeedsConfirmation(flags[i], StepOffset, sampled.Surface,
+            confirm += NavmeshReachability.NeedsConfirmation(flags[i], StepOffset, sampled.Clearance,
                 sampled.Known, sampled.Slack, sampled.Uncertain, margin: 0.05f).Count;
             uncertain += sampled.UncertainSamples;
             for (int t = 0; t < sampled.Known.Length; t++)
@@ -779,9 +779,13 @@ public static class Program
         LevelNavmesh.SnapXZ(flags, target, out Vector3 snappedTarget);
         Console.WriteLine($"== nav: target={target} snapped={snappedTarget} "
             + $"bound={LevelNavigationData.TryGetBound(bounds, target)} flags={flags.Count} ==");
+        IReadOnlyList<NavFlagSurvey> surveys = graph.Survey();
         for (int i = 0; i < flags.Count; i++)
             if (flags[i].ContainsXZ(target))
+            {
                 PrintConnectivity(i, flags[i]);
+                PrintSurvey(i, surveys[i]);
+            }
 
         var nearby = new List<(float Distance, Vector3 Position)>();
         foreach (ZombieSpawnpointData spawn in spawns)
@@ -887,6 +891,19 @@ public static class Program
             largest = Math.Max(largest, size);
         Console.WriteLine($"  flag {index}: triangles={count} exact-edge components={sizes.Count} "
             + $"largest={largest}");
+    }
+
+    private static void PrintSurvey(int index, NavFlagSurvey survey)
+    {
+        Console.WriteLine($"  flag {index}: stitched components={survey.Islands.Count} "
+            + $"largest={survey.Islands[0].TriangleCount} ({survey.LargestIslandShare:P1}), "
+            + $"rim={survey.Rim.Count}");
+        for (int i = 0; i < Math.Min(10, survey.Islands.Count); i++)
+        {
+            NavIsland island = survey.Islands[i];
+            Console.WriteLine($"    island {i}: faces={island.TriangleCount}, area={island.Area:0.##}, "
+                + $"anchor={island.Anchor}, min={island.Min}, max={island.Max}");
+        }
     }
 
     // Correctness/shape diagnostic rather than a timed suite. The cold load's texture pass is one

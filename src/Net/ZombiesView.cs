@@ -276,7 +276,11 @@ public partial class ZombiesView : Node3D
                 // original's. Writes only happen while the pose is actually changing.
                 float blend = MathF.Min(1f, (float)delta * 10f);
                 float gap = avatar.KnownPosition.DistanceSquaredTo(avatar.TargetPosition);
-                visiblyMoving = gap > 0.01f; // the ORIGINAL client derives its move anim from this
+                // The original compares each axis against 0.01 m. Treating 0.01 as a squared-distance
+                // threshold accidentally made ours 0.1 m: after Startle ended, small but real snapshot
+                // gaps kept selecting Idle and visibly delayed the transition into Chase.
+                visiblyMoving = ZombieClientMotion.IsMoving(
+                    avatar.TargetPosition, avatar.KnownPosition);
                 if (gap > 1e-8f)
                 {
                     avatar.KnownPosition = avatar.KnownPosition.Lerp(avatar.TargetPosition, blend);

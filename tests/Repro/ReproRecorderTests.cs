@@ -30,6 +30,7 @@ public class ReproRecorderTests
                 return true;
             },
             VisionBlocked = (from, to) => false,
+            PhysicalLineBlocked = (from, to) => false,
             PathReady = () => true,
         };
         system.Spawn(new[] { new ZombieSpawnpointData(0, new Vector3(5f, 0f, -5f)) },
@@ -182,6 +183,7 @@ public class ReproRecorderTests
         Assert.True(recorder.Seams.MoveResolver);
         Assert.True(recorder.Seams.GroundSnap);
         Assert.True(recorder.Seams.VisionBlocked);
+        Assert.True(recorder.Seams.PhysicalLineBlocked);
         Assert.False(recorder.Seams.PathQuery);
 
         system.Tick(Array.Empty<ZombiePlayerView>(), ReproWorlds.TickRate);

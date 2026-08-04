@@ -15,10 +15,21 @@ public static class NavReconcileCache
     private const uint Magic = 0x524E4755; // "UGNR" little-endian
     private const int FormatVersion = 2;
     // 3: the surface probe moved off the physics server onto CollisionField for everything but the faces
-    // whose verdict is close enough to the step threshold to need confirming. The verdict is meant to be
-    // the same one, but "meant to" is not what a cache should be pinned on — an entry written by the old
-    // measurement is not an entry this one produced, so it is not reused.
-    public const int AlgorithmVersion = 3;
+    // whose verdict is close enough to the step threshold to need confirming.
+    // 4: MEDIUM fence assets joined the World field. An old cache was measured without those barriers
+    // and would restore walkable faces through them, so it cannot be reused even though collider bytes
+    // and map placements are otherwise unchanged.
+    // 5: the fingerprint also carries each selected asset's effective collision layer. Fence category
+    // metadata can change while its collider cache stays byte-for-byte identical.
+    // 6: sampled ground is measured relative to the authored face at each probe, rather than comparing
+    // absolute heights between broad neighbours. Version 5 can contain false holes on continuous slopes.
+    // 7: clearance also includes a physical rise steeper than the walkable slope within one face, so a
+    // vertical wall cannot hide merely because Recast authored that face near the top of its sill.
+    // 8: a single local high sample no longer deletes an entire broad face; those mixed faces remain
+    // available to the capsule and portal validators instead of becoming room-sized navigation holes.
+    // 9: the broad-face exemption retains an independently over-slope authored plane, whose collision
+    // matches the baked Y and therefore has no residual majority by which v8 could recognize the riser.
+    public const int AlgorithmVersion = 9;
 
     public static string Fingerprint(string levelDir, string colliderCacheDir)
         => Fingerprint(levelDir, colliderCacheDir, selectedColliders: null);
@@ -27,7 +38,8 @@ public static class NavReconcileCache
     // collider cache. Runtime reconciliation passes the map's selected GUIDs so another map's cache entries
     // cannot invalidate this map's expensive probe result.
     public static string Fingerprint(string levelDir, string colliderCacheDir,
-        IReadOnlySet<Guid>? selectedColliders)
+        IReadOnlySet<Guid>? selectedColliders,
+        IReadOnlyDictionary<Guid, uint>? effectiveCollisionPolicies = null)
     {
         var manifest = new StringBuilder();
         manifest.Append("nav-reconcile:").Append(AlgorithmVersion).Append('\n');
@@ -36,6 +48,8 @@ public static class NavReconcileCache
             AppendTree(manifest, "collider", colliderCacheDir, "*.collider");
         else
             AppendSelectedColliders(manifest, colliderCacheDir, selectedColliders);
+        if (selectedColliders != null)
+            AppendCollisionPolicies(manifest, selectedColliders, effectiveCollisionPolicies);
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(manifest.ToString()))).ToLowerInvariant();
     }
 
@@ -97,6 +111,24 @@ public static class NavReconcileCache
 
             var info = new FileInfo(path);
             manifest.Append(info.Length).Append('|').Append(info.LastWriteTimeUtc.Ticks).Append('\n');
+        }
+    }
+
+    private static void AppendCollisionPolicies(StringBuilder manifest, IReadOnlySet<Guid> selected,
+        IReadOnlyDictionary<Guid, uint>? policies)
+    {
+        var guids = new List<Guid>(selected);
+        guids.Sort();
+        foreach (Guid guid in guids)
+        {
+            if (guid == Guid.Empty)
+                continue;
+            manifest.Append("policy/").Append(guid.ToString("N")).Append('|');
+            if (policies != null && policies.TryGetValue(guid, out uint layer))
+                manifest.Append(layer.ToString("x8"));
+            else
+                manifest.Append("missing");
+            manifest.Append('\n');
         }
     }
 

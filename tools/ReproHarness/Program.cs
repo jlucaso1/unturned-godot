@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using Godot;
 using UnturnedGodot.Data;
 using UnturnedGodot.Repro;
 using UnturnedGodot.Zombies;
@@ -11,8 +12,15 @@ namespace UnturnedGodot.ReproHarness;
 //
 //   dotnet run -c Release --project tools/ReproHarness -- info    dump.json
 //   dotnet run -c Release --project tools/ReproHarness -- replay  dump.json [--ticks 200] [--level DIR]
+//                                                                       [--trace ZOMBIEID]
+//                                                                       [--recompute-paths]
+//                                                                       [--reconcile-paths]
 //   dotnet run -c Release --project tools/ReproHarness -- verify  dump.json
 //   dotnet run -c Release --project tools/ReproHarness -- pretty   dump.json [out.json]
+//   dotnet run -c Release --project tools/ReproHarness -- map      dump.json [--output out.svg]
+//                                                                        [--radius 16] [--ticks 5]
+//                                                                        [--recompute-paths]
+//                                                                        [--reconcile-paths]
 //
 // `verify` is the one to run first with a dump someone hands you: it replays the recorded window
 // against the code in your working tree and says whether it still comes out the same. On unmodified
@@ -29,7 +37,7 @@ public static class Program
         if (args.Length < 2)
         {
             Console.Error.WriteLine(
-                "usage: reproharness <info|replay|verify|pretty> <dump.json[.gz]> [options]");
+                "usage: reproharness <info|replay|verify|pretty|map> <dump.json[.gz]> [options]");
             return 2;
         }
 
@@ -59,6 +67,7 @@ public static class Program
             "replay" => Replay(dump, args, verify: false),
             "verify" => Replay(dump, args, verify: true),
             "pretty" => Pretty(dump, args),
+            "map" => Map(dump, args),
             _ => Unknown(command),
         };
     }
@@ -113,12 +122,37 @@ public static class Program
         {
             UseRecordedAnswers = !Has(args, "--no-oracle"),
             UseGeometry = !Has(args, "--no-geometry"),
+            RecomputePaths = Has(args, "--recompute-paths"),
+            ReconcilePaths = Has(args, "--reconcile-paths"),
             NavFlags = LoadNavmesh(level),
         };
 
         var scenario = new ReproScenario(dump, options);
         Console.WriteLine($"world: {scenario.Collision?.TriangleCount ?? 0} collision triangles, "
             + $"{(options.NavFlags != null ? "full map navmesh" : "the dump's navmesh slice")}");
+
+        // `--trace ID` prints one line per tick for a single body. The summary says a zombie walked
+        // 19 m to gain 1.5, which names the symptom and nothing else; the route it was handed each
+        // tick, and where along it the body had got to, is what says why.
+        if (Has(args, "--trace"))
+        {
+            // Never on `verify`: returning the trace's exit code would skip every check below, and a
+            // diverging replay would exit 0 because the zombie happened to exist.
+            if (verify)
+            {
+                Console.Error.WriteLine("--trace is for `replay`; `verify` reports a pass or a fail");
+                return 2;
+            }
+            // A malformed id used to throw out of Parse, and a missing one used to run an ordinary
+            // replay while the caller waited for a trace that was never coming.
+            if (Option(args, "--trace") is not { } traced || !ushort.TryParse(traced, out ushort id))
+            {
+                Console.Error.WriteLine("--trace needs a zombie id, as shown by `info`");
+                return 2;
+            }
+            return Trace(scenario, id, extra);
+        }
+
         ReproReplayReport report = scenario.Run(extra);
         Console.Write(report.Describe());
 
@@ -135,6 +169,60 @@ public static class Program
             return 1;
         }
         Console.WriteLine("this build reproduces the recording");
+        return 0;
+    }
+
+    private static int Trace(ReproScenario scenario, ushort id, int extra)
+    {
+        ZombieInstance? zombie = null;
+        foreach (ZombieInstance candidate in scenario.System.Zombies)
+            if (candidate.Id == id)
+                zombie = candidate;
+        if (zombie == null)
+        {
+            Console.Error.WriteLine($"no zombie {id} in this dump");
+            return 1;
+        }
+
+        Console.WriteLine("tick  position                 yaw     state   route  wp  blocked  step");
+        Vector3 previous = zombie.Position;
+        string lastShape = "";
+        string lastDetour = "";
+        for (int i = 0; i < scenario.WindowTicks + Math.Max(0, extra); i++)
+        {
+            scenario.Step();
+            float step = new Vector2(zombie.Position.X - previous.X,
+                zombie.Position.Z - previous.Z).Length();
+            previous = zombie.Position;
+            Console.WriteLine($"{scenario.Tick,4}  "
+                + $"({zombie.Position.X,8:F2},{zombie.Position.Z,8:F2})  "
+                + $"{zombie.Yaw,7:F1}  {zombie.State,-7} "
+                + $"{zombie.PathPoints.Count,4}{(zombie.PathIsPartial ? "p" : " ")} "
+                + $"{zombie.CurrentWaypointIndex,3}  {zombie.BlockedRouteTime,6:F2}  {step,5:F3}");
+
+            // The waypoints only when they change. A body that turns because it was handed a
+            // differently shaped route looks exactly like a body that turned for its own reasons,
+            // until you can see the two routes side by side.
+            string shape = string.Join(" ", zombie.PathPoints.ConvertAll(
+                w => $"({w.X:F1},{w.Z:F1})"));
+            if (shape != lastShape)
+            {
+                Console.WriteLine($"      route: {shape}");
+                lastShape = shape;
+            }
+            string detour = zombie.LastCollisionDetourResult == EZombieCollisionDetourResult.None
+                ? ""
+                : $"{zombie.LastCollisionDetourResult}, {zombie.LastCollisionDetourProbes} motion "
+                    + $"probes, {zombie.LastCollisionDetourRoutePoints} points"
+                    + (zombie.LastCollisionDetourFailedEdge >= 0
+                        ? $", rejected edge {zombie.LastCollisionDetourFailedEdge}"
+                        : "");
+            if (detour != lastDetour)
+            {
+                Console.WriteLine($"      detour: {detour}");
+                lastDetour = detour;
+            }
+        }
         return 0;
     }
 
@@ -160,6 +248,62 @@ public static class Program
         dump.Write(output, pretty: true);
         Console.WriteLine($"wrote {output} ({new FileInfo(output).Length / 1024} KB)");
         return 0;
+    }
+
+    private static int Map(ReproDump dump, string[] args)
+    {
+        float? radius = null;
+        if (Option(args, "--radius") is { } radiusText)
+        {
+            if (!float.TryParse(radiusText, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out float parsed)
+                || !float.IsFinite(parsed) || parsed <= 0f)
+            {
+                Console.Error.WriteLine("--radius needs a positive number of metres");
+                return 2;
+            }
+            radius = parsed;
+        }
+
+        int ticks = 0;
+        if (Option(args, "--ticks") is { } ticksText
+            && (!int.TryParse(ticksText, out ticks) || ticks < 0))
+        {
+            Console.Error.WriteLine("--ticks needs a non-negative integer");
+            return 2;
+        }
+
+        IReadOnlyList<ZombieInstance>? zombies = null;
+        if (ticks > 0)
+        {
+            string? level = Option(args, "--level");
+            var scenario = new ReproScenario(dump, new ReproScenarioOptions
+            {
+                UseRecordedAnswers = !Has(args, "--no-oracle"),
+                UseGeometry = !Has(args, "--no-geometry"),
+                RecomputePaths = Has(args, "--recompute-paths"),
+                ReconcilePaths = Has(args, "--reconcile-paths"),
+                NavFlags = LoadNavmesh(level),
+            });
+            for (int i = 0; i < ticks; i++)
+                scenario.Step();
+            zombies = scenario.System.Zombies;
+        }
+
+        string output = Option(args, "--output") ?? MapOutputPath(args[1]);
+        string svg = ReproMapSvg.Render(dump, zombies, ticks, radius);
+        File.WriteAllText(output, svg);
+        Console.WriteLine($"wrote {output} ({new FileInfo(output).Length / 1024} KB)");
+        return 0;
+    }
+
+    private static string MapOutputPath(string input)
+    {
+        string suffix = input.EndsWith(".json.gz", StringComparison.OrdinalIgnoreCase)
+            ? input[..^8]
+            : Path.Combine(Path.GetDirectoryName(input) ?? "",
+                Path.GetFileNameWithoutExtension(input));
+        return suffix + ".map.svg";
     }
 
     private static string? Option(string[] args, string name)

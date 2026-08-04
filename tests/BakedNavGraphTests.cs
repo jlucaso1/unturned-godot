@@ -12,14 +12,14 @@ namespace UnturnedGodot.Tests;
 
 public class BakedNavGraphTests
 {
-    private static NavFlag Strip(int quads)
+    private static NavFlag Strip(int quads, float width = 1f)
     {
         var vertices = new List<Vector3>();
         var triangles = new List<int>();
         for (int x = 0; x <= quads; x++)
         {
             vertices.Add(new Vector3(x, 0, 0));
-            vertices.Add(new Vector3(x, 0, 1));
+            vertices.Add(new Vector3(x, 0, width));
         }
         for (int x = 0; x < quads; x++)
         {
@@ -28,8 +28,8 @@ public class BakedNavGraphTests
         }
         return new NavFlag
         {
-            Center = new Vector3(quads / 2f, 0, 0.5f),
-            Size = new Vector3(quads + 1f, 10, 2f),
+            Center = new Vector3(quads / 2f, 0, width * 0.5f),
+            Size = new Vector3(quads + 1f, 10, width + 1f),
             Vertices = vertices.ToArray(),
             Triangles = triangles.ToArray(),
         };
@@ -39,7 +39,7 @@ public class BakedNavGraphTests
     public void ConnectedTrianglesProducePortalPath()
     {
         BakedNavGraph graph = BakedNavGraph.Build(new[] { Strip(4) });
-        Assert.Equal((14, 204L), graph.AdjacencyStorage);
+        Assert.Equal((14, 260L), graph.AdjacencyStorage);
         // 912 before the T-junction broad phase was counted into this. The rise is the grid, its
         // buckets, the border list and the pair set — transient, freed when Build returns, and
         // deliberately included so the figure the perf harness prints is not an understatement of what
@@ -104,6 +104,29 @@ public class BakedNavGraphTests
         Assert.NotEqual(to, partial[^1]);
         Assert.InRange(partial[^1].X, 0f, 1f);
         Assert.Equal(0, graph.Disable(flag, new HashSet<int> { 2, 3, -1, 99 }));
+    }
+
+    [Fact]
+    public void LocalRecoveryProjectionCannotLandInsideALargeDisabledFootprint()
+    {
+        NavFlag flag = Strip(5);
+        var removed = new Dictionary<NavFlag, HashSet<int>>
+        {
+            [flag] = new HashSet<int> { 2, 3, 4, 5 }, // two-metre hole from x=1 through x=3
+        };
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { flag }, removed);
+
+        Assert.True(graph.TryProject(new Vector3(0.4f, 0.2f, 0.5f), out Vector3 enabled));
+        Assert.Equal(new Vector3(0.4f, 0f, 0.5f), enabled);
+        Assert.True(graph.TryProject(new Vector3(1.6f, 0f, 0.5f), out Vector3 nearEdge));
+        Assert.Equal(1f, nearEdge.X, 3); // bounded snap to the nearest enabled face
+        Assert.False(graph.TryProject(new Vector3(2f, 0f, 0.5f), out _));
+        Assert.True(graph.SupportsLocalSegment(
+            new Vector3(0.4f, 0f, 0.5f), new Vector3(0.8f, 0f, 0.5f)));
+        Assert.False(graph.SupportsLocalSegment(
+            new Vector3(0.4f, 0f, 0.5f), new Vector3(2f, 0f, 0.5f)));
+        Assert.False(graph.SupportsLocalSegment(
+            new Vector3(2f, 0f, 0.5f), new Vector3(0.4f, 0f, 0.5f)));
     }
 
     [Fact]
@@ -219,6 +242,24 @@ public class BakedNavGraphTests
     }
 
     [Fact]
+    public void CsrCache_AnUnreadablePathIsACacheMissInsteadOfAnException()
+    {
+        using var directory = new TempDir();
+        NavFlag flag = Strip(1);
+        using var blob = new MemoryStream();
+        BakedNavGraph.Build(new[] { flag }).Write(blob, "topology-v1");
+        string path = directory.Write("graph.csr", blob.ToArray());
+        Assert.True(BakedNavGraph.TryReadFile(path, "topology-v1", new[] { flag }, out _));
+
+        // This is the production failure mode from the review: another process temporarily has the CSR
+        // open without sharing. Reconciliation must treat it as a miss and rebuild, otherwise one lock
+        // disables zombie pathfinding for the whole session.
+        using FileStream locked = File.Open(path, FileMode.Open, System.IO.FileAccess.Read,
+            FileShare.None);
+        Assert.False(BakedNavGraph.TryReadFile(path, "topology-v1", new[] { flag }, out _));
+    }
+
+    [Fact]
     public void CsrCache_RejectsNegativeOrDecreasingEdgeOffsets()
     {
         NavFlag flag = Strip(3);
@@ -304,7 +345,7 @@ public class BakedNavGraphTests
         Assert.Equal(triangles + 1, reader.ReadInt32());
         reader.BaseStream.Seek((triangles + 1L) * sizeof(int), SeekOrigin.Current);
         int edges = reader.ReadInt32();
-        reader.BaseStream.Seek(edges * 3L * sizeof(int), SeekOrigin.Current);
+        reader.BaseStream.Seek(edges * ((3L * sizeof(int)) + sizeof(byte)), SeekOrigin.Current);
         reader.ReadInt32(); // columns
         reader.ReadInt32(); // rows
         reader.ReadSingle(); // cellSize
@@ -531,18 +572,18 @@ public class BakedNavGraphTests
     // join is TWO edges. No pair of vertex indices matches across the seam, which is the only thing
     // adjacency was keyed on, so all three edges were classified as walls and the halves were separate
     // islands. Recast output does this wherever tiles meet at different subdivision.
-    private static NavFlag TJunction()
+    private static NavFlag TJunction(float height = 2f, float split = 1f)
     {
         var vertices = new[]
         {
             new Vector3(0, 0, 0), // 0
-            new Vector3(0, 0, 2), // 1
+            new Vector3(0, 0, height), // 1
             new Vector3(2, 0, 0), // 2
-            new Vector3(2, 0, 2), // 3
-            new Vector3(2, 0, 1), // 4  the vertex that splits the left half's edge
+            new Vector3(2, 0, height), // 3
+            new Vector3(2, 0, split), // 4  the vertex that splits the left half's edge
             new Vector3(4, 0, 0), // 5
-            new Vector3(4, 0, 1), // 6
-            new Vector3(4, 0, 2), // 7
+            new Vector3(4, 0, split), // 6
+            new Vector3(4, 0, height), // 7
         };
         var triangles = new[]
         {
@@ -552,8 +593,8 @@ public class BakedNavGraphTests
         };
         return new NavFlag
         {
-            Center = new Vector3(2, 0, 1),
-            Size = new Vector3(6, 10, 4),
+            Center = new Vector3(2, 0, height * 0.5f),
+            Size = new Vector3(6, 10, height + 2f),
             Vertices = vertices,
             Triangles = triangles,
         };
@@ -605,25 +646,495 @@ public class BakedNavGraphTests
         var to = new Vector3(3.5f, 0, 1);
 
         Assert.True(graph.TryPath(from, to, path), "the two halves of one floor were not connected");
+        Assert.False(graph.HasClearLine(0, from, to));
         Assert.True(path.Count >= 2);
         Assert.Equal(from, path[0]);
         Assert.Equal(to, path[^1]);
         // Straight across: the seam is not an obstacle, so nothing should be routed around.
         Assert.Equal(3f, Plan(path), 2);
 
-        // And back. The stitch adds a connection in each direction, and a one-way link would satisfy
-        // everything above while leaving the seam impassable from the other side.
-        //
-        // Not asserted as EQUAL to the forward route: it measures 3.10 m against 3.00 m, and that
-        // asymmetry is not the seam. It is corner rounding, which runs after the shortcut pass and
-        // picks which side to push off without consulting the corridor, so the reverse traversal of the
-        // same geometry can gain a waypoint the forward one does not. That is a known open defect
-        // elsewhere in this file, not something this stitch introduces or should paper over.
+        // And back. The stitch adds a connection in each direction, and the FUNNEL may use that portal
+        // inside the corridor selected by A*. Border classification used to require both portal vertex
+        // ids in the spanning triangle; the middle T vertex cannot be there by definition, so it inset
+        // the opening almost to its midpoint and added a material detour. The any-angle line walker
+        // remains deliberately conservative: collision-only walls can sit on a stitched seam, so it may
+        // not invent a new corridor through one merely because the XZ navmesh overlaps there. That can
+        // retain the 5 cm clearance inset visible below, but no longer sends the route to the portal's
+        // far midpoint.
         var back = new List<Vector3>();
         Assert.True(graph.TryPath(to, from, back), "the seam was only crossable in one direction");
+        Assert.False(graph.HasClearLine(0, to, from));
         Assert.Equal(to, back[0]);
         Assert.Equal(from, back[^1]);
-        Assert.True(Plan(back) < 3.5f, $"the return route detoured: {Plan(back):F2} m across a 3 m floor");
+        Assert.True(Plan(back) < 3.2f, $"the return route materially detoured: {Plan(back):F2} m");
+    }
+
+    [Fact]
+    public void AStitchedPortalBlockedByPhysics_IsExcludedAndTheAnswerIsCached()
+    {
+        int probes = 0;
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { TJunction() }, portalProbe:
+            (from, _, _) =>
+            {
+                probes++;
+                return from;
+            });
+        Vector3 from = new(0.5f, 0, 1f), target = new(3.5f, 0, 1f);
+
+        var first = new List<Vector3>();
+        Assert.True(graph.TryPath(from, target, first));
+        Assert.NotEqual(target, first[^1]);
+        Assert.InRange(first[^1].X, 0f, 2f);
+        Assert.True(probes > 0, "the inferred seam was trusted without consulting collision");
+
+        int afterFirst = probes;
+        var second = new List<Vector3>();
+        Assert.True(graph.TryPath(from, target, second));
+        Assert.Equal(first, second);
+        Assert.Equal(afterFirst, probes);
+    }
+
+    [Fact]
+    public void AnOpenStitchedPortal_RemainsWalkableAndItsProbeIsCached()
+    {
+        int probes = 0;
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { TJunction() }, portalProbe:
+            (_, to, _) =>
+            {
+                probes++;
+                return to;
+            });
+        Vector3 from = new(0.5f, 0, 1f), target = new(3.5f, 0, 1f);
+
+        var first = new List<Vector3>();
+        Assert.True(graph.TryPath(from, target, first));
+        Assert.Equal(target, first[^1]);
+        Assert.True(probes > 0);
+
+        int afterFirst = probes;
+        Assert.True(graph.TryPath(from, target, new List<Vector3>()));
+        Assert.Equal(afterFirst, probes);
+    }
+
+    [Fact]
+    public void AThinFenceAcrossAnIndexedPortal_IsLearnedAndNotSelectedAgain()
+    {
+        int probes = 0;
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { Strip(4) },
+            portalProbe: ThinFenceProbe(2f, () => probes++),
+            validateIndexedPortals: true);
+        Vector3 from = new(0.1f, 0f, 0.5f), target = new(3.9f, 0f, 0.5f);
+
+        // The first graph answer is geometrically complete, but its final leg proves the indexed seam
+        // disagrees with static world collision. It is rejected rather than handed to movement.
+        Assert.False(graph.TryPath(from, target, new List<Vector3>()));
+        Assert.True(probes > 1, "the failed route did not promote and sample its indexed portal");
+
+        // The cached physical verdict is now part of A*. With no opening in this one-metre strip the
+        // safe answer is the closest reachable partial route on the near side; only its bounded leg is
+        // swept, while the full portal verdict itself is not sampled again.
+        int afterLearning = probes;
+        var safe = new List<Vector3>();
+        Assert.True(graph.TryPath(from, target, safe));
+        Assert.NotEqual(target, safe[^1]);
+        Assert.True(safe[^1].X < 2f);
+        Assert.InRange(probes - afterLearning, 1, 2); // bounded safe-leg checks, no full-span re-sampling
+    }
+
+    [Fact]
+    public void ReplacingAProgressiveGraphPreservesLearnedIndexedPortalEvidence()
+    {
+        NavFlag flag = Strip(4);
+        int oldProbes = 0;
+        BakedNavGraph progressive = BakedNavGraph.Build(new[] { flag },
+            portalProbe: ThinFenceProbe(2f, () => oldProbes++),
+            validateIndexedPortals: true);
+        Vector3 from = new(0.1f, 0f, 0.5f), target = new(3.9f, 0f, 0.5f);
+
+        Assert.False(progressive.TryPath(from, target, new List<Vector3>()));
+        Assert.True(progressive.TrackedPortalCount > 0);
+
+        int finalProbes = 0;
+        BakedNavGraph final = BakedNavGraph.Build(new[] { flag },
+            portalProbe: ThinFenceProbe(2f, () => finalProbes++),
+            validateIndexedPortals: true);
+        final.PreserveRuntimeEvidenceFrom(null);
+        final.PreserveRuntimeEvidenceFrom(final);
+        Assert.Equal(0, final.TrackedPortalCount);
+        final.PreserveRuntimeEvidenceFrom(progressive);
+        Assert.Equal(progressive.TrackedPortalCount, final.TrackedPortalCount);
+
+        BakedNavGraph unrelated = BakedNavGraph.Build(new[] { Strip(1) },
+            portalProbe: ThinFenceProbe(2f, () => { }), validateIndexedPortals: true);
+        unrelated.PreserveRuntimeEvidenceFrom(progressive);
+        Assert.Equal(0, unrelated.TrackedPortalCount);
+
+        // The replacement revalidates the cached span, but it already knows that this is a physical
+        // portal rather than briefly publishing the geometrically straight route again.
+        var safe = new List<Vector3>();
+        Assert.True(final.TryPath(from, target, safe));
+        Assert.NotEqual(target, safe[^1]);
+        Assert.True(safe[^1].X < 2f);
+        Assert.True(finalProbes > 0);
+    }
+
+    [Fact]
+    public void AThinFenceOnAPartialRoute_IsLearnedBeforeTheFollowerCanLoopOnIt()
+    {
+        NavFlag flag = Strip(5);
+        var removed = new Dictionary<NavFlag, HashSet<int>>
+        {
+            [flag] = new HashSet<int> { 8, 9 }, // disconnect the target in the final quad
+        };
+        int probes = 0;
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { flag }, removed,
+            ThinFenceProbe(2f, () => probes++), validateIndexedPortals: true);
+        Vector3 from = new(0.1f, 0f, 0.5f), target = new(4.9f, 0f, 0.5f);
+
+        // The geometrically closest partial prefix crosses x=2, but its first physical sweep proves
+        // the fence disagrees with that indexed portal and rejects the answer before movement sees it.
+        Assert.False(graph.TryPath(from, target, new List<Vector3>()));
+        int afterLearning = probes;
+
+        var safe = new List<Vector3>();
+        Assert.True(graph.TryPath(from, target, safe));
+        Assert.NotEqual(target, safe[^1]);
+        Assert.True(safe[^1].X < 2f);
+        Assert.InRange(probes - afterLearning, 1, 2); // bounded safe-leg checks, no full-span re-sampling
+    }
+
+    [Fact]
+    public void ALongOpenIndexedCorridor_UsesOneRouteSweepAndNoPortalSlots()
+    {
+        int probes = 0;
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { Strip(64) },
+            portalProbe: (_, to, _) => { probes++; return to; },
+            validateIndexedPortals: true);
+        var path = new List<Vector3>();
+
+        Assert.True(graph.TryPath(new Vector3(0.1f, 0f, 0.5f),
+            new Vector3(63.9f, 0f, 0.5f), path));
+
+        Assert.Equal(1, probes);
+        Assert.Equal(2, path.Count);
+        Assert.Equal(0, graph.PortalValidationSlots);
+    }
+
+    [Fact]
+    public void IndexedValidationWithoutACollisionResolver_LeavesTheGraphUsable()
+    {
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { Strip(4) },
+            validateIndexedPortals: true);
+        var path = new List<Vector3>();
+
+        Assert.True(graph.TryPath(new Vector3(0.1f, 0f, 0.5f),
+            new Vector3(3.9f, 0f, 0.5f), path));
+        Assert.Equal(2, path.Count);
+    }
+
+    [Fact]
+    public void RouteSweepDefersWhenAStitchedPortalSpentTheWholeProbeBudget()
+    {
+        int probes = 0;
+        NavFlag flag = TJunction(5f, 2.5f);
+        var removed = new Dictionary<NavFlag, HashSet<int>>
+        {
+            [flag] = new HashSet<int> { 4, 5 }, // retain only the lower half of the split seam
+        };
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { flag }, removed,
+            portalProbe: (_, to, _) => { probes++; return to; },
+            validateIndexedPortals: true);
+        Vector3 from = new(0.5f, 0f, 1.25f), target = new(3.5f, 0f, 1.25f);
+
+        Assert.False(graph.TryPath(from, target, new List<Vector3>()));
+        Assert.Equal(BakedNavGraph.PortalProbeBudgetPerPath, probes);
+
+        var path = new List<Vector3>();
+        Assert.True(graph.TryPath(from, target, path), $"probes after second query: {probes}");
+        Assert.Equal(target, path[^1]);
+        Assert.Equal(BakedNavGraph.PortalProbeBudgetPerPath + 1, probes);
+    }
+
+    [Fact]
+    public void ClosestPortalPoint_HandlesOrdinaryAndDegenerateProjectedEdges()
+    {
+        Assert.Equal(new Vector3(1f, 0f, 0f), BakedNavGraph.ClosestPointOnSegmentXZ(
+            new Vector3(1f, 4f, 2f), Vector3.Zero, new Vector3(3f, 0f, 0f)));
+
+        Vector3 verticalA = new(2f, 1f, 3f), verticalB = new(2f, 5f, 3f);
+        Assert.Equal(verticalA, BakedNavGraph.ClosestPointOnSegmentXZ(
+            new Vector3(9f, 0f, 9f), verticalA, verticalB));
+    }
+
+    [Fact]
+    public void FirstActionableWaypoint_MatchesTheFollowersOneMetreDiscardRule()
+    {
+        var path = new[]
+        {
+            Vector3.Zero,
+            new Vector3(0.4f, 0f, 0f),
+            new Vector3(1.2f, 0f, 0f),
+            new Vector3(2f, 0f, 0f),
+        };
+
+        Assert.Equal(2, BakedNavGraph.FirstActionableWaypoint(path, 0));
+        Assert.Equal(3, BakedNavGraph.FirstActionableWaypoint(path, 2));
+    }
+
+    [Fact]
+    public void IndexedPortalValidation_IsAlsoActiveAfterLoadingTheCsrCache()
+    {
+        NavFlag flag = Strip(4);
+        using var cache = new MemoryStream();
+        BakedNavGraph.Build(new[] { flag }).Write(cache, "indexed-portals-v1");
+        cache.Position = 0;
+        int probes = 0;
+
+        Assert.True(BakedNavGraph.TryRead(cache, "indexed-portals-v1", new[] { flag },
+            out BakedNavGraph? graph, ThinFenceProbe(2f, () => probes++),
+            validateIndexedPortals: true));
+        Vector3 from = new(0.1f, 0f, 0.5f), target = new(3.9f, 0f, 0.5f);
+
+        Assert.False(graph!.TryPath(from, target, new List<Vector3>()));
+        Assert.True(probes > 1);
+        var safe = new List<Vector3>();
+        Assert.True(graph.TryPath(from, target, safe));
+        Assert.NotEqual(target, safe[^1]);
+        Assert.True(safe[^1].X < 2f);
+    }
+
+    [Fact]
+    public void CollisionInsideOneFace_DoesNotDisableAnUnrelatedPortal()
+    {
+        int probes = 0;
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { Strip(4) },
+            portalProbe: (from, to, _) =>
+            {
+                probes++;
+                float stop = Mathf.Clamp((0.35f - from.X) / (to.X - from.X), 0f, 1f);
+                return from.Lerp(to, stop);
+            },
+            validateIndexedPortals: true);
+        Vector3 from = new(0.1f, 0f, 0.5f), target = new(3.9f, 0f, 0.5f);
+        var path = new List<Vector3>();
+
+        Assert.True(graph.TryPath(from, target, path));
+        Assert.Equal(new[] { from, target }, path);
+        Assert.Equal(1, probes);
+
+        Assert.True(graph.TryPath(from, target, new List<Vector3>()));
+        Assert.Equal(2, probes);
+    }
+
+    [Fact]
+    public void ALocalizedIndexedFence_TrimsThePortalAndRoutesThroughItsOpening()
+    {
+        int probes = 0;
+        Vector3 Probe(Vector3 from, Vector3 to, float radius)
+        {
+            probes++;
+            const float FenceX = 2f;
+            float dx = to.X - from.X;
+            if (MathF.Abs(dx) <= 1e-6f || (from.X - FenceX) * (to.X - FenceX) >= 0f)
+                return to;
+            float crossing = (FenceX - from.X) / dx;
+            float z = from.Z + ((to.Z - from.Z) * crossing);
+            if (z > 2f + radius)
+                return to;
+            float stopX = from.X < FenceX ? FenceX - radius : FenceX + radius;
+            float stop = Mathf.Clamp((stopX - from.X) / dx, 0f, 1f);
+            return from.Lerp(to, stop);
+        }
+
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { Strip(4, width: 4f) },
+            portalProbe: Probe, validateIndexedPortals: true);
+        Vector3 from = new(0.1f, 0f, 1f), target = new(3.9f, 0f, 1f);
+
+        Assert.False(graph.TryPath(from, target, new List<Vector3>()));
+        int afterLearning = probes;
+        var detour = new List<Vector3>();
+        Assert.True(graph.TryPath(from, target, detour));
+        Assert.Equal(target, detour[^1]);
+        Assert.Contains(detour, point => point.Z > 2.4f);
+        Assert.Equal(afterLearning + 1, probes); // only the next route sweep; portal span was cached
+    }
+
+    // A portal can fit the ordinary 0.4 m capsule and reject the 0.75 m mega capsule. The physical
+    // verdicts are cached separately, so the wall-corner state used by the funnel has to be separate
+    // too: asking for a mega route first must not narrow the later ordinary route.
+    [Fact]
+    public void ABlockedMegaProbe_DoesNotChangeTheOpenNormalRoute()
+    {
+        static Vector3 Probe(Vector3 from, Vector3 to, float radius) =>
+            radius > 0.5f ? from : to;
+
+        Vector3 from = new(0.5f, 0, 1f), target = new(3.5f, 0, 1f);
+        BakedNavGraph queriedByMegaFirst = BakedNavGraph.Build(new[] { TJunction() },
+            portalProbe: Probe);
+
+        var mega = new List<Vector3>();
+        Assert.True(queriedByMegaFirst.TryPath(from, target, mega, radius: 0.75f));
+        Assert.NotEqual(target, mega[^1]);
+
+        var normalAfterMega = new List<Vector3>();
+        Assert.True(queriedByMegaFirst.TryPath(from, target, normalAfterMega,
+            radius: BakedNavGraph.AgentRadius));
+        Assert.Equal(target, normalAfterMega[^1]);
+
+        BakedNavGraph normalOnly = BakedNavGraph.Build(new[] { TJunction() }, portalProbe: Probe);
+        var expected = new List<Vector3>();
+        Assert.True(normalOnly.TryPath(from, target, expected, radius: BakedNavGraph.AgentRadius));
+        Assert.Equal(expected, normalAfterMega);
+    }
+
+    [Fact]
+    public void ACharacterizationRadius_IsProbedWithoutPoisoningAProductionRadiusCache()
+    {
+        bool blocked = false;
+        int probes = 0;
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { TJunction() }, portalProbe:
+            (from, to, _) =>
+            {
+                probes++;
+                return blocked ? from : to;
+            });
+        Vector3 from = new(0.5f, 0f, 1f), target = new(3.5f, 0f, 1f);
+
+        var open = new List<Vector3>();
+        Assert.True(graph.TryPath(from, target, open, radius: 0.6f));
+        Assert.Equal(target, open[^1]);
+        int afterOpen = probes;
+        Assert.True(afterOpen > 0);
+
+        blocked = true;
+        var closed = new List<Vector3>();
+        Assert.True(graph.TryPath(from, target, closed, radius: 0.6f));
+        Assert.NotEqual(target, closed[^1]);
+        Assert.True(probes > afterOpen, "an arbitrary-radius verdict leaked into a production cache slot");
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task CharacterizationRadiusProbes_AreSerializedThroughTheSharedResolver()
+    {
+        int active = 0, peak = 0;
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { TJunction() }, portalProbe:
+            (_, to, _) =>
+            {
+                int now = System.Threading.Interlocked.Increment(ref active);
+                int seen;
+                do
+                {
+                    seen = System.Threading.Volatile.Read(ref peak);
+                }
+                while (now > seen && System.Threading.Interlocked.CompareExchange(ref peak, now, seen) != seen);
+                System.Threading.Thread.Sleep(10);
+                System.Threading.Interlocked.Decrement(ref active);
+                return to;
+            });
+
+        var tasks = new System.Threading.Tasks.Task[12];
+        for (int i = 0; i < tasks.Length; i++)
+            tasks[i] = System.Threading.Tasks.Task.Run(() =>
+            {
+                var path = new List<Vector3>();
+                Assert.True(graph.TryPath(new Vector3(0.5f, 0f, 1f),
+                    new Vector3(3.5f, 0f, 1f), path, radius: 0.6f));
+            });
+        await System.Threading.Tasks.Task.WhenAll(tasks);
+
+        Assert.Equal(1, peak);
+    }
+
+    [Fact]
+    public void ALongColdStitchedPortal_NeverExceedsThePerPathPhysicsBudget()
+    {
+        int probes = 0;
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { TJunction(40f, 20f) },
+            portalProbe: (_, to, _) =>
+            {
+                probes++;
+                return to;
+            });
+        Vector3 from = new(0.5f, 0f, 10f), target = new(3.5f, 0f, 10f);
+        bool completed = false, settled = false;
+
+        for (int query = 0; query < 20 && !settled; query++)
+        {
+            int before = probes;
+            var path = new List<Vector3>();
+            Assert.True(graph.TryPath(from, target, path));
+            int spent = probes - before;
+            Assert.InRange(spent, 0, BakedNavGraph.PortalProbeBudgetPerPath);
+            completed |= path[^1] == target;
+            settled = completed && spent == 0;
+        }
+
+        Assert.True(completed, $"the deferred portal never finished after {probes} bounded probes");
+        Assert.True(settled, $"the searched portals never reached a cached verdict after {probes} probes");
+    }
+
+    [Fact]
+    public void ALocalizedBlocker_TrimsAStitchedPortalToItsOpenSide()
+    {
+        int probes = 0;
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { TJunction(6f, 3f) },
+            portalProbe: (from, to, _) =>
+            {
+                probes++;
+                return from.Z is > 1.1f and < 1.9f ? from : to;
+            });
+        Vector3 from = new(0.5f, 0f, 1.5f), target = new(3.5f, 0f, 1.5f);
+        var path = new List<Vector3>();
+
+        Assert.True(graph.TryPath(from, target, path));
+
+        Assert.Equal(target, path[^1]);
+        float crossing = CrossingAtX(path, 2f);
+        Assert.True(float.IsFinite(crossing), "the completed route never crossed the stitched seam");
+        Assert.False(crossing is > 1.1f and < 1.9f,
+            $"the route crossed the blocked middle of the portal at z={crossing:F3}");
+        Assert.True(probes > 1, "the whole opening was still decided by one midpoint probe");
+    }
+
+    private static float CrossingAtX(IReadOnlyList<Vector3> path, float x)
+    {
+        for (int i = 1; i < path.Count; i++)
+        {
+            Vector3 a = path[i - 1], b = path[i];
+            if ((a.X - x) * (b.X - x) > 0f || MathF.Abs(b.X - a.X) <= 1e-6f)
+                continue;
+            float along = (x - a.X) / (b.X - a.X);
+            if (along is >= 0f and <= 1f)
+                return a.Z + ((b.Z - a.Z) * along);
+        }
+        return float.NaN;
+    }
+
+    [Fact]
+    public void CsrCache_PreservesWhichPortalsRequireCollisionValidation()
+    {
+        NavFlag flag = TJunction();
+        using var cache = new MemoryStream();
+        BakedNavGraph built = BakedNavGraph.Build(new[] { flag }, portalProbe: (_, to, _) => to);
+        Assert.Equal(4, built.PortalValidationSlots); // two inferred joins, each traversable both ways
+        Assert.True(built.PortalValidationSlots < built.AdjacencyStorage.Connections);
+        built.Write(cache, "stitched-v1");
+
+        int probes = 0;
+        Assert.True(BakedNavGraph.TryRead(new MemoryStream(cache.ToArray()), "stitched-v1",
+            new[] { flag }, out BakedNavGraph? loaded, (from, _, _) =>
+            {
+                probes++;
+                return from;
+            }));
+        BakedNavGraph loadedGraph = Assert.IsType<BakedNavGraph>(loaded);
+        Assert.Equal(built.PortalValidationSlots, loadedGraph.PortalValidationSlots);
+
+        var path = new List<Vector3>();
+        Vector3 target = new(3.5f, 0, 1f);
+        Assert.True(loadedGraph.TryPath(new Vector3(0.5f, 0, 1f), target, path));
+        Assert.NotEqual(target, path[^1]);
+        Assert.True(probes > 0);
     }
 
     // A 6 m tent-shaped ridge — 2 m of run either side of the crest — laid along +Z from z = -2 to the
@@ -726,6 +1237,22 @@ public class BakedNavGraphTests
         for (int i = 1; i < path.Count; i++) total += path[i - 1].DistanceTo(path[i]);
         return total;
     }
+
+    private static BakedNavPortalProbe ThinFenceProbe(float fenceX, Action onProbe) =>
+        (from, to, radius) =>
+        {
+            onProbe();
+            float dx = to.X - from.X;
+            if (MathF.Abs(dx) <= 1e-6f || (from.X - fenceX) * (to.X - fenceX) >= 0f)
+                return to;
+            float crossing = (fenceX - from.X) / dx;
+            float z = from.Z + ((to.Z - from.Z) * crossing);
+            if (z < -radius || z > 1f + radius)
+                return to;
+            float stopX = from.X < fenceX ? fenceX - radius : fenceX + radius;
+            float stop = Mathf.Clamp((stopX - from.X) / dx, 0f, 1f);
+            return from.Lerp(to, stop);
+        };
 
     private static Vector3 Centre(NavFlag flag, int triangle) =>
         (flag.Vertices[flag.Triangles[triangle * 3]]

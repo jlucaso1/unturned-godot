@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Godot;
 using UnturnedGodot.Data;
 using UnturnedGodot.Repro;
@@ -46,6 +47,244 @@ public class ReproEdgeTests
         Assert.Null(bare.System.MoveResolver);
         Assert.Null(bare.System.GroundSnap);
         Assert.Null(bare.System.VisionBlocked);
+        Assert.Null(bare.System.PhysicalLineBlocked);
+    }
+
+    [Fact]
+    public void ALegacyDumpDoesNotInventTheNewPhysicalLineSeam()
+    {
+        var dump = new ReproDump
+        {
+            World = new ReproWorldData
+            {
+                HasNavmesh = false,
+                Bounds = { Box() },
+                Geometry = new ReproWorlds.Geometry().Ground().Build(Vector3.Zero, 8f),
+            },
+            // Null is the defining legacy shape: these per-delegate flags did not exist yet.
+            Zombies = new ReproZombieSection { Seams = null },
+        };
+
+        var scenario = new ReproScenario(dump);
+        Assert.NotNull(scenario.System.MoveResolver);
+        Assert.NotNull(scenario.System.GroundSnap);
+        Assert.NotNull(scenario.System.VisionBlocked);
+        Assert.Null(scenario.System.PhysicalLineBlocked);
+    }
+
+    [Fact]
+    public void ARecordedWorldWithoutAPathQueryDoesNotInventOneFromItsNavmesh()
+    {
+        NavFlag field = ReproWorlds.FlatField();
+        var dump = new ReproDump
+        {
+            World = new ReproWorldData
+            {
+                HasNavmesh = true,
+                Bounds = { Box() },
+                NavFlags = { ReproCapture.Slice(field, new Vector3(6f, 0f, 6f), 6f) },
+            },
+            Zombies = new ReproZombieSection { Seams = new ReproWorldSeams { PathQuery = false } },
+        };
+
+        var scenario = new ReproScenario(dump);
+
+        Assert.Null(scenario.System.PathQuery);
+        Assert.Null(scenario.System.NavmeshProject);
+        Assert.Null(scenario.System.NavmeshSupportsSegment);
+    }
+
+    [Fact]
+    public void ALineWithOnlyOneEndpointInsideTheCollisionSliceIsNotClaimedAsComplete()
+    {
+        var dump = new ReproDump
+        {
+            World = new ReproWorldData
+            {
+                HasNavmesh = false,
+                Bounds = { Box() },
+                Geometry = new ReproWorlds.Geometry().Ground().Build(Vector3.Zero, 8f),
+            },
+            Zombies = new ReproZombieSection
+            {
+                Oracle = new ReproOracleData(), // present, but this particular line was not recorded
+                Seams = new ReproWorldSeams { VisionBlocked = true, PhysicalLineBlocked = true },
+            },
+        };
+        var scenario = new ReproScenario(dump);
+        Vector3 inside = new(0f, 2f, 0f), outside = new(20f, 2f, 0f);
+
+        Assert.False(scenario.System.VisionBlocked!(inside, outside));
+        Assert.False(scenario.System.PhysicalLineBlocked!(inside, outside));
+        Assert.False(scenario.System.VisionBlocked!(outside, inside));
+        Assert.False(scenario.System.PhysicalLineBlocked!(outside, inside));
+    }
+
+    // A session and a replay can disagree about ROUTING alone: the live map had the full reconciled
+    // graph where a self-contained replay may have only the dump's local slice. Turning the whole oracle
+    // off also changes ground and collision, so the two causes cannot be told apart afterwards.
+    // RecomputePaths drops the recorded routes and keeps everything else.
+    [Fact]
+    public void RecomputingPathsDropsTheRecordedRoutesAndKeepsTheRest()
+    {
+        // One recorded answer: a route from (0,0,0) to (10,0,0) that detours through (0,0,9). Nothing
+        // a pathfinder over open ground would ever return, so which source answered is unambiguous.
+        var oracle = new ReproOracleData();
+        oracle.Path.AddRange(new[]
+        {
+            0f, 1f,          // tick, zombie
+            0f, 0f, 0f,      // from
+            10f, 0f, 0f,     // to
+            BakedNavGraph.AgentRadius,
+            1f,              // found
+            0f, 2f,          // first point, count
+        });
+        oracle.PathPoints.AddRange(new[] { 0f, 0f, 9f, 10f, 0f, 0f });
+
+        var dump = new ReproDump
+        {
+            World = new ReproWorldData { HasNavmesh = true, Bounds = { Box() } },
+            Zombies = new ReproZombieSection
+            {
+                Oracle = oracle,
+                Frames = { new ReproFrame { Dt = 0.08f } },
+            },
+        };
+
+        var recorded = new List<Vector3>();
+        Assert.True(new ReproScenario(dump).System.PathQuery!(
+            new Vector3(0, 0, 0), new Vector3(10, 0, 0), recorded, BakedNavGraph.AgentRadius));
+        Assert.Equal(new Vector3(0, 0, 9), recorded[0]); // the session's own answer, detour and all
+
+        var fresh = new List<Vector3>();
+        var scenario = new ReproScenario(dump, new ReproScenarioOptions
+        {
+            RecomputePaths = true,
+            NavFlags = new[] { ReproWorlds.FlatField() },
+        });
+        Assert.True(scenario.System.PathQuery!(new Vector3(0, 0, 0), new Vector3(10, 0, 0), fresh,
+            BakedNavGraph.AgentRadius)); // it answered, rather than failing into an empty list
+        Assert.DoesNotContain(new Vector3(0, 0, 9), fresh); // recomputed: the detour is not repeated
+
+        // And the rest of the oracle still answers — this is a routing switch, not `--no-oracle`.
+        // Readiness is the one exception, and deliberately so: a recording that says the map was not
+        // answering yet would drop the follower onto its direct fallback and the recomputed routes
+        // would never be asked for.
+        Assert.NotNull(scenario.Oracle);
+        Assert.True(scenario.System.PathReady!());
+    }
+
+    [Fact]
+    public void ReconcilePathsAppliesTheCurrentCollisionRuleInsteadOfTheRecordedFaceList()
+    {
+        // A one-metre sill cuts the middle of a baked flat field. With no recorded disabled faces the
+        // ordinary replay routes straight through it; current reconciliation must carve that band and
+        // leave a route around either open end.
+        ReproWorlds.Geometry geometry = new ReproWorlds.Geometry().Ground()
+            .Box("sill", new Vector3(20f, 0.5f, 20f), new Vector3(0.5f, 0.5f, 10f));
+        var dump = new ReproDump
+        {
+            World = new ReproWorldData
+            {
+                HasNavmesh = true,
+                Bounds = { Box() },
+                Geometry = geometry.Build(new Vector3(20f, 0f, 20f), 64f),
+            },
+            Zombies = new ReproZombieSection
+            {
+                Seams = new ReproWorldSeams { PathQuery = true },
+            },
+        };
+        var scenario = new ReproScenario(dump, new ReproScenarioOptions
+        {
+            RecomputePaths = true,
+            ReconcilePaths = true,
+            NavFlags = new[] { ReproWorlds.FlatField() },
+        });
+        var path = new List<Vector3>();
+
+        Assert.True(scenario.System.PathQuery!(new Vector3(5f, 0f, 20f),
+            new Vector3(35f, 0f, 20f), path, BakedNavGraph.AgentRadius));
+        Assert.Contains(path, point => point.Z < 10f || point.Z > 30f);
+    }
+
+    [Fact]
+    public void ReconcilePathsReenablesARecordedFaceProvenWalkableByCapturedGeometry()
+    {
+        NavFlag flag = ReproWorlds.FlatField();
+        const int Quads = 40;
+        var stale = new HashSet<int>
+        {
+            2 * ((20 * Quads) + 0),
+            (2 * ((20 * Quads) + 0)) + 1,
+        };
+        ReproNavFlag captured = ReproCapture.Slice(flag, new Vector3(20f, 0f, 20f),
+            radius: 100f, disabled: stale);
+        ReproWorlds.Geometry geometry = new ReproWorlds.Geometry().Ground();
+        ReproGeometryData capturedGeometry = geometry.Build(new Vector3(20f, 0f, 20f), 64f);
+        ReproScenario scenario = ReconciledScenario(captured, capturedGeometry);
+        ReproScenario current = ReconciledScenario(
+            captured with { DisabledFaces = Array.Empty<int>() }, capturedGeometry);
+        var path = new List<Vector3>();
+        var expected = new List<Vector3>();
+
+        Assert.True(scenario.System.PathQuery!(new Vector3(5f, 0f, 0.25f),
+            new Vector3(35f, 0f, 0.25f), path, BakedNavGraph.AgentRadius));
+        Assert.True(current.System.PathQuery!(new Vector3(5f, 0f, 0.25f),
+            new Vector3(35f, 0f, 0.25f), expected, BakedNavGraph.AgentRadius));
+        Assert.Equal(expected, path); // the stale exclusion was replaced by the same current verdict
+    }
+
+    [Fact]
+    public void ReconcilePathsPreservesARecordedExclusionOutsideTheCollisionSlice()
+    {
+        NavFlag flag = ReproWorlds.FlatField();
+        const int Quads = 40;
+        var recorded = new HashSet<int>
+        {
+            2 * ((20 * Quads) + 0),
+            (2 * ((20 * Quads) + 0)) + 1,
+        };
+        ReproNavFlag captured = ReproCapture.Slice(flag, new Vector3(20f, 0f, 20f),
+            radius: 100f, disabled: recorded);
+        ReproWorlds.Geometry geometry = new ReproWorlds.Geometry().Ground();
+        ReproGeometryData capturedGeometry = geometry.Build(Vector3.Zero, radius: 5f);
+        ReproScenario scenario = ReconciledScenario(captured, capturedGeometry);
+        ReproScenario withoutRecordedFace = ReconciledScenario(
+            captured with { DisabledFaces = Array.Empty<int>() }, capturedGeometry);
+        var path = new List<Vector3>();
+        var open = new List<Vector3>();
+
+        Assert.True(scenario.System.PathQuery!(new Vector3(5f, 0f, 0.25f),
+            new Vector3(35f, 0f, 0.25f), path, BakedNavGraph.AgentRadius));
+        Assert.True(withoutRecordedFace.System.PathQuery!(new Vector3(5f, 0f, 0.25f),
+            new Vector3(35f, 0f, 0.25f), open, BakedNavGraph.AgentRadius));
+        Assert.False(open.SequenceEqual(path),
+            "the out-of-slice recorded exclusion was incorrectly re-enabled");
+    }
+
+    private static ReproScenario ReconciledScenario(ReproNavFlag flag,
+        ReproGeometryData geometry)
+    {
+        var dump = new ReproDump
+        {
+            World = new ReproWorldData
+            {
+                HasNavmesh = true,
+                Bounds = { Box() },
+                NavFlags = { flag },
+                Geometry = geometry,
+            },
+            Zombies = new ReproZombieSection
+            {
+                Seams = new ReproWorldSeams { PathQuery = true },
+            },
+        };
+        return new ReproScenario(dump, new ReproScenarioOptions
+        {
+            RecomputePaths = true,
+            ReconcilePaths = true,
+        });
     }
 
     // Handing the replay the real map's navmesh (or someone else's pathfinder) is what lifts it out of
@@ -110,8 +349,8 @@ public class ReproEdgeTests
         ReproReplayReport report = scenario.Run(extraTicks: 5);
         Assert.True(asked > 0);
         Assert.True(scenario.GeometryAnswers > 0);
-        // Recomputed routes are called out on their own: they are the one answer a replay cannot
-        // reproduce faithfully when the live map used the engine's pathfinder.
+        // Recomputed routes are called out on their own: a local graph slice cannot always reproduce
+        // the live full-map route faithfully.
         Assert.Equal(asked, report.RoutesRecomputed);
         Assert.Contains("routes           ", report.Describe(), StringComparison.Ordinal);
     }
@@ -688,6 +927,7 @@ public class ReproEdgeTests
         Assert.Null(scenario.System.MoveResolver);
         Assert.Null(scenario.System.GroundSnap);
         Assert.Null(scenario.System.VisionBlocked);
+        Assert.Null(scenario.System.PhysicalLineBlocked);
         ReproReplayReport report = scenario.Run();
         Assert.True(report.ReproducesRecording, report.Describe());
         Assert.Equal(0, report.UnansweredInWindow);
@@ -948,5 +1188,51 @@ public class ReproEdgeTests
         }).Run(extraTicks: 8);
         Assert.True(whole.RoutesRecomputed > 0);
         Assert.Equal(0, whole.UnansweredQueries);
+    }
+
+    [Fact]
+    public void PortalProbesOutsideTheCollisionSliceAreNotEvidenceOfAnOpenSeam()
+    {
+        static NavFlag TJunction() => new()
+        {
+            Center = new Vector3(2f, 0f, 1f),
+            Size = new Vector3(6f, 10f, 4f),
+            Vertices =
+            [
+                new Vector3(0f, 0f, 0f), new Vector3(0f, 0f, 2f),
+                new Vector3(2f, 0f, 0f), new Vector3(2f, 0f, 2f),
+                new Vector3(2f, 0f, 1f), new Vector3(4f, 0f, 0f),
+                new Vector3(4f, 0f, 1f), new Vector3(4f, 0f, 2f),
+            ],
+            Triangles = [0, 1, 2, 1, 3, 2, 2, 4, 5, 4, 6, 5, 4, 3, 6, 3, 7, 6],
+        };
+
+        var dump = new ReproDump
+        {
+            World = new ReproWorldData
+            {
+                HasNavmesh = true,
+                Bounds = { Box() },
+                Geometry = new ReproWorlds.Geometry().Ground()
+                    .Build(new Vector3(100f, 0f, 100f), 4f),
+            },
+            Zombies = new ReproZombieSection
+            {
+                Seams = new ReproWorldSeams { PathQuery = true },
+                Frames = { new ReproFrame { Dt = 0.08f } },
+            },
+        };
+        var scenario = new ReproScenario(dump, new ReproScenarioOptions
+        {
+            RecomputePaths = true,
+            NavFlags = new[] { TJunction() },
+        });
+        var path = new List<Vector3>();
+
+        Assert.True(scenario.System.PathQuery!(new Vector3(0.5f, 0f, 1f),
+            new Vector3(3.5f, 0f, 1f), path, BakedNavGraph.AgentRadius));
+        Assert.True(scenario.UnansweredQueries > 0,
+            "the out-of-slice stitched portal was reported as covered geometry");
+        Assert.Equal(0, scenario.UnansweredInWindow); // direct diagnostic call occurs outside Step
     }
 }

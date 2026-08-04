@@ -104,148 +104,18 @@ public partial class NetworkManager : Node
             Log.PushWarning("[zombies] level ships no zombie data; skipping");
             return;
         }
-        // AlertTool's BLOCK_VISION raycast: stealth detection fails when geometry hides the player.
-        // BLOCK_VISION is exactly LARGE | MEDIUM (RayMasks.cs) — LARGE/MEDIUM object colliders and
-        // nothing else: not the terrain, not resources, and crucially not the players themselves
-        // (an unfiltered ray ends inside the target's own capsule at close range and blinds every
-        // nearby zombie). Stops at 95% of the distance exactly like the original. The ZombieHost
-        // ticks inside _PhysicsProcess, so querying the physics space here is safe.
-        // Query-parameter objects are engine objects, so both closures reuse one instead of
-        // allocating (and later finalizing) a fresh one per zombie step.
-        var ray = new PhysicsRayQueryParameters3D { CollisionMask = ObjectsBuilder.VisionBlockerLayer };
-        // The viewport's World3D never changes while this node is in the tree, so resolve it once and keep
-        // it: these three closures run PER ZOMBIE PER TICK, and GetViewport() walks the node tree and
-        // marshals across to the engine every single time. The space state itself is still fetched per
-        // call, which is what has to stay fresh.
-        World3D? world = null;
-        World3D? World() => world ??= GetViewport()?.World3D;
-
-        zombies.VisionBlocked = (from, to) =>
-        {
-            PhysicsDirectSpaceState3D? space = World()?.DirectSpaceState;
-            if (space == null)
-                return false;
-            ray.From = from;
-            ray.To = from + ((to - from) * Zombies.ZombieBody.VisionRayFraction);
-            return space.IntersectRay(ray).Count > 0;
-        };
-        // The CharacterController's collide-and-slide against real world colliders: sweep a
-        // capsule covering the zombie's body from the knees up (0.4..2.0 m — the full 2 m capsule
-        // dragged its base along the terrain and jammed on every micro-slope; ground contact is
-        // the ground snap's job here, like a CC's grounding pass). Catches knee-high furniture and
-        // head-high overhangs that the old chest sphere missed.
-        var sweep = new CapsuleShape3D { Height = Zombies.ZombieBody.CapsuleHeight };
-        // Mask 1 only: LARGE world + terrain + resources. MEDIUM furniture lives on its own layer
-        // (the navmesh ignores it; original zombies shove through it).
-        var query = new PhysicsShapeQueryParameters3D { Shape = sweep, CollisionMask = 1 };
-        var stepDown = new PhysicsRayQueryParameters3D { CollisionMask = 1 | ObjectsBuilder.MediumFurnitureLayer };
-        float lastRadius = -1f;
-        zombies.MoveResolver = (from, to, radius) =>
-        {
-            PhysicsDirectSpaceState3D? space = World()?.DirectSpaceState;
-            if (space == null)
-                return to;
-            if (radius != lastRadius) // one capsule size per speciality; skip the redundant engine write
-            {
-                sweep.Radius = radius;
-                lastRadius = radius;
-            }
-            // Capsule centre: covers ZombieBody.CapsuleBottom..CapsuleTop above the feet. The constants
-            // live in core because the bug-repro replay sweeps the SAME body without an engine, and a
-            // replay against a different capsule is not a reproduction of anything.
-            var chest = new Vector3(0f, Zombies.ZombieBody.CapsuleCenter, 0f);
-            Vector3 at = from;
-            Vector3 motion = to - from;
-
-            // Unity's CharacterController.Move is ITERATIVE: it advances to the first contact,
-            // projects what is left of the motion onto that surface, and goes again. That loop is
-            // the whole reason a zombie wedged nose-first into a corner in Unturned works itself
-            // free over a frame or two — one pass leaves it stuck against the first surface, and a
-            // sidestep heuristic bolted on top of a single pass re-decides every tick and visibly
-            // shuffles left and right. Four passes is enough for a corner (two walls) plus slack;
-            // Unity does not publish its own count.
-            for (int pass = 0; pass < Zombies.ZombieBody.MaxSlides; pass++)
-            {
-                if (motion.LengthSquared() < 1e-8f)
-                    break;
-
-                query.Transform = new Transform3D(Basis.Identity, at + chest);
-                query.Motion = motion;
-                float[] cast = space.CastMotion(query);
-                if (cast[0] >= 1f)
-                {
-                    at += motion; // rest of the motion is clear
-                    break;
-                }
-
-                // Step-up with the zombie CharacterController's REAL stepOffset (0.5, read from the
-                // prefab; slope limit is 75°): retry the sweep raised by it — steps pass, walls do
-                // not. Only attempted on the first contact, like the CC's own step pass.
-                if (pass == 0)
-                {
-                    query.Transform = new Transform3D(Basis.Identity,
-                        at + chest + new Vector3(0f, Player.PlayerConfig.StepOffset, 0f));
-                    float[] stepCast = space.CastMotion(query);
-                    if (stepCast[0] >= 1f)
-                    {
-                        // Only a real step: the raised destination must have ground within the climb
-                        // height, or this would float over gaps.
-                        stepDown.From = new Vector3(to.X, at.Y + 1.5f, to.Z);
-                        stepDown.To = new Vector3(to.X, at.Y + 0.05f, to.Z);
-                        Godot.Collections.Dictionary ground = space.IntersectRay(stepDown);
-                        if (ground.Count > 0)
-                            return new Vector3(to.X, ((Vector3)ground["position"]).Y, to.Z);
-                    }
-                }
-
-                Vector3 safe = at + (motion * cast[0]);
-
-                // Contact normal at the blocked spot -> slide what remains along that surface, then
-                // let the next pass resolve whatever the slide runs into.
-                query.Transform = new Transform3D(Basis.Identity, safe + chest);
-                query.Motion = Vector3.Zero;
-                Vector3 normal = space.GetRestInfo(query) is { Count: > 0 } rest
-                    ? (Vector3)rest["normal"]
-                    : Vector3.Zero;
-                if (normal == Vector3.Zero)
-                    return safe;
-
-                Vector3 remaining = motion * (1f - cast[0]);
-                motion = remaining - (normal * remaining.Dot(normal));
-                at = safe;
-            }
-
-            return at;
-        };
-        // Real ground: a short downward ray finds the surface actually underfoot — sidewalks,
-        // house floors, stairs — with the zombie's current height as the reference so stacked
-        // floors (basements, upper storeys) resolve correctly. Mask 1 = static world only (the
-        // player's body lives on layer 2), falling back to the heightfield out in the open.
-        var snapRay = new PhysicsRayQueryParameters3D { CollisionMask = 1 | ObjectsBuilder.MediumFurnitureLayer }; // reused: one per zombie step otherwise
-        zombies.GroundSnap = (Vector3 position, out float y) =>
-        {
-            PhysicsDirectSpaceState3D? space = World()?.DirectSpaceState;
-            if (space == null)
-                return _ground(position.X, position.Z, out y);
-            // Start just above the CC's stepOffset (0.5): steps resolve, railings above don't.
-            snapRay.From = position + new Vector3(0f, Zombies.ZombieBody.GroundProbeUp, 0f);
-            snapRay.To = position + new Vector3(0f, -Zombies.ZombieBody.GroundProbeDown, 0f);
-            Godot.Collections.Dictionary hit = space.IntersectRay(snapRay);
-            if (hit.Count > 0)
-            {
-                y = ((Vector3)hit["position"]).Y;
-                return true;
-            }
-            return _ground(position.X, position.Z, out y);
-        };
+        ZombiePhysics.Attach(zombies, () => GetViewport()?.World3D, _ground);
         // The pre-baked navmesh drives the Seeker port: zombies path around buildings and props
         // exactly over the triangles the original game baked. Prefer the data parsed at the start of the
         // world load; until collision reconciliation publishes it, PathReady selects direct movement.
-        _zombieNavigation = ZombieNavigation.TakePreloaded() ?? ZombieNavigation.Build(zombies.Navmesh);
+        _zombieNavigation = ZombieNavigation.TakePreloaded(zombies.MoveResolver)
+            ?? ZombieNavigation.Build(zombies.Navmesh, zombies.MoveResolver);
         if (_zombieNavigation != null)
         {
             zombies.PathQuery = _zombieNavigation.Query;
             zombies.PathReady = () => _zombieNavigation?.IsReady == true;
+            zombies.NavmeshProject = _zombieNavigation.ProjectToSurface;
+            zombies.NavmeshSupportsSegment = _zombieNavigation.SupportsLocalSegment;
         }
 
         // PATH_PROBE="x,y,z>x,y,z": log the navmesh route between two points — the exact tool for
@@ -258,8 +128,12 @@ public partial class NetworkManager : Node
             var from = new Vector3(a[0].ToFloat(), a[1].ToFloat(), a[2].ToFloat());
             var to = new Vector3(b[0].ToFloat(), b[1].ToFloat(), b[2].ToFloat());
             double startedAt = Now;
-            void Probe()
+            async void Probe()
             {
+                // A previously unseen stitched portal asks MoveResolver to validate its opening. The
+                // resolver owns DirectSpaceState, so even this diagnostic must enter a physics
+                // notification before it can safely populate the portal cache.
+                await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame);
                 var waypoints = new System.Collections.Generic.List<Vector3>();
                 bool ok = zombies.PathQuery!(from, to, waypoints, BakedNavGraph.AgentRadius);
                 Log.Print($"[nav] path probe t={Now - startedAt:F1}s {from} -> {to}: " +
@@ -280,7 +154,7 @@ public partial class NetworkManager : Node
             // 25 s: the navmesh is reconciled against collision once the world finishes streaming, and
             // that rebuild re-syncs the map for a few seconds. Probing earlier catches the gap and reads
             // as "the zombie never moved" when it simply had no graph yet.
-            GetTree().CreateTimer(25.0).Timeout += () => // after the nav map sync AND the reconcile
+            GetTree().CreateTimer(25.0).Timeout += async () => // after the nav map sync AND the reconcile
             {
                 string[] ends = huntProbe.Split('>');
                 string[] a = ends[0].Split(',');
@@ -306,9 +180,12 @@ public partial class NetworkManager : Node
                 {
                     PathQuery = zombies.PathQuery,
                     PathReady = zombies.PathReady,
+                    NavmeshProject = zombies.NavmeshProject,
+                    NavmeshSupportsSegment = zombies.NavmeshSupportsSegment,
                     MoveResolver = zombies.MoveResolver,
                     GroundSnap = zombies.GroundSnap,
                     VisionBlocked = zombies.VisionBlocked,
+                    PhysicalLineBlocked = zombies.PhysicalLineBlocked,
                 };
                 probe.Spawn(new[] { zombieAt }, new System.Random(1));
                 if (probe.Zombies.Count == 0)
@@ -321,6 +198,12 @@ public partial class NetworkManager : Node
                 Vector3 last = z.Position;
                 for (int tick = 0; tick < 500; tick++) // 40 s of hunting
                 {
+                    // DirectSpaceState is legal only during a physics notification. Running this whole
+                    // loop in the timer callback made every collision query fail and then advertised the
+                    // resulting no-collision ATTACK as a successful end-to-end probe. Advance one real
+                    // physics frame per simulated server tick so the diagnostic exercises the authority
+                    // seams it claims to measure.
+                    await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame);
                     Vector3 where = playerLater != null && tick > 37 ? playerLater.Value : playerAt;
                     var views = new[]
                     {

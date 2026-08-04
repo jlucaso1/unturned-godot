@@ -11,6 +11,24 @@ namespace UnturnedGodot.Tests;
 // guessing. These cover both halves: the geometry, and the uncertainty reporting the escalation rests on.
 public class CollisionFieldTests
 {
+    [Fact]
+    public void BuilderRetainsEffectiveCollisionPoliciesUntilRelease()
+    {
+        var builder = new CollisionFieldBuilder();
+        Guid fence = Guid.NewGuid();
+        builder.RecordCollisionPolicy(Guid.Empty, 99u);
+        builder.RecordCollisionPolicy(fence, CollisionLayers.MediumFurniture);
+        builder.RecordCollisionPolicy(fence,
+            CollisionLayers.World | CollisionLayers.MediumFurniture);
+
+        IReadOnlyDictionary<Guid, uint> snapshot = builder.CollisionPolicies;
+        Assert.Single(snapshot);
+        Assert.Equal(CollisionLayers.World | CollisionLayers.MediumFurniture, snapshot[fence]);
+        builder.Release();
+        Assert.Empty(builder.CollisionPolicies);
+        Assert.Single(snapshot); // the fingerprint snapshot is not mutated behind the worker's back
+    }
+
     private static Transform3D Grid(Vector3 origin, float cell) =>
         new(Basis.Identity.Scaled(new Vector3(cell, 1f, cell)), origin);
 

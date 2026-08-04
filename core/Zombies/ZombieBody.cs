@@ -19,6 +19,12 @@ public static class ZombieBody
     // motion onto that surface, go again. Four passes covers a corner (two walls) plus slack.
     public const int MaxSlides = 4;
 
+    // Step-up retries are meaningful only for one authoritative movement tick. The fastest zombie
+    // covers 0.52 m at the server's 0.08 s rate; a little numeric slack keeps that valid while preventing
+    // callers that validate a multi-metre route leg from treating the raised cast as a teleport over a
+    // counter, fence or wall.
+    public const float MaxStepMotion = 0.6f;
+
     // The ground probe starts just above the CharacterController's step offset (steps resolve, railings
     // above them do not) and reaches three metres down.
     public const float GroundProbeUp = 0.55f;
