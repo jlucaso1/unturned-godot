@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Godot;
+using UnturnedGodot.Data;
 using UnturnedGodot.Zombies;
 
 namespace UnturnedGodot.Repro;
@@ -69,6 +70,34 @@ public sealed class ReproCollisionWorld
     }
 
     public int TriangleCount => _triangles.TriangleCount;
+
+    // The same short downward column reconciliation asks of the live physics world. Keeping it here
+    // lets a dump verify a changed reconciliation algorithm against its captured geometry instead of
+    // silently restoring the old session's disabled-face list.
+    public bool ProbeNavSurface(Vector3 point, float stepOffset, out float y)
+    {
+        float top = NavmeshSurfaceSampling.TopOf(point, stepOffset);
+        float bottom = NavmeshSurfaceSampling.BottomOf(point);
+        float reach = MathF.Max(top - point.Y, point.Y - bottom);
+        if (!Covers(point, reach))
+        {
+            y = 0f;
+            return false;
+        }
+
+        Vector3 from = new(point.X, top, point.Z);
+        Vector3 to = new(point.X, bottom, point.Z);
+        if (Raycast(from, to, CollisionLayers.World, out float fraction, out _))
+        {
+            y = Mathf.Lerp(top, bottom, fraction);
+            return true;
+        }
+        if (_ground != null && _ground.Sample(point.X, point.Z, out y)
+            && y >= bottom && y <= top)
+            return true;
+        y = 0f;
+        return false;
+    }
 
     // Which collider the last Resolve stopped against, by name. The reason a dump records owner names
     // at all: "stuck against Street_Light" is a bug report, "stuck at (-613, 35, -65)" is a coordinate.

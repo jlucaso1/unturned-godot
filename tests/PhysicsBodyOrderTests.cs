@@ -151,7 +151,8 @@ public class PhysicsBodyOrderTests
 
         string source = File.ReadAllText(path);
         Assert.Contains("await Task.Run(() =>", source);
-        Assert.Contains("BakedNavGraph.Build(_flags, _unreachable, _portalProbe)", source);
+        Assert.Contains("BakedNavGraph.Build(_flags, _unreachable, _portalProbe,", source);
+        Assert.Contains("validateIndexedPortals: true", source);
         Assert.Contains("await PublishAsync(fingerprint, cachePath + \".csr\")", source);
         Assert.Contains("await PublishAsync(fingerprint, cachePath == null ? null : cachePath + \".csr\")", source);
         Assert.Contains("BakedNavGraph.TryReadFile", source);
@@ -202,6 +203,32 @@ public class PhysicsBodyOrderTests
         Assert.Contains("using Godot.Collections.Dictionary rest = space.GetRestInfo(query)", physics);
         Assert.Contains("using Godot.Collections.Dictionary hit = space.IntersectRay(snapRay)", physics);
         Assert.DoesNotContain("return space.IntersectRay", physics);
+    }
+
+    // Godot's CastMotion deliberately does not recover a shape that starts in contact. A zombie that
+    // finished one tick tangent to a 20 cm fence could therefore get a clear cast for the next diagonal
+    // tick and put its destination inside the fence. At 5.5 m/s the 80 ms motion is shorter than the
+    // fence plus the capsule diameter, so destination overlap is both necessary and sufficient to stop
+    // this thin-barrier tunnel. This ordering is a live-physics contract, like the body-attach rule above.
+    [Fact]
+    public void ZombieCapsuleChecksTheDestinationBeforeAcceptingAClearCast()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Net", "ZombiePhysics.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        int cast = source.IndexOf("float[] cast = space.CastMotion(query)", StringComparison.Ordinal);
+        int destination = source.IndexOf("endpointRest = space.GetRestInfo(query)", cast,
+            StringComparison.Ordinal);
+        int accept = source.IndexOf("at += motion", cast, StringComparison.Ordinal);
+        int unsafeContact = source.IndexOf("cast[1]", destination, StringComparison.Ordinal);
+
+        Assert.True(cast >= 0 && destination > cast && accept > destination,
+            "a clear sweep may be accepted only after its destination capsule is proven unoccupied");
+        Assert.True(unsafeContact > accept,
+            "the slide normal must be queried at the first unsafe point, not the last safe point");
+        Assert.Contains("float safeFraction = destinationOccupied ? 0f : cast[0]", source);
+        Assert.Contains("stepDestinationOccupied", source);
     }
 
     [Fact]

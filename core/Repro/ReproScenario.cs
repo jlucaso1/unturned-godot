@@ -23,6 +23,12 @@ public sealed class ReproScenarioOptions
     // effects cannot be told apart. This isolates the one that matters: "is the ROUTE the problem?"
     public bool RecomputePaths { get; init; }
 
+    // Re-run the current navmesh/collision reconciliation over the geometry slice before rebuilding
+    // routes, including lazy physical validation of indexed portals. Dumps carry the face exclusions
+    // the recorded session used; this option answers the different question needed after changing that
+    // algorithm: what would THIS build exclude here?
+    public bool ReconcilePaths { get; init; }
+
     // The generator a replay rolls from when the dump could not carry the session's own state.
     public ulong RandomSeed { get; init; }
 
@@ -198,12 +204,28 @@ public sealed class ReproScenario
                 if (off is { Length: > 0 })
                     exclusions[flags[i]] = new HashSet<int>(off);
             }
+        if (_options.ReconcilePaths && Collision != null)
+            foreach (NavFlag flag in flags)
+            {
+                HashSet<int> current = NavmeshReachability.Unreachable(flag,
+                    Player.PlayerConfig.StepOffset, ProbeNavSurface);
+                if (current.Count == 0)
+                    continue;
+                if (!exclusions.TryGetValue(flag, out HashSet<int>? combined))
+                    exclusions[flag] = current;
+                else
+                    combined.UnionWith(current);
+            }
         BakedNavPortalProbe? portalProbe = Collision == null
             ? null
             : ResolvePortal;
-        return BakedNavGraph.Build(flags, exclusions.Count > 0 ? exclusions : null,
-            portalProbe).TryPath;
+        BakedNavGraph graph = BakedNavGraph.Build(flags, exclusions.Count > 0 ? exclusions : null,
+            portalProbe, validateIndexedPortals: _options.ReconcilePaths);
+        return graph.TryPath;
     }
+
+    private bool ProbeNavSurface(Vector3 point, out float y) =>
+        Collision!.ProbeNavSurface(point, Player.PlayerConfig.StepOffset, out y);
 
     private Vector3 ResolvePortal(Vector3 from, Vector3 to, float radius)
     {

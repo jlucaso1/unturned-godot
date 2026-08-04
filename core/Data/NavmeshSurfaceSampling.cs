@@ -34,9 +34,10 @@ public static class NavmeshSurfaceSampling
         int Samples,
         int UncertainSamples);
 
-    // Every face of `flag`, sampled at the seven points NavmeshReachability asks for, keeping the highest
-    // clearance above the authored navmesh at the sample — the climb a body crossing the face would
-    // actually have to make. Absolute heights cannot be compared across broad, sloping faces.
+    // Every face of `flag`, sampled at the seven points NavmeshReachability asks for. The resulting
+    // clearance is the climb a body crossing the face would actually have to make: height above the
+    // authored plane or a discontinuity within it. Absolute heights are never compared across broad,
+    // sloping faces.
     public static FlagSurfaces Sample(NavFlag flag, CollisionField field, float stepOffset,
         CancellationToken cancellation = default)
     {
@@ -55,6 +56,9 @@ public static class NavmeshSurfaceSampling
             Vector3 c = flag.Vertices[flag.Triangles[(triangle * 3) + 2]];
 
             float highestClearance = float.MinValue;
+            Span<Vector3> points = stackalloc Vector3[7];
+            Span<float> surfaces = stackalloc float[7];
+            int hitSamples = 0;
             float worstSlack = 0f;
             bool doubtful = false;
             foreach (Vector3 point in NavmeshReachability.SamplePoints(a, b, c))
@@ -71,13 +75,16 @@ public static class NavmeshSurfaceSampling
                 float clearance = sample.Y - point.Y;
                 if (clearance > highestClearance)
                     highestClearance = clearance;
+                points[hitSamples] = point;
+                surfaces[hitSamples++] = sample.Y;
                 if (sample.Slack > worstSlack)
                     worstSlack = sample.Slack;
             }
 
             if (highestClearance != float.MinValue)
             {
-                clearance[triangle] = highestClearance;
+                clearance[triangle] = NavmeshReachability.RequiredClimb(highestClearance,
+                    points[..hitSamples], surfaces[..hitSamples]);
                 known[triangle] = true;
             }
             slack[triangle] = worstSlack;

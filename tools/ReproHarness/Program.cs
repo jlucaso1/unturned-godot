@@ -14,6 +14,7 @@ namespace UnturnedGodot.ReproHarness;
 //   dotnet run -c Release --project tools/ReproHarness -- replay  dump.json [--ticks 200] [--level DIR]
 //                                                                       [--trace ZOMBIEID]
 //                                                                       [--recompute-paths]
+//                                                                       [--reconcile-paths]
 //   dotnet run -c Release --project tools/ReproHarness -- verify  dump.json
 //   dotnet run -c Release --project tools/ReproHarness -- pretty   dump.json [out.json]
 //
@@ -117,6 +118,7 @@ public static class Program
             UseRecordedAnswers = !Has(args, "--no-oracle"),
             UseGeometry = !Has(args, "--no-geometry"),
             RecomputePaths = Has(args, "--recompute-paths"),
+            ReconcilePaths = Has(args, "--reconcile-paths"),
             NavFlags = LoadNavmesh(level),
         };
 

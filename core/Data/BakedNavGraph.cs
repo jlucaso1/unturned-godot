@@ -8,9 +8,9 @@ using Godot;
 
 namespace UnturnedGodot.Data;
 
-// Tests whether a capsule can actually enter both faces of a portal. The baked mesh predates the map's
-// object collision, so a geometrically valid tile seam can still run through a wall that only exists in
-// the physics world. Null keeps the graph usable on the headless server, whose world has no colliders.
+// Resolves a capsule motion used to validate portal crossings and completed route legs. The baked mesh
+// predates the map's object collision, so a geometrically valid route can still run through a wall that
+// only exists in the physics world. Null keeps the graph usable without a collision world.
 public delegate Vector3 BakedNavPortalProbe(Vector3 from, Vector3 to, float radius);
 
 // CPU path graph for the pre-baked Recast maps. Their tile boundaries contain T-junctions: one side of
@@ -47,7 +47,7 @@ public sealed class BakedNavGraph
 
     public static BakedNavGraph Build(IReadOnlyList<NavFlag> flags,
         IReadOnlyDictionary<NavFlag, HashSet<int>>? unreachable = null,
-        BakedNavPortalProbe? portalProbe = null)
+        BakedNavPortalProbe? portalProbe = null, bool validateIndexedPortals = false)
     {
         PortalValidator? validator = portalProbe == null ? null : new PortalValidator(portalProbe);
         var built = new List<FlagGraph>(flags.Count);
@@ -55,7 +55,7 @@ public sealed class BakedNavGraph
         {
             HashSet<int>? skip = null;
             unreachable?.TryGetValue(flag, out skip);
-            built.Add(new FlagGraph(flag, skip, validator));
+            built.Add(new FlagGraph(flag, skip, validator, validateIndexedPortals));
         }
         return new BakedNavGraph(built);
     }
@@ -156,8 +156,8 @@ public sealed class BakedNavGraph
         }
     }
 
-    // Test seam for the sparse inferred-portal storage. Ordinary indexed adjacency must never allocate
-    // a validation slot, even when the graph has a live collision probe.
+    // Test seam for the preallocated inferred-portal storage. Ordinary indexed adjacency must never
+    // reserve a slot; the rare edge with physical evidence is promoted into sparse dynamic storage.
     internal int PortalValidationSlots
     {
         get
@@ -187,7 +187,8 @@ public sealed class BakedNavGraph
     }
 
     public static bool TryRead(Stream stream, string fingerprint, IReadOnlyList<NavFlag> sources,
-        out BakedNavGraph? graph, BakedNavPortalProbe? portalProbe = null)
+        out BakedNavGraph? graph, BakedNavPortalProbe? portalProbe = null,
+        bool validateIndexedPortals = false)
     {
         graph = null;
         try
@@ -198,7 +199,8 @@ public sealed class BakedNavGraph
                 return false;
             PortalValidator? validator = portalProbe == null ? null : new PortalValidator(portalProbe);
             var flags = new List<FlagGraph>(sources.Count);
-            foreach (NavFlag source in sources) flags.Add(FlagGraph.Read(reader, source, validator));
+            foreach (NavFlag source in sources)
+                flags.Add(FlagGraph.Read(reader, source, validator, validateIndexedPortals));
             if (stream.Position != stream.Length) return false;
             graph = new BakedNavGraph(flags);
             return true;
@@ -215,13 +217,15 @@ public sealed class BakedNavGraph
     // permissions must be cache misses just like a truncated payload; none of them may leave navigation
     // unpublished for the session merely because the fast path could not be read.
     public static bool TryReadFile(string path, string fingerprint, IReadOnlyList<NavFlag> sources,
-        out BakedNavGraph? graph, BakedNavPortalProbe? portalProbe = null)
+        out BakedNavGraph? graph, BakedNavPortalProbe? portalProbe = null,
+        bool validateIndexedPortals = false)
     {
         graph = null;
         try
         {
             using FileStream input = File.OpenRead(path);
-            return TryRead(input, fingerprint, sources, out graph, portalProbe);
+            return TryRead(input, fingerprint, sources, out graph, portalProbe,
+                validateIndexedPortals);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
@@ -269,20 +273,28 @@ public sealed class BakedNavGraph
         private readonly Vector3[] _centres;
         private readonly int[] _edgeStart;
         private readonly Connection[] _edges;
-        // -1 for ordinary adjacency; otherwise the compact slot shared by every per-radius validation
-        // array. Inferred stitches are sparse (4.8% of PEI border edges), so sizing those arrays by every
+        // -1 for ordinary adjacency; otherwise the compact slot shared by per-radius validation state.
+        // Inferred stitches are sparse (4.8% of PEI border edges), so sizing that state by every
         // directed connection retained tens of megabytes of entries that could never be read on large maps.
         private readonly int[] _stitchedPortal;
-        private readonly int[] _portalProbeState;
-        private readonly PortalSpan[] _normalPortalSpans;
-        private readonly PortalSpan[] _megaPortalSpans;
-        private readonly PortalValidation?[] _normalPortalProgress;
-        private readonly PortalValidation?[] _megaPortalProgress;
+        // Sparse twice over: only inferred stitches have a slot, and a slot allocates its per-radius
+        // state only when a route actually reaches it. The same cache shape is reused by indexed portals
+        // promoted after a physical route failure, keeping both policies on one validation algorithm.
+        private readonly PortalCache?[] _stitchedPortalCache;
+        // Indexed portals are trusted on the hot A* path until a completed route physically fails.
+        // Only the portals around that collision are promoted into this sparse cache. Validating every
+        // ordinary edge up front costs millions of physics sweeps on large maps; never validating one
+        // lets a thin placed fence be selected forever when it falls between the seven surface samples.
+        // A bit per directed edge keeps the ordinary A* check allocation-free, while the full state is
+        // retained only for the handful of portals that have produced evidence of a mismatch.
+        private readonly int[] _trackedPortalBits;
+        private readonly Dictionary<int, PortalCache> _trackedPortals = new();
         // Collision can reject the 0.75 m capsule while accepting the ordinary 0.4 m one. These bits
         // are therefore per vertex AND radius; folding them into _borderVertex made the ordinary funnel
         // depend on whether a mega happened to query first.
         private readonly byte[] _portalBorderState;
         private readonly PortalValidator? _portalValidator;
+        private readonly bool _validateIndexedPortals;
         private readonly bool[] _enabled;
         private readonly bool[] _borderVertex;
         private readonly ConcurrentBag<SearchWorkspace> _workspaces = new();
@@ -293,6 +305,16 @@ public sealed class BakedNavGraph
 
         private readonly record struct PortalSpan(Vector3 A, Vector3 B,
             bool IncludesA, bool IncludesB);
+        private readonly record struct CorridorPortal(int Triangle, int EdgeAt, PortalSpan Span);
+
+        private sealed class PortalCache
+        {
+            public int State;
+            public PortalSpan NormalSpan;
+            public PortalSpan MegaSpan;
+            public PortalValidation? NormalProgress;
+            public PortalValidation? MegaProgress;
+        }
 
         // A wide stitched opening is sampled incrementally. Capsule-wide sample spacing means every
         // point of the opening lies inside at least one tested capsule footprint, while retaining the
@@ -488,6 +510,7 @@ public sealed class BakedNavGraph
             public readonly PriorityQueue<int, float> Frontier = new();
             public readonly List<int> Reverse = new();
             public readonly List<Portal> Portals = new();
+            public readonly List<CorridorPortal> Corridor = new();
             public readonly List<Vector3> Shortcut = new();
             public readonly List<int> Walls = new();
 
@@ -503,6 +526,7 @@ public sealed class BakedNavGraph
                 Frontier.Clear();
                 Reverse.Clear();
                 Portals.Clear();
+                Corridor.Clear();
                 Shortcut.Clear();
                 Walls.Clear();
                 if (++_generation == int.MaxValue)
@@ -758,13 +782,15 @@ public sealed class BakedNavGraph
         public int ConnectionCount => _edges.Length;
         public long AdjacencyBytes => ((long)_edges.Length * (4 * sizeof(int)))
             + ((long)_edgeStart.Length * sizeof(int));
-        public int PortalValidationSlots => _portalProbeState.Length;
+        public int PortalValidationSlots => _stitchedPortalCache.Length;
         public long ScratchBytes { get; }
 
-        public FlagGraph(NavFlag source, IReadOnlySet<int>? skip, PortalValidator? portalValidator)
+        public FlagGraph(NavFlag source, IReadOnlySet<int>? skip, PortalValidator? portalValidator,
+            bool validateIndexedPortals)
         {
             Source = source;
             _portalValidator = portalValidator;
+            _validateIndexedPortals = validateIndexedPortals;
             int count = source.Triangles.Length / 3;
             _centres = new Vector3[count];
             _enabled = new bool[count];
@@ -883,15 +909,10 @@ public sealed class BakedNavGraph
                 if (directed[i].Stitched)
                     _stitchedPortal[i] = stitchedPortals++;
             }
-            _portalProbeState = portalValidator == null ? Array.Empty<int>() : new int[stitchedPortals];
-            _normalPortalSpans = portalValidator == null
-                ? Array.Empty<PortalSpan>() : new PortalSpan[stitchedPortals];
-            _megaPortalSpans = portalValidator == null
-                ? Array.Empty<PortalSpan>() : new PortalSpan[stitchedPortals];
-            _normalPortalProgress = portalValidator == null
-                ? Array.Empty<PortalValidation?>() : new PortalValidation?[stitchedPortals];
-            _megaPortalProgress = portalValidator == null
-                ? Array.Empty<PortalValidation?>() : new PortalValidation?[stitchedPortals];
+            _stitchedPortalCache = portalValidator == null
+                ? Array.Empty<PortalCache?>() : new PortalCache?[stitchedPortals];
+            _trackedPortalBits = portalValidator == null || !validateIndexedPortals
+                ? Array.Empty<int>() : new int[(directed.Length + 31) / 32];
             _portalBorderState = portalValidator == null
                 ? Array.Empty<byte>() : new byte[source.Vertices.Length];
             _borderVertex = new bool[source.Vertices.Length];
@@ -958,20 +979,17 @@ public sealed class BakedNavGraph
 
         private FlagGraph(NavFlag source, Vector3[] centres, int[] edgeStart, Connection[] edges,
             bool[] stitched, bool[] enabled, int columns, int rows, float cellSize, float minX,
-            float minZ, int[] cellStart, int[] cellItems, PortalValidator? portalValidator)
+            float minZ, int[] cellStart, int[] cellItems, PortalValidator? portalValidator,
+            bool validateIndexedPortals)
         {
             Source = source; _centres = centres; _edgeStart = edgeStart; _edges = edges; _enabled = enabled;
             _stitchedPortal = CompactStitchedPortals(stitched, out int stitchedPortals);
             _portalValidator = portalValidator;
-            _portalProbeState = portalValidator == null ? Array.Empty<int>() : new int[stitchedPortals];
-            _normalPortalSpans = portalValidator == null
-                ? Array.Empty<PortalSpan>() : new PortalSpan[stitchedPortals];
-            _megaPortalSpans = portalValidator == null
-                ? Array.Empty<PortalSpan>() : new PortalSpan[stitchedPortals];
-            _normalPortalProgress = portalValidator == null
-                ? Array.Empty<PortalValidation?>() : new PortalValidation?[stitchedPortals];
-            _megaPortalProgress = portalValidator == null
-                ? Array.Empty<PortalValidation?>() : new PortalValidation?[stitchedPortals];
+            _validateIndexedPortals = validateIndexedPortals;
+            _stitchedPortalCache = portalValidator == null
+                ? Array.Empty<PortalCache?>() : new PortalCache?[stitchedPortals];
+            _trackedPortalBits = portalValidator == null || !validateIndexedPortals
+                ? Array.Empty<int>() : new int[(edges.Length + 31) / 32];
             _portalBorderState = portalValidator == null
                 ? Array.Empty<byte>() : new byte[source.Vertices.Length];
             _columns = columns; _rows = rows; _cellSize = cellSize; _minX = minX; _minZ = minZ;
@@ -1009,7 +1027,8 @@ public sealed class BakedNavGraph
             WriteInts(writer, _cellStart); WriteInts(writer, _cellItems);
         }
 
-        public static FlagGraph Read(BinaryReader reader, NavFlag source, PortalValidator? portalValidator)
+        public static FlagGraph Read(BinaryReader reader, NavFlag source, PortalValidator? portalValidator,
+            bool validateIndexedPortals)
         {
             int triangles = source.Triangles.Length / 3;
             int centreCount = reader.ReadInt32();
@@ -1066,7 +1085,8 @@ public sealed class BakedNavGraph
                 throw new InvalidDataException("CSR grid offsets invalid");
             foreach (int item in cellItems) if ((uint)item >= (uint)triangles) throw new InvalidDataException("CSR grid item invalid");
             return new FlagGraph(source, centres, edgeStart, edges, stitched, enabled, columns, rows,
-                cellSize, minX, minZ, cellStart, cellItems, portalValidator);
+                cellSize, minX, minZ, cellStart, cellItems, portalValidator,
+                validateIndexedPortals);
         }
 
         private static void WriteInts(BinaryWriter writer, int[] values)
@@ -1417,7 +1437,7 @@ public sealed class BakedNavGraph
                     {
                         Connection edge = _edges[edgeAt];
                         if (!_enabled[edge.To]
-                            || ValidateStitchedPortal(current, edgeAt, radius, ref portalProbeBudget)
+                            || ValidatePortal(current, edgeAt, radius, ref portalProbeBudget)
                                 != PortalVerdict.Open)
                             continue;
                         float candidate = currentCost + _centres[current].DistanceTo(_centres[edge.To]);
@@ -1450,6 +1470,7 @@ public sealed class BakedNavGraph
                 reverse.Reverse();
 
                 List<Portal> portals = workspace.Portals;
+                List<CorridorPortal> corridor = workspace.Corridor;
                 portals.Add(new Portal(from, from, -1, -1));
                 for (int i = 0; i + 1 < reverse.Count; i++)
                 {
@@ -1458,7 +1479,7 @@ public sealed class BakedNavGraph
                     {
                         Connection edge = _edges[edgeAt];
                         if (edge.To == next
-                            && ValidateStitchedPortal(current, edgeAt, radius,
+                            && ValidatePortal(current, edgeAt, radius,
                                 ref portalProbeBudget, out PortalSpan span) == PortalVerdict.Open)
                         {
                             Vector3 a = span.A;
@@ -1475,6 +1496,7 @@ public sealed class BakedNavGraph
                                     span.IncludesA ? edge.VertexA : -1)
                                 : (span.IncludesA ? edge.VertexA : -1,
                                     span.IncludesB ? edge.VertexB : -1);
+                            corridor.Add(new CorridorPortal(current, edgeAt, span));
                             portals.Add(Inset(current, left, right, leftVertex, rightVertex,
                                 leftVertex >= 0 && IsBorderVertex(leftVertex, radius),
                                 rightVertex >= 0 && IsBorderVertex(rightVertex, radius), radius));
@@ -1499,6 +1521,12 @@ public sealed class BakedNavGraph
                 // funnel legs the shortcut could not replace, which is the smaller set. Rounding first
                 // and shortcutting after measured the same routes at 31.7 mean waypoints against 27.8.
                 RoundCorners(output, begin, portals, workspace.Walls, radius);
+                if (complete && !ValidateCompletedRoute(output, begin, corridor, radius,
+                    ref portalProbeBudget))
+                {
+                    output.RemoveRange(begin, output.Count - begin);
+                    return false;
+                }
                 return true;
             }
             finally
@@ -1509,95 +1537,198 @@ public sealed class BakedNavGraph
 
         private float Heuristic(int from, int to) => _centres[from].DistanceTo(_centres[to]);
 
+        // Surface reconciliation is deliberately point-sampled, so a thin fence can lie between all
+        // seven probes while cutting the exact indexed portal A* uses. Sweeping every ordinary portal
+        // on every search would move that cost from a rare mismatch to the whole map. Instead, verify
+        // the route's first actionable leg: from the current position through the first waypoint the
+        // follower will not immediately discard. Checking one keeps the cost fixed instead of making a
+        // corner-heavy route consume an unbounded number of physics queries. If it hits static world
+        // collision at an ordinary portal in that corridor, promote that local span into the existing
+        // incremental validator and reject this answer. The next bounded repath either uses the surviving
+        // open part or routes elsewhere.
+        private bool ValidateCompletedRoute(List<Vector3> output, int begin,
+            List<CorridorPortal> corridor, float radius, ref int probeBudget)
+        {
+            PortalValidator? validator = _portalValidator;
+            if (!_validateIndexedPortals || validator == null || output.Count - begin < 2)
+                return true;
+
+            if (probeBudget <= 0)
+                return false;
+            Vector3 from = output[begin];
+            int actionable = begin + 1;
+            while (actionable < output.Count - 1)
+            {
+                float dx = output[actionable].X - from.X;
+                float dz = output[actionable].Z - from.Z;
+                if ((dx * dx) + (dz * dz) >= 1f) // follower's pickNextWaypointDist = 1 m
+                    break;
+                actionable++;
+            }
+            Vector3 to = output[actionable];
+            Vector3 resolved;
+            probeBudget--;
+            lock (validator.Gate)
+                resolved = validator.Probe(from, to, radius);
+            float endX = resolved.X - to.X, endZ = resolved.Z - to.Z;
+            if ((endX * endX) + (endZ * endZ) <= 0.05f * 0.05f)
+                return true;
+
+            int candidate = -1;
+            int candidateTriangle = -1;
+            float nearest = float.MaxValue;
+            Vector3 travel = to - from;
+            travel.Y = 0f;
+            Vector3 contact = travel.LengthSquared() > 1e-8f
+                ? resolved + (travel.Normalized() * (radius + Clearance))
+                : resolved;
+            foreach (CorridorPortal portal in corridor)
+            {
+                if (_stitchedPortal[portal.EdgeAt] >= 0 || IsTrackedPortal(portal.EdgeAt))
+                    continue;
+                Vector3 crossing = ClosestPointXZ(contact, portal.Span.A, portal.Span.B);
+                float dx = crossing.X - contact.X, dz = crossing.Z - contact.Z;
+                float distance = (dx * dx) + (dz * dz);
+                if (distance < nearest)
+                {
+                    nearest = distance;
+                    candidate = portal.EdgeAt;
+                    candidateTriangle = portal.Triangle;
+                }
+            }
+
+            // A collision only implicates the portal at the physical contact. Without this bound an
+            // obstacle in the middle of a large face would condemn whichever unrelated corridor edge
+            // happened to be nearest, even when it was metres away. The resolver stops the capsule one
+            // radius before collision and `contact` advances it back to the surface, leaving only the
+            // clearance skin and numerical motion margin between these two measurements.
+            const float PortalEvidenceDistance = Clearance + 0.1f;
+            if (candidate >= 0 && nearest <= PortalEvidenceDistance * PortalEvidenceDistance)
+            {
+                TrackPortal(validator, candidate);
+                ValidatePortal(candidateTriangle, candidate, radius, ref probeBudget, out _);
+                return false;
+            }
+            // The collision lies inside a face rather than on an indexed connection. Face
+            // reconciliation and the movement timeout own that case; inventing a portal verdict here
+            // would remove an unrelated edge and make the graph less truthful.
+            return true;
+        }
+
+        private static Vector3 ClosestPointXZ(Vector3 point, Vector3 a, Vector3 b)
+        {
+            float dx = b.X - a.X, dz = b.Z - a.Z;
+            float lengthSquared = (dx * dx) + (dz * dz);
+            float along = lengthSquared > 1e-10f
+                ? (((point.X - a.X) * dx) + ((point.Z - a.Z) * dz)) / lengthSquared
+                : 0f;
+            return a.Lerp(b, Mathf.Clamp(along, 0f, 1f));
+        }
+
         // A T-junction proves only that two baked faces meet in XZ. It cannot prove that the map's
         // collision world agrees: objects are placed after the Recast mesh was baked, and PEI contains a
         // 10 cm sliver whose inferred join leads straight through a house collider. That produced a
         // four-point route into the wall, then a long route around it, then the same shortcut again as the
         // zombie's yaw changed — visible as walking in a tight circle forever.
         //
-        // Exact indexed adjacency remains authoritative. Only inferred stitches get this lazy physical
-        // crossing test. A query spends at most PortalProbeBudgetPerPath physical sweeps; an unfinished
-        // opening is deferred as closed for that query and resumes on the next one. That keeps pathfinding
-        // inside the authoritative tick bounded even on a long/unreachable route across many cold seams.
-        private PortalVerdict ValidateStitchedPortal(int triangle, int edgeAt, float radius,
+        // Inferred stitches get this lazy physical crossing test before first use. Indexed portals stay
+        // authoritative until a completed route supplies contrary physical evidence, at which point the
+        // same validator owns their sparse cached verdict. A query spends at most
+        // PortalProbeBudgetPerPath physical sweeps; an unfinished opening is deferred as closed for that
+        // query and resumes on the next one. That keeps pathfinding inside the authoritative tick bounded.
+        private PortalVerdict ValidatePortal(int triangle, int edgeAt, float radius,
             ref int probeBudget)
         {
-            // This is the hot A* call: ordinary indexed edges have no physical validation and the caller
-            // discards their span, so do not read either endpoint or construct a PortalSpan for them.
-            if (_portalValidator == null || _stitchedPortal[edgeAt] < 0)
+            // This is the hot A* call: an ordinary indexed edge has no physical validation until a route
+            // through it has actually hit world collision. The tracked bit is the only extra work for
+            // the common case; do not read endpoints or enter the sparse dictionary unless it is set.
+            if (_portalValidator == null
+                || (_stitchedPortal[edgeAt] < 0 && !IsTrackedPortal(edgeAt)))
                 return PortalVerdict.Open;
-            return ValidateStitchedPortal(triangle, edgeAt, radius, ref probeBudget, out _);
+            return ValidatePortal(triangle, edgeAt, radius, ref probeBudget, out _);
         }
 
-        private PortalVerdict ValidateStitchedPortal(int triangle, int edgeAt, float radius,
+        private PortalVerdict ValidatePortal(int triangle, int edgeAt, float radius,
             ref int probeBudget, out PortalSpan span)
         {
             Connection edge = _edges[edgeAt];
             span = new PortalSpan(Source.Vertices[edge.VertexA], Source.Vertices[edge.VertexB],
                 IncludesA: true, IncludesB: true);
             PortalValidator? validator = _portalValidator;
+            if (validator == null)
+                return PortalVerdict.Open;
             int portalAt = _stitchedPortal[edgeAt];
-            if (validator == null || portalAt < 0)
+            if (portalAt < 0 && !IsTrackedPortal(edgeAt))
                 return PortalVerdict.Open;
 
-            int testedBit;
-            int blockedBit;
-            byte borderBit;
-            PortalSpan[] spans;
-            PortalValidation?[] progress;
-            if (MathF.Abs(radius - AgentRadius) <= 1e-3f)
+            // The game has only the two production radii cached below. Characterization callers with
+            // another radius still get a bounded physical answer, but publish nothing into either slot.
+            if (MathF.Abs(radius - AgentRadius) > 1e-3f && MathF.Abs(radius - 0.75f) > 1e-3f)
             {
-                testedBit = 1;
-                blockedBit = 2;
-                borderBit = 1;
-                spans = _normalPortalSpans;
-                progress = _normalPortalProgress;
-            }
-            else if (MathF.Abs(radius - 0.75f) <= 1e-3f)
-            {
-                testedBit = 4;
-                blockedBit = 8;
-                borderBit = 2;
-                spans = _megaPortalSpans;
-                progress = _megaPortalProgress;
-            }
-            else
-            {
-                // The game has only the two slots above. Characterization callers with another radius
-                // still get a bounded physical answer, but do not publish it into either production cache.
                 if (probeBudget <= 0)
                     return PortalVerdict.Deferred;
                 probeBudget--;
                 Vector3 middle = (span.A + span.B) * 0.5f;
                 lock (validator.Gate)
-                {
                     return ProbePortalPoint(validator, triangle, middle, span.A, span.B, radius)
                         ? PortalVerdict.Open : PortalVerdict.Blocked;
-                }
             }
 
-            int cached = Volatile.Read(ref _portalProbeState[portalAt]);
-            if ((cached & testedBit) != 0)
+            PortalCache cache;
+            if (portalAt >= 0)
             {
-                if ((cached & blockedBit) != 0)
+                cache = Volatile.Read(ref _stitchedPortalCache[portalAt])!;
+                if (cache == null)
+                    lock (validator.Gate)
+                    {
+                        cache = _stitchedPortalCache[portalAt] ?? new PortalCache();
+                        Volatile.Write(ref _stitchedPortalCache[portalAt], cache);
+                    }
+            }
+            else
+            {
+                if (!IsTrackedPortal(edgeAt))
+                    return PortalVerdict.Open;
+                lock (validator.Gate)
+                    cache = _trackedPortals[edgeAt];
+            }
+            return ValidatePortalCache(validator, cache, triangle, edge, radius,
+                ref probeBudget, ref span);
+        }
+
+        private PortalVerdict ValidatePortalCache(PortalValidator validator, PortalCache cache,
+            int triangle, Connection edge, float radius, ref int probeBudget, ref PortalSpan span)
+        {
+            bool normal = MathF.Abs(radius - AgentRadius) <= 1e-3f;
+            int testedBit = normal ? 1 : 4;
+            int blockedBit = normal ? 2 : 8;
+            byte borderBit = normal ? (byte)1 : (byte)2;
+            int state = Volatile.Read(ref cache.State);
+            if ((state & testedBit) != 0)
+            {
+                if ((state & blockedBit) != 0)
                     return PortalVerdict.Blocked;
-                span = spans[portalAt];
+                span = normal ? cache.NormalSpan : cache.MegaSpan;
                 return PortalVerdict.Open;
             }
 
             lock (validator.Gate)
             {
-                cached = Volatile.Read(ref _portalProbeState[portalAt]);
-                if ((cached & testedBit) != 0)
+                state = Volatile.Read(ref cache.State);
+                if ((state & testedBit) != 0)
                 {
-                    if ((cached & blockedBit) != 0)
+                    if ((state & blockedBit) != 0)
                         return PortalVerdict.Blocked;
-                    span = spans[portalAt];
+                    span = normal ? cache.NormalSpan : cache.MegaSpan;
                     return PortalVerdict.Open;
                 }
 
-                PortalValidation validation = progress[portalAt]
-                    ??= CreatePortalValidation(triangle, edge, radius);
+                PortalValidation validation = (normal ? cache.NormalProgress : cache.MegaProgress)
+                    ?? CreatePortalValidation(triangle, edge, radius);
+                if (normal)
+                    cache.NormalProgress = validation;
+                else
+                    cache.MegaProgress = validation;
                 while (validation.Next < validation.Samples && probeBudget > 0)
                 {
                     Vector3 point = validation.Sample(validation.Next);
@@ -1614,19 +1745,42 @@ public sealed class BakedNavGraph
                 if (!blocked)
                 {
                     span = validation.Span();
-                    spans[portalAt] = span;
+                    if (normal)
+                        cache.NormalSpan = span;
+                    else
+                        cache.MegaSpan = span;
                 }
                 if (validation.FirstBlocked)
                     _portalBorderState[edge.VertexA] |= borderBit;
                 if (validation.LastBlocked)
                     _portalBorderState[edge.VertexB] |= borderBit;
-                progress[portalAt] = null;
-
-                int state = Volatile.Read(ref _portalProbeState[portalAt]) | testedBit;
-                if (blocked)
-                    state |= blockedBit;
-                Volatile.Write(ref _portalProbeState[portalAt], state);
+                if (normal)
+                    cache.NormalProgress = null;
+                else
+                    cache.MegaProgress = null;
+                Volatile.Write(ref cache.State, state | testedBit | (blocked ? blockedBit : 0));
                 return blocked ? PortalVerdict.Blocked : PortalVerdict.Open;
+            }
+        }
+
+        private bool IsTrackedPortal(int edgeAt)
+        {
+            if (_trackedPortalBits.Length == 0)
+                return false;
+            int word = Volatile.Read(ref _trackedPortalBits[edgeAt >> 5]);
+            return (word & (1 << (edgeAt & 31))) != 0;
+        }
+
+        private void TrackPortal(PortalValidator validator, int edgeAt)
+        {
+            lock (validator.Gate)
+            {
+                if (!_trackedPortals.ContainsKey(edgeAt))
+                    _trackedPortals.Add(edgeAt, new PortalCache());
+                int wordAt = edgeAt >> 5;
+                int mask = 1 << (edgeAt & 31);
+                Volatile.Write(ref _trackedPortalBits[wordAt],
+                    Volatile.Read(ref _trackedPortalBits[wordAt]) | mask);
             }
         }
 

@@ -23,7 +23,9 @@ public static class NavReconcileCache
     // metadata can change while its collider cache stays byte-for-byte identical.
     // 6: sampled ground is measured relative to the authored face at each probe, rather than comparing
     // absolute heights between broad neighbours. Version 5 can contain false holes on continuous slopes.
-    public const int AlgorithmVersion = 6;
+    // 7: clearance also includes a physical rise steeper than the walkable slope within one face, so a
+    // vertical wall cannot hide merely because Recast authored that face near the top of its sill.
+    public const int AlgorithmVersion = 7;
 
     public static string Fingerprint(string levelDir, string colliderCacheDir)
         => Fingerprint(levelDir, colliderCacheDir, selectedColliders: null);

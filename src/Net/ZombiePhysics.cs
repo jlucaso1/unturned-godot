@@ -88,18 +88,43 @@ internal static class ZombiePhysics
                 query.Transform = new Transform3D(Basis.Identity, at + chest);
                 query.Motion = motion;
                 float[] cast = space.CastMotion(query);
+                bool destinationOccupied = false;
                 if (cast[0] >= 1f)
                 {
-                    at += motion;
-                    break;
+                    // CastMotion does not report a collider the capsule already touches at the start.
+                    // That matters for thin barriers: the first tick can finish exactly tangent to a
+                    // fence, then a diagonal second tick can be reported clear even though its endpoint
+                    // is inside the fence. At zombie speed one tick cannot cross the fence plus the
+                    // capsule diameter, so an occupied endpoint proves the supposedly clear cast is not
+                    // executable. This is the same sweep-then-destination rule used by ladder clearance.
+                    query.Transform = new Transform3D(Basis.Identity, at + motion + chest);
+                    query.Motion = Vector3.Zero;
+                    using Godot.Collections.Dictionary endpointRest = space.GetRestInfo(query);
+                    destinationOccupied = endpointRest.Count > 0;
+                    if (!destinationOccupied)
+                    {
+                        at += motion;
+                        break;
+                    }
                 }
 
                 if (pass == 0)
                 {
                     query.Transform = new Transform3D(Basis.Identity,
                         at + chest + new Vector3(0f, Player.PlayerConfig.StepOffset, 0f));
+                    query.Motion = motion;
                     float[] stepCast = space.CastMotion(query);
+                    bool stepDestinationOccupied = false;
                     if (stepCast[0] >= 1f)
+                    {
+                        query.Transform = new Transform3D(Basis.Identity,
+                            at + motion + chest
+                                + new Vector3(0f, Player.PlayerConfig.StepOffset, 0f));
+                        query.Motion = Vector3.Zero;
+                        using Godot.Collections.Dictionary stepRest = space.GetRestInfo(query);
+                        stepDestinationOccupied = stepRest.Count > 0;
+                    }
+                    if (stepCast[0] >= 1f && !stepDestinationOccupied)
                     {
                         stepDown.From = new Vector3(to.X, at.Y + 1.5f, to.Z);
                         stepDown.To = new Vector3(to.X, at.Y + 0.05f, to.Z);
@@ -109,8 +134,15 @@ internal static class ZombiePhysics
                     }
                 }
 
-                Vector3 safe = at + (motion * cast[0]);
-                query.Transform = new Transform3D(Basis.Identity, safe + chest);
+                float safeFraction = destinationOccupied ? 0f : cast[0];
+                Vector3 safe = at + (motion * safeFraction);
+                // cast[1] is the first unsafe fraction. Querying rest at cast[0] asks at the last
+                // non-overlapping point and can return no normal, leaving the body unable to slide.
+                float contactFraction = destinationOccupied
+                    ? 1f
+                    : cast.Length > 1 ? cast[1] : cast[0];
+                query.Transform = new Transform3D(Basis.Identity,
+                    at + (motion * contactFraction) + chest);
                 query.Motion = Vector3.Zero;
                 using Godot.Collections.Dictionary rest = space.GetRestInfo(query);
                 Vector3 normal = rest.Count > 0

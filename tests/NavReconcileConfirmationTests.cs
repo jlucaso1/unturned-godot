@@ -414,11 +414,21 @@ public class NavReconcileConfirmationTests
             Vector3 b = flag.Vertices[flag.Triangles[(t * 3) + 1]];
             Vector3 c = flag.Vertices[flag.Triangles[(t * 3) + 2]];
             float highestClearance = float.MinValue;
+            var points = new Vector3[7];
+            var heights = new float[7];
+            int samples = 0;
             foreach (Vector3 point in NavmeshReachability.SamplePoints(a, b, c))
                 if (truth(point, out float y))
-                    highestClearance = MathF.Max(highestClearance, y - point.Y);
+                {
+                    float sampleClearance = y - point.Y;
+                    highestClearance = MathF.Max(highestClearance, sampleClearance);
+                    points[samples] = point;
+                    heights[samples++] = y;
+                }
             known[t] = highestClearance != float.MinValue;
-            surface[t] = known[t] ? highestClearance : 0f;
+            surface[t] = known[t]
+                ? NavmeshReachability.RequiredClimb(highestClearance,
+                    points.AsSpan(0, samples), heights.AsSpan(0, samples)) : 0f;
         }
 
         Assert.Equal(NavmeshReachability.Unreachable(flag, StepOffset, truth),

@@ -745,6 +745,16 @@ public sealed partial class ZombieSystem
                 bool complete = newError <= 4f;
                 bool improvesFrom = newError + 0.01f < fromError;
                 bool improvesRoute = newError + 0.01f < oldError;
+                // The closest reachable face can lie around a doorway that initially leads AWAY from
+                // a nearby target across a wall. Requiring its endpoint to improve straight-line
+                // distance rejects that only executable prefix and leaves a route-less zombie staring
+                // through the window. With no incumbent, accept a partial route that actually advances
+                // across the mesh; once it reaches that safe prefix, the collision-aware fallback takes
+                // over. A later, worse partial still cannot replace a better route already being walked.
+                bool startsUsefulPartial = !complete && zombie.PathPoints.Count == 0
+                    && _scratchPath.Count > 1
+                    && HorizontalDistanceSquared(_scratchPath[0], _scratchPath[^1])
+                        > EndReachedDistance * EndReachedDistance;
 
                 // A complete replacement no longer displaces a complete incumbent for free. Where two
                 // ways round an obstacle cost about the same, which one the graph returns flips on
@@ -771,11 +781,19 @@ public sealed partial class ZombieSystem
                 // it delivers forward motion.
                 bool incumbentStillServes = zombie.PathPoints.Count > 0
                     && RouteEndpointStillServes(zombie.PathPoints[^1], routeAnchor, approachOffset);
-                bool keepsWalking = complete && incumbentStillServes
-                    && (zombie.RouteEscapingCollision
-                        ? zombie.EscapeRouteHasProgress && !zombie.PathIsPartial
-                        : KeepsWalkingTheCurrentRoute(zombie, _scratchPath, destination));
-                if (!keepsWalking && (complete || (improvesFrom && improvesRoute)))
+                // Partial prefixes end at the closest reachable face, so two queries from opposite
+                // sides of a doorway can alternately call outside and inside "closer" and reverse the
+                // zombie every repath. Finish the safe prefix already in hand; a COMPLETE route may
+                // still replace it immediately, and physical non-delivery still clears it on timeout.
+                bool keepsPartialPrefix = !complete && zombie.PathIsPartial
+                    && zombie.PathPoints.Count > 0;
+                bool keepsWalking = keepsPartialPrefix
+                    || (complete && incumbentStillServes
+                        && (zombie.RouteEscapingCollision
+                            ? zombie.EscapeRouteHasProgress && !zombie.PathIsPartial
+                            : KeepsWalkingTheCurrentRoute(zombie, _scratchPath, destination)));
+                if (!keepsWalking
+                    && (complete || (improvesFrom && improvesRoute) || startsUsefulPartial))
                 {
                     zombie.PathPoints.Clear();
                     zombie.PathPoints.AddRange(_scratchPath);

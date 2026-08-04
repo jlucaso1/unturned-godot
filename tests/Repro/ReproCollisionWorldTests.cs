@@ -115,6 +115,19 @@ public class ReproCollisionWorldTests
         Assert.Equal(0f, open, 3);
     }
 
+    [Fact]
+    public void NavSurfaceProbeUsesTheCapturedColliderThenGround()
+    {
+        var geometry = new ReproWorlds.Geometry().Ground()
+            .Box("sill", new Vector3(4f, 0.5f, 0f), new Vector3(1f, 0.5f, 1f));
+        ReproCollisionWorld world = World(geometry);
+
+        Assert.True(world.ProbeNavSurface(new Vector3(4f, 0f, 0f), 0.5f, out float sill));
+        Assert.Equal(1f, sill, 2);
+        Assert.True(world.ProbeNavSurface(new Vector3(8f, 0f, 0f), 0.5f, out float ground));
+        Assert.Equal(0f, ground, 2);
+    }
+
     // Off the slice entirely: the heightfield patch answers, and where there is none, nothing does.
     [Fact]
     public void GroundSnap_FallsBackToTheHeightPatch()

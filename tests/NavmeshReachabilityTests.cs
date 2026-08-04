@@ -160,6 +160,60 @@ public class NavmeshReachabilityTests
     }
 
     [Fact]
+    public void AbruptAuthoredTransitionMatchingCollision_IsStillDropped()
+    {
+        // A collision sampler that follows the authored surface exactly reports zero residual at every
+        // point. That must not hide an over-height transition: the middle quad climbs one metre over
+        // 20 cm, far steeper than the body can walk, while the broad floors on either side stay valid.
+        float[] z = { 0f, 1f, 1.2f, 2.2f };
+        float[] y = { 0f, 0f, 1f, 1f };
+        var vertices = new List<Vector3>();
+        var triangles = new List<int>();
+        for (int row = 0; row < z.Length; row++)
+        {
+            vertices.Add(new Vector3(-1f, y[row], z[row]));
+            vertices.Add(new Vector3(1f, y[row], z[row]));
+        }
+        for (int row = 0; row + 1 < z.Length; row++)
+        {
+            int a = row * 2, b = a + 1, c = a + 2, d = a + 3;
+            triangles.AddRange(new[] { a, b, c, b, d, c });
+        }
+        var flag = new NavFlag
+        {
+            Vertices = vertices.ToArray(),
+            Triangles = triangles.ToArray(),
+            Center = new Vector3(0f, 0.5f, 1.1f),
+            Size = new Vector3(4f, 4f, 4f),
+        };
+
+        HashSet<int> drop = NavmeshReachability.Unreachable(flag, 0.5f,
+            (Vector3 point, out float surface) => { surface = point.Y; return true; });
+
+        Assert.Equal(new HashSet<int> { 2, 3 }, drop);
+    }
+
+    [Fact]
+    public void WallCuttingAFace_IsDroppedEvenWhenItsTopIsWithinOneAuthoredStep()
+    {
+        // The real Post_0 window has this geometry: Recast authored the face 0.66 m above the approach
+        // floor, so the sill top is only 0.34 m above the FACE and a highest-only clearance calls it
+        // climbable. The capsule still has to climb the full metre from the outside half of that same
+        // face. Measuring the steep physical rise exposes that discontinuity without comparing broad
+        // neighbours or mistaking an ordinary slope for a step.
+        NavFlag flag = Strip(1, width: 2f, y: 0.66f);
+
+        HashSet<int> drop = NavmeshReachability.Unreachable(flag, 0.5f,
+            (Vector3 point, out float y) =>
+            {
+                y = point.X < 0f ? 0f : 1f;
+                return true;
+            });
+
+        Assert.Equal(2, drop.Count);
+    }
+
+    [Fact]
     public void WindowFacesAreRemoved_AndPlannerUsesTheOpenDoorCorridor()
     {
         // Two rooms separated by a raised collision band. The baked ground mesh incorrectly spans the

@@ -857,6 +857,62 @@ public class ZombieSystemTests
     }
 
     [Fact]
+    public void FirstPartialRouteMayDetourAwayFromANearbyTargetToUseADoor()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        int queries = 0;
+        system.PathQuery = (from, _, path, _) =>
+        {
+            queries++;
+            path.Add(from);
+            if (queries == 1)
+            {
+                path.Add(new Vector3(0f, 5f, 6f));
+                // The graph ends just inside the door. This is farther from the target than the spawn
+                // is, but it is the only executable prefix; collision-aware fallback can finish here.
+                path.Add(new Vector3(2f, 5f, 6f));
+            }
+            else
+            {
+                // From the doorway the opposite navmesh island looks geometrically closer, but adopting
+                // this partial prefix would reverse back outside and park at the window again.
+                path.Add(new Vector3(0f, 5f, 0f));
+            }
+            return true;
+        };
+        system.MoveResolver = (from, to, _) =>
+        {
+            // Wall at x=1.5, with its door open at z>=5.5.
+            float dx = to.X - from.X;
+            if (MathF.Abs(dx) > 1e-6f)
+            {
+                float crossing = (1.5f - from.X) / dx;
+                if (crossing >= 0f && crossing <= 1f)
+                {
+                    float z = from.Z + ((to.Z - from.Z) * crossing);
+                    if (z < 5.5f)
+                        return new Vector3(MathF.Min(to.X, 1.49f), to.Y, to.Z); // slide along it
+                }
+            }
+            return to;
+        };
+
+        var player = Player(1, new Vector3(3f, 5f, 0f));
+        float farthestZ = 0f;
+        for (int tick = 0; tick < 240; tick++)
+        {
+            system.Tick(new[] { player }, 0.1f);
+            farthestZ = MathF.Max(farthestZ, zombie.Position.Z);
+        }
+
+        Assert.True(farthestZ >= 5.5f, $"never used the door: {zombie.Position}");
+        Assert.True(queries > 1, "the route was never challenged by a later partial repath");
+        Assert.True(zombie.Position.X > 2f, $"never entered through the door: {zombie.Position}");
+        Assert.Equal(EZombieState.Attack, zombie.State);
+    }
+
+    [Fact]
     public void PartialRouteFallback_StillCannotCrossARealWall()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);

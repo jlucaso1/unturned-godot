@@ -14,8 +14,10 @@ namespace UnturnedGodot.Data;
 // a route that lies.
 //
 // The rule here is the agent's own step height. At every sample, collision is measured relative to the
-// authored navmesh plane at that exact point. A face whose real surface rises more than one step above
-// that plane is not a route; kerbs, stair treads and continuous authored slopes are left alone.
+// authored navmesh plane at that exact point. The climb a face requires is either a surface above that
+// plane, or a rise between samples steeper than the character may walk. The second part catches a
+// vertical wall cutting through a face even when Recast placed that face near the top of the sill. Kerbs,
+// stair treads and continuous slopes are left alone.
 //
 // The surface sampling is injected so this stays pure logic: the game passes a physics raycast, tests
 // pass an analytic surface.
@@ -28,8 +30,8 @@ public static class NavmeshReachability
     // Where a face is sampled. The baked triangles are large enough that one can span an opening AND the
     // solid beside it, so sampling only the centre reports the whole face walkable and the funnel then
     // cuts the shortest line straight across the solid half. Centre, three interior points and the three
-    // edge midpoints catch that; the HIGHEST clearance above the authored plane is the one that matters,
-    // because that is what a body crossing the face would have to climb onto.
+    // edge midpoints catch that. Their physical slope matters as well as the highest clearance: a face
+    // can be authored near the top of a window sill while its approach remains one metre lower.
     public static IEnumerable<Vector3> SamplePoints(Vector3 a, Vector3 b, Vector3 c)
     {
         Vector3 centre = (a + b + c) / 3f;
@@ -48,6 +50,8 @@ public static class NavmeshReachability
         int count = flag.Triangles.Length / 3;
         var clearance = new float[count];
         var known = new bool[count];
+        var pointSamples = new Vector3[7];
+        var surfaceSamples = new float[7];
 
         for (int t = 0; t < count; t++)
         {
@@ -56,17 +60,48 @@ public static class NavmeshReachability
             Vector3 c = flag.Vertices[flag.Triangles[(t * 3) + 2]];
 
             float highestClearance = float.MinValue;
+            int samples = 0;
             foreach (Vector3 sample in SamplePoints(a, b, c))
                 if (probe(sample, out float y))
-                    highestClearance = MathF.Max(highestClearance, y - sample.Y);
+                {
+                    float sampleClearance = y - sample.Y;
+                    highestClearance = MathF.Max(highestClearance, sampleClearance);
+                    pointSamples[samples] = sample;
+                    surfaceSamples[samples++] = y;
+                }
 
             if (highestClearance == float.MinValue)
                 continue; // nothing under the whole face: leave the baked data alone
-            clearance[t] = highestClearance;
+            clearance[t] = RequiredClimb(highestClearance,
+                pointSamples.AsSpan(0, samples), surfaceSamples.AsSpan(0, samples));
             known[t] = true;
         }
 
         return Unreachable(flag, stepOffset, clearance, known);
+    }
+
+    private static readonly float MaxWalkableGradient = MathF.Tan(
+        Mathf.DegToRad(Player.PlayerConfig.MaxWalkableSlopeDegrees));
+
+    // A positive residual says collision sits above the authored face. A steep physical rise says a
+    // wall or sill cuts the face despite its authored height. Height accumulated gradually over a broad
+    // face is a slope, not a step; flat collision beneath an authored ramp is walkable too. This is the
+    // distinction an unqualified min/max range cannot make on real PEI terrain.
+    public static float RequiredClimb(float highestClearance, ReadOnlySpan<Vector3> points,
+        ReadOnlySpan<float> surfaces)
+    {
+        float steepestRise = 0f;
+        for (int a = 0; a < surfaces.Length; a++)
+            for (int b = a + 1; b < surfaces.Length; b++)
+            {
+                float dx = points[b].X - points[a].X;
+                float dz = points[b].Z - points[a].Z;
+                float run = MathF.Sqrt((dx * dx) + (dz * dz));
+                float rise = MathF.Abs(surfaces[b] - surfaces[a]);
+                if (rise > run * MaxWalkableGradient)
+                    steepestRise = MathF.Max(steepestRise, rise);
+            }
+        return MathF.Max(0f, MathF.Max(highestClearance, steepestRise));
     }
 
     // The decision itself, over already-sampled clearances above the authored face. Split out so a caller
@@ -140,7 +175,10 @@ public static class NavmeshReachability
                 continue;
             }
 
-            float allowance = margin + slack[t];
+            // A highest-clearance verdict contains one sampled height, while a steep-rise verdict is the
+            // difference of two. Those two measurements may drift in opposite directions, so reserve
+            // both margins here. It is intentionally conservative for the one-height case.
+            float allowance = 2f * (margin + slack[t]);
             if (context.HasNeighbour[t]
                 && MathF.Abs(clearance[t] - stepOffset) <= allowance)
                 confirm.Add(t);

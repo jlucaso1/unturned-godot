@@ -103,6 +103,40 @@ public class ReproEdgeTests
         Assert.True(scenario.System.PathReady!());
     }
 
+    [Fact]
+    public void ReconcilePathsAppliesTheCurrentCollisionRuleInsteadOfTheRecordedFaceList()
+    {
+        // A one-metre sill cuts the middle of a baked flat field. With no recorded disabled faces the
+        // ordinary replay routes straight through it; current reconciliation must carve that band and
+        // leave a route around either open end.
+        ReproWorlds.Geometry geometry = new ReproWorlds.Geometry().Ground()
+            .Box("sill", new Vector3(20f, 0.5f, 20f), new Vector3(0.5f, 0.5f, 10f));
+        var dump = new ReproDump
+        {
+            World = new ReproWorldData
+            {
+                HasNavmesh = true,
+                Bounds = { Box() },
+                Geometry = geometry.Build(new Vector3(20f, 0f, 20f), 64f),
+            },
+            Zombies = new ReproZombieSection
+            {
+                Seams = new ReproWorldSeams { PathQuery = true },
+            },
+        };
+        var scenario = new ReproScenario(dump, new ReproScenarioOptions
+        {
+            RecomputePaths = true,
+            ReconcilePaths = true,
+            NavFlags = new[] { ReproWorlds.FlatField() },
+        });
+        var path = new List<Vector3>();
+
+        Assert.True(scenario.System.PathQuery!(new Vector3(5f, 0f, 20f),
+            new Vector3(35f, 0f, 20f), path, BakedNavGraph.AgentRadius));
+        Assert.Contains(path, point => point.Z < 10f || point.Z > 30f);
+    }
+
     // Handing the replay the real map's navmesh (or someone else's pathfinder) is what lifts it out of
     // the dump's local slice.
     [Fact]

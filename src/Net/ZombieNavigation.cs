@@ -135,7 +135,8 @@ public sealed class ZombieNavigation
             return;
 
         var watch = Stopwatch.StartNew();
-        _bakedGraph = BakedNavGraph.Build(_flags, _unreachable, _portalProbe);
+        _bakedGraph = BakedNavGraph.Build(_flags, _unreachable, _portalProbe,
+            validateIndexedPortals: true);
         _ready = true;
         int graphTriangles = 0, graphDropped = 0;
         foreach (NavFlag flag in _flags)
@@ -161,10 +162,11 @@ public sealed class ZombieNavigation
             {
                 if (BakedNavGraph.TryReadFile(graphCachePath, fingerprint, _flags,
                         out BakedNavGraph? cached,
-                        _portalProbe))
+                        _portalProbe, validateIndexedPortals: true))
                     return (cached!, true);
             }
-            BakedNavGraph built = BakedNavGraph.Build(_flags, _unreachable, _portalProbe);
+            BakedNavGraph built = BakedNavGraph.Build(_flags, _unreachable, _portalProbe,
+                validateIndexedPortals: true);
             if (fingerprint != null && graphCachePath != null)
             {
                 try
@@ -688,7 +690,9 @@ public sealed class ZombieNavigation
             else
             {
                 float delta = MathF.Abs(cpuClearance[t] - serverClearance[t]);
-                differs = delta > margin + sampled.Slack[t];
+                // RequiredClimb may difference two samples, each of which can drift by the margin and
+                // measured heightfield slack in the opposite direction.
+                differs = delta > 2f * (margin + sampled.Slack[t]);
                 if (differs && delta > worst)
                 {
                     worst = delta;
@@ -732,6 +736,8 @@ public sealed class ZombieNavigation
 
         var budget = Stopwatch.StartNew();
         long benchmarkStarted = Benchmark.RuntimeCounters.Start();
+        var surfacePoints = new Vector3[7];
+        var surfaceY = new float[7];
         foreach (int triangle in triangles)
         {
             if (_disposed || AppShutdown.IsShuttingDown)
@@ -741,6 +747,7 @@ public sealed class ZombieNavigation
             Vector3 b = flag.Vertices[flag.Triangles[(triangle * 3) + 1]];
             Vector3 c = flag.Vertices[flag.Triangles[(triangle * 3) + 2]];
             float highestClearance = float.MinValue;
+            int hitSamples = 0;
             foreach (Vector3 point in NavmeshReachability.SamplePoints(a, b, c))
             {
                 // Look down from above the highest thing the agent could step onto, and stop below
@@ -758,7 +765,12 @@ public sealed class ZombieNavigation
                         ground = ((Vector3)hit["position"]).Y;
                 _probeTally.ServerSamples++;
                 if (ground != float.MinValue)
-                    highestClearance = MathF.Max(highestClearance, ground - point.Y);
+                {
+                    float sampleClearance = ground - point.Y;
+                    highestClearance = MathF.Max(highestClearance, sampleClearance);
+                    surfacePoints[hitSamples] = point;
+                    surfaceY[hitSamples++] = ground;
+                }
 
                 // A triangle has seven probes. Checking only after all seven let one triangle
                 // overrun the nominal 0.25 ms large-map budget by 2-7x. Yield between probes so
@@ -775,7 +787,9 @@ public sealed class ZombieNavigation
                     benchmarkStarted = Benchmark.RuntimeCounters.Start();
                 }
             }
-            clearance[triangle] = highestClearance == float.MinValue ? 0f : highestClearance;
+            clearance[triangle] = highestClearance == float.MinValue ? 0f
+                : NavmeshReachability.RequiredClimb(highestClearance,
+                    surfacePoints.AsSpan(0, hitSamples), surfaceY.AsSpan(0, hitSamples));
             known[triangle] = highestClearance != float.MinValue;
         }
         Benchmark.RuntimeCounters.Record(Benchmark.RuntimeCounters.Counter.NavigationReconcile,
@@ -808,7 +822,8 @@ public sealed class ZombieNavigation
         if (_bakedGraph != null)
             return;
         BakedNavGraph graph = await Task.Run(
-            () => BakedNavGraph.Build(_flags, _unreachable, _portalProbe));
+            () => BakedNavGraph.Build(_flags, _unreachable, _portalProbe,
+                validateIndexedPortals: true));
         if (_disposed || AppShutdown.IsShuttingDown)
             return;
         _bakedGraph = graph;
