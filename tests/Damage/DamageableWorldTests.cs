@@ -3,8 +3,8 @@ using System.Collections.Generic;
 using Godot;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Damage;
-using UnturnedGodot.Data;
 using UnturnedGodot.Dat;
+using UnturnedGodot.Data;
 using Xunit;
 
 namespace UnturnedGodot.Tests.Damage;
