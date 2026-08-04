@@ -53,6 +53,24 @@ public class ReproCollisionWorldTests
         Assert.True(result.X <= 9.36f, $"passed into the wall: {result}");
     }
 
+    [Fact]
+    public void AnInitiallyOverlappingCapsule_IsRecoveredAwayFromItsRequestedBarrierSide()
+    {
+        var geometry = new ReproWorlds.Geometry().Ground()
+            .Box("thin wall", new Vector3(0f, 1.5f, 0f), new Vector3(0.1f, 1.5f, 5f));
+        ReproCollisionWorld world = World(geometry);
+
+        // This is an already-corrupt state: the centre is inside the wall. Recovery must put it back
+        // on the side opposite the requested +X motion, never use the overlap to cross the thin wall.
+        Vector3 result = world.Resolve(new Vector3(-0.05f, 0f, 0f),
+            new Vector3(1f, 0f, 0f), Radius);
+
+        Assert.True(result.X < -0.49f, $"overlap recovery crossed the wall: {result}");
+        Assert.Equal("thin wall", world.LastBlocker);
+        Vector3 away = world.Resolve(result, result + new Vector3(-0.5f, 0f, 0f), Radius);
+        Assert.True(away.X < result.X - 0.45f, $"recovered body remained embedded: {away}");
+    }
+
     // A kerb inside the CharacterController's step offset is climbed; a wall is not. (Anything under
     // 0.4 m never touches the capsule at all — it starts at the knees — and the ground snap lifts the
     // body over it, which is how the host models a CharacterController's grounding pass.)
@@ -70,6 +88,22 @@ public class ReproCollisionWorldTests
         Vector3 stopped = wall.Resolve(new Vector3(9f, 0f, 0f), new Vector3(9.45f, 0f, 0f), Radius);
         Assert.Equal(9.35f, stopped.X, 2);
         Assert.Equal(0f, stopped.Y, 3);
+    }
+
+    [Fact]
+    public void ARouteLengthProbeCannotUseStepUpToTeleportAcrossALowObstacle()
+    {
+        var counter = new ReproWorlds.Geometry().Ground()
+            .Box("counter", new Vector3(2f, 0.225f, 0f), new Vector3(1f, 0.225f, 8f));
+        ReproCollisionWorld world = World(counter);
+
+        // The same 0.45 m obstacle is a valid step over one real 0.5 m movement above. A route validator
+        // asking about the whole 3.45 m leg at once must not reuse that rule: the body cannot land on the
+        // far side in one tick, and accepting it certified the three-point routes captured in 155709.
+        Vector3 result = world.Resolve(new Vector3(0.55f, 0f, 0f), new Vector3(4f, 0f, 0f), Radius);
+
+        Assert.True(result.X < 1f, $"long clearance probe crossed the counter: {result}");
+        Assert.Equal("counter", world.LastBlocker);
     }
 
     [Fact]

@@ -80,6 +80,9 @@ internal static class ZombiePhysics
             var chest = new Vector3(0f, ZombieBody.CapsuleCenter, 0f);
             Vector3 at = from;
             Vector3 motion = to - from;
+            float initialHorizontalSquared = (motion.X * motion.X) + (motion.Z * motion.Z);
+            bool longClearanceProbe = initialHorizontalSquared
+                > ZombieBody.MaxStepMotion * ZombieBody.MaxStepMotion;
             for (int pass = 0; pass < ZombieBody.MaxSlides; pass++)
             {
                 if (motion.LengthSquared() < 1e-8f)
@@ -108,7 +111,49 @@ internal static class ZombiePhysics
                     }
                 }
 
-                if (pass == 0)
+                // CastMotion intentionally ignores a collider already intersecting the capsule at
+                // the start. Endpoint occupancy catches the symptom but, without recovering the
+                // measured penetration, every possible move is then rejected forever. CollideShape
+                // returns contact pairs whose difference is the minimum correction. Bias an ambiguous
+                // horizontal correction against the requested motion so recovery cannot carry a body
+                // through the same thin barrier it was trying to cross.
+                if (pass == 0 && destinationOccupied)
+                {
+                    query.Transform = new Transform3D(Basis.Identity, at + chest);
+                    query.Motion = Vector3.Zero;
+                    Godot.Collections.Array<Vector3> contacts = space.CollideShape(query, 8);
+                    Vector3 correction = Vector3.Zero;
+                    for (int i = 0; i + 1 < contacts.Count; i += 2)
+                    {
+                        Vector3 candidate = contacts[i + 1] - contacts[i];
+                        Vector3 flatCandidate = candidate with { Y = 0f };
+                        Vector3 flatRequested = motion with { Y = 0f };
+                        if (flatCandidate.Dot(flatRequested) > 0f)
+                            candidate = -candidate;
+                        if (candidate.LengthSquared() > correction.LengthSquared())
+                            correction = candidate;
+                    }
+                    if (correction.LengthSquared() > 1e-10f
+                        && correction.LengthSquared() <= radius * radius * 4f)
+                    {
+                        at += correction + (correction.Normalized() * 0.001f);
+                        continue;
+                    }
+                }
+
+                // Navigation validates complete route legs with this same authoritative capsule seam.
+                // Such a multi-metre call asks only whether the endpoint is directly reachable. The
+                // slide/step logic below models delivery over one <=0.52 m simulation tick; running it
+                // over a long leg can land beyond a counter or wall and falsely certify that crossing.
+                if (longClearanceProbe)
+                {
+                    float probeFraction = destinationOccupied ? 0f : cast[0];
+                    return at + (motion * probeFraction);
+                }
+
+                float horizontalMotionSquared = (motion.X * motion.X) + (motion.Z * motion.Z);
+                if (pass == 0
+                    && horizontalMotionSquared <= ZombieBody.MaxStepMotion * ZombieBody.MaxStepMotion)
                 {
                     query.Transform = new Transform3D(Basis.Identity,
                         at + chest + new Vector3(0f, Player.PlayerConfig.StepOffset, 0f));

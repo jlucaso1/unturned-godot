@@ -209,12 +209,24 @@ public sealed class ReproScenario
             {
                 HashSet<int> current = NavmeshReachability.Unreachable(flag,
                     Player.PlayerConfig.StepOffset, ProbeNavSurface);
-                if (current.Count == 0)
-                    continue;
-                if (!exclusions.TryGetValue(flag, out HashSet<int>? combined))
-                    exclusions[flag] = current;
+                if (!exclusions.TryGetValue(flag, out HashSet<int>? reconciled))
+                    reconciled = new HashSet<int>();
+                int faces = flag.Triangles.Length / 3;
+                for (int triangle = 0; triangle < faces; triangle++)
+                {
+                    // A current verdict replaces the recorded one only when every sample that can
+                    // influence it lies inside the captured collision slice. Outside it, absence of
+                    // geometry is unknown rather than proof that the old exclusion was wrong.
+                    if (!NavFaceCovered(flag, triangle))
+                        continue;
+                    reconciled.Remove(triangle);
+                    if (current.Contains(triangle))
+                        reconciled.Add(triangle);
+                }
+                if (reconciled.Count > 0)
+                    exclusions[flag] = reconciled;
                 else
-                    combined.UnionWith(current);
+                    exclusions.Remove(flag);
             }
         BakedNavPortalProbe? portalProbe = Collision == null
             ? null
@@ -226,6 +238,17 @@ public sealed class ReproScenario
 
     private bool ProbeNavSurface(Vector3 point, out float y) =>
         Collision!.ProbeNavSurface(point, Player.PlayerConfig.StepOffset, out y);
+
+    private bool NavFaceCovered(NavFlag flag, int triangle)
+    {
+        Vector3 a = flag.Vertices[flag.Triangles[triangle * 3]];
+        Vector3 b = flag.Vertices[flag.Triangles[(triangle * 3) + 1]];
+        Vector3 c = flag.Vertices[flag.Triangles[(triangle * 3) + 2]];
+        foreach (Vector3 point in NavmeshReachability.SamplePoints(a, b, c))
+            if (!Collision!.CoversNavSurface(point, Player.PlayerConfig.StepOffset))
+                return false;
+        return true;
+    }
 
     private Vector3 ResolvePortal(Vector3 from, Vector3 to, float radius)
     {

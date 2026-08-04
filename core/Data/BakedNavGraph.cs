@@ -8,7 +8,7 @@ using Godot;
 
 namespace UnturnedGodot.Data;
 
-// Resolves a capsule motion used to validate portal crossings and completed route legs. The baked mesh
+// Resolves a capsule motion used to validate portal crossings and route legs. The baked mesh
 // predates the map's object collision, so a geometrically valid route can still run through a wall that
 // only exists in the physics world. Null keeps the graph usable without a collision world.
 public delegate Vector3 BakedNavPortalProbe(Vector3 from, Vector3 to, float radius);
@@ -1548,8 +1548,9 @@ public sealed class BakedNavGraph
                 // funnel legs the shortcut could not replace, which is the smaller set. Rounding first
                 // and shortcutting after measured the same routes at 31.7 mean waypoints against 27.8.
                 RoundCorners(output, begin, portals, workspace.Walls, radius);
-                if (complete && !ValidateCompletedRoute(output, begin, corridor, radius,
-                    ref portalProbeBudget))
+                int routeProbeBudget = complete ? portalProbeBudget
+                    : Math.Max(portalProbeBudget, 1);
+                if (!ValidateRouteLeg(output, begin, corridor, radius, ref routeProbeBudget))
                 {
                     output.RemoveRange(begin, output.Count - begin);
                     return false;
@@ -1573,7 +1574,7 @@ public sealed class BakedNavGraph
         // collision at an ordinary portal in that corridor, promote that local span into the existing
         // incremental validator and reject this answer. The next bounded repath either uses the surviving
         // open part or routes elsewhere.
-        private bool ValidateCompletedRoute(List<Vector3> output, int begin,
+        private bool ValidateRouteLeg(List<Vector3> output, int begin,
             List<CorridorPortal> corridor, float radius, ref int probeBudget)
         {
             PortalValidator? validator = _portalValidator;

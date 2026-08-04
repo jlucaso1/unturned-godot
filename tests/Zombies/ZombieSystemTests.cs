@@ -1100,7 +1100,8 @@ public class ZombieSystemTests
         Assert.True(queries >= 3);
         Assert.Contains(trace, p => p.Z >= 2f);
         Assert.True(trace[^1].X > 8f, $"never escaped the window route: {trace[^1]}");
-        Assert.Equal(EZombieState.Attack, state);
+        Assert.True(state == EZombieState.Attack,
+            $"window recovery ended in {state}; last={trace[^1]}, queries={queries}");
     }
 
     [Fact]
@@ -1431,6 +1432,103 @@ public class ZombieSystemTests
         Assert.Equal(EZombieState.Attack, zombie.State);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ARepeatedBlockedGraphRoute_UsesTheBoundedPhysicalDetour(bool partial)
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        system.PathQuery = (from, to, path, _) =>
+        {
+            // The baked graph sees either a same-face direct answer or only the near-side prefix and
+            // returns it forever. The finite wall lives inside that face, so no indexed portal can
+            // teach the graph about it.
+            path.Add(from);
+            path.Add(partial ? new Vector3(2f, 5f, 0f) : to);
+            return true;
+        };
+        system.MoveResolver = (from, to, radius) => SegmentClear(from, to, radius) ? to : from;
+        system.PhysicalLineBlocked = (from, to) => !SegmentClear(from, to, zombie.Radius);
+        system.GroundSnap = (Vector3 point, out float y) => { y = 5f; return true; };
+
+        var player = Player(1, new Vector3(10f, 5f, 0f),
+            UnturnedGodot.Player.EPlayerStance.Sprint);
+        for (int tick = 0; tick < 240; tick++)
+            system.Tick(new[] { player }, ImpassableDt);
+
+        Assert.True(zombie.State == EZombieState.Attack,
+            $"detour ended at {zombie.Position} in {zombie.State}, route "
+            + $"{zombie.CurrentWaypointIndex}/{zombie.PathPoints.Count}, "
+            + $"escape={zombie.RouteEscapingCollision}/{zombie.CollisionEscapeRoute}, "
+            + $"blocked={zombie.BlockedRouteTime:0.##}: {string.Join(" ", zombie.PathPoints)}");
+        Assert.True(zombie.Position.X > 8f, $"never got round the in-face wall: {zombie.Position}");
+        Assert.False(zombie.CollisionEscapeRoute,
+            "the local route should relinquish control after direct capsule reach returns");
+
+        static bool SegmentClear(Vector3 from, Vector3 to, float radius)
+        {
+            const float wallX = 4f;
+            float dx = to.X - from.X;
+            if (MathF.Abs(dx) <= 1e-6f || (from.X - wallX) * (to.X - wallX) > 0f)
+                return true;
+            float along = (wallX - from.X) / dx;
+            if (along is < 0f or > 1f)
+                return true;
+            float z = from.Z + ((to.Z - from.Z) * along);
+            return MathF.Abs(z) > 4f + radius;
+        }
+    }
+
+    [Fact]
+    public void AFinishedCompleteRouteToAnOldTargetPosition_DoesNotBecomeAPermanentStop()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.State = EZombieState.Chase;
+        zombie.TargetPlayer = 1;
+        zombie.PathPoints.Add(zombie.Position);
+        zombie.CurrentWaypointIndex = 0;
+        zombie.TargetReached = true;
+        zombie.RepathTimer = -1f;
+        zombie.RepathGranted = true;
+        system.PathQuery = (_, _, _, _) => false;
+        system.MoveResolver = (_, to, _) => to;
+
+        var player = Player(1, new Vector3(10f, 5f, 0f),
+            UnturnedGodot.Player.EPlayerStance.Sprint);
+        for (int tick = 0; tick < 40; tick++)
+            system.Tick(new[] { player }, ImpassableDt);
+
+        Assert.Equal(EZombieState.Attack, zombie.State);
+        Assert.True(zombie.Position.X > 9f,
+            $"the exhausted old endpoint still held the body: {zombie.Position}");
+    }
+
+    [Fact]
+    public void AFinishedFormationEndpointThatStillCannotAttack_KeepsClosingTheGap()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.State = EZombieState.Chase;
+        zombie.TargetPlayer = 1;
+        zombie.PathPoints.Add(zombie.Position);
+        zombie.TargetReached = true;
+        zombie.RepathTimer = -1f;
+        zombie.RepathGranted = true;
+        system.PathQuery = (_, _, _, _) => false;
+        system.MoveResolver = (_, to, _) => to;
+
+        // 2.5 m is inside the three-metre endpoint tolerance (2 m path completion + 1 m
+        // formation offset), but outside a normal zombie's one-metre attack radius.
+        var player = Player(1, new Vector3(2.5f, 5f, 0f),
+            UnturnedGodot.Player.EPlayerStance.Sprint);
+        for (int tick = 0; tick < 25; tick++)
+            system.Tick(new[] { player }, ImpassableDt);
+
+        Assert.Equal(EZombieState.Attack, zombie.State);
+        Assert.True(zombie.Position.X > 1.5f,
+            $"the formation endpoint was mistaken for attack arrival: {zombie.Position}");
+    }
+
     // The other side of the same rule: evidence is about DELIVERED motion, so a route that keeps
     // moving the body must never accumulate any, however many times it is repathed.
     [Fact]
@@ -1718,6 +1816,38 @@ public class ZombieSystemTests
         Assert.Equal(8f, zombie.PathPoints[^1].Y, 2);
         Assert.True(zombie.Position.X > 0f,
             $"the downstairs route kept vetoing the stairs: {zombie.Position}");
+    }
+
+    [Fact]
+    public void ACompleteEndpointDiagonallyOutsideTheCompletionSphere_CannotVetoStairs()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.State = EZombieState.Chase;
+        zombie.TargetPlayer = 1;
+        zombie.Yaw = -90f;
+        zombie.Path = EZombiePath.Rush;
+        zombie.PathPoints.Add(zombie.Position);
+        zombie.PathPoints.Add(zombie.Position); // 2.5 m horizontal and 1.9 m below the player
+        zombie.CurrentWaypointIndex = 1;
+        zombie.RepathTimer = -1f;
+        zombie.RepathGranted = true;
+
+        Vector3 stair = new(5f, 5f, 0f);
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            path.Add(from);
+            path.Add(stair);
+            path.Add(stair with { Y = 6.9f });
+            path.Add(to);
+            return true;
+        };
+        var player = Player(1, new Vector3(2.5f, 6.9f, 0f),
+            UnturnedGodot.Player.EPlayerStance.Sprint);
+
+        system.Tick(new[] { player }, ImpassableDt);
+
+        Assert.Contains(stair, zombie.PathPoints);
+        Assert.Equal(6.9f, zombie.PathPoints[^1].Y, 2);
     }
 
     [Fact]
@@ -2022,9 +2152,10 @@ public class ZombieSystemTests
         Assert.Equal(EZombieState.Attack, zombie.State);
     }
 
-    // The regression behind the window-sill shuffle: with the way forward blocked, the brain must
-    // hand the same forward step to the resolver every tick and accept the answer. It must never
-    // try one side and then the other, which is what made a stuck zombie visibly pace left-right.
+    // The regression behind the window-sill shuffle: before sustained collision has invalidated the
+    // route, the follower must hand the same forward step to the resolver every tick and accept the
+    // answer. A bounded, physically-verified detour may probe later; this pins that ordinary following
+    // still has no per-tick left/right sidestep, which was what made the zombie visibly pace at a sill.
     [Fact]
     public void BlockedZombie_NeverProbesSideways()
     {
@@ -2045,7 +2176,9 @@ public class ZombieSystemTests
         };
 
         var player = Player(1, new Vector3(10, 5, 0), UnturnedGodot.Player.EPlayerStance.Sprint);
-        for (int i = 0; i < 10; i++)
+        int ordinaryFollowerTicks = (int)MathF.Floor(
+            ZombieSystem.BlockedRouteTimeout / ImpassableDt) - 1;
+        for (int i = 0; i < ordinaryFollowerTicks; i++)
             system.Tick(new[] { player }, 0.1f);
 
         Assert.NotEmpty(asked);

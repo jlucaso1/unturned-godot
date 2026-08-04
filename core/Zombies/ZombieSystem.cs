@@ -73,6 +73,10 @@ public sealed class ZombieInstance
     // instead of swapping back to a shorter route through the same obstacle on the next repath.
     public bool RouteEscapingCollision;
     public bool EscapeRouteHasProgress; // the current replacement has delivered forward world motion
+    // A short lateral waypoint installed only after physics disproves the graph route. Keeping this
+    // distinct from an ordinary partial route lets the body finish walking round an in-face obstacle
+    // instead of accepting the same blocked graph answer at every repath.
+    public bool CollisionEscapeRoute;
 
     // ZombieManager.getZombieSpeed with Slow_Movement=false (NORMAL difficulty).
     public float Speed => Speciality switch
@@ -489,6 +493,7 @@ public sealed partial class ZombieSystem
         zombie.BlockedRouteTime = 0f;
         zombie.RouteEscapingCollision = false;
         zombie.EscapeRouteHasProgress = false;
+        zombie.CollisionEscapeRoute = false;
         // And the route stops being the incumbent a replacement has to beat. Move scores a partial
         // replacement against the endpoint of the route in hand, measured to the CURRENT target — a
         // route built for someone else can happen to end nearer the new player than anything actually
@@ -644,6 +649,7 @@ public sealed partial class ZombieSystem
         {
             zombie.RouteEscapingCollision = false;
             zombie.EscapeRouteHasProgress = false;
+            zombie.CollisionEscapeRoute = false;
         }
         if (sqrHorizontal > 4f)
         {
@@ -787,7 +793,9 @@ public sealed partial class ZombieSystem
                 // still replace it immediately, and physical non-delivery still clears it on timeout.
                 bool keepsPartialPrefix = !complete && zombie.PathIsPartial
                     && zombie.PathPoints.Count > 0;
-                bool keepsWalking = keepsPartialPrefix
+                bool keepsCollisionEscape = zombie.CollisionEscapeRoute
+                    && zombie.RouteEscapingCollision;
+                bool keepsWalking = keepsCollisionEscape || keepsPartialPrefix
                     || (complete && incumbentStillServes
                         && (zombie.RouteEscapingCollision
                             ? zombie.EscapeRouteHasProgress && !zombie.PathIsPartial
@@ -801,6 +809,7 @@ public sealed partial class ZombieSystem
                     zombie.TargetReached = false;
                     zombie.PathIsPartial = !complete;
                     zombie.RouteServedAnotherTarget = false; // this one was built for the current target
+                    zombie.CollisionEscapeRoute = false;
                     if (zombie.RouteEscapingCollision)
                         zombie.EscapeRouteHasProgress = false;
                     // The blocked-route evidence deliberately SURVIVES a repath. Accepting a route is
@@ -816,6 +825,30 @@ public sealed partial class ZombieSystem
             }
         }
 
+        // A complete route is only complete for the target position it was built against. Once the
+        // body has reached that endpoint but still cannot attack (or the target has left its legitimate
+        // completion radius), standing there is not progress and produces no movement step for the
+        // collision timeout to judge. Prefer a freshly accepted graph route above; if none exists, ask
+        // the bounded physical planner once and discard the exhausted incumbent on failure.
+        bool exhaustedCompleteRoute = zombie.TargetReached && !zombie.PathIsPartial
+            && zombie.PathPoints.Count > 0
+            && (zombie.State == EZombieState.Chase
+                || !RouteEndpointStillServes(zombie.PathPoints[^1], routeAnchor, approachOffset));
+        if (exhaustedCompleteRoute)
+        {
+            zombie.RouteEscapingCollision = true;
+            zombie.EscapeRouteHasProgress = false;
+            if (!TryInstallCollisionDetour(zombie, zombie.Position, routeAnchor))
+            {
+                zombie.PathPoints.Clear();
+                zombie.CurrentWaypointIndex = 0;
+                zombie.TargetReached = false;
+                zombie.CollisionEscapeRoute = false;
+                zombie.RouteServedAnotherTarget = false;
+                zombie.RepathTimer = 0f;
+            }
+        }
+
         if (zombie.PathPoints.Count == 0)
             return; // no route has ever succeeded: stand, like the original with path == null
 
@@ -825,18 +858,21 @@ public sealed partial class ZombieSystem
         // holds while an artificial navmesh split no longer strands a running-in-place zombie.
         if (zombie.PathIsPartial && zombie.TargetReached)
         {
-            MoveTowards(zombie, destination, dt, routeGuided: true);
+            MoveTowards(zombie, destination, dt, routeGuided: true,
+                collisionDetourDestination: routeAnchor);
             return;
         }
 
-        Vector3 velocity = CalculateVelocity(zombie, destination, canTurn, dt);
+        Vector3 velocity = CalculateVelocity(zombie, destination, canTurn, dt,
+            out Vector3 intendedDirection);
         if (!canTurn)
             zombie.SteerDirection = directDirection;
         RotateTowards(zombie, zombie.SteerDirection, dt);
-        ApplyStep(zombie, velocity * dt, dt, routeGuided: true);
+        ApplyStep(zombie, velocity * dt, intendedDirection, routeAnchor, dt, routeGuided: true);
     }
 
     private readonly List<Vector3> _scratchPath = new();
+    private readonly ZombieCollisionDetour _collisionDetour = new();
 
     // Is the route in hand still the one to walk? Only asked of a complete replacement against a
     // complete incumbent that was built for this target: a partial incumbent, or one inherited from
@@ -879,18 +915,20 @@ public sealed partial class ZombieSystem
         return offered + RouteTieBand >= remaining;
     }
 
-    // A successful query may finish up to 2 m from its requested endpoint. Chase endpoints are requested
-    // another metre to the side/short of the actual player for horde formation, so an incumbent can be
-    // at most 3 m away horizontally and still be the complete route built for this same stationary
-    // target. Vertical tolerance stays at the query's 2 m: broadening it with the formation radius would
-    // let a route on the storey below veto the real stairs route.
+    // A successful query may finish within a 2 m 3D sphere around its requested endpoint. Chase
+    // endpoints are requested up to one horizontal metre from the actual player for horde formation,
+    // so subtract that possible offset from the horizontal error before testing the SAME 3D sphere.
+    // Treating horizontal and vertical tolerances independently admits diagonal endpoints outside the
+    // completion sphere and can let a route on the lower storey veto the real stairs route.
     private static bool RouteEndpointStillServes(Vector3 endpoint, Vector3 anchor,
         float approachOffset)
     {
         const float completionRadius = 2f;
-        float horizontal = completionRadius + MathF.Max(0f, approachOffset);
-        return HorizontalDistanceSquared(endpoint, anchor) <= horizontal * horizontal
-            && MathF.Abs(endpoint.Y - anchor.Y) <= completionRadius;
+        float horizontal = MathF.Sqrt(HorizontalDistanceSquared(endpoint, anchor));
+        float residualHorizontal = MathF.Max(0f, horizontal - MathF.Max(0f, approachOffset));
+        float vertical = endpoint.Y - anchor.Y;
+        return (residualHorizontal * residualHorizontal) + (vertical * vertical)
+            <= completionRadius * completionRadius;
     }
 
     // The ground still to cover, measured exactly as the follower walks it. On a complete route whose
@@ -919,7 +957,7 @@ public sealed partial class ZombieSystem
     // by how aligned the body is with the desired direction (a zombie turns INTO its route instead
     // of strafing sideways onto it) and by the slowdown near the target point.
     private static Vector3 CalculateVelocity(ZombieInstance zombie, Vector3 destination,
-        bool canTurn, float dt)
+        bool canTurn, float dt, out Vector3 intendedDirection)
     {
         List<Vector3> vp = zombie.PathPoints;
         // (The original also clamps index >= count here, guarding its ASYNC path callbacks; our
@@ -945,9 +983,11 @@ public sealed partial class ZombieSystem
         zombie.CurrentWaypointIndex = index;
 
         Vector3 targetPoint = CalculateTargetPoint(zombie.Position, segmentStart,
-            vp[vp.Count == 1 ? 0 : index], index == vp.Count - 1, destination);
+            vp[vp.Count == 1 ? 0 : index],
+            index == vp.Count - 1 && !zombie.CollisionEscapeRoute, destination);
         Vector3 direction = targetPoint - zombie.Position;
         direction.Y = 0f;
+        intendedDirection = direction;
         float magnitude = direction.Length();
         float slowdown = Mathf.Clamp(magnitude / SlowdownDistance, 0f, 1f);
         if (canTurn)
@@ -1064,6 +1104,7 @@ public sealed partial class ZombieSystem
         zombie.RouteServedAnotherTarget = false;
         zombie.RouteEscapingCollision = false;
         zombie.EscapeRouteHasProgress = false;
+        zombie.CollisionEscapeRoute = false;
         zombie.PathIsPartial = false;
         zombie.CurrentWaypointIndex = 0;
         zombie.TargetReached = false;
@@ -1102,7 +1143,7 @@ public sealed partial class ZombieSystem
     // NonPathfindingZombieMovementComponent.Move: straight-line seek with its own 720°/s turning —
     // the original's fallback when no pathfinding exists, kept for maps without navmesh data.
     private void MoveTowards(ZombieInstance zombie, Vector3 targetPosition, float dt,
-        bool routeGuided = false)
+        bool routeGuided = false, Vector3? collisionDetourDestination = null)
     {
         Face(zombie, targetPosition, dt);
         Vector3 flat = new(targetPosition.X - zombie.Position.X, 0f, targetPosition.Z - zombie.Position.Z);
@@ -1110,7 +1151,8 @@ public sealed partial class ZombieSystem
         if (distance < 1e-4f)
             return;
         float step = MathF.Min(zombie.Speed * dt, distance);
-        ApplyStep(zombie, flat / distance * step, dt, routeGuided);
+        ApplyStep(zombie, flat / distance * step, flat,
+            collisionDetourDestination ?? targetPosition, dt, routeGuided);
     }
 
     // The physics leg of a movement step: world collision (the host's capsule collide-and-slide),
@@ -1120,7 +1162,8 @@ public sealed partial class ZombieSystem
     // evidence about the route: a neighbour holding the final position back means "wait for the
     // crowd", not "the nav route crosses a wall". Sustained world non-delivery invalidates only the
     // stale route so a newly reconciled door route is allowed to replace it on the next bounded repath.
-    private void ApplyStep(ZombieInstance zombie, Vector3 step, float dt, bool routeGuided)
+    private void ApplyStep(ZombieInstance zombie, Vector3 step, Vector3 intendedDirection,
+        Vector3 destination, float dt, bool routeGuided)
     {
         if ((step.X * step.X) + (step.Z * step.Z) < 1e-10f)
             return;
@@ -1180,18 +1223,39 @@ public sealed partial class ZombieSystem
             return;
         }
 
-        float requestedSquared = (step.X * step.X) + (step.Z * step.Z);
+        float requestedLength = MathF.Sqrt((step.X * step.X) + (step.Z * step.Z));
         float deliveredX = worldNext.X - before.X, deliveredZ = worldNext.Z - before.Z;
-        // Magnitude alone calls a wall slide "progress" even when all of it is perpendicular to the
-        // requested segment. Project onto the requested step so only forward world delivery clears
-        // the evidence. (Crowd separation remains deliberately absent: worldNext predates it.)
-        float deliveredAlongStep = (deliveredX * step.X) + (deliveredZ * step.Z);
-        float minimumAlongStep = requestedSquared * MinRouteProgressFraction;
-        if (deliveredAlongStep >= minimumAlongStep)
+        float intendedLength = MathF.Sqrt((intendedDirection.X * intendedDirection.X)
+            + (intendedDirection.Z * intendedDirection.Z));
+        // The requested step follows the body's FORWARD while it turns toward the route. Projecting
+        // onto that step therefore called any CharacterController wall slide progress, including the
+        // captured fence loop where the body repeatedly rotated, slid a few millimetres along the
+        // fence, and snapped back. The route's intended leg is the actual question: only delivery
+        // toward that leg clears the evidence. Ordinary turning has far less than the 0.75 s timeout
+        // to align, and crowd separation remains deliberately absent because worldNext predates it.
+        float deliveredAlongIntent = intendedLength > 1e-5f
+            ? ((deliveredX * intendedDirection.X) + (deliveredZ * intendedDirection.Z))
+                / intendedLength
+            : 0f;
+        float minimumAlongIntent = requestedLength * MinRouteProgressFraction;
+        if (deliveredAlongIntent >= minimumAlongIntent)
         {
             zombie.BlockedRouteTime = 0f;
             if (zombie.RouteEscapingCollision)
                 zombie.EscapeRouteHasProgress = true;
+            return;
+        }
+
+        // Every edge of a local collision route was already accepted by this same capsule resolver.
+        // While the body rotates into one of those short legs, forward delivery is sufficient evidence
+        // that the verified route is being executed. Graph routes do not get this exception: the fence
+        // loop consisted precisely of unverified forward wall-slides while the body kept rotating.
+        float deliveredAlongStep = ((deliveredX * step.X) + (deliveredZ * step.Z))
+            / requestedLength;
+        if (zombie.CollisionEscapeRoute && deliveredAlongStep >= minimumAlongIntent)
+        {
+            zombie.BlockedRouteTime = 0f;
+            zombie.EscapeRouteHasProgress = true;
             return;
         }
 
@@ -1207,12 +1271,56 @@ public sealed partial class ZombieSystem
         zombie.BlockedRouteTime = 0f;
         zombie.RouteEscapingCollision = true;
         zombie.EscapeRouteHasProgress = false;
+        if (TryInstallCollisionDetour(zombie, before, destination))
+            return;
         zombie.PathPoints.Clear();
         zombie.PathIsPartial = false;
+        zombie.CollisionEscapeRoute = false;
         zombie.RouteServedAnotherTarget = false;
         zombie.CurrentWaypointIndex = 0;
         zombie.TargetReached = false;
         zombie.RepathTimer = 0f;
+    }
+
+    // Keep the state-machine seam here and the bounded physical search in ZombieCollisionDetour. The
+    // scratch list is safe to reuse: movement is sequential, and the last graph query has already been
+    // copied into the zombie before a blocked step can reach this method.
+    private bool TryInstallCollisionDetour(ZombieInstance zombie, Vector3 from, Vector3 destination)
+    {
+        if (MoveResolver == null)
+            return false;
+        if (!_collisionDetour.TryFind(from, destination, zombie.Radius, DetourPoint,
+                CapsuleCanReach, _scratchPath))
+            return false;
+        zombie.PathPoints.Clear();
+        zombie.PathPoints.AddRange(_scratchPath);
+        zombie.CurrentWaypointIndex = 1;
+        zombie.TargetReached = false;
+        zombie.PathIsPartial = false;
+        zombie.RouteServedAnotherTarget = false;
+        zombie.CollisionEscapeRoute = true;
+        zombie.RepathTimer = RepathRate;
+        return true;
+    }
+
+    private bool DetourPoint(Vector3 point, out Vector3 grounded)
+    {
+        grounded = point;
+        if (!CheckNavigation(point))
+            return false;
+        if (GroundSnap != null)
+        {
+            if (!GroundSnap(point, out float y))
+                return false;
+            grounded.Y = y;
+        }
+        return true;
+    }
+
+    private bool CapsuleCanReach(Vector3 from, Vector3 target, float radius)
+    {
+        Vector3 resolved = MoveResolver!(from, target, radius);
+        return resolved.DistanceSquaredTo(target) <= 0.05f * 0.05f;
     }
 
     private static void Face(ZombieInstance zombie, Vector3 targetPosition, float dt)

@@ -708,13 +708,39 @@ public class BakedNavGraphTests
         Assert.True(probes > 1, "the failed route did not promote and sample its indexed portal");
 
         // The cached physical verdict is now part of A*. With no opening in this one-metre strip the
-        // safe answer is the closest reachable partial route on the near side, and no probe is repeated.
+        // safe answer is the closest reachable partial route on the near side; only its bounded leg is
+        // swept, while the full portal verdict itself is not sampled again.
         int afterLearning = probes;
         var safe = new List<Vector3>();
         Assert.True(graph.TryPath(from, target, safe));
         Assert.NotEqual(target, safe[^1]);
         Assert.True(safe[^1].X < 2f);
-        Assert.Equal(afterLearning, probes);
+        Assert.InRange(probes - afterLearning, 1, 2); // bounded safe-leg checks, no full-span re-sampling
+    }
+
+    [Fact]
+    public void AThinFenceOnAPartialRoute_IsLearnedBeforeTheFollowerCanLoopOnIt()
+    {
+        NavFlag flag = Strip(5);
+        var removed = new Dictionary<NavFlag, HashSet<int>>
+        {
+            [flag] = new HashSet<int> { 8, 9 }, // disconnect the target in the final quad
+        };
+        int probes = 0;
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { flag }, removed,
+            ThinFenceProbe(2f, () => probes++), validateIndexedPortals: true);
+        Vector3 from = new(0.1f, 0f, 0.5f), target = new(4.9f, 0f, 0.5f);
+
+        // The geometrically closest partial prefix crosses x=2, but its first physical sweep proves
+        // the fence disagrees with that indexed portal and rejects the answer before movement sees it.
+        Assert.False(graph.TryPath(from, target, new List<Vector3>()));
+        int afterLearning = probes;
+
+        var safe = new List<Vector3>();
+        Assert.True(graph.TryPath(from, target, safe));
+        Assert.NotEqual(target, safe[^1]);
+        Assert.True(safe[^1].X < 2f);
+        Assert.InRange(probes - afterLearning, 1, 2); // bounded safe-leg checks, no full-span re-sampling
     }
 
     [Fact]

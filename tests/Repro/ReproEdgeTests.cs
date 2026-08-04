@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Godot;
 using UnturnedGodot.Data;
 using UnturnedGodot.Repro;
@@ -135,6 +136,85 @@ public class ReproEdgeTests
         Assert.True(scenario.System.PathQuery!(new Vector3(5f, 0f, 20f),
             new Vector3(35f, 0f, 20f), path, BakedNavGraph.AgentRadius));
         Assert.Contains(path, point => point.Z < 10f || point.Z > 30f);
+    }
+
+    [Fact]
+    public void ReconcilePathsReenablesARecordedFaceProvenWalkableByCapturedGeometry()
+    {
+        NavFlag flag = ReproWorlds.FlatField();
+        const int Quads = 40;
+        var stale = new HashSet<int>
+        {
+            2 * ((20 * Quads) + 0),
+            (2 * ((20 * Quads) + 0)) + 1,
+        };
+        ReproNavFlag captured = ReproCapture.Slice(flag, new Vector3(20f, 0f, 20f),
+            radius: 100f, disabled: stale);
+        ReproWorlds.Geometry geometry = new ReproWorlds.Geometry().Ground();
+        ReproGeometryData capturedGeometry = geometry.Build(new Vector3(20f, 0f, 20f), 64f);
+        ReproScenario scenario = ReconciledScenario(captured, capturedGeometry);
+        ReproScenario current = ReconciledScenario(
+            captured with { DisabledFaces = Array.Empty<int>() }, capturedGeometry);
+        var path = new List<Vector3>();
+        var expected = new List<Vector3>();
+
+        Assert.True(scenario.System.PathQuery!(new Vector3(5f, 0f, 0.25f),
+            new Vector3(35f, 0f, 0.25f), path, BakedNavGraph.AgentRadius));
+        Assert.True(current.System.PathQuery!(new Vector3(5f, 0f, 0.25f),
+            new Vector3(35f, 0f, 0.25f), expected, BakedNavGraph.AgentRadius));
+        Assert.Equal(expected, path); // the stale exclusion was replaced by the same current verdict
+    }
+
+    [Fact]
+    public void ReconcilePathsPreservesARecordedExclusionOutsideTheCollisionSlice()
+    {
+        NavFlag flag = ReproWorlds.FlatField();
+        const int Quads = 40;
+        var recorded = new HashSet<int>
+        {
+            2 * ((20 * Quads) + 0),
+            (2 * ((20 * Quads) + 0)) + 1,
+        };
+        ReproNavFlag captured = ReproCapture.Slice(flag, new Vector3(20f, 0f, 20f),
+            radius: 100f, disabled: recorded);
+        ReproWorlds.Geometry geometry = new ReproWorlds.Geometry().Ground();
+        ReproGeometryData capturedGeometry = geometry.Build(Vector3.Zero, radius: 5f);
+        ReproScenario scenario = ReconciledScenario(captured, capturedGeometry);
+        ReproScenario withoutRecordedFace = ReconciledScenario(
+            captured with { DisabledFaces = Array.Empty<int>() }, capturedGeometry);
+        var path = new List<Vector3>();
+        var open = new List<Vector3>();
+
+        Assert.True(scenario.System.PathQuery!(new Vector3(5f, 0f, 0.25f),
+            new Vector3(35f, 0f, 0.25f), path, BakedNavGraph.AgentRadius));
+        Assert.True(withoutRecordedFace.System.PathQuery!(new Vector3(5f, 0f, 0.25f),
+            new Vector3(35f, 0f, 0.25f), open, BakedNavGraph.AgentRadius));
+        Assert.False(open.SequenceEqual(path),
+            "the out-of-slice recorded exclusion was incorrectly re-enabled");
+    }
+
+    private static ReproScenario ReconciledScenario(ReproNavFlag flag,
+        ReproGeometryData geometry)
+    {
+        var dump = new ReproDump
+        {
+            World = new ReproWorldData
+            {
+                HasNavmesh = true,
+                Bounds = { Box() },
+                NavFlags = { flag },
+                Geometry = geometry,
+            },
+            Zombies = new ReproZombieSection
+            {
+                Seams = new ReproWorldSeams { PathQuery = true },
+            },
+        };
+        return new ReproScenario(dump, new ReproScenarioOptions
+        {
+            RecomputePaths = true,
+            ReconcilePaths = true,
+        });
     }
 
     // Handing the replay the real map's navmesh (or someone else's pathfinder) is what lifts it out of

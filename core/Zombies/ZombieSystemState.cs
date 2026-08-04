@@ -76,6 +76,7 @@ public sealed class ZombieSystemState
         destination.RouteServedAnotherTarget = source.RouteServedAnotherTarget;
         destination.RouteEscapingCollision = source.RouteEscapingCollision;
         destination.EscapeRouteHasProgress = source.EscapeRouteHasProgress;
+        destination.CollisionEscapeRoute = source.CollisionEscapeRoute;
         destination.PathPoints.Clear();
         destination.PathPoints.AddRange(source.PathPoints);
     }
