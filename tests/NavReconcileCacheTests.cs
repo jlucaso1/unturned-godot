@@ -178,6 +178,41 @@ public class NavReconcileCacheTests
     }
 
     [Fact]
+    public void SelectedColliderFingerprint_IncludesEffectiveCollisionPolicy()
+    {
+        string root = TempDir();
+        try
+        {
+            string level = Directory.CreateDirectory(Path.Combine(root, "level")).FullName;
+            string cache = Directory.CreateDirectory(Path.Combine(root, "cache")).FullName;
+            Guid selected = Guid.NewGuid();
+            var selectedSet = new HashSet<Guid> { selected };
+            File.WriteAllText(Path.Combine(cache, selected.ToString("N") + ".collider"), "same bytes");
+
+            string furniture = NavReconcileCache.Fingerprint(level, cache, selectedSet,
+                new Dictionary<Guid, uint> { [selected] = CollisionLayers.MediumFurniture });
+            string fence = NavReconcileCache.Fingerprint(level, cache, selectedSet,
+                new Dictionary<Guid, uint>
+                {
+                    [selected] = CollisionLayers.World | CollisionLayers.MediumFurniture,
+                });
+            string unknown = NavReconcileCache.Fingerprint(level, cache, selectedSet);
+
+            Assert.NotEqual(furniture, fence);
+            Assert.NotEqual(furniture, unknown);
+            Assert.Equal(fence, NavReconcileCache.Fingerprint(level, cache, selectedSet,
+                new Dictionary<Guid, uint>
+                {
+                    [selected] = CollisionLayers.World | CollisionLayers.MediumFurniture,
+                }));
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
     public void MissingRootsStillProduceAStableFingerprintAndMapKeysArePathSpecific()
     {
         string root = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));

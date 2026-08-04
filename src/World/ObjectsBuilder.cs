@@ -78,7 +78,8 @@ public static class ObjectsBuilder
         IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary,
         IReadOnlyDictionary<Guid, List<CachedCollider>> colliderLibrary, out int withMesh,
         IReadOnlyDictionary<Guid, ArrayMesh>? lod1Library = null,
-        CollisionFieldBuilder? navigationField = null, string label = "Objects")
+        CollisionFieldBuilder? navigationField = null, string label = "Objects",
+        bool renderGeometry = true)
     {
         var root = new Node3D { Name = label };
 
@@ -88,13 +89,14 @@ public static class ObjectsBuilder
         foreach (PlacedObject obj in objects)
         {
             Transform3D transform = ObjectPlacement.ComputeTransform(obj);
-            if (obj.Guid != Guid.Empty && meshLibrary.ContainsKey(obj.Guid))
+            if (obj.Guid != Guid.Empty && (meshLibrary.ContainsKey(obj.Guid)
+                || (!renderGeometry && colliderLibrary.ContainsKey(obj.Guid))))
             {
                 if (!byMesh.TryGetValue(obj.Guid, out List<Transform3D>? list))
                     byMesh[obj.Guid] = list = new List<Transform3D>();
                 list.Add(transform);
             }
-            else
+            else if (renderGeometry)
             {
                 fallback.Add((transform, ObjectColor.ForAsset(db.Resolve(obj.Guid, obj.Id))));
             }
@@ -105,61 +107,65 @@ public static class ObjectsBuilder
             ? null : new InstancedStaticBodies { Name = label + "Bodies" };
         int collisionBodyCount = 0;
         var ladders = new LadderVolumes { Name = label + "Ladders" };
-        MultiMeshRidRenderer? render = EnvFlag.IsOn(OS.GetEnvironment("UG_NODE_MULTIMESH"), whenUnset: false)
+        MultiMeshRidRenderer? render = !renderGeometry
+            || EnvFlag.IsOn(OS.GetEnvironment("UG_NODE_MULTIMESH"), whenUnset: false)
             ? null : new MultiMeshRidRenderer { Name = label + "Batches" };
         var collisionShapes = new CollisionShapePool(navigationField);
         withMesh = 0;
         int renderBatches = 0, sparseGroups = 0, sparseExtraBatches = 0;
-        if (EnvFlag.IsOn(OS.GetEnvironment("UG_OBJECT_PROFILE"), whenUnset: false))
+        if (renderGeometry && EnvFlag.IsOn(OS.GetEnvironment("UG_OBJECT_PROFILE"), whenUnset: false))
             PrintObjectCosts(byMesh, meshLibrary, db);
         foreach ((Guid guid, List<Transform3D> transforms) in byMesh)
         {
-            // No MaterialOverride: the mesh's per-submesh surface materials carry the textures.
-            ArrayMesh renderMesh = meshLibrary[guid];
-            // The prefab's own lower level, if it shipped one. AddLevels derives the distance past which
-            // it takes over from the batch it is actually given, so chunked cells switch on their own
-            // largest placement rather than on the whole map's.
-            ArrayMesh? lodMesh = LodEnabled && lod1Library != null
-                && lod1Library.TryGetValue(guid, out ArrayMesh? candidate) ? candidate : null;
-            // A visibility range is a property of the whole batch, never of the placements inside it: a
-            // batch spanning the map is wholly near or wholly far, so whichever level it picks says
-            // nothing about the objects the camera is actually looking at — and picking the far level for
-            // a batch that reaches the player draws the coarse mesh right in front of them. Groups that
-            // have a lower level are cut into cells small enough for the switch to mean something; groups
-            // without one keep the coarse cells, which are the ones tuned for large-map culling.
-            // LodChunkMetres is an override, so 0 means "no finer cells", not "no cells": dropping to 0
-            // here would leave levelled groups as one map-spanning batch — the opposite of the point, and
-            // the opposite of what UG_OBJECT_CHUNK_METRES=0 means for everything else.
-            float chunkMetres = lodMesh != null && ObjectChunkMetres > 0f && LodChunkMetres > 0f
-                ? Mathf.Min(ObjectChunkMetres, LodChunkMetres)
-                : ObjectChunkMetres;
-            long trianglesPerInstance = TriangleCount(renderMesh);
-            long placementTriangles = trianglesPerInstance * transforms.Count;
-            bool spread = chunkMetres > 0f && transforms.Count > 1
-                && ExceedsCellSpan(transforms, chunkMetres);
-            bool sparseWide = ChunkSparseObjects && transforms.Count < MinChunkedInstances && spread
-                && placementTriangles >= SparseChunkMinTriangles;
-            if (chunkMetres > 0f && (transforms.Count >= MinChunkedInstances || sparseWide)
-                && placementTriangles >= ObjectChunkMinTriangles
-                && (!ObjectChunkRequireSpread || spread))
+            if (renderGeometry)
             {
-                chunkMetres = CellSizeFor(transforms, chunkMetres, trianglesPerInstance);
-                Dictionary<(int X, int Z), List<Transform3D>> cells = Cells(transforms, chunkMetres);
-                if (sparseWide)
+                // No MaterialOverride: the mesh's per-submesh surface materials carry the textures.
+                ArrayMesh renderMesh = meshLibrary[guid];
+                // The prefab's own lower level, if it shipped one. AddLevels derives the distance past which
+                // it takes over from the batch it is actually given, so chunked cells switch on their own
+                // largest placement rather than on the whole map's.
+                ArrayMesh? lodMesh = LodEnabled && lod1Library != null
+                    && lod1Library.TryGetValue(guid, out ArrayMesh? candidate) ? candidate : null;
+                // A visibility range is a property of the whole batch, never of the placements inside it: a
+                // batch spanning the map is wholly near or wholly far, so whichever level it picks says
+                // nothing about the objects the camera is actually looking at — and picking the far level for
+                // a batch that reaches the player draws the coarse mesh right in front of them. Groups that
+                // have a lower level are cut into cells small enough for the switch to mean something; groups
+                // without one keep the coarse cells, which are the ones tuned for large-map culling.
+                // LodChunkMetres is an override, so 0 means "no finer cells", not "no cells": dropping to 0
+                // here would leave levelled groups as one map-spanning batch — the opposite of the point, and
+                // the opposite of what UG_OBJECT_CHUNK_METRES=0 means for everything else.
+                float chunkMetres = lodMesh != null && ObjectChunkMetres > 0f && LodChunkMetres > 0f
+                    ? Mathf.Min(ObjectChunkMetres, LodChunkMetres)
+                    : ObjectChunkMetres;
+                long trianglesPerInstance = TriangleCount(renderMesh);
+                long placementTriangles = trianglesPerInstance * transforms.Count;
+                bool spread = chunkMetres > 0f && transforms.Count > 1
+                    && ExceedsCellSpan(transforms, chunkMetres);
+                bool sparseWide = ChunkSparseObjects && transforms.Count < MinChunkedInstances && spread
+                    && placementTriangles >= SparseChunkMinTriangles;
+                if (chunkMetres > 0f && (transforms.Count >= MinChunkedInstances || sparseWide)
+                    && placementTriangles >= ObjectChunkMinTriangles
+                    && (!ObjectChunkRequireSpread || spread))
                 {
-                    sparseGroups++;
-                    sparseExtraBatches += cells.Count - 1;
+                    chunkMetres = CellSizeFor(transforms, chunkMetres, trianglesPerInstance);
+                    Dictionary<(int X, int Z), List<Transform3D>> cells = Cells(transforms, chunkMetres);
+                    if (sparseWide)
+                    {
+                        sparseGroups++;
+                        sparseExtraBatches += cells.Count - 1;
+                    }
+                    foreach (((int x, int z), List<Transform3D> inCell) in cells)
+                    {
+                        renderBatches += AddLevels(root, render, renderMesh, lodMesh, inCell);
+                    }
                 }
-                foreach (((int x, int z), List<Transform3D> inCell) in cells)
+                else
                 {
-                    renderBatches += AddLevels(root, render, renderMesh, lodMesh, inCell);
+                    renderBatches += AddLevels(root, render, renderMesh, lodMesh, transforms);
                 }
+                withMesh += transforms.Count;
             }
-            else
-            {
-                renderBatches += AddLevels(root, render, renderMesh, lodMesh, transforms);
-            }
-            withMesh += transforms.Count;
 
             // Only LARGE/MEDIUM objects block the player (SMALL objects have their collider stripped in
             // Unturned). Resources (trees/rocks/bushes) have no such gate: ResourceSpawnpoint instantiates
@@ -170,6 +176,9 @@ public static class ObjectsBuilder
             // exactly LARGE | MEDIUM, so zombie alert rays must see these and nothing else.
             ObjectAsset? asset = colliderLibrary.ContainsKey(guid) ? db.Resolve(guid, 0) : null;
             EObjectType? type = asset?.Type;
+            if (asset != null)
+                navigationField?.RecordCollisionPolicy(guid,
+                    ObjectCollisionPolicy.PhysicsLayer(asset));
             if (colliderLibrary.TryGetValue(guid, out List<CachedCollider>? colliders))
             {
                 // Ladders first, and deliberately outside the type gate below: what Unturned strips from a
@@ -205,10 +214,10 @@ public static class ObjectsBuilder
             collision.AddChild(collisionOwner);
         root.AddChild(collision);
 
-        if (fallback.Count > 0)
+        if (renderGeometry && fallback.Count > 0)
             root.AddChild(BuildFallbackBoxes(fallback, label));
 
-        if (ObjectChunkMetres > 0f)
+        if (renderGeometry && ObjectChunkMetres > 0f)
             Log.Print($"[unturned-godot] {label} render batches: {renderBatches} " +
                 $"({ObjectChunkMetres:0} m cells, min {MinChunkedInstances} instances / " +
                 $"{ObjectChunkMinTriangles:N0} placement tris, coarsen below {MinCellTriangles:N0} " +

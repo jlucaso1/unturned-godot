@@ -48,12 +48,13 @@ public sealed record ReproZombieSection
 // The seams between the simulation and the world it runs in. Which ones EXIST is part of the
 // simulation: ZombieSystem takes a different branch for each one that is null, so a replay that
 // installs a resolver the session did not have is not being more thorough, it is running something
-// else. A dedicated server, for instance, has a pathfinder and no physics at all.
+// else. Historical dedicated-server dumps, for instance, had a pathfinder and no physics at all.
 public sealed record ReproWorldSeams
 {
     public bool MoveResolver { get; init; }
     public bool GroundSnap { get; init; }
     public bool VisionBlocked { get; init; }
+    public bool PhysicalLineBlocked { get; init; }
     public bool PathQuery { get; init; }
 }
 

@@ -28,6 +28,7 @@ public sealed class CollisionFieldBuilder
     private readonly List<Pending> _shapes = new();
     private readonly List<(int Shape, Transform3D Transform)> _instances = new();
     private readonly List<CollisionField.Heightfield> _tiles = new();
+    private readonly Dictionary<Guid, uint> _collisionPolicies = new();
     private readonly object _gate = new();
 
     private readonly struct Pending
@@ -52,6 +53,22 @@ public sealed class CollisionFieldBuilder
     public int ShapeCount { get { lock (_gate) return _shapes.Count; } }
     public int InstanceCount { get { lock (_gate) return _instances.Count; } }
     public int TileCount { get { lock (_gate) return _tiles.Count; } }
+
+    // The collider bytes alone do not say which physics layers an asset belongs to. Directory and
+    // Bundle_Override_Path can promote the exact same MEDIUM collider to a World fence, so reconciliation
+    // fingerprints the effective policy captured beside the geometry.
+    public IReadOnlyDictionary<Guid, uint> CollisionPolicies
+    {
+        get { lock (_gate) return new Dictionary<Guid, uint>(_collisionPolicies); }
+    }
+
+    public void RecordCollisionPolicy(Guid guid, uint layer)
+    {
+        if (guid == Guid.Empty)
+            return;
+        lock (_gate)
+            _collisionPolicies[guid] = layer;
+    }
 
     public int AddBoxShape(Vector3 size) =>
         AddShape(new Pending(CollisionField.Kind.Box, size, 0f, 0f, null));
@@ -264,6 +281,8 @@ public sealed class CollisionFieldBuilder
             _instances.TrimExcess();
             _tiles.Clear();
             _tiles.TrimExcess();
+            _collisionPolicies.Clear();
+            _collisionPolicies.TrimExcess();
         }
     }
 

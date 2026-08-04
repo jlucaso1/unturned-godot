@@ -1199,6 +1199,38 @@ public class ZombieSystemTests
     }
 
     [Fact]
+    public void CollisionRecovery_DoesNotEndOnClearVisionThroughAWorldObstacle()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        var player = Player(1, new Vector3(10f, 5f, 0f),
+            UnturnedGodot.Player.EPlayerStance.Sprint);
+        system.VisionBlocked = (_, _) => false; // a Resource/terrain collider has no VisionBlocker bit
+        system.PhysicalLineBlocked = (_, _) => true;
+        system.Tick(new[] { player }, 0.1f); // acquire first
+
+        var destinations = new List<Vector3>();
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            destinations.Add(to);
+            path.Add(from);
+            path.Add(to);
+            return true;
+        };
+        zombie.Path = EZombiePath.Left;
+        zombie.RouteEscapingCollision = true;
+        zombie.RepathTimer = -1f;
+
+        system.Tick(new[] { player }, 0.1f);
+
+        Assert.True(zombie.RouteEscapingCollision);
+        Vector3 destination = Assert.Single(destinations);
+        Assert.True(new Vector2(destination.X - player.Position.X,
+            destination.Z - player.Position.Z).Length() < 0.001f,
+            $"physical recovery was replaced by a formation offset: {destination}");
+    }
+
+    [Fact]
     public void CollisionEscape_IsNotReplacedByTheShortWallRouteOnTheNextRepath()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
@@ -2220,6 +2252,55 @@ public class ZombieSystemTests
     }
 
     [Fact]
+    public void FullPhysicalSegment_BlocksAFenceThatPerceptionDoesNotSee()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        var hits = new List<byte>();
+        system.OnAttack += (_, _, damage) => hits.Add(damage);
+        system.MoveResolver = (from, _, _) => from;
+        system.VisionBlocked = (_, _) => false;
+        int physicalQueries = 0;
+        system.PhysicalLineBlocked = (from, to) =>
+        {
+            physicalQueries++;
+            Assert.Equal(5f + UnturnedGodot.Player.PlayerConfig.EyeHeightStand, to.Y, 3);
+            return true; // thin fence in the final 5% of the visual segment
+        };
+        var behindFence = Player(1, new Vector3(0.8f, 5f, 0f));
+
+        for (int i = 0; i < 20; i++)
+            system.Tick(new[] { behindFence }, 0.1f);
+
+        Assert.True(physicalQueries > 0);
+        Assert.Equal(EZombieState.Chase, zombie.State);
+        Assert.True(zombie.PendingHit < 0f);
+        Assert.Empty(hits);
+    }
+
+    [Fact]
+    public void ClosePhysicalBarrier_UsesTheDetourBeforeCollisionTimeout()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = 0f; // the detour heads -Z; direct pursuit of the player would turn toward +X
+        system.VisionBlocked = (_, _) => false; // final-five-percent perception miss
+        system.PhysicalLineBlocked = (_, _) => true;
+        system.MoveResolver = (from, _, _) => from;
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            path.Add(from);
+            path.Add(from + new Vector3(0f, 0f, -6f));
+            path.Add(to);
+            return true;
+        };
+
+        system.Tick(new[] { Player(1, new Vector3(1.2f, 5f, 0f)) }, 0.1f);
+
+        Assert.False(zombie.RouteEscapingCollision); // no timeout/recovery flag was needed
+        Assert.True(MathF.Abs(zombie.Yaw) < 1f || MathF.Abs(zombie.Yaw - 360f) < 1f,
+            $"the close-wall override still faced through the barrier: yaw={zombie.Yaw}");
+    }
+
+    [Fact]
     public void AWallAppearingDuringTheSwing_BlocksThePendingHit()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
@@ -2239,6 +2320,27 @@ public class ZombieSystemTests
             system.Tick(new[] { player }, 0.1f);
 
         Assert.Equal(EZombieState.Chase, zombie.State);
+        Assert.Empty(hits);
+    }
+
+    [Fact]
+    public void FullPhysicalSegment_IsRecheckedAtThePendingHitFrame()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        var hits = new List<byte>();
+        system.OnAttack += (_, _, damage) => hits.Add(damage);
+        system.MoveResolver = (from, _, _) => from;
+        system.VisionBlocked = (_, _) => false;
+        bool fence = false;
+        system.PhysicalLineBlocked = (_, _) => fence;
+        var player = Player(1, new Vector3(0.8f, 5f, 0f));
+
+        system.Tick(new[] { player }, 0.1f);
+        Assert.True(zombie.PendingHit >= 0f);
+        fence = true;
+        for (int i = 0; i < 5; i++)
+            system.Tick(new[] { player }, 0.1f);
+
         Assert.Empty(hits);
     }
 

@@ -106,15 +106,16 @@ public sealed class ReproScenario
 
         // Only install what the session actually had. A world delegate that exists where the original
         // had none is not a more complete replay, it is a different simulation: ZombieSystem branches
-        // on each of these being null. A dedicated server runs with a pathfinder and no physics, and a
-        // replay of one of its dumps has to run the same way or every step it takes is a different
-        // step. Dumps written before the seams were recorded fall back to "install what can answer".
+        // on each of these being null. Older dedicated-server dumps had a pathfinder and no physics, and
+        // replaying one still has to preserve that historical seam. Dumps written before seams were
+        // recorded fall back to "install what can answer".
         ReproWorldSeams seams = _section.Seams
             ?? new ReproWorldSeams
             {
                 MoveResolver = true,
                 GroundSnap = true,
                 VisionBlocked = true,
+                PhysicalLineBlocked = true,
                 PathQuery = flags != null,
             };
         if (Oracle != null || Collision != null)
@@ -125,6 +126,8 @@ public sealed class ReproScenario
                 System.GroundSnap = ResolveGround;
             if (seams.VisionBlocked)
                 System.VisionBlocked = ResolveVision;
+            if (seams.PhysicalLineBlocked)
+                System.PhysicalLineBlocked = ResolvePhysical;
         }
         if (flags != null && seams.PathQuery)
         {
@@ -196,9 +199,19 @@ public sealed class ReproScenario
             }
         BakedNavPortalProbe? portalProbe = Collision == null
             ? null
-            : (from, to, radius) => Collision.Resolve(from, to, radius);
+            : ResolvePortal;
         return BakedNavGraph.Build(flags, exclusions.Count > 0 ? exclusions : null,
             portalProbe).TryPath;
+    }
+
+    private Vector3 ResolvePortal(Vector3 from, Vector3 to, float radius)
+    {
+        // A stitched portal is validated by sweeping the same capsule as ordinary movement. The dump's
+        // triangle soup says "open" outside its capture circle only because nothing was recorded there;
+        // book that as unanswered before allowing the graph to consume the provisional result.
+        float reach = radius + ZombieBody.CapsuleTop;
+        Recompute(Collision!.Covers(from, reach) && Collision.Covers(to, reach));
+        return Collision.Resolve(from, to, radius);
     }
 
     public void Step()
@@ -331,6 +344,19 @@ public sealed class ReproScenario
         {
             Recompute(Collision.Covers(from) && Collision.Covers(to));
             return Collision.VisionBlocked(from, to);
+        }
+        Unanswered();
+        return false;
+    }
+
+    private bool ResolvePhysical(Vector3 from, Vector3 to)
+    {
+        if (Oracle != null && Oracle.TryVision(from, to, out bool blocked))
+            return blocked;
+        if (Collision != null)
+        {
+            Recompute(Collision.Covers(from) && Collision.Covers(to));
+            return Collision.PhysicalLineBlocked(from, to);
         }
         Unanswered();
         return false;

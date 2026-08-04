@@ -34,6 +34,79 @@ public static class WorldBuilder
     // the uncullled path available for visual/performance A/B checks.
     private static bool OccludersEnabled => EnvFlag.IsOn(OS.GetEnvironment("TERRAIN_OCCLUDERS"), whenUnset: true);
 
+    // Dedicated authority needs static object collision but none of the render/texture products. This
+    // follows the same source ownership, asset metadata, extraction and ObjectsBuilder policy as the
+    // interactive world, then asks ObjectsBuilder to realise only bodies and ladder volumes.
+    public static Node3D BuildObjectCollision(string unturnedPath, LevelInfo level)
+    {
+        IReadOnlyList<ContentSource> sources = ContentSource.Discover(unturnedPath);
+        List<PlacedObject> objects = LevelObjects.Load(level.ObjectsDat);
+        foreach (PlacedTree tree in LevelTrees.Load(System.IO.Path.Combine(level.Path,
+            "Terrain", "Trees.dat")))
+            objects.Add(new PlacedObject(tree.Position, tree.EulerDegrees, tree.Scale, 0, tree.Guid));
+
+        ObjectAssetDatabase db = ContentExtraction.ScanAssets(sources);
+        var needed = new HashSet<Guid>();
+        foreach (PlacedObject placed in objects)
+            needed.Add(placed.Guid);
+
+        string cacheDir = ProjectSettings.GlobalizePath("user://model_cache");
+        string textureCacheDir = ProjectSettings.GlobalizePath("user://texture_cache");
+        var noFoliage = new Dictionary<Guid, FoliageAsset.Owned>();
+        List<ContentExtraction.BundlePlan> plans = ContentExtraction.Plan(sources, cacheDir,
+            textureCacheDir, needed, db, noFoliage);
+        foreach (ContentExtraction.BundlePlan plan in plans)
+        {
+            if (plan.Missing.Count == 0)
+                continue;
+            try
+            {
+                ModelExtractor.ExtractMeshes(plan.Source, plan.Needed, cacheDir, db, plan.Foliage);
+            }
+            catch (Exception e)
+            {
+                Log.PrintErr($"[server] {plan.Source.Name} collision extraction failed "
+                    + $"({e.GetType().Name}: {e.Message}); affected assets have no body this run");
+            }
+        }
+
+        Dictionary<Guid, List<CachedCollider>> colliders = ColliderLibrary.Load(cacheDir, needed);
+        Node3D root = ObjectsBuilder.Build(objects, db,
+            new Dictionary<Guid, ArrayMesh>(), colliders, out _,
+            label: "DedicatedObjects", renderGeometry: false);
+        Log.Print($"[server] authoritative object collision: {colliders.Count}/{needed.Count} asset types");
+        return root;
+    }
+
+    // HeightfieldMoveSolver keeps players/zombies on grade, but it cannot answer a 3D ray or stop a
+    // capsule at a cliff. Publish the same cheap heightmap shapes as the interactive player path so a
+    // dedicated attack cannot pass through terrain and its movement world is not object-only.
+    public static Node3D BuildTerrainCollision(IReadOnlyList<HeightmapTile> tiles)
+    {
+        var root = new Node3D { Name = "DedicatedTerrainCollision" };
+        const int res = Landscape.HEIGHTMAP_RESOLUTION;
+        foreach (HeightmapTile tile in tiles)
+        {
+            float[] data = tile.RawSamples != null
+                ? TerrainHeightfield.MapData(tile.RawSamples)
+                : TerrainHeightfield.MapData(tile.Heights);
+            var body = new StaticBody3D { Name = $"Terrain_{tile.CoordX}_{tile.CoordY}" };
+            body.AddChild(new CollisionShape3D
+            {
+                Shape = new HeightMapShape3D
+                {
+                    MapWidth = res,
+                    MapDepth = res,
+                    MapData = data,
+                },
+                Transform = TerrainHeightfield.CollisionTransform(tile.CoordX, tile.CoordY),
+            });
+            root.AddChild(body);
+        }
+        Log.Print($"[server] authoritative terrain collision: {tiles.Count} heightfield bodies");
+        return root;
+    }
+
     public static WorldBuildResult Build(string unturnedPath, string mapName)
     {
         var level = new LevelInfo(MapCatalog.ResolvePath(unturnedPath, mapName));

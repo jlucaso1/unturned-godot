@@ -46,6 +46,7 @@ public class ReproEdgeTests
         Assert.Null(bare.System.MoveResolver);
         Assert.Null(bare.System.GroundSnap);
         Assert.Null(bare.System.VisionBlocked);
+        Assert.Null(bare.System.PhysicalLineBlocked);
     }
 
     // A session and a replay can disagree about ROUTING alone: the live map had the full reconciled
@@ -742,6 +743,7 @@ public class ReproEdgeTests
         Assert.Null(scenario.System.MoveResolver);
         Assert.Null(scenario.System.GroundSnap);
         Assert.Null(scenario.System.VisionBlocked);
+        Assert.Null(scenario.System.PhysicalLineBlocked);
         ReproReplayReport report = scenario.Run();
         Assert.True(report.ReproducesRecording, report.Describe());
         Assert.Equal(0, report.UnansweredInWindow);
@@ -1002,5 +1004,50 @@ public class ReproEdgeTests
         }).Run(extraTicks: 8);
         Assert.True(whole.RoutesRecomputed > 0);
         Assert.Equal(0, whole.UnansweredQueries);
+    }
+
+    [Fact]
+    public void PortalProbesOutsideTheCollisionSliceAreNotEvidenceOfAnOpenSeam()
+    {
+        static NavFlag TJunction() => new()
+        {
+            Center = new Vector3(2f, 0f, 1f),
+            Size = new Vector3(6f, 10f, 4f),
+            Vertices =
+            [
+                new Vector3(0f, 0f, 0f), new Vector3(0f, 0f, 2f),
+                new Vector3(2f, 0f, 0f), new Vector3(2f, 0f, 2f),
+                new Vector3(2f, 0f, 1f), new Vector3(4f, 0f, 0f),
+                new Vector3(4f, 0f, 1f), new Vector3(4f, 0f, 2f),
+            ],
+            Triangles = [0, 1, 2, 1, 3, 2, 2, 4, 5, 4, 6, 5, 4, 3, 6, 3, 7, 6],
+        };
+
+        var dump = new ReproDump
+        {
+            World = new ReproWorldData
+            {
+                HasNavmesh = true,
+                Bounds = { Box() },
+                Geometry = new ReproWorlds.Geometry().Ground()
+                    .Build(new Vector3(100f, 0f, 100f), 4f),
+            },
+            Zombies = new ReproZombieSection
+            {
+                Seams = new ReproWorldSeams { PathQuery = true },
+            },
+        };
+        var scenario = new ReproScenario(dump, new ReproScenarioOptions
+        {
+            RecomputePaths = true,
+            NavFlags = new[] { TJunction() },
+        });
+        var path = new List<Vector3>();
+
+        Assert.True(scenario.System.PathQuery!(new Vector3(0.5f, 0f, 1f),
+            new Vector3(3.5f, 0f, 1f), path, BakedNavGraph.AgentRadius));
+        Assert.True(scenario.UnansweredQueries > 0,
+            "the out-of-slice stitched portal was reported as covered geometry");
+        Assert.Equal(0, scenario.UnansweredInWindow); // direct diagnostic call occurs outside Step
     }
 }

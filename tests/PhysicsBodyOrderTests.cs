@@ -177,6 +177,40 @@ public class PhysicsBodyOrderTests
     }
 
     [Fact]
+    public void DedicatedZombiesUseTheSameAuthoritativePhysicsWorldAsHostedZombies()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Net", "DedicatedServer.cs")) is not { } serverPath
+            || FindRepositoryFile(Path.Combine("src", "Net", "NetworkManager.cs")) is not { } hostPath
+            || FindRepositoryFile(Path.Combine("src", "Net", "ZombiePhysics.cs")) is not { } physicsPath)
+            return;
+
+        string server = File.ReadAllText(serverPath);
+        string host = File.ReadAllText(hostPath);
+        string physics = File.ReadAllText(physicsPath);
+        Assert.Contains("BuildTerrainCollision(tiles)", server);
+        Assert.Contains("BuildObjectCollision(unturnedPath, level)", server);
+        Assert.Contains("ZombiePhysics.Attach(zombies", server);
+        Assert.Contains("ZombiePhysics.Attach(zombies", host);
+        Assert.Contains("CollisionLayers.World | CollisionLayers.VisionBlocker", physics);
+        Assert.Contains("physicalRay.To = to", physics);
+    }
+
+    [Fact]
+    public void HuntProbeAdvancesInsidePhysicsNotifications()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Net", "NetworkManager.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        int probe = source.IndexOf("if (OS.GetEnvironment(\"HUNT_PROBE\")", StringComparison.Ordinal);
+        int frame = source.IndexOf("await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame)", probe,
+            StringComparison.Ordinal);
+        int tick = source.IndexOf("probe.Tick(views", probe, StringComparison.Ordinal);
+        Assert.True(probe >= 0 && frame > probe && tick > frame,
+            "the end-to-end probe must not issue DirectSpaceState queries from a timer callback");
+    }
+
+    [Fact]
     public void BundleDecodePassesAreSerializedToBoundPeakMemory()
     {
         if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } path)

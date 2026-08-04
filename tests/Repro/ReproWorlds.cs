@@ -146,6 +146,7 @@ public static class ReproWorlds
             MoveResolver = collision.Resolve,
             GroundSnap = collision.GroundSnap,
             VisionBlocked = collision.VisionBlocked,
+            PhysicalLineBlocked = collision.PhysicalLineBlocked,
             PathQuery = graph.TryPath,
             PathReady = () => true,
         };

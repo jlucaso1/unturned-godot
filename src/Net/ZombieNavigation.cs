@@ -340,7 +340,8 @@ public sealed class ZombieNavigation
                 string reconcileCache = ProjectSettings.GlobalizePath("user://nav_reconcile");
                 (fingerprint, cachePath) = await Task.Run(() =>
                 {
-                    string fp = NavReconcileCache.Fingerprint(_levelDir, modelCache, colliderGuids);
+                    string fp = NavReconcileCache.Fingerprint(_levelDir, modelCache, colliderGuids,
+                        collision?.CollisionPolicies);
                     fp = NavReconcileCache.WithStepOffset(fp, stepOffset);
                     fp = NavReconcileCache.WithProbeSettings(fp, cpuField, ConfirmationMargin);
                     return (fp, System.IO.Path.Combine(reconcileCache,

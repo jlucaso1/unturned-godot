@@ -131,6 +131,11 @@ public sealed class ReproCollisionWorld
         return Raycast(from, end, CollisionLayers.VisionBlocker, out _, out _);
     }
 
+    // Attacks and collision recovery are authority checks, not AlertTool perception: include every solid
+    // movement layer and inspect the endpoint instead of dropping the last five percent.
+    public bool PhysicalLineBlocked(Vector3 from, Vector3 to) =>
+        Raycast(from, to, CollisionLayers.World | CollisionLayers.VisionBlocker, out _, out _);
+
     private bool GroundBetween(Vector3 from, Vector3 to, out float y)
     {
         if (Raycast(from, to, CollisionLayers.World | CollisionLayers.MediumFurniture,

@@ -38,11 +38,17 @@ public partial class DedicatedServer : Node
                 levelName),
         };
 
+        // Static bodies must exist in the same World3D the authoritative zombie queries use. The root is
+        // attached before this node enters the tree; ZombiePhysics resolves the world lazily on first tick.
+        node.AddChild(WorldBuilder.BuildTerrainCollision(tiles));
+        node.AddChild(WorldBuilder.BuildObjectCollision(unturnedPath, level));
+
         UnturnedGodot.Zombies.ZombieSystem? zombies = UnturnedGodot.Zombies.ZombieWorld.Load(
             level.Path, ground,
             UnturnedGodot.Repro.ReproRandom.ForSession(OS.GetEnvironment("ZOMBIE_SEED"), out _));
         if (zombies != null)
         {
+            ZombiePhysics.Attach(zombies, () => node.GetViewport()?.World3D, ground);
             node._zombieNavigation = ZombieNavigation.Build(zombies.Navmesh);
             if (node._zombieNavigation != null)
             {

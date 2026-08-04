@@ -152,6 +152,25 @@ public class ReproCollisionWorldTests
     }
 
     [Fact]
+    public void PhysicalLine_SeesTheFinalFivePercentAndWorldOnlyGeometry()
+    {
+        var geometry = new ReproWorlds.Geometry()
+            .Box("near-target fence", new Vector3(9.8f, 1f, 0f),
+                new Vector3(0.1f, 1f, 1f))
+            .Box("world resource", new Vector3(5f, 1f, 3f),
+                new Vector3(0.1f, 1f, 1f), CollisionLayers.World);
+        ReproCollisionWorld world = World(geometry);
+
+        Vector3 from = new(0f, 1f, 0f), to = new(10f, 1f, 0f);
+        Assert.False(world.VisionBlocked(from, to));
+        Assert.True(world.PhysicalLineBlocked(from, to));
+        Assert.False(world.VisionBlocked(new Vector3(from.X, from.Y, 3f),
+            new Vector3(to.X, to.Y, 3f)));
+        Assert.True(world.PhysicalLineBlocked(new Vector3(from.X, from.Y, 3f),
+            new Vector3(to.X, to.Y, 3f)));
+    }
+
+    [Fact]
     public void ARayOfNoLengthHitsNothing()
     {
         ReproCollisionWorld world = World(Wall());

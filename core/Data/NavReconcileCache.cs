@@ -19,7 +19,9 @@ public static class NavReconcileCache
     // 4: MEDIUM fence assets joined the World field. An old cache was measured without those barriers
     // and would restore walkable faces through them, so it cannot be reused even though collider bytes
     // and map placements are otherwise unchanged.
-    public const int AlgorithmVersion = 4;
+    // 5: the fingerprint also carries each selected asset's effective collision layer. Fence category
+    // metadata can change while its collider cache stays byte-for-byte identical.
+    public const int AlgorithmVersion = 5;
 
     public static string Fingerprint(string levelDir, string colliderCacheDir)
         => Fingerprint(levelDir, colliderCacheDir, selectedColliders: null);
@@ -28,7 +30,8 @@ public static class NavReconcileCache
     // collider cache. Runtime reconciliation passes the map's selected GUIDs so another map's cache entries
     // cannot invalidate this map's expensive probe result.
     public static string Fingerprint(string levelDir, string colliderCacheDir,
-        IReadOnlySet<Guid>? selectedColliders)
+        IReadOnlySet<Guid>? selectedColliders,
+        IReadOnlyDictionary<Guid, uint>? effectiveCollisionPolicies = null)
     {
         var manifest = new StringBuilder();
         manifest.Append("nav-reconcile:").Append(AlgorithmVersion).Append('\n');
@@ -37,6 +40,8 @@ public static class NavReconcileCache
             AppendTree(manifest, "collider", colliderCacheDir, "*.collider");
         else
             AppendSelectedColliders(manifest, colliderCacheDir, selectedColliders);
+        if (selectedColliders != null)
+            AppendCollisionPolicies(manifest, selectedColliders, effectiveCollisionPolicies);
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(manifest.ToString()))).ToLowerInvariant();
     }
 
@@ -98,6 +103,24 @@ public static class NavReconcileCache
 
             var info = new FileInfo(path);
             manifest.Append(info.Length).Append('|').Append(info.LastWriteTimeUtc.Ticks).Append('\n');
+        }
+    }
+
+    private static void AppendCollisionPolicies(StringBuilder manifest, IReadOnlySet<Guid> selected,
+        IReadOnlyDictionary<Guid, uint>? policies)
+    {
+        var guids = new List<Guid>(selected);
+        guids.Sort();
+        foreach (Guid guid in guids)
+        {
+            if (guid == Guid.Empty)
+                continue;
+            manifest.Append("policy/").Append(guid.ToString("N")).Append('|');
+            if (policies != null && policies.TryGetValue(guid, out uint layer))
+                manifest.Append(layer.ToString("x8"));
+            else
+                manifest.Append("missing");
+            manifest.Append('\n');
         }
     }
 

@@ -123,10 +123,16 @@ public readonly struct ZombiePlayerView
 // position (AlertTool's BLOCK_VISION raycast). Null means an unobstructed world.
 public delegate bool VisionBlocked(Vector3 from, Vector3 to);
 
+// Blocks a physical interaction along the COMPLETE segment. Unlike VisionBlocked this is not the
+// original AlertTool query (which deliberately stops at 95%): attacks and collision recovery need to
+// know about a thin wall immediately beside the target as well as World-only terrain/resources.
+public delegate bool PhysicalLineBlocked(Vector3 from, Vector3 to);
+
 // Resolves a zombie's step against the world's colliders the way its Unity CharacterController
 // does — sliding along walls, trees and props instead of passing through them. Receives the
 // current and desired positions plus the capsule radius; returns where the step actually ends.
-// Null means an unobstructed world (the heightfield-only dedicated server).
+// Null means an unobstructed world (principally tests or legacy repro seams; both authoritative hosts
+// install the shared physics resolver).
 public delegate Vector3 ZombieMoveResolver(Vector3 from, Vector3 to, float radius);
 
 // Finds a walkable route over the level's pre-baked navmesh (the Seeker's A* + funnel). Fills
@@ -212,6 +218,11 @@ public sealed partial class ZombieSystem
 
     // AlertTool's line-of-sight test, wired to real world geometry by the host (optional).
     public VisionBlocked? VisionBlocked;
+
+    // Full World | VisionBlocker segment used to authorize attack start/hit and to prove that a collided
+    // route has actually carried the body around its obstacle. Falls back to VisionBlocked for old hosts
+    // and old repro dumps, but authoritative hosts install this independently.
+    public PhysicalLineBlocked? PhysicalLineBlocked;
 
     // The CharacterController's world collision, wired to real colliders by the host (optional).
     public ZombieMoveResolver? MoveResolver;
@@ -572,15 +583,30 @@ public sealed partial class ZombieSystem
         float vertical = MathF.Abs(target.Position.Y - zombie.Position.Y);
         bool canAttack = sqrHorizontal < zombie.AttackRangeSquared
             && vertical < zombie.VerticalAttackRange;
-        // Preserve the old lazy raycast: open-ground hunters beyond two metres need no visibility answer
-        // unless they are recovering from collision. A plain local keeps the one-answer-per-tick behavior
-        // without allocating the capturing local-function display class for every hunter every tick.
-        bool needsVision = canAttack || sqrHorizontal <= 4f
-            || (zombie.RouteEscapingCollision && VisionBlocked != null);
-        bool visionBlocked = needsVision && VisionBlocked?.Invoke(
-            zombie.Position + (Vector3.Up * ZombieBody.EyeHeight), target.Position) == true;
+        Vector3 eye = zombie.Position + (Vector3.Up * ZombieBody.EyeHeight);
+        // Perception remains AlertTool-compatible (95% and VisionBlocker-only). Physical permission is a
+        // different question: use the complete eye-to-eye segment so a fence in the final 5% is not
+        // invisible, and include World-only terrain/resources so clear visual LOS cannot prematurely end
+        // a collision escape. Old replay/host seams fall back to their recorded visibility answer.
+        bool hasPhysicalLine = PhysicalLineBlocked != null || VisionBlocked != null;
+        bool needsVision = sqrHorizontal <= 4f
+            || (zombie.RouteEscapingCollision && PhysicalLineBlocked == null && VisionBlocked != null);
+        bool visionBlocked = needsVision && VisionBlocked?.Invoke(eye, target.Position) == true;
+        // Close steering needs the same answer even just outside this speciality's attack range: the
+        // reported face-to-face case otherwise spent the collision timeout staring into the wall before
+        // it allowed its already-valid route to turn the body around it.
+        bool needsPhysicalLine = canAttack || sqrHorizontal <= 4f || zombie.RouteEscapingCollision;
+        bool physicalBlocked = false;
+        if (needsPhysicalLine)
+        {
+            Vector3 playerEye = target.Position
+                + (Vector3.Up * PlayerConfig.EyeHeightFor(target.Stance));
+            physicalBlocked = PhysicalLineBlocked != null
+                ? PhysicalLineBlocked(eye, playerEye)
+                : (needsVision ? visionBlocked : VisionBlocked?.Invoke(eye, target.Position) == true);
+        }
 
-        if (canAttack && !visionBlocked)
+        if (canAttack && !physicalBlocked)
         {
             zombie.State = EZombieState.Attack;
             if (zombie.SinceSwing > SwingInterval && zombie.PendingHit < 0f)
@@ -606,7 +632,7 @@ public sealed partial class ZombieSystem
         Vector3 directDirection = default;
         if (sqrHorizontal > 4f)
         {
-            if (zombie.RouteEscapingCollision && VisionBlocked != null && !visionBlocked)
+            if (zombie.RouteEscapingCollision && hasPhysicalLine && !physicalBlocked)
             {
                 zombie.RouteEscapingCollision = false;
                 zombie.EscapeRouteHasProgress = false;
@@ -615,7 +641,8 @@ public sealed partial class ZombieSystem
             // The lateral formation offset is useful in open ground, but after collision has disproved
             // a route it can put the next destination inside the very obstacle being escaped. In the
             // captured PEI corner the body is 2.1 m from the player, so LEFT turns the physical recovery
-            // target one metre into the house. Recover toward the real target until line of sight clears.
+            // target one metre into the house. Recover toward the real target until its full physical
+            // segment clears.
             if (!zombie.RouteEscapingCollision)
             {
                 float yawRad = Mathf.DegToRad(zombie.Yaw);
@@ -636,16 +663,18 @@ public sealed partial class ZombieSystem
             // around while this override keeps the body staring and pushing into the player through
             // the wall. It then invalidates the executable route every 0.75 s for "not moving" and
             // adopts it again forever. When vision geometry proves the target is occluded, keep the
-            // route's steering until the body reaches an actual line of sight.
-            bool blocked = visionBlocked;
-            canTurn = blocked;
-            if (!blocked)
+            // route's steering until the complete physical segment is actually clear.
+            if (zombie.RouteEscapingCollision && hasPhysicalLine && !physicalBlocked)
             {
-                // Collision recovery only has to outrank the lying shortcut until the obstacle is
-                // genuinely behind the body. Once the target is visible, ordinary moving-target
-                // repaths may take over again.
                 zombie.RouteEscapingCollision = false;
                 zombie.EscapeRouteHasProgress = false;
+            }
+            // Visual occlusion still selects route-facing close to an ordinary wall. A recovery route is
+            // stronger: keep its steering even through World-only geometry until the physical line is
+            // clear. With no query installed, absence of evidence must not cancel recovery.
+            canTurn = visionBlocked || physicalBlocked || zombie.RouteEscapingCollision;
+            if (!canTurn)
+            {
                 directDirection = target.Position - zombie.Position;
             }
         }
@@ -965,8 +994,11 @@ public sealed partial class ZombieSystem
         if (HorizontalDistanceSquared(zombie.Position, target.Position) >= zombie.AttackRangeSquared
             || MathF.Abs(target.Position.Y - zombie.Position.Y) >= zombie.VerticalAttackRange)
             return false;
-        return VisionBlocked?.Invoke(zombie.Position + (Vector3.Up * ZombieBody.EyeHeight),
-            target.Position) != true;
+        Vector3 from = zombie.Position + (Vector3.Up * ZombieBody.EyeHeight);
+        Vector3 to = target.Position + (Vector3.Up * PlayerConfig.EyeHeightFor(target.Stance));
+        if (PhysicalLineBlocked != null)
+            return !PhysicalLineBlocked(from, to);
+        return VisionBlocked?.Invoke(from, target.Position) != true;
     }
 
     // Zombie.leave: drop the target, retreat 16 m away from it (with +-8 m of scatter), stand for
