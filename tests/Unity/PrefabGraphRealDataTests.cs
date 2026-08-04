@@ -149,4 +149,69 @@ public class PrefabGraphRealDataTests
         Assert.Equal(2, part.Materials.Count);
         Assert.Single(graph.CollidersByKey["objects/large/buildings/tutorial_0"]);
     }
+
+    // Every renderable part of a prefab has to resolve into ONE frame — the prefab's own — whether it
+    // hangs off a MeshFilter or a SkinnedMeshRenderer.
+    //
+    // These three carry both kinds. Their static geometry sits on a "Model_0" whose -90 degrees about X
+    // cancel the +90 its "Root" parent carries; their glass, hinges, hobs and counter tops are skinned,
+    // and Unity poses those from the bones alone, so the renderer's own chain never applies to them. The
+    // graph used to compose that chain for the skinned ones too, handing them the +90 that nothing
+    // cancelled: PEI's diner showed its display cases with the glass lying flat outside the building, and
+    // its ovens and counters with their tops thrown clear of the bodies.
+    [RealDataTheory(RequiresMasterBundle = true)]
+    [InlineData("objects/medium/business/cooler_0")]
+    [InlineData("objects/medium/furniture/counter_2")]
+    [InlineData("objects/medium/furniture/oven_0")]
+    public void RealPrefabs_ResolveSkinnedAndStaticPartsIntoOneFrame(string key)
+    {
+        List<MeshPart> parts = Parts(GameData.Prefabs, key);
+
+        Assert.True(parts.Count > 1, $"{key} is expected to carry several parts");
+        foreach (MeshPart part in parts)
+        {
+            // Not Assert.Equal on the transform: the authored quaternions round-trip through floats, so
+            // the cancelling pair lands a rounding step off exact identity.
+            Godot.Basis basis = part.LocalToRoot.Basis;
+            Assert.Equal(Godot.Vector3.Zero, part.LocalToRoot.Origin);
+            Assert.True(basis.X.IsEqualApprox(Godot.Vector3.Right)
+                && basis.Y.IsEqualApprox(Godot.Vector3.Up)
+                && basis.Z.IsEqualApprox(Godot.Vector3.Back),
+                $"{key} has a part rotated out of the prefab frame: {basis}");
+        }
+    }
+
+    // The same thing said in the geometry rather than the transform, so the assertion above cannot pass on
+    // a graph that has quietly stopped finding the skinned parts at all: the pane really does stand inside
+    // the case it belongs to. Cooler_0's body is 2.5 units tall in the authored (Z-up) frame and its glass
+    // spans that same height just outside the front face — which is only true while both share a frame.
+    [RealDataFact(RequiresMasterBundle = true)]
+    public void RealCooler_KeepsItsGlassInsideTheCase()
+    {
+        PrefabGraph graph = GameData.Prefabs;
+        var heights = new List<float>();
+
+        foreach (MeshPart part in Parts(graph, "objects/medium/business/cooler_0"))
+        {
+            UnityMesh mesh = UnityMesh.Read(TypeTreeReader.Read(
+                graph.ObjectsByPathId[part.MeshId].TypeTree,
+                graph.File.ReaderFor(graph.ObjectsByPathId[part.MeshId])));
+            if (!mesh.Usable)
+                continue;
+
+            float min = float.MaxValue, max = float.MinValue;
+            foreach (Godot.Vector3 v in mesh.Vertices)
+            {
+                float z = (part.LocalToRoot * v).Z;
+                min = System.Math.Min(min, z);
+                max = System.Math.Max(max, z);
+            }
+            heights.Add(max - min);
+        }
+
+        Assert.NotEmpty(heights);
+        // Every part spans most of the case's height. Applying the chain to the skinned ones turned that
+        // extent into a 0.2-unit-thick slab lying across the Z axis instead.
+        Assert.All(heights, h => Assert.InRange(h, 2.0f, 2.6f));
+    }
 }

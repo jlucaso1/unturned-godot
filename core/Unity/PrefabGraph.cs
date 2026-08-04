@@ -317,9 +317,23 @@ public sealed class PrefabGraph
             if (walk.AnchorOf(goId) is not { } anchor)
                 continue;
 
+            // A skinned mesh does not sit where its GameObject does. Unity poses those vertices from the
+            // bones alone — vertex = bone.localToWorld * bindpose * v — and never reads the renderer's own
+            // transform, which is why the bone can live in a different subtree entirely: the glass in
+            // Cooler_0 is a SkinnedMeshRenderer under "Root" whose only bone is "Hinge" under "Skeleton".
+            //
+            // bindpose is the inverse of that bone's pose as authored, so the product collapses to the
+            // identity for as long as the skeleton stands at its bind pose — which is how a prefab ships
+            // and how it renders on a level that has just loaded. Composing the GameObject chain instead
+            // took the +90 degrees about X that "Root" carries and applied it to geometry already in the
+            // prefab's own space: the display cases' glass, the counters' tops and the ovens' hobs all
+            // came out lying flat and thrown clear of the body they belong to.
+            Transform3D localToRoot = o.ClassId == SkinnedMeshRendererClassId
+                ? Transform3D.Identity
+                : anchor.LocalToRoot;
+
             parts.Add(anchor.Key, anchor.PartName, anchor.IsVehicle,
-                new MeshPart(meshId, MeshRendererMaterials(file, objectsByPathId, goId),
-                    anchor.LocalToRoot));
+                new MeshPart(meshId, MeshRendererMaterials(file, objectsByPathId, goId), localToRoot));
         }
 
         (Dictionary<string, List<MeshPart>> baseLevel, Dictionary<string, List<MeshPart>> lower) =
