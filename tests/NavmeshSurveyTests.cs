@@ -146,10 +146,12 @@ public class NavmeshSurveyTests
         Assert.Equal(2f, MathF.Max(seam.A.Z, seam.B.Z), 4);
     }
 
-    // A face standing on its edge has no footprint to draw a line along, and dividing by that footprint
-    // is how every other edge is measured.
+    // A face standing on its edge covers no ground, so from above it has no outline: one of its edges
+    // is a point in plan and the other two run along the face itself. The overlay is a plan view, and
+    // two arbitrary lines for a face with no footprint are worse than none. It is still a face the
+    // router holds, which is why the island survives.
     [Fact]
-    public void AnEdgeWithNoFootprintInPlan_DrawsNothing()
+    public void AFaceStandingOnItsEdge_DrawsNoOutline()
     {
         NavFlagSurvey survey = SurveyOf(new NavFlag
         {
@@ -159,9 +161,8 @@ public class NavmeshSurveyTests
             Triangles = new[] { 0, 1, 2 },
         });
 
-        // The vertical edge 0-1 is skipped; the other two are wall.
-        Assert.Equal(2, survey.Rim.Count);
-        Assert.DoesNotContain(survey.Rim, edge => edge.A.X == edge.B.X && edge.A.Z == edge.B.Z);
+        Assert.Empty(survey.Rim);
+        Assert.Equal(1, Assert.Single(survey.Islands).TriangleCount);
     }
 
     // Two faces on the SAME side of an edge are stacked or duplicated, not joined across it. Counting
@@ -183,6 +184,36 @@ public class NavmeshSurveyTests
 
         // Three edges, each still a wall despite the second copy naming every one of them.
         Assert.Equal(3, survey.Rim.Count);
+    }
+
+    // A zero-area face lies ALONG an edge rather than to one side of it, so the sign that decides
+    // "is there floor across this" is zero and rejects every neighbour. Left able to claim the edge,
+    // such a face would report a wall down the middle of open floor — and, because the edge is only
+    // answered once, would stop the two real faces that share it from saying otherwise. Which one wins
+    // came down to face order, so this is pinned with the sliver FIRST.
+    [Fact]
+    public void ASliverAlongAnEdge_DoesNotClaimItFromTheFacesWithASide()
+    {
+        NavFlagSurvey survey = SurveyOf(new NavFlag
+        {
+            Center = new Vector3(0, 0, 0.5f),
+            Size = new Vector3(6, 10, 6),
+            Vertices = new[]
+            {
+                new Vector3(0, 0, 0),    // 0 ─┐ the shared edge
+                new Vector3(0, 0, 1),    // 1 ─┘
+                new Vector3(0, 0, 2),    // 2  collinear with it: the sliver's third corner
+                new Vector3(-1, 0, 0.5f),// 3  left of the edge
+                new Vector3(1, 0, 0.5f), // 4  right of the edge
+            },
+            Triangles = new[] { 0, 1, 2, 0, 1, 3, 0, 1, 4 },
+        });
+
+        // The two real faces sit either side of x = 0, so there is floor across it and no wall there.
+        Assert.DoesNotContain(survey.Rim, edge => edge.A.X == 0f && edge.B.X == 0f
+            && MathF.Min(edge.A.Z, edge.B.Z) >= 0f && MathF.Max(edge.A.Z, edge.B.Z) <= 1f);
+        // The outer boundary of the two real faces is still drawn: two free edges each.
+        Assert.Equal(4, survey.Rim.Count);
     }
 
     [Fact]

@@ -221,25 +221,38 @@ public sealed partial class BakedNavGraph
                     // Overlapping or duplicated faces name the same edge from the same side, so the
                     // same wall can be reached twice; drawing it twice doubles the line count on
                     // exactly the maps that already have the most of them.
-                    if (!seen.Add((Math.Min(v0, v1), Math.Max(v0, v1))))
+                    if (seen.Contains((Math.Min(v0, v1), Math.Max(v0, v1))))
                         continue;
-                    AppendUncovered(triangle, v0, v1, covered, rim);
+                    // The pair is only CLAIMED by a face that could actually answer for it. A face
+                    // with no side to be on cannot: "is there floor across this?" is decided by a
+                    // sign, and a zero sign rejects every neighbour, so a sliver sharing an edge with
+                    // real geometry would report the whole edge as wall AND stop the faces that know
+                    // better from being asked. Leaving the key unclaimed hands the question to them.
+                    if (AppendUncovered(triangle, v0, v1, covered, rim))
+                        seen.Add((Math.Min(v0, v1), Math.Max(v0, v1)));
                 }
             }
             return rim;
         }
 
-        private void AppendUncovered(int triangle, int v0, int v1, List<(float From, float To)> covered,
+        // True when this face answered for the edge — false when it is not equipped to, and the pair
+        // should be left for another face naming it.
+        private bool AppendUncovered(int triangle, int v0, int v1, List<(float From, float To)> covered,
             List<NavRimEdge> rim)
         {
             Vector3 a = Source.Vertices[v0], b = Source.Vertices[v1];
             float ex = b.X - a.X, ez = b.Z - a.Z;
             float lengthSquared = (ex * ex) + (ez * ez);
             if (lengthSquared <= 1e-8f)
-                return; // a vertical or zero-length edge in plan: nothing to draw a line along
+                return false; // a vertical or zero-length edge in plan: nothing to draw a line along
 
             covered.Clear();
             float here = SideOfEdge(v0, v1, OppositeVertex(triangle, v0, v1));
+            // A zero-area face lies ALONG the edge rather than to one side of it, so it has no opinion
+            // to offer on what is across. The same rule the snap and the stitch already apply.
+            if (MathF.Abs(here) <= 1e-6f)
+                return false;
+
             for (int at = _edgeStart[triangle]; at < _edgeStart[triangle + 1]; at++)
             {
                 Connection c = _edges[at];
@@ -267,9 +280,10 @@ public sealed partial class BakedNavGraph
                     Emit(a, b, open, MathF.Min(from, 1f), rim);
                 open = MathF.Max(open, to);
                 if (open >= 1f)
-                    return;
+                    return true;
             }
             Emit(a, b, open, 1f, rim);
+            return true;
         }
 
         // Below this the leftover is the float noise between two portals that meet, not a gap a body

@@ -24,6 +24,13 @@ namespace UnturnedGodot.EditorTools;
 // BakedNavGraph's survey — the adjacency the game's own pathfinder walks — rather than from the raw
 // triangles, which disagree with it about 3 449 of PEI's edges.
 //
+// What it shows is the navmesh AS BAKED. A session additionally reconciles it against collision
+// (ZombieNavigation.PruneAgainstCollisionAsync) and drops the faces that turn out to sit inside
+// geometry, so a live graph can be a little smaller than this one. That pass is not reproducible here:
+// its verdict comes from probing realised colliders, which the editor deliberately never builds, and
+// even its cached result is fingerprinted against a collider cache a session had to populate first. So
+// the report says which of the two it is rather than implying a parity it does not have.
+//
 // Drawn to stay smooth to fly through: one mesh per flag (so the renderer culls the ones behind you),
 // one shared unshaded material per layer, no shadows, no depth writes, and every toggle except the
 // build itself is a property write rather than a rebuild.
@@ -75,41 +82,53 @@ public static class NavigationPreview
                     LevelNavigationData.Load(environmentDir));
             });
 
+        // Detached until the very end, and a Node is manually managed: nothing collects it if this
+        // throws part-way. Yield throws exactly that way when the dock is freed mid-build — the plugin
+        // disabled, or the project closed — and the whole half-built tree would then be leaked
+        // instances for the life of the editor process.
         var root = new Node3D { Name = RootName, Position = new Vector3(0, options.Lift, 0) };
-        var surfaces = new Node3D { Name = SurfaceNode };
-        var rims = new Node3D { Name = RimNode, Visible = options.Rim };
-        root.AddChild(surfaces);
-        root.AddChild(rims);
-
-        StandardMaterial3D surfaceMaterial = OverlayMaterial(options.XRay, unshadedLines: false);
-        StandardMaterial3D rimMaterial = OverlayMaterial(options.XRay, unshadedLines: true);
-
-        for (int i = 0; i < survey.Count; i++)
+        try
         {
-            onStatus($"Navmesh {i + 1}/{survey.Count}…");
+            var surfaces = new Node3D { Name = SurfaceNode };
+            var rims = new Node3D { Name = RimNode, Visible = options.Rim };
+            root.AddChild(surfaces);
+            root.AddChild(rims);
+
+            StandardMaterial3D surfaceMaterial = OverlayMaterial(options.XRay, unshadedLines: false);
+            StandardMaterial3D rimMaterial = OverlayMaterial(options.XRay, unshadedLines: true);
+
+            for (int i = 0; i < survey.Count; i++)
+            {
+                onStatus($"Navmesh {i + 1}/{survey.Count}…");
+                await Yield(yieldOn);
+
+                NavFlagSurvey flag = survey[i];
+                if (BuildSurface(flag, surfaceMaterial, $"Flag{i}") is { } surface)
+                    surfaces.AddChild(surface);
+                if (BuildRim(flag, rimMaterial, $"Flag{i}") is { } rim)
+                    rims.AddChild(rim);
+            }
+
             await Yield(yieldOn);
+            if (BuildBeacons(survey, out int drawn, out int total) is { } beacons)
+            {
+                beacons.Visible = options.Beacons;
+                root.AddChild(beacons);
+            }
+            if (BuildBounds(flags, spawnBounds) is { } bounds)
+            {
+                bounds.Visible = options.Bounds;
+                root.AddChild(bounds);
+            }
 
-            NavFlagSurvey flag = survey[i];
-            if (BuildSurface(flag, surfaceMaterial, $"Flag{i}") is { } surface)
-                surfaces.AddChild(surface);
-            if (BuildRim(flag, rimMaterial, $"Flag{i}") is { } rim)
-                rims.AddChild(rim);
+            Summarize(survey, drawn, total, timer.ElapsedMilliseconds, report);
+            return root;
         }
-
-        await Yield(yieldOn);
-        if (BuildBeacons(survey, out int drawn, out int total) is { } beacons)
+        catch
         {
-            beacons.Visible = options.Beacons;
-            root.AddChild(beacons);
+            root.Free(); // frees the children with it
+            throw;
         }
-        if (BuildBounds(flags, spawnBounds) is { } bounds)
-        {
-            bounds.Visible = options.Bounds;
-            root.AddChild(bounds);
-        }
-
-        Summarize(survey, drawn, total, timer.ElapsedMilliseconds, report);
-        return root;
     }
 
     // Applies every option that is not baked into a vertex, so the checkboxes are instant instead of
@@ -121,11 +140,15 @@ public static class NavigationPreview
         SetVisible(root, BeaconNode, options.Beacons);
         SetVisible(root, BoundsNode, options.Bounds);
 
-        // The beacons are always drawn through geometry — a marker you can only see when already
-        // looking at the thing it marks is not a marker — so they are left out of the X-ray sweep.
+        // Beacons and bounds are always drawn through geometry, so both are left out of the X-ray
+        // sweep — it would otherwise turn their depth test back ON, which is not a state either was
+        // ever built in. A marker you can only see once you are already looking at the thing it marks
+        // is not a marker, and a spawn box you can only see from inside the terrain says nothing about
+        // the surface under it. Sweeping them also made the same options render differently depending
+        // on whether they were set before the build or after it.
         foreach (Node layer in root.GetChildren())
         {
-            if (layer.Name == BeaconNode)
+            if (layer.Name == BeaconNode || layer.Name == BoundsNode)
                 continue;
             foreach (MeshInstance3D mesh in Meshes(layer))
                 if (mesh.MaterialOverride is StandardMaterial3D material)
@@ -341,7 +364,7 @@ public static class NavigationPreview
         }
 
         report.Add($"{survey.Count} flags, {faces:N0} faces, {islands:N0} islands, "
-            + $"{rim:N0} rim segments in {milliseconds} ms");
+            + $"{rim:N0} rim segments in {milliseconds} ms  (as baked — not reconciled with collision)");
         if (dropped > 0)
             report.Add($"  {dropped:N0} faces dropped");
 

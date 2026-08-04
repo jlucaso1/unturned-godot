@@ -163,7 +163,9 @@ public partial class MapPreviewDock : VBoxContainer
         _navigation = AddButton("Show navmesh", OnToggleNavigation,
             "Draw this map's baked navmesh into the edited scene: walkable surface coloured by island, "
             + "the rim where it stops, and a beacon over every patch nothing can walk to. Reads only "
-            + "the map's Environment folder, so it does not need a warm cache.");
+            + "the map's Environment folder, so it needs no warm cache and works on the maps whose "
+            + "terrain this port cannot build. This is the navmesh as baked — a session additionally "
+            + "reconciles it against collision.");
 
         var grid = new GridContainer { Columns = 2 };
         AddChild(grid);
@@ -243,8 +245,10 @@ public partial class MapPreviewDock : VBoxContainer
         var report = new List<string>();
         try
         {
-            Node3D overlay = await NavigationPreview.BuildAsync(
-                MapCatalog.ResolvePath(install, map.FolderName), NavigationOptions, this,
+            // The entry's own path, not a lookup by folder name: folder names are not unique across
+            // workshop items, and resolving one picks the first match — which can be a different
+            // workshop map from the one the dock is describing right above this button.
+            Node3D overlay = await NavigationPreview.BuildAsync(map.Path, NavigationOptions, this,
                 status => { if (Alive) _navigation.Text = status; }, report);
 
             // The staged build yields between flags, so the scene may have closed in the meantime.
@@ -292,11 +296,12 @@ public partial class MapPreviewDock : VBoxContainer
 
         _install.Text = _unturnedPath;
         _catalog = MapCatalog.Scan(_unturnedPath);
+        // Pre-Landscape maps are listed and SELECTABLE, even though this port cannot build their
+        // terrain. Their navmesh is read from Environment/ like any other map's, and refusing to let
+        // them be picked at all would put the one thing that does work behind the one that does not.
+        // SetButtonsEnabled turns off the buttons that genuinely need the terrain.
         foreach (MapEntry map in _catalog)
-        {
             _maps.AddItem(map.IsSupported ? map.DisplayName : $"{map.DisplayName} (no terrain)");
-            _maps.SetItemDisabled(_maps.ItemCount - 1, !map.IsSupported);
-        }
 
         if (_maps.ItemCount == 0)
         {
@@ -305,8 +310,12 @@ public partial class MapPreviewDock : VBoxContainer
             return;
         }
 
-        SetButtonsEnabled(true);
+        // The rescan resets the selection itself rather than going through the selection handler, so
+        // an overlay built for whatever was selected before would survive while the dock now names a
+        // different map — and be read as that map's navigation.
+        DropOverlayFromAnotherMap();
         _maps.Selected = 0;
+        SetButtonsEnabled(true);
         RefreshCacheState();
     }
 
@@ -315,11 +324,20 @@ public partial class MapPreviewDock : VBoxContainer
     private void OnMapSelected()
     {
         RefreshCacheState();
-        if (EditorInterface.Singleton.GetEditedSceneRoot() is { } root && NavigationPreview.Clear(root))
-        {
-            UpdateNavigationButton(shown: false);
-            Log("Navmesh overlay dropped: it belonged to the previous map.");
-        }
+        // The preview and warm buttons follow the selection too: a map this port cannot read terrain
+        // for still has a navmesh worth looking at, so it is selectable, and only what actually needs
+        // the terrain is turned off.
+        SetButtonsEnabled(!_busy);
+        DropOverlayFromAnotherMap();
+    }
+
+    private void DropOverlayFromAnotherMap()
+    {
+        if (EditorInterface.Singleton.GetEditedSceneRoot() is not { } root
+            || !NavigationPreview.Clear(root))
+            return;
+        UpdateNavigationButton(shown: false);
+        Log("Navmesh overlay dropped: it belonged to the previous map.");
     }
 
     private MapEntry? Selected =>
@@ -502,9 +520,12 @@ public partial class MapPreviewDock : VBoxContainer
 
     private void SetButtonsEnabled(bool enabled)
     {
-        _preview.Disabled = !enabled;
+        // Building the world and warming its mesh cache both need terrain this port can read; the
+        // navmesh overlay does not, so it stays available on the maps those two cannot serve.
+        bool terrain = Selected?.IsSupported != false;
+        _preview.Disabled = !enabled || !terrain;
         _clear.Disabled = !enabled;
-        _warm.Disabled = !enabled;
+        _warm.Disabled = !enabled || !terrain;
         _refresh.Disabled = !enabled;
         _navigation.Disabled = !enabled;
         _maps.Disabled = !enabled;
