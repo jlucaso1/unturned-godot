@@ -126,7 +126,7 @@ public sealed class ReproScenario
             // Without a pathfinder handed in, the dump's own navmesh slice becomes one. It routes
             // correctly around the incident and nowhere else, which is the trade a self-contained
             // bug report makes; pass the real map's flags (or a pathfinder) to lift it.
-            _pathQuery = _options.PathQuery ?? BakedNavGraph.Build(flags).TryPath;
+            _pathQuery = _options.PathQuery ?? BuildGraph(flags, dump.World, _options.NavFlags == null);
             // Whether that graph covers the whole map or only what the dump sliced out. A slice can
             // only answer near the incident, and a route asked for beyond it comes back "no route"
             // from a graph that simply has no triangles there — which is not the same claim.
@@ -157,6 +157,31 @@ public sealed class ReproScenario
             return _dump.Meta.TickRate > 0f ? _dump.Meta.TickRate : ServerSimulation.TickRate;
         float dt = _section.Frames[Math.Min(tick, _section.Frames.Count - 1)].Dt;
         return dt > 0f ? dt : ServerSimulation.TickRate;
+    }
+
+    // The dump's own flags, with the faces reconciliation had already disabled put back out of use.
+    // The navmesh is baked before the map's objects exist, so a graph rebuilt from the same triangles
+    // routes through every building on it; restoring them is what makes a recorded route reproducible
+    // rather than merely plausible.
+    //
+    // Only when the flags came from the dump. `--level` hands over the whole map, whose triangles are
+    // numbered differently from the slice, and applying the slice's indices to it would take out faces
+    // chosen at random — a worse lie than not applying them at all. A dump from before this was
+    // recorded carries none, and behaves as it always did.
+    private static ZombiePathQuery BuildGraph(IReadOnlyList<NavFlag> flags, ReproWorldData world,
+        bool flagsAreTheDumps)
+    {
+        BakedNavGraph graph = BakedNavGraph.Build(flags);
+        if (flagsAreTheDumps && flags.Count == world.NavFlags.Count)
+            for (int i = 0; i < flags.Count; i++)
+            {
+                // Null, not empty, on every dump written before this field existed: the reader leaves
+                // an absent array alone rather than running the initializer.
+                int[]? off = world.NavFlags[i].DisabledFaces;
+                if (off is { Length: > 0 })
+                    graph.Disable(flags[i], new HashSet<int>(off));
+            }
+        return graph.TryPath;
     }
 
     public void Step()

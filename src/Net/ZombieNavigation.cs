@@ -342,6 +342,21 @@ public sealed class ZombieNavigation
             + $"({(cacheHit ? "CSR cache hit" : "CSR built")}, NavigationServer bypassed)");
     }
 
+    // What reconciliation has taken out of the graph so far, for whoever needs to describe the graph
+    // rather than query it — the repro capture, which has to record the faces a rebuild would restore.
+    // A live view on purpose: a dump taken mid-reconciliation should carry what was disabled by then.
+    public IReadOnlyDictionary<NavFlag, IReadOnlySet<int>> DisabledFaces
+    {
+        get
+        {
+            var view = new Dictionary<NavFlag, IReadOnlySet<int>>(_unreachable.Count);
+            foreach (KeyValuePair<NavFlag, HashSet<int>> entry in _unreachable)
+                if (entry.Value.Count > 0)
+                    view[entry.Key] = entry.Value;
+            return view;
+        }
+    }
+
     private readonly Dictionary<NavFlag, HashSet<int>> _unreachable = new();
 
     // Removes the navmesh triangles a body cannot actually reach, using the real collision world.

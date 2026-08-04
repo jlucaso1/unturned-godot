@@ -56,6 +56,7 @@ public partial class DedicatedServer : Node
             // this — an unattended soak run that writes a dump when the simulation misbehaves.
             if (ReproService.Create(zombies, node._server, ground, host) is { } repro)
             {
+                repro.DisabledFaces = () => node._zombieNavigation?.DisabledFaces;
                 repro.LevelName = levelName;
                 repro.Map = mapName;
                 node.AddChild(repro);

@@ -62,6 +62,16 @@ and the report marks it `<- spinning in place`; one that covers 14 m is chasing 
 `--ticks N` keeps simulating past the recorded window (the players hold their last position), which is
 where a fix is judged: the window shows the bug, the tail shows whether it ends.
 
+A dump also carries the faces **reconciliation had already disabled** — the footprints of the map's
+objects, which are walkable in the baked navmesh because it is baked before the objects exist. Without
+them a replay routes on a graph the session never had and answers with a straight line through a
+house; measured on a real dump, the session's own route detoured to 2.25x the plan distance while the
+replay went direct at 1.08x, so a route-shaped bug could not be reproduced from the dump it was taken
+for. They are renumbered along with the slice, so they name the same ground after it.
+
+They are skipped when you pass `--level`, because that hands over the whole map, whose triangles are
+numbered differently from the slice. Dumps written before this was recorded simply carry none.
+
 `--level <map folder>` gives the replay the whole map's navmesh instead of the slice in the dump. Use
 it when the route matters beyond the incident. `./scripts/fetch-game-data.sh` downloads a map.
 

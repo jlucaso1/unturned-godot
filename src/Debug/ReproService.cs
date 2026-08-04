@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Godot;
+using UnturnedGodot.Data;
 using UnturnedGodot.Net;
 using UnturnedGodot.Repro;
 using UnturnedGodot.Zombies;
@@ -53,6 +54,11 @@ public sealed partial class ReproService : Node
 
     // Builds the service for a hosted session, or nothing at all when REPRO=0 — in which case the
     // simulation runs with its own delegates and this file costs the session exactly nothing.
+    // Where the faces reconciliation disabled come from. Set by whoever owns the navigation, because
+    // the graph is not the zombie system's to hand over. Null leaves the dump saying nothing about
+    // them, which is what a session without collision reconciliation should say.
+    public Func<IReadOnlyDictionary<NavFlag, IReadOnlySet<int>>?>? DisabledFaces { get; set; }
+
     public static ReproService? Create(ZombieSystem zombies, NetServer? server, GroundSampler? ground,
         ZombieHost? host = null)
     {
@@ -178,6 +184,7 @@ public sealed partial class ReproService : Node
             NavmeshRadius = _navRadius,
             GroundRadius = _groundRadius,
             Session = Session(),
+            DisabledFaces = DisabledFaces?.Invoke(),
             Geometry = ReproGeometryCapture.Capture(GetViewport()?.World3D?.DirectSpaceState, focus,
                 _geometryRadius, warnings),
             Log = Log.Tail(),
