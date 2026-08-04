@@ -260,6 +260,9 @@ public static class WorldBuilder
         var colliderLibrary = ColliderLibrary.Load(cacheDir, neededGuids);
 
         ObjectAssetDatabase db = dbTask.Result; // the scan ran concurrently with ModelLibrary.Load above
+        // NPCs leave the object list here: they resolve to the player rig rather than to an extracted
+        // mesh, so ObjectsBuilder would only ever box them (see NpcPlacements).
+        List<PlacedObject> npcs = NpcPlacements.Partition(objects, db);
         int withMesh = 0;
         // The prefabs' authored lower levels, so this path renders the same as the streamed one: a
         // benchmark or screenshot taken here must submit the geometry a real session submits.
@@ -272,6 +275,8 @@ public static class WorldBuilder
         if (lod1Library.Count > 0)
             Log.Print($"[world] object LOD levels: {lod1Library.Count} of {meshLibrary.Count} meshes "
                 + "have an authored lower level");
+        objectsRoot.AddChild(NpcsBuilder.Build(npcs, unturnedPath, out int npcsDrawn));
+        withMesh += npcsDrawn;
 
         Node3D vehiclesRoot = BuildVehicles(vehicles, db, meshLibrary, colliderLibrary, lod1Library);
 

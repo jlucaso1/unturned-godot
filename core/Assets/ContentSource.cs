@@ -31,6 +31,11 @@ public sealed class ContentSource
     // subfolder, so a consumer scans the subtree it needs rather than the whole tree.
     public string SpawnsDir { get; }
 
+    // NPC character assets. They carry no prefab of their own — an NPC is the player's own rig wearing
+    // what its .dat names — but a map places them by GUID like any other object, so they have to be in
+    // the asset database for those placements to resolve at all.
+    public string NpcsDir { get; }
+
     // The game's own content, as opposed to a workshop item.
     public bool IsCore { get; }
 
@@ -39,7 +44,7 @@ public sealed class ContentSource
     public string CacheTag { get; }
 
     private ContentSource(string name, string root, string bundlePath, string objectsDir, string treesDir,
-        string assetsDir, string vehiclesDir, string spawnsDir, bool isCore)
+        string assetsDir, string vehiclesDir, string spawnsDir, string npcsDir, bool isCore)
     {
         Name = name;
         string nameTag = Unity.TextureKey.TagFor(name);
@@ -55,6 +60,7 @@ public sealed class ContentSource
         AssetsDir = assetsDir;
         VehiclesDir = vehiclesDir;
         SpawnsDir = spawnsDir;
+        NpcsDir = npcsDir;
         IsCore = isCore;
     }
 
@@ -96,6 +102,7 @@ public sealed class ContentSource
                 Path.Combine(bundles, "Assets"),
                 Path.Combine(bundles, "Vehicles"),
                 Path.Combine(bundles, "Spawns"),
+                Path.Combine(bundles, "NPCs"),
                 isCore: true));
         }
 
@@ -119,6 +126,7 @@ public sealed class ContentSource
         string assets = Path.Combine(itemDirectory, "Assets");
         string vehicles = Path.Combine(itemDirectory, "Vehicles");
         string spawns = Path.Combine(itemDirectory, "Spawns");
+        string npcs = Path.Combine(itemDirectory, "NPCs");
         // Asset-only bundles are valid sources too. Foliage, physics materials, landscapes and spawn
         // tables are consumed independently of Objects/Resources, and every one of those scanners starts
         // from Discover's result. Rejecting an item that contains only one of them silently drops
@@ -147,6 +155,7 @@ public sealed class ContentSource
             assets,
             vehicles,
             spawns,
+            npcs,
             isCore: false);
     }
 

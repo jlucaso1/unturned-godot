@@ -44,6 +44,10 @@ public partial class ObjectStreamer : Node
     private string _cacheDir = "";
     private string _textureCacheDir = "";
     private LevelInfo _level = null!;
+    // Kept from StartPrepare: the NPC characters are imported out of the install's resources.assets at
+    // build time, long after the path was handed in.
+    private string _unturnedPath = "";
+    private List<PlacedObject> _npcs = new();
 
     private TextureRegistry _registry = null!;
     // One table for the whole load, so the base and lower-LOD libraries share their materials, and so the
@@ -185,6 +189,7 @@ public partial class ObjectStreamer : Node
     // that pass took over responsibility for completing LayerTextures.
     private bool Prepare(string unturnedPath, LevelInfo level)
     {
+        _unturnedPath = unturnedPath;
         LoadPlacements();
 
         // The terrain layers are planned first so the bundles that owe them are part of the extraction
@@ -417,6 +422,10 @@ public partial class ObjectStreamer : Node
         _vehicles = VehicleSpawnPlan.Load(_level, _sources, _db);
         Log.Print($"[stream] vehicles: {_vehicles.Count} spawned");
 
+        // NPCs leave the object list before the needed set is built: they resolve to the player rig, not
+        // to an extracted mesh, so counting them would keep every load looking cold (see NpcPlacements).
+        _npcs = NpcPlacements.Partition(_objects, _db);
+
         _neededGuids = new HashSet<Guid>();
         foreach (PlacedObject o in _objects)
             _neededGuids.Add(o.Guid);
@@ -507,6 +516,8 @@ public partial class ObjectStreamer : Node
                 + "have an authored lower level");
         double buildMs = stage.Elapsed.TotalMilliseconds;
         stage.Restart();
+        root.AddChild(NpcsBuilder.Build(_npcs, _unturnedPath, out int npcsDrawn));
+        withMesh += npcsDrawn;
         AddChild(root);
         AddChild(WorldBuilder.BuildVehicles(_vehicles, _db, meshLibrary, colliderLibrary, lod1Library));
         double attachMs = stage.Elapsed.TotalMilliseconds;

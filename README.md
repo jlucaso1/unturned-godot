@@ -44,8 +44,9 @@ in view.
   because barricades do not exist here yet — their prefabs carry the same climbing volume on the same
   layer, so they come for free once they do. Neither does the climb/swim transition, for the same reason:
   there is no swimming stance to move between.
-- **NPC characters**: Russia places 40 of them (`Bundles/NPCs/Characters`), and nothing reads that asset
-  family yet, so each one stands there as a placeholder box instead of a dressed character.
+- **NPC clothing**: the NPC characters Russia places stand in the player rig's default look. Their
+  `.dat` names a Shirt, Pants, Hat and Face, and those are item assets whose meshes are a family nothing
+  reads yet, so every one of them is currently the same undressed character.
 
 ## Requirements
 

@@ -19,6 +19,9 @@ public sealed class ObjectAssetDatabase
     // every id Monolith's trees are placed with is one of them. A tree resolved out of _byId would render
     // as somebody's house.
     private readonly Dictionary<ushort, ObjectAsset> _resourcesById = new();
+    // And a fourth for EAssetType.NPC, whose ids run 1..~900 straight through the object range. Scanning
+    // Bundles/NPCs into the shared table would have every NPC shadow an unrelated object.
+    private readonly Dictionary<ushort, ObjectAsset> _npcsById = new();
 
     // How far a redirector chain is followed before giving up. One hop is all the shipped content uses;
     // the bound is only here so a self-referencing mod asset cannot spin.
@@ -69,6 +72,7 @@ public sealed class ObjectAssetDatabase
     {
         EObjectType.Vehicle or EObjectType.VehicleRedirector => _vehiclesById,
         EObjectType.Resource => _resourcesById,
+        EObjectType.Npc => _npcsById,
         _ => _byId,
     };
 
