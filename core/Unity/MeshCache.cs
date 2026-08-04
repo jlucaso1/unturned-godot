@@ -56,7 +56,14 @@ public static class MeshCache
     // but an entry written by the old rules is indistinguishable from a correct one, and completeness is
     // decided per GUID: bumping is what makes an install with a warm cache extract those meshes again
     // instead of drawing the wreck forever.
-    private const uint Magic = 0x444D4755;
+    //
+    // "UGME": a skinned part is now posed by what drives its skeleton rather than by its GameObject chain,
+    // so the vertices baked for every prefab with an animated skinned mesh — the display cases' glass, the
+    // counters' and wardrobes' doors, the ovens' hobs, the containers, the prison and blast doors — come
+    // out somewhere else. Same story as "UGMD": the FORMAT is unchanged, so an entry written under the old
+    // rule passes every completeness test there is, and without a bump an install with a warm cache keeps
+    // its glass lying flat in mid-air no matter how many times it loads.
+    private const uint Magic = 0x454D4755;
 
     // A prefab's authored lower level is cached beside its mesh as "<guid>.lod1.mesh". The suffix still
     // ends in ".mesh" so a directory scan finds both levels; callers that want only the base level filter
