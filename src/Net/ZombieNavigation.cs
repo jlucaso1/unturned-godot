@@ -358,14 +358,20 @@ public sealed class ZombieNavigation
     private readonly Dictionary<int, IReadOnlySet<int>> _disabledByFlag = new();
 
     // Snapshot one flag's disabled set at the moment it is decided, keyed by position in _flags.
+    //
+    // An EMPTY set removes rather than skips. A partial cache is loaded into here and then, if partial
+    // resumption is off, thrown away and every flag recomputed; a flag that came back non-empty from
+    // the cache and recomputes to empty would otherwise keep its old entry, and the dump would claim
+    // faces the live graph actually has. Last writer wins is the only rule that holds here.
     private void RememberDisabled(NavFlag flag, HashSet<int> unreachable)
     {
-        if (unreachable.Count == 0)
-            return;
         for (int i = 0; i < _flags.Count; i++)
             if (ReferenceEquals(_flags[i], flag))
             {
-                _disabledByFlag[i] = new HashSet<int>(unreachable);
+                if (unreachable.Count == 0)
+                    _disabledByFlag.Remove(i);
+                else
+                    _disabledByFlag[i] = new HashSet<int>(unreachable);
                 return;
             }
     }
