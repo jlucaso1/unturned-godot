@@ -674,8 +674,8 @@ public sealed partial class ZombieSystem
                 // and 164 m travelled for 2 m of progress.
                 //
                 // So the tie is broken by the route already being walked. A replacement has to be
-                // shorter than what is left of the incumbent, by more than the distance a body covers
-                // between repaths, or the incumbent stands. Anything genuinely better still wins, and
+                // shorter than what is left of the incumbent by more than RouteTieBand, or the
+                // incumbent stands. Anything genuinely better still wins, and
                 // an incumbent that stops delivering motion is still thrown out by the blocked-route
                 // timeout — this only stops a coin-flip from costing a turn every half second.
                 // `oldError <= 4f` is what stops this becoming stickiness: the incumbent may only refuse
