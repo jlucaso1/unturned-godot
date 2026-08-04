@@ -73,41 +73,49 @@ them — only a real want set does that, which is what the map-scoped lower boun
 
 The masterbundle's first node is a ~171 MiB SerializedFile holding ~103k objects. Everything the port
 builds a scene from comes through it, and until this suite existed none of it was measured. It reports
-the object table, then the TypeTree-driven object reader over two sets:
+the object table, then the TypeTree-driven object reader over three sets:
 
-- **bulk-scanned classes** — the classes a bundle-wide pass scans the whole object table for and decodes
-  (`PrefabGraph`'s AssetBundle/GameObject/Transform/MeshFilter/renderers/colliders, `ModelExtractor` and
-  `MapBundle`'s Mesh/Texture2D/Material/Shader, `AudioExtractor`'s AudioClip and its MonoBehaviour
-  definitions). This is the one that tracks load work.
-- **every object** — a bound, not load work. A class outside the bulk set is not a class the port never
-  reads: several are reached by targeted path-id lookup from an asset that names them (`CharacterModel`
-  walks the player rig's own AnimationClips). It means no pass decodes *every* object of that class.
+- **scanned classes** — classes a bundle-wide loop decodes *every* object of, on any load, whatever the
+  map: `PrefabGraph`'s `ReadContainer` (AssetBundle), `BuildTransformMaps` (Transform), the
+  MeshFilter/SkinnedMeshRenderer sweep and the collider sweep. Each filters on class id alone, so this row
+  is load work **measured**.
+- **targeted classes** — Mesh, Material, Texture2D, Shader, MeshRenderer, GameObject, AudioClip and the
+  audio MonoBehaviours, which the port reaches only by path-id or GUID lookup from an asset that names
+  them. `ModelExtractor` skips GUIDs the map does not need before it touches any of them, so a map that
+  places a small subset of the bundle decodes a small subset of this row. An **upper bound**, not a
+  measurement.
+- **every object** — a bound too, and a looser one. A class in neither list is not a class the port never
+  reads (`CharacterModel` walks the player rig's own AnimationClips by id); it means nothing decodes every
+  object of it.
 
 Measured on the game's own `core_linux.masterbundle` (4-vCPU container, medians after warmup, three
 interleaved runs in one session — the range across those runs is the last column):
 
 | | count | input | median | allocated | across runs |
 |---|---:|---:|---:|---:|---:|
-| `SerializedFile.Read` | 103,549 objects | 170.9 MiB | 8.8 ms | 9.9 MiB | 8.3–9.0 ms |
-| `TypeTreeReader.Read`, bulk-scanned | 92,749 | 108.2 MiB | 469 ms | 509 MiB | 460–476 ms |
-| `TypeTreeReader.Read`, every object | 103,549 | 167.9 MiB | 2,699 ms | 2,121 MiB | 2,644–2,757 ms |
+| `SerializedFile.Read` | 103,549 objects | 170.9 MiB | 9.7 ms | 9.9 MiB | 8.9–9.9 ms |
+| `TypeTreeReader.Read`, scanned | 42,010 | 5.5 MiB | 230 ms | 125 MiB | 221–243 ms |
+| `TypeTreeReader.Read`, targeted (bound) | 50,739 | 102.7 MiB | 284 ms | 384 MiB | 271–307 ms |
+| `TypeTreeReader.Read`, every object (bound) | 103,549 | 167.9 MiB | 2,666 ms | 2,121 MiB | 2,599–2,758 ms |
 
 The allocation figures are byte-identical run to run, as they should be for a deterministic decode; only
 the clock moves.
 
-Two things fall out. The object table itself is free — 9.5 ms to index 103k objects, so nothing is to be
-gained by making it lazier. And **the reader's cost is allocation, not parsing**: it turns 108 MiB of
-object bytes into 509 MiB of managed objects (4.7x) for the classes a load reads, and 168 MiB into
-2,121 MiB (12.6x) for the file. That is inherent in the output shape — a boxed leaf per primitive, a
-`Dictionary<string, object>` per struct, a `List<object>` per array — not in how the shape is computed.
-The per-class table says where it lands: AnimationClip is 1.4 GiB of the 2.1 GiB, which is why the
-whole-file row is a bound and not a load figure.
+Three things fall out. The object table itself is free — 9.7 ms to index 103k objects, so nothing is to
+be gained by making it lazier. The decode every load pays unconditionally is **230 ms**, which against a
+~15 s LZMA pass is 1.5%; even the loosest bound on it is 2%. And **the reader's cost is allocation, not
+parsing**: the scanned set turns 5.5 MiB of object bytes into 125 MiB of managed objects — **22.9x** —
+because a Transform or a BoxCollider is a handful of floats that becomes nested `Dictionary` objects with
+a boxed leaf each. Over the whole file it is 168 MiB into 2,121 MiB. That is inherent in the output shape
+— a boxed leaf per primitive, a `Dictionary<string, object>` per struct, a `List<object>` per array — not
+in how the shape is computed. The per-class table says where the rest lands: AnimationClip alone is
+1.4 GiB of the 2.1 GiB, and nothing scans it, which is why the whole-file row is a bound.
 
 **A negative result, so nobody re-derives it.** `TypeTreeReader.ReadValue` switches on `node.Type`, a
 string, for every value it reads, including every element of every array — and the tree it walks is
 already cached by node-list identity, so the kind could be resolved once at build time instead. Doing
 that (a `Kind` byte per node, resolved in `BuildTree`, switch on the byte) is **worth nothing**: over all
-103,549 objects, 2,846 ms → 2,958 ms, and over the bulk-scanned set 622 ms → 617 ms — both inside a
+103,549 objects, 2,846 ms → 2,958 ms, and over the class subsets a load reads 622 ms → 617 ms — both inside a
 spread of several hundred milliseconds, and allocation is unchanged at 2,121 MiB because the same objects
 are still produced. Equivalence was checked first over all 103,549 objects by deep-comparing the two
 object graphs including dictionary key order and float bit patterns: identical. The string switch is not

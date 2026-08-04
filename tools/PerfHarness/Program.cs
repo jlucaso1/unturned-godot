@@ -365,34 +365,41 @@ public static class Program
         Console.WriteLine();
     }
 
-    // The class ids the port's bundle-wide passes scan the whole object table for and decode, so the suite
-    // can price that sweep rather than the whole file. Taken from the readers themselves: PrefabGraph
-    // (AssetBundle/GameObject/Transform/MeshFilter/renderers/colliders), ModelExtractor and MapBundle
-    // (Mesh/Texture2D/Material/Shader), AudioExtractor (AudioClip and its MonoBehaviour definitions).
-    //
-    // A class missing here is NOT a class the port never reads — several are reached by targeted path-id
-    // lookup from an asset that names them (CharacterModel walks the player rig's own AnimationClips, for
-    // instance). What it means is that no pass decodes every object of that class in the file, so this
-    // suite's whole-file figure for it is a bound on load work rather than a measurement of it.
-    private static readonly int[] BulkDecodedClasses =
+    // Classes a bundle-wide loop decodes EVERY object of, on any load of this bundle, whatever the map:
+    // `PrefabGraph.ReadContainer` (AssetBundle), `BuildTransformMaps` (Transform), the MeshFilter /
+    // SkinnedMeshRenderer sweep, and the collider sweep. Each is `foreach (o in file.Objects)` filtered on
+    // class id alone, so the suite's figure for these is load work measured, not bounded.
+    private static readonly int[] ScannedClasses =
     {
-        1,   // GameObject
-        4,   // Transform
-        21,  // Material
-        23,  // MeshRenderer
-        28,  // Texture2D
-        33,  // MeshFilter
-        43,  // Mesh
-        48,  // Shader
-        64,  // MeshCollider
-        65,  // BoxCollider
-        83,  // AudioClip
-        114, // MonoBehaviour (audio definitions)
-        135, // SphereCollider
-        136, // CapsuleCollider
-        137, // SkinnedMeshRenderer
-        142, // AssetBundle
+        4,   // Transform          — BuildTransformMaps
+        33,  // MeshFilter         — the mesh-part sweep
+        64,  // MeshCollider       — the collider sweep
+        65,  // BoxCollider        — the collider sweep
+        135, // SphereCollider     — the collider sweep
+        136, // CapsuleCollider    — the collider sweep
+        137, // SkinnedMeshRenderer— the mesh-part sweep
+        142, // AssetBundle        — ReadContainer
     };
+
+    // Classes the port reads only through a targeted path-id or GUID lookup from an asset that names them:
+    // `ModelExtractor` skips GUIDs the map does not need before it touches a Mesh/Material/Texture2D,
+    // `MaterialsOf` reaches a MeshRenderer through its GameObject's component list, and `GameObjectOf`
+    // caches GameObjects by id. A map placing a small subset of the bundle decodes a small subset of these,
+    // so the whole-file figure is an UPPER BOUND on load work and must not be read as a measurement of it.
+    private static readonly int[] TargetedClasses =
+    {
+        1,   // GameObject     — GameObjectOf(goId), by id
+        21,  // Material       — from a renderer's material list
+        23,  // MeshRenderer   — from its GameObject's component list
+        28,  // Texture2D      — from a material's texture properties
+        43,  // Mesh           — from a MeshFilter/collider part, GUID-filtered
+        48,  // Shader         — from a material
+        83,  // AudioClip      — from an audio definition
+        114, // MonoBehaviour  — the audio definitions themselves
+    };
+
+    // A class in neither list is not a class the port never reads: CharacterModel walks the player rig's
+    // own AnimationClips by id, for instance. It means no pass decodes every object of that class here.
 
     // Unity class ids worth naming in the per-class table; anything else prints as its bare id.
     private static readonly Dictionary<int, string> ClassNames = new()
@@ -429,8 +436,8 @@ public static class Program
 
     // What the masterbundle's object metadata costs to turn into values: the SerializedFile table, then
     // the TypeTree-driven object reader over it. The cold load's single biggest Core cost after LZMA, and
-    // until now the only major decode path with no suite at all. Times the subset a load really decodes
-    // separately from every object in the file, because they differ by 4x and one of them is a fiction.
+    // until now the only major decode path with no suite at all. Splits what every load decodes from what
+    // only a map that places it decodes, because conflating the two prices the wrong thing.
     private static void BundleSuite(string? unturned)
     {
         string? bundlePath = Environment.GetEnvironmentVariable("BUNDLE_PATH")
@@ -459,6 +466,30 @@ public static class Program
         Console.WriteLine($"== bundle: object decode over {Path.GetFileName(path)} ==");
         Console.WriteLine($"  {Mb(new FileInfo(path).Length)} on disk, {Mb(stream.TotalSize)} decompressed");
 
+        // The stream is forward-only and starts at offset 0, so a bundle whose serialized file sits behind
+        // a stream node has to be wound past it first — reading at the cursor would hand SerializedFile a
+        // slice of somebody else's pixels. The real masterbundles put it at offset 0 and skip nothing; a
+        // bundle named by BUNDLE_PATH need not.
+        if (metadata.Value.Offset > 0)
+        {
+            Console.WriteLine($"  winding {Mb(metadata.Value.Offset)} forward: the serialized file is not "
+                + "this bundle's first node");
+            var skip = new byte[1 << 20];
+            long skipped = 0;
+            while (skipped < metadata.Value.Offset)
+            {
+                int n = stream.Read(skip, 0, (int)Math.Min(skip.Length, metadata.Value.Offset - skipped));
+                if (n <= 0)
+                    break;
+                skipped += n;
+            }
+            if (skipped < metadata.Value.Offset)
+            {
+                Console.WriteLine("== bundle: SKIP (the stream ended before the serialized file) ==\n");
+                return;
+            }
+        }
+
         // Decoded once: this is setup, not a measurement, and it is the only part that needs the LZMA
         // pass. The rate it reports is the metadata region's alone — see the `lzma` diagnostic for why
         // that is nothing like the rate the rest of the blob decodes at.
@@ -481,11 +512,17 @@ public static class Program
             if (o.TypeTree.Count > 0)
                 readable.Add(o);
 
-        var bulkClasses = new HashSet<int>(BulkDecodedClasses);
-        var bulkSet = new List<SerializedObject>();
+        var scanned = new HashSet<int>(ScannedClasses);
+        var targeted = new HashSet<int>(TargetedClasses);
+        var scannedSet = new List<SerializedObject>();
+        var targetedSet = new List<SerializedObject>();
         foreach (SerializedObject o in readable)
-            if (bulkClasses.Contains(o.ClassId))
-                bulkSet.Add(o);
+        {
+            if (scanned.Contains(o.ClassId))
+                scannedSet.Add(o);
+            else if (targeted.Contains(o.ClassId))
+                targetedSet.Add(o);
+        }
 
         if (readable.Count < file.Objects.Count)
         {
@@ -493,10 +530,15 @@ public static class Program
                 + "and are excluded from the decode below");
         }
 
+        // Three rows, and only the first is load work measured. The other two are upper bounds and are
+        // labelled as such: a map places a subset of the bundle, so it decodes a subset of the targeted
+        // classes, and nothing decodes every object.
+        //
         // Far fewer iterations than the default 15: one pass over every object is seconds, not
         // milliseconds, and fifteen of them would cost more than the rest of the harness put together.
-        // The whole-file pass is the coarser of the two, so it gets the smaller budget.
-        ReadPass("TypeTreeReader.Read (bulk-scanned classes)", bulkSet, file, iters: 5);
+        // The coarser the row, the smaller its budget.
+        ReadPass("TypeTreeReader.Read (scanned classes)", scannedSet, file, iters: 5);
+        ReadPass("TypeTreeReader.Read (targeted classes — a bound)", targetedSet, file, iters: 5);
         ReadPass("TypeTreeReader.Read (every object — a bound)", readable, file, iters: 3);
 
         PerClassTable(readable, file);
@@ -530,11 +572,12 @@ public static class Program
 
     // Where the decode time and allocation actually sit, per Unity class, from a single pass. Every object
     // is individually timed here, so the column sums above the uninstrumented pass — read it for the shape,
-    // and take the totals from the two passes above. A class no bundle-wide pass scans can still dominate
-    // this table, which is exactly why the bulk-scanned subset is timed separately.
+    // and take the totals from the passes above. A class nothing scans can still dominate this table, which
+    // is exactly why the scanned subset is timed on its own.
     private static void PerClassTable(List<SerializedObject> objects, SerializedFile file)
     {
-        var bulkClasses = new HashSet<int>(BulkDecodedClasses);
+        var scannedClasses = new HashSet<int>(ScannedClasses);
+        var targetedClasses = new HashSet<int>(TargetedClasses);
         var perClass = new Dictionary<int, (int Count, double Ms, long Input, long Alloc)>();
         foreach (SerializedObject o in objects)
         {
@@ -551,8 +594,9 @@ public static class Program
         var ordered = new List<KeyValuePair<int, (int Count, double Ms, long Input, long Alloc)>>(perClass);
         ordered.Sort((a, b) => b.Value.Ms.CompareTo(a.Value.Ms));
 
-        Console.WriteLine("    by class (individually timed; 'bulk' marks the classes a bundle-wide pass scans for)");
-        Console.WriteLine("      class                      count      input        ms      alloc  bulk");
+        Console.WriteLine("    by class (individually timed; 'how' is scan = every object decoded, "
+            + "targeted = by id)");
+        Console.WriteLine("      class                      count      input        ms      alloc  how");
         int shown = 0;
         foreach (KeyValuePair<int, (int Count, double Ms, long Input, long Alloc)> entry in ordered)
         {
@@ -560,7 +604,7 @@ public static class Program
                 break;
             string name = ClassNames.TryGetValue(entry.Key, out string? n) ? $"{n} ({entry.Key})" : entry.Key.ToString();
             Console.WriteLine($"      {name,-24} {entry.Value.Count,7:N0} {Mb(entry.Value.Input),10} "
-                + $"{entry.Value.Ms,9:0} {Mb(entry.Value.Alloc),10}  {(bulkClasses.Contains(entry.Key) ? "yes" : "no"),-3}");
+                + $"{entry.Value.Ms,9:0} {Mb(entry.Value.Alloc),10}  {(scannedClasses.Contains(entry.Key) ? "scan" : targetedClasses.Contains(entry.Key) ? "targeted" : "-"),-8}");
         }
     }
 

@@ -70,13 +70,14 @@ Measured with `PerfHarness -- lzma` and `-- bundle` on a 4-vCPU container, again
 | LZMA, `.resS` texture node | 1,180.2 MiB | 7.73 s | 51% |
 | LZMA, `.resource` audio node | 20.8 MiB | 2.11 s | 14% |
 | `SerializedFile.Read` | 103,549 objects | 0.01 s | <1% |
-| `TypeTreeReader.Read`, bulk-scanned classes | 92,749 objects | 0.47 s | 3% |
+| `TypeTreeReader.Read`, classes every load scans | 42,010 objects | 0.23 s | 1.5% |
 
-**The pass is LZMA-bound and nothing else is close.** Decompression is ~97% of it; the object table is
+**The pass is LZMA-bound and nothing else is close.** Decompression is ~98% of it; the object table is
 free, and the TypeTree reader — the obvious-looking target, and the only part of this that is the port's
-own code — is 3%. Eliminating the reader entirely would take ~0.5 s off a ~15 s pass. Work aimed at cold
-load time should go at *what is decoded and when* (`ress`, deferral, caching) rather than at how fast the
-port turns already-decoded bytes into values.
+own code — is 1.5%. The classes a map actually places add a bounded 0.28 s on top, so even the loosest
+reading puts the reader at 2%: eliminating it entirely would take well under half a second off a ~15 s
+pass. Work aimed at cold load time should go at *what is decoded and when* (`ress`, deferral, caching)
+rather than at how fast the port turns already-decoded bytes into values.
 
 Two specifics worth carrying. The decode rate is not one number: it varies 15x between the three nodes
 and tracks how compressible each one is, so a rate sampled in one node cannot price a deferral in
