@@ -434,19 +434,25 @@ public partial class PlayerController : CharacterBody3D
 
     // The rig the player is actually looking at, which is the only one worth animating: a hidden rig
     // stops advancing its clock (CharacterSkeleton pauses _Process off screen), so arming one leaves a
-    // stale gesture to thaw and replay the next time it is shown. Derived from the same condition
-    // ApplyPerspective shows them by, so the two cannot drift apart.
-    private CharacterSkeleton? DrawnRig => _thirdPerson || _viewmodel == null ? _rig : _viewmodel;
+    // stale gesture to thaw and replay the next time it is shown. Null in first person without an arms
+    // rig, because then nothing is drawn and there is nothing to animate. Derived from the same
+    // condition ApplyPerspective shows them by, so the two cannot drift apart.
+    private CharacterSkeleton? DrawnRig => _thirdPerson ? _rig : _viewmodel;
 
     private void ApplyPerspective()
     {
-        // With a separate arms rig, first person hides the body and shows the arms. WITHOUT one, hiding
-        // the body would leave first person empty — which is what it was doing. Unturned's own first
-        // person is not an arms-only viewmodel anyway: the character is drawn from inside its own head,
-        // which is why you can look down and see your legs. So the body stays visible and the camera,
-        // already at eye height inside the head, sees it from within: the head's own faces point away
-        // and are culled, and what is left in view is the torso, arms and legs — the swing included.
-        _model.Visible = _thirdPerson || _viewmodel == null;
+        // First person never draws the body. It briefly did, on the theory that Unturned renders the
+        // character from inside its own head — that is why you can look down and see your legs there —
+        // so the head's faces would point away and cull, leaving only the torso and arms in view. The
+        // theory was wrong about THIS rig: the camera sits at PlayerConfig.EyeHeightStand, a fixed 1.75 m
+        // that has nothing to do with where the imported character's skull actually is, so it ends up
+        // outside the head looking at the body rather than inside it. What a player saw was their own
+        // chest filling the screen.
+        //
+        // Drawing the body from a genuine eye point is still the right end state, and it needs the
+        // camera anchored to the rig's own head bone rather than to a constant. Until it is, the arms
+        // rig is the only thing first person may draw, and without one it draws nothing.
+        _model.Visible = _thirdPerson;
         if (_viewmodel != null)
             _viewmodel.Visible = !_thirdPerson;
         // The third-person collision ray belongs to UpdateCamera in _PhysicsProcess. _Ready and _Input
