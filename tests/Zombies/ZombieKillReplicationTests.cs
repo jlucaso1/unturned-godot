@@ -77,6 +77,10 @@ public class ZombieKillReplicationTests
         public readonly List<NetClient> Clients = new();
         public double Now = 5000.0;
 
+        // How many ZombieKilled PAYLOADS arrived, as distinct from how many ids they carried between
+        // them: the point of the pending queue is that one tick's deaths ride together.
+        public int KillMessages;
+
         public Harness()
         {
             Server = new NetServer(ServerTransport,
@@ -109,6 +113,7 @@ public class ZombieKillReplicationTests
                         zoo.AddRange(ZombieNetMessages.ReadZombieList(payload).Listings);
                         break;
                     case ENetMessage.ZombieKilled:
+                        KillMessages++;
                         killed.AddRange(ZombieNetMessages.ReadZombieKilled(payload).Ids);
                         break;
                 }
@@ -186,11 +191,17 @@ public class ZombieKillReplicationTests
         (_, _, List<ushort> killed) = h.Join("A");
         h.Pump(3);
 
+        // Dead first, as they would be in a session: ReportKilled is the replication half of a death
+        // the brain has already applied.
+        h.System.Damage(first, 100, byte.MaxValue, Array.Empty<ZombiePlayerView>());
+        h.System.Damage(second, 100, byte.MaxValue, Array.Empty<ZombiePlayerView>());
         h.Host.ReportKilled(first);
         h.Host.ReportKilled(second);
         h.Pump(2);
 
         Assert.Equal(new ushort[] { 1, 2 }, killed);
+        Assert.Equal(1, h.KillMessages); // one payload, not one per death
+        Assert.Empty(h.System.Zombies);
     }
 
     // Nothing dies, nothing is sent: the payload costs a session that never fights nothing at all.
@@ -224,4 +235,18 @@ public class ZombieKillReplicationTests
     [Fact]
     public void ReportKilledRejectsNull() =>
         Assert.Throws<ArgumentNullException>(() => new Harness().Host.ReportKilled(null!));
+
+    // The count header is one byte wide, so a caller handing over more ids than it can express has to
+    // be refused rather than silently writing a payload that claims to carry none.
+    [Fact]
+    public void WriteRefusesMoreIdsThanTheCountFieldHolds()
+    {
+        var tooMany = new ushort[byte.MaxValue + 1];
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            ZombieNetMessages.WriteZombieKilled(0, tooMany));
+        // One fewer is exactly the ceiling, and writes.
+        Assert.Equal(byte.MaxValue,
+            ZombieNetMessages.ReadZombieKilled(
+                ZombieNetMessages.WriteZombieKilled(0, new ushort[byte.MaxValue])).Ids.Count);
+    }
 }

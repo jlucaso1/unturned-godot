@@ -25,7 +25,11 @@ namespace UnturnedGodot.Damage;
 public sealed class PunchDamageHost
 {
     private readonly NetServer _server;
-    private readonly ZombieSystem _zombies;
+
+    // The zombie brain, when the level has one. A map with no zombie data still has breakable rubble
+    // and resources standing on it, and a player whose fists work — so the punch host exists either way
+    // and simply finds no bodies to hit.
+    private readonly ZombieSystem? _zombies;
     private readonly ZombieHost? _zombieHost;
     private readonly List<ZombiePlayerView> _views = new();
     private readonly Action<byte, PlayerMoveState, ITransportConnection> _collectPlayer;
@@ -47,11 +51,11 @@ public sealed class PunchDamageHost
     // its outcome.
     public event Action<PunchResult>? Resolved;
 
-    public PunchDamageHost(NetServer server, ZombieSystem zombies, ZombieHost? zombieHost = null,
+    public PunchDamageHost(NetServer server, ZombieSystem? zombies, ZombieHost? zombieHost = null,
         DamageableWorld? world = null)
     {
         _server = server ?? throw new ArgumentNullException(nameof(server));
-        _zombies = zombies ?? throw new ArgumentNullException(nameof(zombies));
+        _zombies = zombies;
         _zombieHost = zombieHost;
         World = world;
         _collectPlayer = CollectPlayer;
@@ -80,22 +84,32 @@ public sealed class PunchDamageHost
                 continue;
             if (!_server.TryGetPlayerState(gesture.PlayerId, out PlayerMoveState state))
                 continue; // they left between the step and here
-            Swing(gesture.PlayerId, state);
+            Swing(gesture, state);
         }
     }
 
     // One fist, from the eyes it was thrown from.
-    private void Swing(byte playerId, in PlayerMoveState state)
+    //
+    // The ANGLES and the STANCE come off the gesture — the input frame that announced the swing — while
+    // the POSITION comes off the tick's authoritative state. That split is deliberate. A swing is
+    // accepted the moment its datagram lands, so a burst can leave the simulation replaying frames from
+    // a third of a second earlier when the gesture finally goes out, and a player turns far enough in
+    // that time to miss what they were plainly looking at. Angles are the client's word wherever they
+    // are read from, so taking them from the swing's own frame costs nothing; the position is the one
+    // thing a speed budget validates, and a punch is not the place to go around it.
+    private void Swing(in PlayerGestureEvent gesture, in PlayerMoveState state)
     {
-        Vector3 origin = PunchAim.Origin(state.Position, state.Stance);
-        Vector3 forward = PunchAim.Forward(state.Yaw, PunchAim.PitchFromWire(state.Pitch));
+        byte playerId = gesture.PlayerId;
+        Vector3 origin = PunchAim.Origin(state.Position, gesture.Stance);
+        Vector3 forward = PunchAim.Forward(NetAngles.DequantizeYaw(gesture.Yaw),
+            PunchAim.PitchFromWire(NetAngles.DequantizePitch(gesture.Pitch)));
 
         // Read once. The ledger is settable — an interactive session installs it mid-load — and a hit
         // that names an index has to be applied to the ledger that produced it, not to whatever the
         // property says a few lines later.
         DamageableWorld? world = World;
-        PunchHit hit = PunchTargeting.Resolve(origin, forward, PunchDamageData.Reach, _zombies.Zombies,
-            world, WorldRaycast, LineBlocked);
+        PunchHit hit = PunchTargeting.Resolve(origin, forward, PunchDamageData.Reach,
+            _zombies?.Zombies ?? Array.Empty<ZombieInstance>(), world, WorldRaycast, LineBlocked);
 
         // The original's own sanity check on where the hit landed. It cannot fail for a ray this host
         // cast itself — the reach is 1.75 m — and it is applied anyway, because the day a hit arrives
@@ -115,12 +129,12 @@ public sealed class PunchDamageHost
 
     private PunchResult DamageZombie(byte playerId, in PunchHit hit, Vector3 direction)
     {
-        ZombieInstance? zombie = _zombies.Find((ushort)hit.Id);
+        ZombieInstance? zombie = _zombies?.Find((ushort)hit.Id);
         if (zombie == null)
             return new PunchResult(playerId, hit, 0, Destroyed: false);
 
         ushort amount = PunchDamageResolver.Zombie(hit.Limb, direction, ZombieHitbox.ForwardOf(zombie));
-        bool killed = _zombies.Damage(zombie, amount, playerId, _views);
+        bool killed = _zombies!.Damage(zombie, amount, playerId, _views);
         if (killed)
             _zombieHost?.ReportKilled(zombie);
         return new PunchResult(playerId, hit, amount, killed);

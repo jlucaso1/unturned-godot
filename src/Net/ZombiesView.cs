@@ -55,6 +55,16 @@ public partial class ZombiesView : Node3D
     private System.Func<Vector3>? _localPosition;
     private byte _localBound = LevelNavigationData.NoBound;
 
+    // Zombies this client has been told are dead. Reliable delivery retransmits and de-duplicates but
+    // does NOT order — the same reason a replicated gesture carries its tick — so a region's zombie list
+    // can arrive after a kill for a zombie in it, and SpawnOrReset would then stand the corpse back up
+    // with nothing left to remove it again. A death is final, so remembering it is enough.
+    //
+    // Cleared on every region change, which is exactly when the ids stop meaning anything: the list that
+    // arrives for the new region is authoritative about its whole population, and ids are recycled
+    // across regions and across a repro dump's reload.
+    private readonly HashSet<ushort> _killed = new();
+
     public static ZombiesView Create(NetClient client, string unturnedPath, OneShotAudio? audio,
         IReadOnlyList<NavBound> navBounds, System.Func<Vector3> localPosition)
     {
@@ -175,6 +185,9 @@ public partial class ZombiesView : Node3D
     // body is simply freed, which is what its own dead-zombie cleanup does once the ragdoll expires.
     private void Kill(ushort id)
     {
+        // Remembered whether or not an avatar exists for it: a kill that arrives BEFORE the list that
+        // would have spawned this zombie is precisely the case the tombstone is for.
+        _killed.Add(id);
         if (!_avatars.Remove(id, out ZombieAvatar? avatar))
             return; // never spawned here, or already removed on a region change
         avatar.Root.QueueFree();
@@ -194,6 +207,8 @@ public partial class ZombiesView : Node3D
 
     private void SpawnOrReset(in ZombieListing listing, byte bound)
     {
+        if (_killed.Contains(listing.Id))
+            return; // a list that outran the death it predates
         if (!_avatars.TryGetValue(listing.Id, out ZombieAvatar? avatar))
             _avatars[listing.Id] = avatar = Spawn(listing);
 
@@ -421,6 +436,10 @@ public partial class ZombiesView : Node3D
     // on (the guard the original doesn't need, since its RPCs can't outrun its bound events).
     private void DropForeignRegions()
     {
+        // The new region's list is authoritative about its own population, so the deaths remembered for
+        // the region just left stop being relevant — and holding them would suppress a live zombie that
+        // happens to be handed the same id.
+        _killed.Clear();
         _leaving.Clear();
         foreach ((ushort id, ZombieAvatar avatar) in _avatars)
             if (avatar.Bound != _localBound)

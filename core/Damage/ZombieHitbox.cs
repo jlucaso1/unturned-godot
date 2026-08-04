@@ -63,10 +63,11 @@ public static class ZombieHitbox
         // rather than being refused: a ray that entered the capsule landed SOMEWHERE on it.
         float fraction = Math.Clamp((point.Y - zombie.Position.Y) / HeightOf(zombie), 0f, 1f);
 
-        // Which side: the component of the hit along the zombie's own right vector. Right is forward
-        // rotated a quarter turn about up, which for (-sin, 0, -cos) is (-cos, 0, sin).
+        // Which side: the component of the hit along the zombie's own right vector. This is the X column
+        // of the same yaw basis ForwardOf takes its -Z column from, so the two cannot disagree about
+        // which way the body faces — at yaw 0 it faces (0, 0, -1) and its right hand is at (1, 0, 0).
         float yaw = Mathf.DegToRad(zombie.Yaw);
-        var right = new Vector3(-MathF.Cos(yaw), 0f, MathF.Sin(yaw));
+        var right = new Vector3(MathF.Cos(yaw), 0f, -MathF.Sin(yaw));
         Vector3 offset = point - zombie.Position;
         float lateral = new Vector3(offset.X, 0f, offset.Z).Dot(right);
         bool isRight = lateral >= 0f;

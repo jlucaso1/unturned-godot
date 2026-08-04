@@ -117,22 +117,29 @@ public static class CharacterModel
     // (the caller then falls back to the placeholder figure).
     public static Node3D? Build(string unturnedPath) => BuildEntity(unturnedPath, PlayerEntity);
 
-    // The player's two rigs from ONE read of resources.assets: the third-person body, and the first-person
-    // arms rigged into the prefab's Viewmodel subtree with the same clips, so a swing plays identically
-    // from either side of the camera. Either may be null — no game data at all, or a prefab that carries
-    // no Viewmodel subtree, in which case first person simply shows no hands.
+    // The player's rigs, and where the first-person eye sits on them.
+    //
+    // `EyeOffset` is the prefab's own ViewmodelCamera transform, local to the Skull bone — the point
+    // PlayerAnimator renders the arms from. It travels with the rigs because it is a property of the
+    // authored character, not of the controller that draws it.
+    public readonly record struct PlayerRigs(Node3D? Body, Node3D? Viewmodel, Vector3 EyeOffset);
+
+    // Both rigs from ONE read of resources.assets: the third-person body, and the first-person arms
+    // rigged into the prefab's Viewmodel subtree with the same clips, so a swing plays identically from
+    // either side of the camera. Either may be null — no game data at all, or a prefab that carries no
+    // Viewmodel subtree, in which case first person falls back to the body rig.
     //
     // One entry point rather than two calls because opening that file is the expensive part (~100 ms and
     // tens of MB of transient heap), and it happens inside the load's character stage. Same reason
     // BuildZombieTemplates imports once for both zombie looks.
-    public static (Node3D? Body, Node3D? Viewmodel) BuildPlayerRigs(string unturnedPath)
+    public static PlayerRigs BuildPlayerRigs(string unturnedPath)
     {
         AssetSource source;
         Node3D? body;
         try
         {
             if (Open(unturnedPath) is not { } opened)
-                return (null, null);
+                return default;
             source = opened;
             if (EnvFlag.IsOn(OS.GetEnvironment("UG_DUMP_PLAYER_RIG"), whenUnset: false))
                 DumpRigs(source);
@@ -142,7 +149,7 @@ public static class CharacterModel
         {
             Log.PrintErr($"[unturned-godot] Character: failed to load real {PlayerEntity.Root} "
                 + $"({e.GetType().Name}: {e.Message}); using placeholder.\n{e.StackTrace}");
-            return (null, null);
+            return default;
         }
 
         // The arms are caught on their own, because the two rigs fail differently. No body means the
@@ -160,15 +167,67 @@ public static class CharacterModel
                 + $"({e.GetType().Name}: {e.Message}); falling back to the body rig for first person.");
         }
 
+        Vector3 eye = FindViewmodelCameraOffset(source);
         if (viewmodel is CharacterSkeleton arms)
-            return (body, arms);
+            return new PlayerRigs(body, arms, eye);
 
         // The import produced something, but not a rig — a static bind-pose mesh, which cannot be posed
         // and so would hang in front of the camera in one frozen attitude. It is a Node nothing owns and
         // nothing else will free, so it is freed here rather than left to the collector that does not
         // exist for Godot objects.
         viewmodel?.Free();
-        return (body, ViewmodelFromBody(body));
+        return new PlayerRigs(body, ViewmodelFromBody(body), eye);
+    }
+
+    // Where PlayerAnimator's ViewmodelCamera sits, as a local offset from the Skull bone it hangs off.
+    //
+    // This is the whole of how Unturned's first person is framed, and it is authored data rather than a
+    // constant: the arms and the weapon are rendered by a SECOND camera parented to
+    // firstSkeleton/Spine/Skull/ViewmodelCamera, so the eye that sees them is pinned to the head bone and
+    // moves with every animation. Reading the prefab's own transform for it is what makes the framing
+    // this port's first person 1:1 with the game's, instead of a number somebody tuned by eye.
+    //
+    // The Viewmodel subtree is present even when its MESH cannot be decoded (Model_0's skin weights live
+    // in the compressed stream), so this is available whichever rig ends up being drawn. Zero when the
+    // prefab has no such transform, which puts the eye on the skull joint itself.
+    private static Vector3 FindViewmodelCameraOffset(in AssetSource source)
+    {
+        SerializedFile file = source.File;
+        Dictionary<long, SerializedObject> byId = source.ById;
+        const int classGameObject = 1;
+
+        foreach (SerializedObject o in file.Objects)
+        {
+            if (o.ClassId != classGameObject)
+                continue;
+            Dictionary<string, object> go;
+            try { go = Read(file, byId, o.PathId); }
+            catch { continue; }
+            if ((string)go["m_Name"] != "ViewmodelCamera")
+                continue;
+
+            long transformId = TransformOf(file, byId, o.PathId);
+            if (transformId == 0)
+                continue;
+            Dictionary<string, object> transform = Read(file, byId, transformId);
+
+            // Its parent has to be the Skull, and the whole chain has to belong to the player's
+            // Viewmodel subtree — a mod or another prefab may well carry the same name.
+            long father = Id(transform["m_Father"]);
+            if (father == 0
+                || (string)Read(file, byId, Id(Read(file, byId, father)["m_GameObject"]))["m_Name"] != "Skull")
+                continue;
+            (string root, bool inViewmodel) =
+                Ancestry(file, byId, Id(transform["m_GameObject"]), ViewmodelSubtree);
+            if (root != PlayerEntity.Root || !inViewmodel)
+                continue;
+
+            Vector3 offset = LocalTransformOf(transform).Origin;
+            Log.Print($"[unturned-godot] Character: first-person eye at the prefab's own ViewmodelCamera "
+                + $"({offset.X:0.###}, {offset.Y:0.###}, {offset.Z:0.###}) from the Skull.");
+            return offset;
+        }
+        return Vector3.Zero;
     }
 
     // First person without the prefab's own arms rig.

@@ -6,7 +6,21 @@ using UnturnedGodot.Player;
 namespace UnturnedGodot.Net;
 
 // One hand animation a player performed on a tick, for the server to replicate.
-public readonly record struct PlayerGestureEvent(byte PlayerId, EPlayerGesture Gesture);
+//
+// `Yaw`/`Pitch`/`Stance` are the ones the input frame that ANNOUNCED the gesture carried, not the ones
+// the tick it goes out on happens to be simulating. The two part company whenever a burst of datagrams
+// arrives together: a swing is accepted the moment its packet lands (see AcceptSwing), while the loop
+// still plays one queued movement frame per tick, so by the time the gesture is emitted the state can be
+// several frames behind the frame the player actually swung on. A player turns 180 degrees inside three
+// ticks, so anything deciding WHAT a swing hit has to read the swing's own angles or it is aiming a
+// third of a second into the past.
+//
+// Angles are the client's word either way — ApplyTrustedPosition takes them verbatim from whatever frame
+// it plays — so carrying them here trusts the client with nothing new. The POSITION deliberately does
+// not travel: that one is validated against a speed budget, and a punch resolves from the authoritative
+// position rather than from a claim that has not been through it.
+public readonly record struct PlayerGestureEvent(byte PlayerId, EPlayerGesture Gesture,
+    byte Yaw = 0, byte Pitch = 0, EPlayerStance Stance = EPlayerStance.Stand);
 
 // One player's authoritative state on the server.
 public struct PlayerMoveState
@@ -19,6 +33,11 @@ public struct PlayerMoveState
     public UnturnedGodot.Player.EPlayerStance Stance;
     public bool Moving; // input-derived (keys held), NOT position-derived: drives remote walk/idle animation
 }
+
+// A swing waiting for the tick that announces it, with the aim of the frame that threw it. See
+// PlayerGestureEvent for why the angles travel with it rather than being read off the tick.
+internal readonly record struct PendingGesture(EPlayerGesture Gesture, byte Yaw, byte Pitch,
+    EPlayerStance Stance);
 
 // How the server resolves one input frame into movement. The pure heightfield solver below covers open
 // terrain and drives the deterministic tests; the Godot runtime can swap in a solver backed by real
@@ -161,7 +180,7 @@ public sealed class ServerSimulation
         // what keeps two from going out under the same tick number, where the client's freshness guard
         // would read the second as a retransmission of the first and drop it. Bounded by the allowance,
         // which is the most that can ever be accepted at once.
-        public readonly Queue<EPlayerGesture> PendingGestures = new();
+        public readonly Queue<PendingGesture> PendingGestures = new();
         public bool HasSwung;
         public byte LastSwingSequence;
 
@@ -369,7 +388,8 @@ public sealed class ServerSimulation
         if (entry.SwingAllowance < 1)
             return; // faster than the rule allows, whatever the client says its frame numbers were
         entry.SwingAllowance -= 1;
-        entry.PendingGestures.Enqueue(Player.PlayerGestures.For(input.SwingFist));
+        entry.PendingGestures.Enqueue(new PendingGesture(Player.PlayerGestures.For(input.SwingFist),
+            input.Yaw, input.Pitch, input.Stance));
     }
 
     // Advances one 0.08 s step on the nominal clock: each call is one tick of simulated time. What the
@@ -418,8 +438,9 @@ public sealed class ServerSimulation
             // tick, because an avatar cannot throw two punches inside 0.08 s and a client holds a single
             // pending swing on that basis — two events under the same tick number would read as a
             // retransmission of each other anyway.
-            if (entry.PendingGestures.TryDequeue(out EPlayerGesture announced))
-                _gestures.Add(new PlayerGestureEvent(id, announced));
+            if (entry.PendingGestures.TryDequeue(out PendingGesture announced))
+                _gestures.Add(new PlayerGestureEvent(id, announced.Gesture, announced.Yaw,
+                    announced.Pitch, announced.Stance));
 
             states.Add(new PlayerSnapshotState(id, entry.State.Position,
                 NetAngles.QuantizePitch(entry.State.Pitch), NetAngles.QuantizeYaw(entry.State.Yaw),

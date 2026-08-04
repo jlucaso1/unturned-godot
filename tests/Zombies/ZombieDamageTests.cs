@@ -203,13 +203,14 @@ public class ZombieDamageTests
         var players = new[] { Player(1, new Vector3(0, 5f, 2f)) };
 
         int swings = 0;
-        while (!zombie.IsDead)
+        while (!zombie.IsDead && swings < 13) // bounded: a punch that stopped working must fail, not hang
         {
             ushort amount = PunchDamageResolver.Zombie(ELimb.Spine, new Vector3(0, 0, -1),
                 ZombieHitbox.ForwardOf(zombie));
             system.Damage(zombie, amount, 1, players);
             swings++;
         }
+        Assert.True(zombie.IsDead);
         Assert.Equal(12, swings); // 11 x 9 = 99, the twelfth finishes it
     }
 
@@ -221,13 +222,14 @@ public class ZombieDamageTests
         var players = new[] { Player(1, new Vector3(0, 5f, 2f)) };
 
         int swings = 0;
-        while (!zombie.IsDead)
+        while (!zombie.IsDead && swings < 8)
         {
             ushort amount = PunchDamageResolver.Zombie(ELimb.Skull, new Vector3(0, 0, -1),
                 ZombieHitbox.ForwardOf(zombie));
             system.Damage(zombie, amount, 1, players);
             swings++;
         }
+        Assert.True(zombie.IsDead);
         Assert.Equal(7, swings); // 16 a swing
     }
 }

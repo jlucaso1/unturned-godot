@@ -114,18 +114,20 @@ public class PunchDamageResolverTests
     }
 
     // A 75-health garbage pile — the health every Rubble object in the shipped maps carries — takes
-    // fifteen punches.
+    // fifteen punches. Bounded, because a regression that made the punch do nothing would otherwise
+    // hang the run rather than fail it.
     [Fact]
     public void GarbagePileTakesFifteenPunches()
     {
         ushort health = 75;
         int swings = 0;
-        while (health > 0)
+        while (health > 0 && swings < 16)
         {
             health = PunchDamageResolver.ApplyToHealth(health,
                 PunchDamageResolver.Object(rubbleBladeId: 0, rubbleIsVulnerable: true));
             swings++;
         }
+        Assert.Equal(0, health);
         Assert.Equal(15, swings);
     }
 

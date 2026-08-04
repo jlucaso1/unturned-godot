@@ -164,6 +164,13 @@ public static class ZombieNetMessages
     public static byte[] WriteZombieKilled(byte bound, IReadOnlyList<ushort> ids)
     {
         ArgumentNullException.ThrowIfNull(ids);
+        // The count header is one byte, and a silent truncation here would be the worst possible
+        // failure: a payload advertising zero ids that the reader believes, leaving every one of those
+        // corpses standing forever. A region cannot hold more than 255 zombies, so this can only fire
+        // on a caller that has already gone wrong somewhere else.
+        if (ids.Count > byte.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(ids),
+                $"a ZombieKilled payload carries at most {byte.MaxValue} ids, not {ids.Count}");
         var payload = new byte[3 + (ids.Count * 2)];
         payload[0] = (byte)ENetMessage.ZombieKilled;
         payload[1] = bound;

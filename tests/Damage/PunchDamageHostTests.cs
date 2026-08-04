@@ -39,7 +39,8 @@ public class PunchDamageHostTests
         public readonly List<PunchResult> Results = new();
         public double Now = 5000.0;
 
-        public Harness(DamageableWorld? world = null, PunchTargeting.WorldRaycast? raycast = null)
+        public Harness(DamageableWorld? world = null, PunchTargeting.WorldRaycast? raycast = null,
+            bool withZombies = true)
         {
             Server = new NetServer(ServerTransport,
                 new ServerSimulation(new HeightfieldMoveSolver(FlatGround)), Spawn, Level);
@@ -50,7 +51,7 @@ public class PunchDamageHostTests
                     new() { Center = new Vector3(0, 140, 0), Size = new Vector3(400, 300, 400) },
                 },
                 FlatGround);
-            Punches = new PunchDamageHost(Server, Zombies, zombieHost: null, world)
+            Punches = new PunchDamageHost(Server, withZombies ? Zombies : null, zombieHost: null, world)
             {
                 WorldRaycast = raycast,
             };
@@ -99,6 +100,15 @@ public class PunchDamageHostTests
                 NetAngles.QuantizePitch(pitch + PunchAim.WirePitchOffset),
                 stance, Spawn, grounded: true, hasSwing: true, swingSequence: ++_swing,
                 swingFist: EPlayerPunch.Left));
+        }
+
+        // A plain movement frame at some other view angle: no swing, just somewhere else to be looking.
+        public void Look(float yaw = 0f, float pitch = 0f)
+        {
+            Client.SendInput(new InputCommand(++_frame, 0, 0, jump: false, sprint: false,
+                NetAngles.QuantizeYaw(yaw),
+                NetAngles.QuantizePitch(pitch + PunchAim.WirePitchOffset),
+                EPlayerStance.Stand, Spawn));
         }
     }
 
@@ -271,10 +281,12 @@ public class PunchDamageHostTests
         var world = new DamageableWorld();
         world.Add(DamageableInstance.Object(new Vector3(0, 10f, -1f), GarbagePile()));
         Harness h = Joined(world,
-            (Vector3 origin, Vector3 direction, float maxDistance, out Vector3 point, out float distance) =>
+            (Vector3 origin, Vector3 direction, float maxDistance, out Vector3 point, out float distance,
+                out Guid asset) =>
             {
                 point = new Vector3(0, 10.5f, -1f);
                 distance = 1f;
+                asset = GarbagePile().Guid;
                 return direction.Z < -0.5f; // only when actually looking that way
             });
 
@@ -298,10 +310,12 @@ public class PunchDamageHostTests
         var world = new DamageableWorld();
         world.Add(DamageableInstance.Object(new Vector3(0, 10f, -40f), GarbagePile()));
         Harness h = Joined(world,
-            (Vector3 origin, Vector3 direction, float maxDistance, out Vector3 point, out float distance) =>
+            (Vector3 origin, Vector3 direction, float maxDistance, out Vector3 point, out float distance,
+                out Guid asset) =>
             {
                 point = new Vector3(0, 10f, -40f); // forty metres away, claimed as one
                 distance = 1f;
+                asset = GarbagePile().Guid;
                 return true;
             });
 
@@ -317,10 +331,12 @@ public class PunchDamageHostTests
     public void AWorldHitWithNoLedgerDamagesNothing()
     {
         Harness h = Joined(world: null,
-            (Vector3 origin, Vector3 direction, float maxDistance, out Vector3 point, out float distance) =>
+            (Vector3 origin, Vector3 direction, float maxDistance, out Vector3 point, out float distance,
+                out Guid asset) =>
             {
                 point = origin + (direction * 0.5f);
                 distance = 0.5f;
+                asset = Guid.Empty; // terrain
                 return true;
             });
         h.PlantZombie(1, new Vector3(0, 10f, -1.2f), yaw: 180f);
@@ -332,11 +348,53 @@ public class PunchDamageHostTests
         Assert.False(Assert.Single(h.Results).Hit.Exists);
     }
 
+    // A level with no zombie data still has rubble on it and a player who can punch it, so the host is
+    // built without a brain rather than not built at all.
     [Fact]
-    public void HostRejectsNulls()
+    public void AHostWithNoZombieSystemStillBreaksTheWorld()
     {
-        var h = new Harness();
-        Assert.Throws<ArgumentNullException>(() => new PunchDamageHost(null!, h.Zombies));
-        Assert.Throws<ArgumentNullException>(() => new PunchDamageHost(h.Server, null!));
+        var world = new DamageableWorld();
+        world.Add(DamageableInstance.Object(new Vector3(0, 10f, -1f), GarbagePile()));
+        var h = new Harness(world,
+            (Vector3 origin, Vector3 direction, float maxDistance, out Vector3 point, out float distance,
+                out Guid asset) =>
+            {
+                point = new Vector3(0, 10.5f, -1f);
+                distance = 1f;
+                asset = GarbagePile().Guid;
+                return direction.Z < -0.5f;
+            },
+            withZombies: false);
+        h.Pump(3);
+        Assert.True(h.Client.Joined);
+
+        h.Swing();
+        h.Pump(2);
+
+        Assert.Equal(70, world.HealthOf(0));
+        Assert.Equal(EPunchTargetKind.Object, Assert.Single(h.Results).Hit.Kind);
     }
+
+    // The swing is answered when its datagram lands, but the loop plays one queued movement frame per
+    // tick — so after a burst the tick that emits the gesture can be replaying a frame from a third of a
+    // second earlier. The punch has to be aimed by the frame that THREW it: here the player swings while
+    // facing the zombie and then sends three frames looking the other way, all of which arrive first.
+    [Fact]
+    public void ASwingIsAimedByTheFrameThatThrewIt()
+    {
+        Harness h = Joined();
+        ZombieInstance zombie = h.PlantZombie(1, new Vector3(0, 10f, -1.2f), yaw: 180f);
+
+        h.Swing();                       // facing the zombie
+        for (int i = 0; i < 3; i++)
+            h.Look(yaw: 180f);           // then spun round, and these play first
+        h.Pump(4);
+
+        Assert.True(zombie.Health < zombie.MaxHealth,
+            "the punch was resolved from a later frame's aim, not the swing's own");
+    }
+
+    [Fact]
+    public void HostRejectsANullServer() =>
+        Assert.Throws<ArgumentNullException>(() => new PunchDamageHost(null!, new Harness().Zombies));
 }

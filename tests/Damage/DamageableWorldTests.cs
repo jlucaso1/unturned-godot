@@ -131,7 +131,7 @@ public class DamageableWorldTests
     public void APlacementOfAnotherKindTakesNoPunchDamage()
     {
         DamageableWorld world = WorldWith(new DamageableInstance(EPunchTargetKind.Player, Vector3.Zero,
-            Health: 100, VulnerableToFists: true, BladeId: 0, IsVulnerable: true));
+            Health: 100, VulnerableToFists: true, BladeId: 0, IsVulnerable: true, Guid.NewGuid()));
         Assert.Equal(0, world.PunchDamageTo(0));
     }
 
@@ -147,27 +147,65 @@ public class DamageableWorldTests
 
     // ---- The lookup -----------------------------------------------------------------------------
 
+    private static readonly float Radius = PunchTargeting.PlacementMatchRadius;
+
     [Fact]
-    public void FindReturnsTheNearestPlacement()
+    public void FindReturnsTheNearestPlacementOfTheStruckAsset()
     {
         DamageableWorld world = WorldWith(
             DamageableInstance.Resource(new Vector3(0, 0, 0), Pine()),
             DamageableInstance.Resource(new Vector3(30f, 0, 0), Pine()),
-            DamageableInstance.Resource(new Vector3(5f, 0, 0), Pine()));
-        Assert.Equal(2, world.Find(new Vector3(6f, 0, 0), radius: 12f));
+            DamageableInstance.Resource(new Vector3(3f, 0, 0), Pine()));
+        Assert.Equal(2, world.Find(new Vector3(3.5f, 0, 0), Radius, Pine().Guid));
     }
 
     [Fact]
     public void FindMissesBeyondItsRadius() =>
         Assert.Equal(-1, WorldWith(DamageableInstance.Resource(Vector3.Zero, Pine()))
-            .Find(new Vector3(50f, 0, 0), radius: 12f));
+            .Find(new Vector3(50f, 0, 0), Radius, Pine().Guid));
 
-    // A tree is hit several metres up its trunk, so the search has to reach from the hit point down to
-    // the placement's origin at its base.
+    // THE case the asset identity exists for: a punch that stops on a wall, terrain, or any body that
+    // is not this placement's own must not take health off it, however close it stopped.
+    [Fact]
+    public void FindRefusesAHitOnSomethingElsesCollider()
+    {
+        DamageableWorld world = WorldWith(DamageableInstance.Object(Vector3.Zero, GarbagePile()));
+        // The ray stopped half a metre away — but on the wall behind the pile, not on the pile.
+        Assert.Equal(-1, world.Find(new Vector3(0.5f, 0.5f, 0), Radius, Pine().Guid));
+        // And on terrain, or anything else the host could not name at all.
+        Assert.Equal(-1, world.Find(new Vector3(0.5f, 0.5f, 0), Radius, Guid.Empty));
+        // The pile's own collider does hit it.
+        Assert.Equal(0, world.Find(new Vector3(0.5f, 0.5f, 0), Radius, GarbagePile().Guid));
+    }
+
+    // A tree is struck several metres up its trunk while its origin is at the base, so the match is
+    // measured HORIZONTALLY inside a vertical window rather than as a 3D distance.
     [Fact]
     public void FindReachesFromATrunkHitDownToTheBase() =>
         Assert.Equal(0, WorldWith(DamageableInstance.Resource(Vector3.Zero, Pine()))
-            .Find(new Vector3(0.5f, 6f, 0.5f), PunchTargeting.PlacementSearchRadius));
+            .Find(new Vector3(0.5f, 6f, 0.5f), Radius, Pine().Guid));
+
+    // Two pines side by side: a hit six metres up the near one is nearer in 3D to the FAR one's base,
+    // which is exactly why the distance is horizontal.
+    [Fact]
+    public void FindPicksTheTrunkItStruckNotTheNearerBase()
+    {
+        DamageableWorld world = WorldWith(
+            DamageableInstance.Resource(Vector3.Zero, Pine()),
+            DamageableInstance.Resource(new Vector3(7f, 0, 0), Pine()));
+        Assert.Equal(0, world.Find(new Vector3(0.4f, 6f, 0), Radius, Pine().Guid));
+    }
+
+    // The vertical window: a hit far above a bush is a hit on the building behind it, not on the bush.
+    [Fact]
+    public void FindRefusesAHitOutsideItsVerticalWindow()
+    {
+        DamageableWorld world = WorldWith(DamageableInstance.Resource(Vector3.Zero, Pine()));
+        Assert.Equal(-1, world.Find(new Vector3(0, DamageableWorld.MatchAbove + 1f, 0), Radius,
+            Pine().Guid));
+        Assert.Equal(-1, world.Find(new Vector3(0, -DamageableWorld.MatchBelow - 1f, 0), Radius,
+            Pine().Guid));
+    }
 
     // Something already broken is not what the ray hit: its collider is gone in the game, and here it
     // simply stops being a candidate.
@@ -178,7 +216,7 @@ public class DamageableWorldTests
             DamageableInstance.Object(Vector3.Zero, GarbagePile()),
             DamageableInstance.Object(new Vector3(3f, 0, 0), GarbagePile()));
         world.Damage(0, 75);
-        Assert.Equal(1, world.Find(Vector3.Zero, radius: 12f));
+        Assert.Equal(1, world.Find(Vector3.Zero, radius: 12f, GarbagePile().Guid));
     }
 
     // The grid is only an index: a lookup near a cell boundary must find a placement in the next cell.
@@ -188,7 +226,7 @@ public class DamageableWorldTests
         float cell = DamageableWorld.CellSize;
         DamageableWorld world = WorldWith(
             DamageableInstance.Resource(new Vector3(cell + 0.5f, 0, 0), Pine()));
-        Assert.Equal(0, world.Find(new Vector3(cell - 0.5f, 0, 0), radius: 4f));
+        Assert.Equal(0, world.Find(new Vector3(cell - 0.5f, 0, 0), radius: 4f, Pine().Guid));
     }
 
     [Fact]
@@ -196,7 +234,7 @@ public class DamageableWorldTests
     {
         DamageableWorld world = WorldWith(
             DamageableInstance.Resource(new Vector3(-100f, 0, -250f), Pine()));
-        Assert.Equal(0, world.Find(new Vector3(-101f, 0, -251f), radius: 5f));
+        Assert.Equal(0, world.Find(new Vector3(-101f, 0, -251f), radius: 5f, Pine().Guid));
     }
 
     // ---- Building it from the level's placements ------------------------------------------------
@@ -227,7 +265,9 @@ public class DamageableWorldTests
         DamageableWorld world = DamageableWorldBuilder.Build(placements, database);
         Assert.Equal(2, world.Count);
         Assert.Equal(EPunchTargetKind.Resource, world[0].Kind);
+        Assert.Equal(pine.Guid, world[0].Asset);
         Assert.Equal(EPunchTargetKind.Object, world[1].Kind);
+        Assert.Equal(garbage.Guid, world[1].Asset);
     }
 
     // The ledger has to agree with the collision world about where things stand, so it goes through the

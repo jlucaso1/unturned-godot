@@ -14,22 +14,27 @@ namespace UnturnedGodot.Damage;
 // So both are asked, and the NEAREST answer wins — which is what a single cast would have returned.
 public static class PunchTargeting
 {
-    // How far past a world hit's point a placement may stand and still be what was hit. A tree's origin
-    // is the base of its trunk and the ray strikes it several metres up, so this has to cover a tree's
-    // height rather than the ray's precision — and it is only ever consulted for a point the physics
-    // world already said was solid, so a generous radius costs nothing but picks the right trunk.
-    public const float PlacementSearchRadius = 12f;
+    // How far HORIZONTALLY from a placement's origin a hit on that placement's own asset may land. A
+    // trunk is struck a few metres up and slightly off its centre line, and a wide rubble pile spreads
+    // further still, so this is measured in the width of the thing rather than in the ray's precision —
+    // but it is not a search radius: the asset identity has already narrowed the candidates to other
+    // copies of the SAME prop, and this only picks which copy.
+    public const float PlacementMatchRadius = 4f;
 
     // Blocks a punch on world geometry between the eyes and a zombie: the fist cannot reach through a
     // wall. Same shape as the brain's own PhysicalLineBlocked, so a host installs one predicate for
     // both. Null is an unobstructed world, which is what the pure tests run in.
     public delegate bool LineBlocked(Vector3 from, Vector3 to);
 
-    // Where the physics world stops the ray, if it does: the point, and the distance to it. A host backs
-    // this with a real cast against the solid world; null means nothing solid is known, and then only
-    // zombies can be hit.
+    // Where the physics world stops the ray, if it does: the point, how far along it, and WHICH ASSET
+    // the body it struck belongs to. That last one is what turns a point into an identification — a
+    // punch that stops on a wall beside a garbage pile must not be attributed to the pile — and it is
+    // Guid.Empty for anything the host cannot name (terrain, a ladder volume), which is a miss.
+    //
+    // A host backs this with a real cast against the solid world; null means nothing solid is known,
+    // and then only zombies can be hit.
     public delegate bool WorldRaycast(Vector3 origin, Vector3 direction, float maxDistance,
-        out Vector3 point, out float distance);
+        out Vector3 point, out float distance, out System.Guid asset);
 
     // The nearest zombie the ray enters, with the limb it entered at. Walks the population rather than
     // a broadphase because the caller has already narrowed it — a punch is one ray per swing, and swings
@@ -79,11 +84,12 @@ public static class PunchTargeting
         float reach = maxDistance;
 
         if (worldRaycast != null
-            && worldRaycast(origin, direction, maxDistance, out Vector3 point, out float distance)
+            && worldRaycast(origin, direction, maxDistance, out Vector3 point, out float distance,
+                out System.Guid asset)
             && distance <= reach)
         {
             reach = distance;
-            int index = world?.Find(point, PlacementSearchRadius) ?? -1;
+            int index = world?.Find(point, PlacementMatchRadius, asset) ?? -1;
             if (index >= 0)
                 best = new PunchHit(world![index].Kind, index, ELimb.Spine, point, distance);
         }

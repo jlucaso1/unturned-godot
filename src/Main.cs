@@ -823,7 +823,7 @@ public partial class Main : Node3D
             network.Configure(heights, spawnPosition);
         AddChild(network);
 
-        (Node3D? Body, Node3D? Viewmodel) rigs = CharacterModel.BuildPlayerRigs(unturnedPath);
+        CharacterModel.PlayerRigs rigs = CharacterModel.BuildPlayerRigs(unturnedPath);
         var player = new PlayerController
         {
             Name = "Player",
@@ -835,6 +835,9 @@ public partial class Main : Node3D
             // no game data means the placeholder figure, no Viewmodel rig means no hands in first person.
             BodyModel = rigs.Body,
             ViewmodelModel = rigs.Viewmodel,
+            // The prefab's own ViewmodelCamera offset from the Skull bone: where the game frames its
+            // first-person arms from, rather than a number tuned by eye here.
+            ViewmodelEyeOffset = rigs.EyeOffset,
         };
         (player.Footsteps, _movementAudioFactory) = BuildMovementAudio(unturnedPath);
         player.Sounds = _oneShotAudio; // BuildMovementAudio created the pool; gestures share it

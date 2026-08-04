@@ -43,6 +43,7 @@ public class ZombieHitboxTests
         Assert.True(ZombieHitbox.HeightOf(Zombie(speciality: EZombieSpeciality.Mega))
             > ZombieHitbox.HeightOf(Zombie()));
 
+    // Dead on the centre line, so `lateral` is exactly zero and the side falls to the right.
     [Theory]
     [InlineData(1.9f, ELimb.Skull)]
     [InlineData(1.65f, ELimb.Skull)]
@@ -58,17 +59,17 @@ public class ZombieHitboxTests
     [Fact]
     public void TorsoEdgeIsAnArm()
     {
-        ZombieInstance zombie = Zombie();               // facing -Z, so its right is -X
-        Assert.Equal(ELimb.LeftArm, ZombieHitbox.LimbAt(zombie, new Vector3(0.35f, 1.5f, 0)));
-        Assert.Equal(ELimb.RightArm, ZombieHitbox.LimbAt(zombie, new Vector3(-0.35f, 1.5f, 0)));
+        ZombieInstance zombie = Zombie();               // facing -Z, so its right is +X
+        Assert.Equal(ELimb.RightArm, ZombieHitbox.LimbAt(zombie, new Vector3(0.35f, 1.5f, 0)));
+        Assert.Equal(ELimb.LeftArm, ZombieHitbox.LimbAt(zombie, new Vector3(-0.35f, 1.5f, 0)));
     }
 
     [Fact]
     public void LowerTorsoEdgeIsAHand()
     {
         ZombieInstance zombie = Zombie();
-        Assert.Equal(ELimb.LeftHand, ZombieHitbox.LimbAt(zombie, new Vector3(0.35f, 1.0f, 0)));
-        Assert.Equal(ELimb.RightHand, ZombieHitbox.LimbAt(zombie, new Vector3(-0.35f, 1.0f, 0)));
+        Assert.Equal(ELimb.RightHand, ZombieHitbox.LimbAt(zombie, new Vector3(0.35f, 1.0f, 0)));
+        Assert.Equal(ELimb.LeftHand, ZombieHitbox.LimbAt(zombie, new Vector3(-0.35f, 1.0f, 0)));
     }
 
     // Both sides of the lower body, for the same reason: the leg and foot columns are the cheapest hits
@@ -76,11 +77,11 @@ public class ZombieHitboxTests
     [Fact]
     public void LegsAndFeetHaveSides()
     {
-        ZombieInstance zombie = Zombie();          // facing -Z, so its right is -X
-        Assert.Equal(ELimb.LeftLeg, ZombieHitbox.LimbAt(zombie, new Vector3(0.2f, 0.6f, 0)));
-        Assert.Equal(ELimb.RightLeg, ZombieHitbox.LimbAt(zombie, new Vector3(-0.2f, 0.6f, 0)));
-        Assert.Equal(ELimb.LeftFoot, ZombieHitbox.LimbAt(zombie, new Vector3(0.2f, 0.1f, 0)));
-        Assert.Equal(ELimb.RightFoot, ZombieHitbox.LimbAt(zombie, new Vector3(-0.2f, 0.1f, 0)));
+        ZombieInstance zombie = Zombie();          // facing -Z, so its right is +X
+        Assert.Equal(ELimb.RightLeg, ZombieHitbox.LimbAt(zombie, new Vector3(0.2f, 0.6f, 0)));
+        Assert.Equal(ELimb.LeftLeg, ZombieHitbox.LimbAt(zombie, new Vector3(-0.2f, 0.6f, 0)));
+        Assert.Equal(ELimb.RightFoot, ZombieHitbox.LimbAt(zombie, new Vector3(0.2f, 0.1f, 0)));
+        Assert.Equal(ELimb.LeftFoot, ZombieHitbox.LimbAt(zombie, new Vector3(-0.2f, 0.1f, 0)));
     }
 
     // Turn the zombie around and the same world-space hit is the other arm.
@@ -88,7 +89,27 @@ public class ZombieHitboxTests
     public void SideFollowsTheZombiesFacing()
     {
         Assert.Equal(ELimb.RightArm,
+            ZombieHitbox.LimbAt(Zombie(), new Vector3(0.35f, 1.5f, 0)));
+        Assert.Equal(ELimb.LeftArm,
             ZombieHitbox.LimbAt(Zombie(yaw: 180f), new Vector3(0.35f, 1.5f, 0)));
+    }
+
+    // The side vector is the X column of the same basis the facing's -Z column comes from, so the two
+    // are a quarter turn apart at every yaw and can never disagree about which way the body is pointing.
+    [Theory]
+    [InlineData(0f)]
+    [InlineData(37f)]
+    [InlineData(90f)]
+    [InlineData(180f)]
+    [InlineData(270f)]
+    public void TheSideIsAQuarterTurnFromTheFacing(float yaw)
+    {
+        ZombieInstance zombie = Zombie(yaw);
+        Vector3 forward = ZombieHitbox.ForwardOf(zombie);
+        // A hit one metre to the body's own right must resolve as a right limb, whatever the yaw.
+        var right = new Vector3(-forward.Z, 0f, forward.X);
+        Assert.Equal(ELimb.RightLeg, ZombieHitbox.LimbAt(zombie, (right * 0.2f) + new Vector3(0, 0.6f, 0)));
+        Assert.Equal(ELimb.LeftLeg, ZombieHitbox.LimbAt(zombie, (-right * 0.2f) + new Vector3(0, 0.6f, 0)));
     }
 
     // The bands are fractions of the body, so they follow a zombie standing on a hill rather than

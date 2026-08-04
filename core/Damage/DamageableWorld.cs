@@ -16,14 +16,15 @@ public readonly record struct DamageableInstance(
     ushort Health,
     bool VulnerableToFists,
     byte BladeId,
-    bool IsVulnerable)
+    bool IsVulnerable,
+    Guid Asset = default)
 {
     // A resource off Bundles/Trees: Health, BladeID and the Vulnerable_To_Fists opt-in.
     public static DamageableInstance Resource(Vector3 position, ObjectAsset asset)
     {
         ArgumentNullException.ThrowIfNull(asset);
         return new DamageableInstance(EPunchTargetKind.Resource, position, asset.Health,
-            asset.VulnerableToFists, asset.BladeId, IsVulnerable: true);
+            asset.VulnerableToFists, asset.BladeId, IsVulnerable: true, asset.Guid);
     }
 
     // A destructible object: the rubble block's health, blade id and (negated) invulnerable flag. Fists
@@ -32,7 +33,7 @@ public readonly record struct DamageableInstance(
     {
         ArgumentNullException.ThrowIfNull(asset);
         return new DamageableInstance(EPunchTargetKind.Object, position, asset.RubbleHealth,
-            VulnerableToFists: false, asset.RubbleBladeId, asset.RubbleIsVulnerable);
+            VulnerableToFists: false, asset.RubbleBladeId, asset.RubbleIsVulnerable, asset.Guid);
     }
 
     // Whether it is worth putting in the world at all: something with no health cannot be broken, so
@@ -83,12 +84,32 @@ public sealed class DamageableWorld
         return index;
     }
 
-    // The nearest live placement to `point` within `radius`, or -1. This is the port's answer to
-    // ResourceManager.tryGetRegion: the physics world says a ray stopped here, and this says what was
-    // standing there. Distance is measured to the placement's ORIGIN, which for a tree is the base of
-    // its trunk — so the radius has to cover a tree's own height, not merely the ray's slop.
-    public int Find(Vector3 point, float radius)
+    // How far BELOW a placement's origin a hit on it may land — sloping ground under a wide trunk, and
+    // the slop in a collider that was authored around the mesh rather than under it.
+    public const float MatchBelow = 2f;
+
+    // And how far above. Taller than anything Bundles/Trees ships, and low enough that a hit on a
+    // building's upper floor is not attributed to a bush at its foot.
+    public const float MatchAbove = 40f;
+
+    // The live placement a ray stopped on, or -1. This is the port's answer to
+    // ResourceManager.tryGetRegion: the physics world says a ray stopped at this point on a body
+    // belonging to this asset, and this says which placement of it was standing there.
+    //
+    // `asset` is what makes the answer an identification rather than a guess. The hit point alone is not
+    // enough — a punch that stops on a wall or on the terrain a metre from a garbage pile would
+    // otherwise be attributed to the pile — so the ASSET the struck body belongs to has to match, and
+    // only then is the nearest of that asset's own placements picked. Guid.Empty means the caller could
+    // not recover an identity (terrain, an unnamed body), and then nothing matches at all.
+    //
+    // Distance is measured HORIZONTALLY, inside a vertical window. A tree's origin is the base of its
+    // trunk and the fist lands several metres up it, so a 3D distance would prefer a neighbouring
+    // trunk whose base happens to be nearer to a high hit than the one actually struck.
+    public int Find(Vector3 point, float radius, Guid asset)
     {
+        if (asset == Guid.Empty)
+            return -1;
+
         int best = -1;
         float bestSquared = radius * radius;
         (int cx, int cz) = CellOf(point);
@@ -103,7 +124,15 @@ public sealed class DamageableWorld
                 {
                     if (_health[index] == 0)
                         continue;
-                    float squared = (_instances[index].Position - point).LengthSquared();
+                    DamageableInstance instance = _instances[index];
+                    if (instance.Asset != asset)
+                        continue;
+                    float height = point.Y - instance.Position.Y;
+                    if (height < -MatchBelow || height > MatchAbove)
+                        continue;
+                    float dx = instance.Position.X - point.X;
+                    float dz = instance.Position.Z - point.Z;
+                    float squared = (dx * dx) + (dz * dz);
                     if (squared >= bestSquared)
                         continue;
                     bestSquared = squared;

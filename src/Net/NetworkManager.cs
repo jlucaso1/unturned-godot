@@ -38,7 +38,8 @@ public partial class NetworkManager : Node
     // message and the way back to the menu, instead of a session that silently never starts.
     public System.Action<JoinRejection>? OnRejected;
 
-    // The server half of PlayerEquipment.punch, once zombies exist to punch. Null on a pure client.
+    // The server half of PlayerEquipment.punch. Created whenever this session hosts a world, with or
+    // without a zombie population in it. Null on a pure client, which decides no damage at all.
     public UnturnedGodot.Damage.PunchDamageHost? PunchDamage { get; private set; }
 
     // The level's breakable placements, handed over by the object streamer once it has read the map.
@@ -118,6 +119,10 @@ public partial class NetworkManager : Node
         if (zombies == null)
         {
             Log.PushWarning("[zombies] level ships no zombie data; skipping");
+            // The punch host is NOT skipped with them. A level with no zombie population still has
+            // trees and rubble standing on it and a player whose fists work, and the Damageable handoff
+            // the streamer makes later needs a host to hand it to.
+            PunchDamage = AttachPunchDamage(zombies: null, host: null);
             return;
         }
         ZombiePhysics.Attach(zombies, () => GetViewport()?.World3D, _ground);
@@ -370,7 +375,7 @@ public partial class NetworkManager : Node
     // damage resolves against the population the tick has already moved, and so a kill it reports is
     // broadcast on the next tick rather than racing that tick's snapshots.
     private UnturnedGodot.Damage.PunchDamageHost AttachPunchDamage(
-        UnturnedGodot.Zombies.ZombieSystem zombies, UnturnedGodot.Zombies.ZombieHost host)
+        UnturnedGodot.Zombies.ZombieSystem? zombies, UnturnedGodot.Zombies.ZombieHost? host)
     {
         var punches = new UnturnedGodot.Damage.PunchDamageHost(_server!, zombies, host);
         PunchPhysics.Attach(punches, () => GetViewport()?.World3D);

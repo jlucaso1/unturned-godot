@@ -37,12 +37,15 @@ public class PunchTargetingTests
         Rubble_Health 75
         """);
 
-    // A stand-in for the physics world: the ray stops dead at `distance` along it.
-    private static PunchTargeting.WorldRaycast WallAt(float distance) =>
-        (Vector3 origin, Vector3 direction, float maxDistance, out Vector3 point, out float hit) =>
+    // A stand-in for the physics world: the ray stops dead at `distance` along it, on a body belonging
+    // to `asset` — Guid.Empty standing for terrain or anything else the host cannot name.
+    private static PunchTargeting.WorldRaycast WallAt(float distance, Guid asset = default) =>
+        (Vector3 origin, Vector3 direction, float maxDistance, out Vector3 point, out float hit,
+            out Guid struck) =>
         {
             point = origin + (direction.Normalized() * distance);
             hit = distance;
+            struck = asset;
             return distance <= maxDistance;
         };
 
@@ -112,9 +115,23 @@ public class PunchTargetingTests
         var world = new DamageableWorld();
         world.Add(DamageableInstance.Object(new Vector3(0, 0, -1f), GarbagePile()));
         PunchHit hit = PunchTargeting.Resolve(Eyes, Forward, PunchDamageData.Reach,
-            Array.Empty<ZombieInstance>(), world, WallAt(1f));
+            Array.Empty<ZombieInstance>(), world, WallAt(1f, GarbagePile().Guid));
         Assert.Equal(EPunchTargetKind.Object, hit.Kind);
         Assert.Equal(0, hit.Id);
+    }
+
+    // The same geometry, struck on somebody else's collider: a wall a handspan from a rubble pile is a
+    // wall, and the pile keeps its health.
+    [Fact]
+    public void AWorldHitOnAnotherAssetsColliderIsAMiss()
+    {
+        var world = new DamageableWorld();
+        world.Add(DamageableInstance.Object(new Vector3(0, 0, -1f), GarbagePile()));
+        Assert.False(PunchTargeting.Resolve(Eyes, Forward, PunchDamageData.Reach,
+            Array.Empty<ZombieInstance>(), world, WallAt(1f, Guid.NewGuid())).Exists);
+        // And terrain, which carries no asset identity at all.
+        Assert.False(PunchTargeting.Resolve(Eyes, Forward, PunchDamageData.Reach,
+            Array.Empty<ZombieInstance>(), world, WallAt(1f)).Exists);
     }
 
     // And one that lands on bare geometry is a wall: nothing is hit, but the reach is spent anyway.
@@ -134,7 +151,7 @@ public class PunchTargetingTests
         world.Add(DamageableInstance.Object(new Vector3(0, 0, -1.6f), GarbagePile()));
         var zombies = new List<ZombieInstance> { Zombie(3, new Vector3(0, 0, -1f)) };
         PunchHit hit = PunchTargeting.Resolve(Eyes, Forward, PunchDamageData.Reach, zombies, world,
-            WallAt(1.6f));
+            WallAt(1.6f, GarbagePile().Guid));
         Assert.Equal(EPunchTargetKind.Zombie, hit.Kind);
         Assert.Equal(3, hit.Id);
     }

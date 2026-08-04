@@ -29,6 +29,12 @@ public partial class PlayerController : CharacterBody3D
     // shows no hands and no swing, which is what the port did before there was a fallback.
     public Node3D? ViewmodelModel { get; set; }
 
+    // Where the first-person eye sits on that rig, as a local offset from its Skull bone — the prefab's
+    // own ViewmodelCamera transform (CharacterModel.PlayerRigs.EyeOffset). Zero puts the eye on the
+    // skull joint itself, which is the neck end of the head rather than the eyes, and frames the arms
+    // too high.
+    public Vector3 ViewmodelEyeOffset { get; set; }
+
     // Movement audio (footsteps + landing), built by the caller with the map's terrain material data.
     public MovementAudio? Footsteps { get; set; }
 
@@ -50,6 +56,8 @@ public partial class PlayerController : CharacterBody3D
     private Node3D _model = null!;
     private CharacterSkeleton? _rig; // the real body, when present, so stance changes repose it
     private CharacterSkeleton? _viewmodel; // the first-person arms, posed by the same clips as the body
+    private int _viewmodelSkull = -1;      // the bone the first-person eye hangs off
+    private Vector3 _viewmodelNudge;       // UG_VIEWMODEL_OFFSET, on top of the prefab's own offset
 
     // The hands. Everything the player does with them — punching today, a swung machete or a fired gun
     // later — is decided here, on the same 12.5 Hz tick the server re-runs it on.
@@ -661,15 +669,42 @@ public partial class PlayerController : CharacterBody3D
             return;
 
         _viewmodel = rig;
-        int skull = rig.FindBone("Skull");
-        Vector3 offset = skull >= 0 ? -rig.GetBoneGlobalRest(skull).Origin : Vector3.Zero;
-        rig.Position = offset + EnvOffset("UG_VIEWMODEL_OFFSET");
+        _viewmodelSkull = rig.FindBone("Skull");
+        _viewmodelNudge = EnvOffset("UG_VIEWMODEL_OFFSET");
+        PlaceViewmodelEye();
         // Close to the near plane and lit like the world around it, but never casting into it: an arm a
         // handspan from the eye throws a shadow across the whole view.
         foreach (Node child in rig.GetChildren())
             if (child is GeometryInstance3D geometry)
                 geometry.CastShadow = GeometryInstance3D.ShadowCastingSetting.Off;
         _camera.AddChild(rig);
+    }
+
+    // Puts the rig where its own ViewmodelCamera lands on this camera.
+    //
+    // PlayerAnimator parents the Viewmodel rig to the main camera and then renders the arms from a
+    // SECOND camera sitting at firstSkeleton/Spine/Skull/ViewmodelCamera — so the eye that sees them is
+    // a child of the head bone and moves with every frame of every animation. One camera here does the
+    // same thing from the other side: instead of moving a second camera onto the bone, the rig is moved
+    // so the bone's own camera point lands on the one camera there is.
+    //
+    // That is what stops the neck and shoulder sliding across the view during a run cycle or a swing —
+    // the head stays pinned to the eye exactly as it does in the game, and only the arms move relative
+    // to it. Done per rendered frame, because the pose it reads is written per rendered frame.
+    private void PlaceViewmodelEye()
+    {
+        if (_viewmodel is not { } rig || _viewmodelSkull < 0)
+            return;
+        Vector3 eye = rig.GetBoneGlobalPose(_viewmodelSkull) * ViewmodelEyeOffset;
+        rig.Position = -eye + _viewmodelNudge;
+    }
+
+    public override void _Process(double delta)
+    {
+        // Only while it is the rig being drawn: a hidden CharacterSkeleton stops advancing its clock, so
+        // its pose is stale and following it would park the arms wherever they froze.
+        if (!_thirdPerson)
+            PlaceViewmodelEye();
     }
 
     private static Vector3 EnvOffset(string name)

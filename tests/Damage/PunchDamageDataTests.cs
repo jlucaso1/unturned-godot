@@ -34,8 +34,9 @@ public class PunchDamageDataTests
         Assert.Equal(15f, PunchDamageData.Animal.Damage);
     }
 
-    // A fist to the head is worth 16.5, to the chest 12, and to a zombie's arm or leg only 4.5 — a
-    // zombie's limbs shrug a punch off twice as hard as a player's do.
+    // A fist to a zombie's head is worth 16.5, to its chest 9, and to an arm or a leg only 4.5 — its
+    // limbs shrug a punch off twice as hard as a player's 9 do, and its chest takes 9 where a player's
+    // takes 12.
     [Theory]
     [InlineData(ELimb.Skull, 16.5f)]
     [InlineData(ELimb.Spine, 9f)]
@@ -64,8 +65,8 @@ public class PunchDamageDataTests
     public void PlayerTableScalesQuadrupedLimbsAsLegs(ELimb limb) =>
         Assert.Equal(9f, PunchDamageData.Player.Multiply(limb), 3);
 
-    // The animal table is the mirror image: it knows only the quadruped limbs, and a biped one it has no
-    // column for falls through unscaled, exactly as the original's switch does.
+    // The animal table scales the skull, the spine and the four QUADRUPED limbs. A biped leg has no
+    // column in it at all and falls through to the unscaled 15, exactly as the original's switch does.
     [Fact]
     public void AnimalTableKnowsOnlyQuadrupedLimbs()
     {

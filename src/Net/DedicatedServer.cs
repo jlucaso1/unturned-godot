@@ -49,6 +49,7 @@ public partial class DedicatedServer : Node
         UnturnedGodot.Zombies.ZombieSystem? zombies = UnturnedGodot.Zombies.ZombieWorld.Load(
             level.Path, ground,
             UnturnedGodot.Repro.ReproRandom.ForSession(OS.GetEnvironment("ZOMBIE_SEED"), out _));
+        UnturnedGodot.Zombies.ZombieHost? zombieHost = null;
         if (zombies != null)
         {
             ZombiePhysics.Attach(zombies, () => node.GetViewport()?.World3D, ground);
@@ -68,12 +69,7 @@ public partial class DedicatedServer : Node
             else
                 navigationField.Release();
             var host = new UnturnedGodot.Zombies.ZombieHost(zombies, node._server);
-
-            // Punches resolve against the same world the movement solver uses. Hooked after the zombie
-            // host so a swing sees the population this tick already moved.
-            var punches = new UnturnedGodot.Damage.PunchDamageHost(node._server, zombies, host, damageable);
-            PunchPhysics.Attach(punches, () => node.GetViewport()?.World3D);
-            node.PunchDamage = punches;
+            zombieHost = host;
 
             // The same bug-report recorder the windowed session arms. There is no key to press on a
             // dedicated server, which is the point: REPRO_AUTO=1 and REPRO_CAPTURE_AT are for exactly
@@ -90,6 +86,13 @@ public partial class DedicatedServer : Node
         }
         else
             navigationField.Release();
+
+        // Punches resolve against the same world the movement solver uses, whether or not this level
+        // has zombies: the rubble and resources are there either way. Hooked after the zombie host so a
+        // swing sees the population that tick already moved.
+        var punches = new UnturnedGodot.Damage.PunchDamageHost(node._server, zombies, zombieHost, damageable);
+        PunchPhysics.Attach(punches, () => node.GetViewport()?.World3D);
+        node.PunchDamage = punches;
 
         Log.Print($"[server] dedicated server for {levelName} listening on UDP {port} ({tiles.Count} height tiles)");
         return node;

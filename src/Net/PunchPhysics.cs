@@ -23,19 +23,19 @@ internal static class PunchPhysics
 
         host.Resolved += LogPunch;
 
-        World3D? world = null;
-        World3D? World() => world ??= resolveWorld();
-
-        // Reused rather than allocated per swing. Punches are rare, but these are RefCounted objects and
-        // every other per-tick query in this port owns one for the same reason.
+        // Resolved on every swing rather than cached for the host's lifetime, which is what the zombie
+        // brain does — its queries run per zombie per tick and cannot pay a lookup each time. A punch is
+        // a handful of events per minute, so the cheaper thing here is the CORRECT thing: a session that
+        // rebuilds its world (a level reload) must not keep raycasting against the space it left.
         var ray = new PhysicsRayQueryParameters3D { CollisionMask = DamageMask };
 
         host.WorldRaycast = (Vector3 origin, Vector3 direction, float maxDistance,
-            out Vector3 point, out float distance) =>
+            out Vector3 point, out float distance, out System.Guid asset) =>
         {
             point = Vector3.Zero;
             distance = 0f;
-            PhysicsDirectSpaceState3D? space = World()?.DirectSpaceState;
+            asset = System.Guid.Empty;
+            PhysicsDirectSpaceState3D? space = resolveWorld()?.DirectSpaceState;
             if (space == null)
                 return false;
             ray.From = origin;
@@ -45,6 +45,7 @@ internal static class PunchPhysics
                 return false;
             point = (Vector3)hit["position"];
             distance = (point - origin).Length();
+            asset = AssetOf(hit);
             return true;
         };
 
@@ -53,6 +54,21 @@ internal static class PunchPhysics
         // no object collision. Where the cast above works, it already shortens the punch to whatever
         // solid thing it met first, so a zombie behind a wall is out of reach rather than merely
         // occluded, and a second query would only be another chance to disagree with the first.
+    }
+
+    // Which asset the body a ray struck belongs to, so the punch damages the thing it hit rather than
+    // whatever breakable happens to stand nearby. Object collision lives on server-owned bodies that
+    // carry the asset's GUID in their name (ObjectCollisionNames), and the query reports the body's RID
+    // — so the name is the identity, and terrain or anything else resolves to Guid.Empty.
+    private static System.Guid AssetOf(Godot.Collections.Dictionary hit)
+    {
+        if (!hit.TryGetValue("collider", out Variant colliderValue)
+            || colliderValue.As<Node>() is not InstancedStaticBodies owner
+            || !hit.TryGetValue("rid", out Variant rid))
+            return System.Guid.Empty;
+        return ObjectCollisionNames.TryParseGuid(owner.NameFor(rid.As<Rid>()), out System.Guid guid)
+            ? guid
+            : System.Guid.Empty;
     }
 
     // PUNCH_LOG=1 prints what every swing found. The damage model has no HUD in front of it yet — no hit
