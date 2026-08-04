@@ -50,6 +50,10 @@ callgrind.out.*
 perf.data*
 *.rgp
 
+# Python bytecode, from importing scripts/*.py in an ad-hoc check
+__pycache__/
+*.pyc
+
 # Rider / VS / editors
 .idea/
 .vs/
