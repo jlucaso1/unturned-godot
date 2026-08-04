@@ -118,6 +118,10 @@ public sealed class ServerSimulation
     public static readonly double PunchCooldownSeconds =
         (Player.PlayerEquipment.PunchCooldownTicks + 1) * TickRate;
 
+    // The most swings a player can have saved up. Two, so a stall that buffers a legitimate pair of them
+    // into one drained batch pays out both — and no more than that, so idling never buys a flurry.
+    public const double MaxSwingAllowance = 2;
+
     private sealed class Entry
     {
         public PlayerMoveState State;
@@ -137,10 +141,11 @@ public sealed class ServerSimulation
         public bool HasSwung;
         public byte LastSwingSequence;
 
-        // Before the first swing there is no previous one to be too soon after, and the clock starts at
-        // zero — so this cannot start there too, or a session's opening punch would be refused for
-        // arriving less than a cooldown after a swing that never happened.
-        public double LastSwingAt = double.NegativeInfinity;
+        // How many swings this player may spend, and when that was last topped up. Starts at one so a
+        // session's opening punch lands.
+        public double SwingAllowance = 1;
+        public bool HasSwingAllowance;
+        public double AllowanceAt;
 
         // Trusted-position bookkeeping: the budget rate-limits CONSECUTIVE client claims, so it needs the
         // last claim we accepted and when. Before any claim exists there is nothing to rate-limit against —
@@ -323,9 +328,23 @@ public sealed class ServerSimulation
         entry.HasSwung = true;
         entry.LastSwingSequence = input.SwingSequence;
 
-        if (receivedAt - entry.LastSwingAt < PunchCooldownSeconds)
+        // Allowance accrues with real time and a swing spends one, rather than the rule being a gap
+        // since the last swing. A gap cannot be measured when a stall makes the transport hand over a
+        // batch of datagrams that really arrived seconds apart: they all carry the single timestamp of
+        // the update that drained them, so the second swing in a batch looks like it arrived no time
+        // after the first, and refusing it would lose a punch the player legitimately threw. What did
+        // pass is the time before the batch, and that is what this counts. The ceiling is what keeps an
+        // idle player from banking a long burst, and it is what a client sending a hundred swings at
+        // once runs into.
+        if (entry.HasSwingAllowance)
+            entry.SwingAllowance = Math.Min(MaxSwingAllowance,
+                entry.SwingAllowance + ((receivedAt - entry.AllowanceAt) / PunchCooldownSeconds));
+        entry.HasSwingAllowance = true;
+        entry.AllowanceAt = receivedAt;
+
+        if (entry.SwingAllowance < 1)
             return; // faster than the rule allows, whatever the client says its frame numbers were
-        entry.LastSwingAt = receivedAt;
+        entry.SwingAllowance -= 1;
         entry.PendingGesture = Player.PlayerGestures.For(input.SwingFist);
     }
 

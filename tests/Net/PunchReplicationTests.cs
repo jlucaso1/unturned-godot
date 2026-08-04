@@ -216,6 +216,54 @@ public class PunchReplicationTests
         Assert.Single(sim.Gestures);
     }
 
+    // A stall makes the transport hand over a batch of datagrams that really arrived seconds apart, all
+    // carrying the one timestamp of the update that drained them. The gap between two swings in that
+    // batch reads as zero; the time before it is what actually passed, and what the rule counts.
+    [Fact]
+    public void Server_AcceptsBothSwingsOfAStalledBatch()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        sim.QueueInput(1, Attack(), receivedAt: 0);
+        sim.Step();
+        Assert.Single(sim.Gestures);
+
+        // The server froze for a second. The player threw two more punches, comfortably apart, and both
+        // come off the socket in the same drain.
+        sim.QueueInput(1, Attack(), receivedAt: 1.0);
+        sim.Step();
+        Assert.Single(sim.Gestures);
+
+        sim.QueueInput(1, Attack(), receivedAt: 1.0);
+        sim.Step();
+        Assert.Single(sim.Gestures);
+    }
+
+    // ...but the batch is not a licence. A client that sends a hundred swings at once gets the ceiling.
+    [Fact]
+    public void Server_DoesNotPayOutAWholeBatchOfSwings()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        // Five seconds idle is ten cooldowns' worth of time, far past the ceiling.
+        sim.QueueInput(1, Attack(), receivedAt: 0);
+        sim.Step();
+
+        int swings = 0;
+        for (int i = 0; i < 100; i++)
+        {
+            sim.QueueInput(1, Attack(), receivedAt: 5.0); // one drain, one instant
+            sim.Step();
+            swings += sim.Gestures.Count;
+        }
+
+        // What idling bought is the ceiling, not the ten it would otherwise have accrued — and certainly
+        // not the hundred the client asked for.
+        Assert.Equal((int)ServerSimulation.MaxSwingAllowance, swings);
+    }
+
     [Fact]
     public void Server_SeparatesPlayersCooldowns()
     {
