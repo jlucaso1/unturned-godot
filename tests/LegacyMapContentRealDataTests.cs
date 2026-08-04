@@ -13,16 +13,19 @@ namespace UnturnedGodot.Tests;
 // older Unity and Unturned versions than PEI's, and every one of these assertions failed before the readers
 // learned those formats: the roads drew with the procedural fallback shader and the maps had no trees.
 //
-// Each fact self-skips when its map is not installed (`./scripts/fetch-game-data.sh --maps all` gets them
-// all); the sweep at the bottom runs against whatever is.
+// [RealDataFact] turns "no install at all" into a visible skip, but the maps below are beyond what the
+// real-data job fetches (PEI), and that job sets UG_REQUIRE_REAL_DATA=1 to turn skips off — so each fact
+// checks for its own map and returns, the same way the California2 test in BakedNavGraphTests does.
+// `./scripts/fetch-game-data.sh --maps all` is what makes them run. The sweep at the bottom needs no such
+// guard: it asserts over whatever maps are installed, PEI included.
 [Trait("Category", "RealData")]
 public class LegacyMapContentRealDataTests
 {
-    private static string RoadsBundle(string map) =>
-        Path.Combine(GameData.Map(map)!, "Environment", "Roads.unity3d");
+    private static string? RoadsBundle(string map) =>
+        GameData.Map(map) is { } path ? Path.Combine(path, "Environment", "Roads.unity3d") : null;
 
-    private static string TreesDat(string map) =>
-        Path.Combine(GameData.Map(map)!, "Terrain", "Trees.dat");
+    private static string? TreesDat(string map) =>
+        GameData.Map(map) is { } path ? Path.Combine(path, "Terrain", "Trees.dat") : null;
 
     // Every Texture2D the bundle holds, decoded the way RoadsBuilder and TerrainTextures decode them.
     private static List<UnityTexture> Textures(string bundlePath)
@@ -40,12 +43,15 @@ public class LegacyMapContentRealDataTests
         return textures;
     }
 
-    [RealDataFact(Map = "Alpha Valley")]
+    [RealDataFact]
     public void AlphaValley_Unity4RoadBundle_Decodes()
     {
+        if (RoadsBundle("Alpha Valley") is not { } bundlePath)
+            return;
+
         // SerializedFile format 9, written by Unity 4.5: the recursive type tree, no type hashes, and
         // Texture2D carrying m_MipMap instead of m_MipCount.
-        List<UnityTexture> textures = Textures(RoadsBundle("Alpha Valley"));
+        List<UnityTexture> textures = Textures(bundlePath);
 
         Assert.Equal(8, textures.Count);
         UnityTexture trail = textures.Find(t => t.Name == "Trail")!;
@@ -55,31 +61,40 @@ public class LegacyMapContentRealDataTests
         Assert.Contains(textures, t => t.Name == "Highway_0");
     }
 
-    [RealDataFact(Map = "Germany")]
+    [RealDataFact]
     public void Germany_UnityFsRoadBundle_Decodes()
     {
+        if (RoadsBundle("Germany") is not { } bundlePath)
+            return;
+
         // A UnityFS container (not UnityRaw) holding a format-17 SerializedFile, with the pixels in a
         // .resS entry beside it rather than inline.
-        List<UnityTexture> textures = Textures(RoadsBundle("Germany"));
+        List<UnityTexture> textures = Textures(bundlePath);
 
         Assert.Equal(10, textures.Count);
         Assert.Contains(textures, t => t.Name == "Highway_0");
     }
 
-    [RealDataFact(Map = "Alpha Valley")]
+    [RealDataFact]
     public void AlphaValley_ReadsItsRegionGriddedTrees()
     {
-        List<PlacedTree> trees = LevelTrees.Load(TreesDat("Alpha Valley"));
+        if (TreesDat("Alpha Valley") is not { } treesPath)
+            return;
+
+        List<PlacedTree> trees = LevelTrees.Load(treesPath);
 
         Assert.Equal(1981, trees.Count);
         // Version 6 carries the GUID, so these need nothing from the asset database to find their mesh.
         Assert.All(trees, t => Assert.NotEqual(Guid.Empty, t.Guid));
     }
 
-    [RealDataFact(Map = "Monolith", RequiresMasterBundle = true)]
+    [RealDataFact]
     public void Monolith_ResolvesItsIdOnlyTreesThroughTheAssetDatabase()
     {
-        List<PlacedTree> trees = LevelTrees.Load(TreesDat("Monolith"));
+        if (TreesDat("Monolith") is not { } treesPath)
+            return;
+
+        List<PlacedTree> trees = LevelTrees.Load(treesPath);
         Assert.Equal(1810, trees.Count);
         // Version 5 predates GUIDs entirely: the legacy id is the only identity on the file.
         Assert.All(trees, t => Assert.Equal(Guid.Empty, t.Guid));
