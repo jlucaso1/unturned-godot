@@ -39,7 +39,9 @@ public sealed class ReproCaptureRequest
     // navmesh is baked before the map's objects exist, so this is the difference between the graph the
     // session routed on and one rebuilt from the same triangles — a building's footprint, mostly.
     // Null when the session never reconciled (no collision world, or a dump taken during loading).
-    public IReadOnlyDictionary<NavFlag, IReadOnlySet<int>>? DisabledFaces { get; init; }
+    // Keyed by the flag's position in the system's navmesh, because NavFlag has reference equality and
+    // the interactive load deserializes the navmesh twice — a lookup by instance misses every time.
+    public IReadOnlyDictionary<int, IReadOnlySet<int>>? DisabledFaces { get; init; }
 
     public ReproSessionData Session { get; init; } = new();
     public ReproGeometryData? Geometry { get; init; }
@@ -148,7 +150,7 @@ public static class ReproCapture
             {
                 IReadOnlySet<int>? disabled = null;
                 if (request.DisabledFaces != null
-                    && request.DisabledFaces.TryGetValue(flag, out IReadOnlySet<int>? set))
+                    && request.DisabledFaces.TryGetValue(world.NavFlags.Count, out IReadOnlySet<int>? set))
                     disabled = set;
                 world.NavFlags.Add(Slice(flag, request.Focus, request.NavmeshRadius, disabled));
             }

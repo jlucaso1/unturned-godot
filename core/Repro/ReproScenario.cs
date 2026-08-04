@@ -171,7 +171,12 @@ public sealed class ReproScenario
     private static ZombiePathQuery BuildGraph(IReadOnlyList<NavFlag> flags, ReproWorldData world,
         bool flagsAreTheDumps)
     {
-        BakedNavGraph graph = BakedNavGraph.Build(flags);
+        // Excluded at BUILD time, the way the session's own graph was built, rather than disabled
+        // afterwards. The two are not equivalent: adjacency is derived once, and an edge only counts as
+        // a border when no enabled face sits across it — so a face that is absent from the start can
+        // change which edges are borders, and therefore which seams get stitched. Disabling later only
+        // marks faces; it cannot add the connections the build would have made.
+        var exclusions = new Dictionary<NavFlag, HashSet<int>>();
         if (flagsAreTheDumps && flags.Count == world.NavFlags.Count)
             for (int i = 0; i < flags.Count; i++)
             {
@@ -179,9 +184,9 @@ public sealed class ReproScenario
                 // an absent array alone rather than running the initializer.
                 int[]? off = world.NavFlags[i].DisabledFaces;
                 if (off is { Length: > 0 })
-                    graph.Disable(flags[i], new HashSet<int>(off));
+                    exclusions[flags[i]] = new HashSet<int>(off);
             }
-        return graph.TryPath;
+        return BakedNavGraph.Build(flags, exclusions.Count > 0 ? exclusions : null).TryPath;
     }
 
     public void Step()

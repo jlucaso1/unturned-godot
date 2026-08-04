@@ -104,8 +104,11 @@ public class ReproDisabledFaceTests
         List<NavFlag> flags = ReproZombieState.ToNavFlags(world);
 
         BakedNavGraph open = BakedNavGraph.Build(flags);
-        BakedNavGraph walled = BakedNavGraph.Build(flags);
-        walled.Disable(flags[0], new HashSet<int>(sliced.DisabledFaces));
+        // Excluded at build time, which is how the session's graph was built and how the replay now
+        // rebuilds it: adjacency is derived once, so a face absent from the start can change which
+        // edges count as borders, and disabling afterwards cannot add connections the build would have.
+        BakedNavGraph walled = BakedNavGraph.Build(flags,
+            new Dictionary<NavFlag, HashSet<int>> { [flags[0]] = new(sliced.DisabledFaces) });
 
         Vector3 from = new(1.5f, 0, 4.5f), to = new(7.5f, 0, 4.5f);
         var straight = new List<Vector3>();
