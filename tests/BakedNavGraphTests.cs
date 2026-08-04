@@ -748,6 +748,38 @@ public class BakedNavGraphTests
     }
 
     [Fact]
+    public async System.Threading.Tasks.Task CharacterizationRadiusProbes_AreSerializedThroughTheSharedResolver()
+    {
+        int active = 0, peak = 0;
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { TJunction() }, portalProbe:
+            (_, to, _) =>
+            {
+                int now = System.Threading.Interlocked.Increment(ref active);
+                int seen;
+                do
+                {
+                    seen = System.Threading.Volatile.Read(ref peak);
+                }
+                while (now > seen && System.Threading.Interlocked.CompareExchange(ref peak, now, seen) != seen);
+                System.Threading.Thread.Sleep(10);
+                System.Threading.Interlocked.Decrement(ref active);
+                return to;
+            });
+
+        var tasks = new System.Threading.Tasks.Task[12];
+        for (int i = 0; i < tasks.Length; i++)
+            tasks[i] = System.Threading.Tasks.Task.Run(() =>
+            {
+                var path = new List<Vector3>();
+                Assert.True(graph.TryPath(new Vector3(0.5f, 0f, 1f),
+                    new Vector3(3.5f, 0f, 1f), path, radius: 0.6f));
+            });
+        await System.Threading.Tasks.Task.WhenAll(tasks);
+
+        Assert.Equal(1, peak);
+    }
+
+    [Fact]
     public void ALongColdStitchedPortal_NeverExceedsThePerPathPhysicsBudget()
     {
         int probes = 0;

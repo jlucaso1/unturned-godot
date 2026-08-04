@@ -49,6 +49,7 @@ public sealed class ReproScenario
     private readonly bool _routesAreSliced;
     private readonly float _navmeshRadius;
     private readonly Vector3 _navmeshCentre;
+    private bool _replayingTick;
 
     public ZombieSystem System { get; }
 
@@ -217,7 +218,15 @@ public sealed class ReproScenario
     public void Step()
     {
         Oracle?.SeekTick(Tick);
-        System.Tick(PlayersAt(Tick), DtAt(Tick));
+        _replayingTick = true;
+        try
+        {
+            System.Tick(PlayersAt(Tick), DtAt(Tick));
+        }
+        finally
+        {
+            _replayingTick = false;
+        }
         Tick++;
     }
 
@@ -406,7 +415,7 @@ public sealed class ReproScenario
     private void Unanswered()
     {
         UnansweredQueries++;
-        if (Tick < WindowTicks)
+        if (_replayingTick && Tick < WindowTicks)
             UnansweredInWindow++;
     }
 

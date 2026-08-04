@@ -1035,6 +1035,7 @@ public class ReproEdgeTests
             Zombies = new ReproZombieSection
             {
                 Seams = new ReproWorldSeams { PathQuery = true },
+                Frames = { new ReproFrame { Dt = 0.08f } },
             },
         };
         var scenario = new ReproScenario(dump, new ReproScenarioOptions

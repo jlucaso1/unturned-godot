@@ -630,14 +630,13 @@ public sealed partial class ZombieSystem
         Vector3 destination = target.Position;
         bool canTurn = true;
         Vector3 directDirection = default;
+        if (zombie.RouteEscapingCollision && hasPhysicalLine && !physicalBlocked)
+        {
+            zombie.RouteEscapingCollision = false;
+            zombie.EscapeRouteHasProgress = false;
+        }
         if (sqrHorizontal > 4f)
         {
-            if (zombie.RouteEscapingCollision && hasPhysicalLine && !physicalBlocked)
-            {
-                zombie.RouteEscapingCollision = false;
-                zombie.EscapeRouteHasProgress = false;
-            }
-
             // The lateral formation offset is useful in open ground, but after collision has disproved
             // a route it can put the next destination inside the very obstacle being escaped. In the
             // captured PEI corner the body is 2.1 m from the player, so LEFT turns the physical recovery
@@ -664,11 +663,6 @@ public sealed partial class ZombieSystem
             // the wall. It then invalidates the executable route every 0.75 s for "not moving" and
             // adopts it again forever. When vision geometry proves the target is occluded, keep the
             // route's steering until the complete physical segment is actually clear.
-            if (zombie.RouteEscapingCollision && hasPhysicalLine && !physicalBlocked)
-            {
-                zombie.RouteEscapingCollision = false;
-                zombie.EscapeRouteHasProgress = false;
-            }
             // Visual occlusion still selects route-facing close to an ordinary wall. A recovery route is
             // stronger: keep its steering even through World-only geometry until the physical line is
             // clear. With no query installed, absence of evidence must not cancel recovery.
@@ -767,7 +761,7 @@ public sealed partial class ZombieSystem
                 // it delivers forward motion.
                 bool keepsWalking = complete && oldError <= 4f
                     && (zombie.RouteEscapingCollision
-                        ? zombie.EscapeRouteHasProgress
+                        ? zombie.EscapeRouteHasProgress && !zombie.PathIsPartial
                         : KeepsWalkingTheCurrentRoute(zombie, _scratchPath, destination));
                 if (!keepsWalking && (complete || (improvesFrom && improvesRoute)))
                 {

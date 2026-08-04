@@ -1569,8 +1569,11 @@ public sealed class BakedNavGraph
                     return PortalVerdict.Deferred;
                 probeBudget--;
                 Vector3 middle = (span.A + span.B) * 0.5f;
-                return ProbePortalPoint(validator, triangle, middle, span.A, span.B, radius)
-                    ? PortalVerdict.Open : PortalVerdict.Blocked;
+                lock (validator.Gate)
+                {
+                    return ProbePortalPoint(validator, triangle, middle, span.A, span.B, radius)
+                        ? PortalVerdict.Open : PortalVerdict.Blocked;
+                }
             }
 
             int cached = Volatile.Read(ref _portalProbeState[portalAt]);

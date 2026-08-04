@@ -196,6 +196,12 @@ public class PhysicsBodyOrderTests
         Assert.Contains("PlayerConfig.StepOffset, selected, field", server);
         Assert.Contains("CollisionLayers.World | CollisionLayers.VisionBlocker", physics);
         Assert.Contains("physicalRay.To = to", physics);
+        Assert.Contains("using Godot.Collections.Dictionary seen = space.IntersectRay(visionRay)", physics);
+        Assert.Contains("using Godot.Collections.Dictionary blocked = space.IntersectRay(physicalRay)", physics);
+        Assert.Contains("using Godot.Collections.Dictionary support = space.IntersectRay(stepDown)", physics);
+        Assert.Contains("using Godot.Collections.Dictionary rest = space.GetRestInfo(query)", physics);
+        Assert.Contains("using Godot.Collections.Dictionary hit = space.IntersectRay(snapRay)", physics);
+        Assert.DoesNotContain("return space.IntersectRay", physics);
     }
 
     [Fact]

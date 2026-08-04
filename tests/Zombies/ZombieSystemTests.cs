@@ -1491,6 +1491,50 @@ public class ZombieSystemTests
         Assert.Equal(3f, zombie.PathPoints[^1].X, 1);
     }
 
+    [Fact]
+    public void APartialEscapeRoute_CannotVetoACompleteReplacement()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        var player = Player(1, new Vector3(10f, 5f, 0f),
+            UnturnedGodot.Player.EPlayerStance.Sprint, moving: true);
+        system.Tick(new[] { player }, 0.1f);
+        Assert.Equal(1, zombie.TargetPlayer);
+
+        // This route was partial for an earlier destination. The moving target now puts its endpoint
+        // inside the completeness tolerance, but the route is still known not to reach its old request.
+        zombie.Position = new Vector3(0f, 5f, 0f);
+        zombie.Yaw = -90f;
+        zombie.Path = EZombiePath.Rush; // destination is one metre short: (9, 5, 0)
+        zombie.PathPoints.Clear();
+        zombie.PathPoints.Add(zombie.Position);
+        zombie.PathPoints.Add(new Vector3(9f, 5f, 0f));
+        zombie.CurrentWaypointIndex = 1;
+        zombie.TargetReached = false;
+        zombie.PathIsPartial = true;
+        zombie.RouteServedAnotherTarget = false;
+        zombie.RouteEscapingCollision = true;
+        zombie.EscapeRouteHasProgress = true;
+        zombie.RepathTimer = -1f;
+        zombie.RepathGranted = true;
+
+        var replacementCorner = new Vector3(4f, 5f, -3f);
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            path.Add(from);
+            path.Add(replacementCorner);
+            path.Add(to);
+            return true;
+        };
+        system.MoveResolver = (from, _, _) => from;
+        system.VisionBlocked = (_, _) => false;
+        system.PhysicalLineBlocked = (_, _) => true; // recovery is still crossing its obstacle
+
+        system.Tick(new[] { player }, 0.1f);
+
+        Assert.False(zombie.PathIsPartial);
+        Assert.Contains(replacementCorner, zombie.PathPoints);
+    }
+
     // CalculateTargetPoint divides by the active segment's length, and the comment above it claimed a
     // degenerate segment could not reach it because "the final segment short-circuits to the
     // destination". That short-circuit is conditional: it only fires when the route's end is within 4 m
@@ -2295,6 +2339,8 @@ public class ZombieSystemTests
 
         system.Tick(new[] { Player(1, new Vector3(1.2f, 5f, 0f)) }, 0.1f);
 
+        Assert.Equal(EZombieState.Chase, zombie.State);
+        Assert.Equal(1, zombie.TargetPlayer);
         Assert.False(zombie.RouteEscapingCollision); // no timeout/recovery flag was needed
         Assert.True(MathF.Abs(zombie.Yaw) < 1f || MathF.Abs(zombie.Yaw - 360f) < 1f,
             $"the close-wall override still faced through the barrier: yaw={zombie.Yaw}");

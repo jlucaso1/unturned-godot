@@ -33,7 +33,8 @@ internal static class ZombiePhysics
                 return false;
             visionRay.From = from;
             visionRay.To = from + ((to - from) * ZombieBody.VisionRayFraction);
-            return space.IntersectRay(visionRay).Count > 0;
+            using Godot.Collections.Dictionary seen = space.IntersectRay(visionRay);
+            return seen.Count > 0;
         };
 
         // Authority checks inspect the complete eye-to-eye segment. World adds terrain, resources and
@@ -50,7 +51,8 @@ internal static class ZombiePhysics
                 return false;
             physicalRay.From = from;
             physicalRay.To = to;
-            return space.IntersectRay(physicalRay).Count > 0;
+            using Godot.Collections.Dictionary blocked = space.IntersectRay(physicalRay);
+            return blocked.Count > 0;
         };
 
         var sweep = new CapsuleShape3D { Height = ZombieBody.CapsuleHeight };
@@ -101,7 +103,7 @@ internal static class ZombiePhysics
                     {
                         stepDown.From = new Vector3(to.X, at.Y + 1.5f, to.Z);
                         stepDown.To = new Vector3(to.X, at.Y + 0.05f, to.Z);
-                        Godot.Collections.Dictionary support = space.IntersectRay(stepDown);
+                        using Godot.Collections.Dictionary support = space.IntersectRay(stepDown);
                         if (support.Count > 0)
                             return new Vector3(to.X, ((Vector3)support["position"]).Y, to.Z);
                     }
@@ -110,7 +112,8 @@ internal static class ZombiePhysics
                 Vector3 safe = at + (motion * cast[0]);
                 query.Transform = new Transform3D(Basis.Identity, safe + chest);
                 query.Motion = Vector3.Zero;
-                Vector3 normal = space.GetRestInfo(query) is { Count: > 0 } rest
+                using Godot.Collections.Dictionary rest = space.GetRestInfo(query);
+                Vector3 normal = rest.Count > 0
                     ? (Vector3)rest["normal"]
                     : Vector3.Zero;
                 if (normal == Vector3.Zero)
@@ -134,7 +137,7 @@ internal static class ZombiePhysics
                 return ground(position.X, position.Z, out y);
             snapRay.From = position + new Vector3(0f, ZombieBody.GroundProbeUp, 0f);
             snapRay.To = position + new Vector3(0f, -ZombieBody.GroundProbeDown, 0f);
-            Godot.Collections.Dictionary hit = space.IntersectRay(snapRay);
+            using Godot.Collections.Dictionary hit = space.IntersectRay(snapRay);
             if (hit.Count > 0)
             {
                 y = ((Vector3)hit["position"]).Y;
