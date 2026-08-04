@@ -212,7 +212,7 @@ public sealed partial class ZombieSystem
     // The CharacterController's world collision, wired to real colliders by the host (optional).
     public ZombieMoveResolver? MoveResolver;
 
-    // The Seeker's navmesh pathfinding, wired to the NavigationServer by the host (optional).
+    // The Seeker's navmesh pathfinding, wired to the baked graph by the host (optional).
     public ZombiePathQuery? PathQuery;
 
     // False while an attached pathfinder is still publishing/reconciling its graph. This is distinct
@@ -226,7 +226,7 @@ public sealed partial class ZombieSystem
     // Fires when a zombie's swing lands (attackTime/2 after it starts): (zombie, player id, damage).
     public Action<ZombieInstance, byte, byte>? OnAttack;
 
-    public IReadOnlyList<NavFlag>? Navmesh => _navmesh; // for the host's NavigationServer regions
+    public IReadOnlyList<NavFlag>? Navmesh => _navmesh; // for route endpoint projection and repro capture
 
     public ZombieSystem(
         IReadOnlyList<ZombieTable> tables,
@@ -331,9 +331,8 @@ public sealed partial class ZombieSystem
         // The bug-repro recorder brackets the tick here (ZombieSystemState.cs): everything below is
         // what a dump has to be able to put back, and the state it must be put back to is this one.
         Observer?.BeginTick(this, players, dt);
-        // Poll an engine-backed pathfinder once per authoritative tick, not once per hunter. During a
-        // small map's async publication this probe can cross into NavigationServer; a horde must not turn
-        // one readiness check into hundreds of identical engine calls.
+        // Poll the asynchronously published pathfinder once per authoritative tick, not once per hunter.
+        // A horde must not turn one readiness check into hundreds of identical calls.
         _pathReadyThisTick = PathQuery != null && (PathReady?.Invoke() ?? true);
         _detectTimer += dt;
         if (_detectTimer >= ZombieDetection.DetectInterval)
@@ -599,8 +598,17 @@ public sealed partial class ZombieSystem
         }
         else
         {
-            canTurn = false;
-            directDirection = target.Position - zombie.Position;
+            // Inside two metres the original turns straight at the player so attacks stay faced, but
+            // that assumes there is nothing between them. Across a thin wall the route correctly goes
+            // around while this override keeps the body staring and pushing into the player through
+            // the wall. It then invalidates the executable route every 0.75 s for "not moving" and
+            // adopts it again forever. When vision geometry proves the target is occluded, keep the
+            // route's steering until the body reaches an actual line of sight.
+            bool blocked = VisionBlocked?.Invoke(
+                zombie.Position + (Vector3.Up * ZombieBody.EyeHeight), target.Position) == true;
+            canTurn = blocked;
+            if (!blocked)
+                directDirection = target.Position - zombie.Position;
         }
         Move(zombie, destination, canTurn, directDirection, dt);
     }

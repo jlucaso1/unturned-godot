@@ -202,6 +202,7 @@ public class ZombieSystemTests
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
         int scans = 0;
         system.VisionBlocked = (from, to) => { scans++; return false; };
+        system.MoveResolver = (from, to, radius) => from; // keep Hunt outside its separate 2 m LOS check
 
         var players = new[] { Player(1, new Vector3(3, 5, 0)) };
         const float dt = UnturnedGodot.Net.ServerSimulation.TickRate; // 0.08, what ZombieHost passes
@@ -641,6 +642,51 @@ public class ZombieSystemTests
         for (int i = 0; i < 40; i++)
             system.Tick(new[] { player }, 0.1f);
         Assert.Equal(EZombieState.Attack, zombie.State);
+    }
+
+    [Fact]
+    public void CloseTargetBehindWall_StillTurnsIntoTheDetour()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = 180f; // face +Z: straight at the nearby player and the wall between them
+        var player = Player(1, new Vector3(0f, 5f, 1.3f)); // inside 2 m, outside normal attack range
+
+        // Acquire the player while visible. The wall then closes the vision ray, which is the exact
+        // state of a zombie already hunting a player pressed against the opposite face of a wall.
+        system.VisionBlocked = (_, _) => false;
+        system.Tick(new[] { player }, 0.1f);
+        Assert.Equal(EZombieState.Chase, zombie.State);
+
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            path.Add(from);
+            path.Add(new Vector3(-3f, 5f, -1f));
+            path.Add(new Vector3(-3f, 5f, 2f));
+            path.Add(to);
+            return true;
+        };
+        system.VisionBlocked = (_, _) => true;
+        system.MoveResolver = (from, to, radius) =>
+        {
+            // Thin wall across z=0.5, ending at x=-2.5. A direct push at the player is clamped;
+            // the nav route first turns away from the wall and then goes around its left end.
+            if (from.Z < 0.5f && to.Z >= 0.5f && from.X > -2.5f)
+                return new Vector3(to.X, to.Y, 0.49f);
+            return to;
+        };
+
+        float leftmost = zombie.Position.X;
+        for (int i = 0; i < 30; i++)
+        {
+            system.Tick(new[] { player }, 0.1f);
+            leftmost = MathF.Min(leftmost, zombie.Position.X);
+        }
+
+        Assert.True(leftmost < -2.5f,
+            $"kept pushing straight into the wall instead of reaching its end: leftmost={leftmost}, final={zombie.Position}");
+        Assert.True(zombie.Position.Z > 0.5f,
+            $"reached the wall end but never crossed to the player's side: {zombie.Position}");
+        Assert.NotEqual(180f, zombie.Yaw);
     }
 
     [Fact]

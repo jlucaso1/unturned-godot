@@ -446,10 +446,9 @@ public partial class Main : Node3D
         string environmentDir = EnvironmentDir(unturnedPath, _mapName);
         LevelLighting? lighting = LevelLighting.Load(System.IO.Path.Combine(environmentDir, "Lighting.dat"));
 
-        // The navigation map goes up next, not before the screen: parsing the pre-baked navmesh and handing
-        // it to the NavigationServer takes a couple of seconds on a large map, and doing that first meant
-        // the window stayed black for all of it. Its own sync still runs async and finishes behind the
-        // world build, so pathfinding is ready on first aggro either way.
+        // Parse the pre-baked navmesh next, not before the screen. The graph is published asynchronously
+        // behind the world build after collision reconciliation, so pathfinding is ready on first aggro
+        // without holding the loading window black during this early data read.
         ZombieNavigation.Preload(MapCatalog.ResolvePath(unturnedPath, _mapName));
 
         // Nothing above the await chain observes this task, so an exception here would otherwise vanish

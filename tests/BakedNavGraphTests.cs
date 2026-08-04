@@ -605,25 +605,27 @@ public class BakedNavGraphTests
         var to = new Vector3(3.5f, 0, 1);
 
         Assert.True(graph.TryPath(from, to, path), "the two halves of one floor were not connected");
+        Assert.False(graph.HasClearLine(0, from, to));
         Assert.True(path.Count >= 2);
         Assert.Equal(from, path[0]);
         Assert.Equal(to, path[^1]);
         // Straight across: the seam is not an obstacle, so nothing should be routed around.
         Assert.Equal(3f, Plan(path), 2);
 
-        // And back. The stitch adds a connection in each direction, and a one-way link would satisfy
-        // everything above while leaving the seam impassable from the other side.
-        //
-        // Not asserted as EQUAL to the forward route: it measures 3.10 m against 3.00 m, and that
-        // asymmetry is not the seam. It is corner rounding, which runs after the shortcut pass and
-        // picks which side to push off without consulting the corridor, so the reverse traversal of the
-        // same geometry can gain a waypoint the forward one does not. That is a known open defect
-        // elsewhere in this file, not something this stitch introduces or should paper over.
+        // And back. The stitch adds a connection in each direction, and the FUNNEL may use that portal
+        // inside the corridor selected by A*. Border classification used to require both portal vertex
+        // ids in the spanning triangle; the middle T vertex cannot be there by definition, so it inset
+        // the opening almost to its midpoint and added a material detour. The any-angle line walker
+        // remains deliberately conservative: collision-only walls can sit on a stitched seam, so it may
+        // not invent a new corridor through one merely because the XZ navmesh overlaps there. That can
+        // retain the 5 cm clearance inset visible below, but no longer sends the route to the portal's
+        // far midpoint.
         var back = new List<Vector3>();
         Assert.True(graph.TryPath(to, from, back), "the seam was only crossable in one direction");
+        Assert.False(graph.HasClearLine(0, to, from));
         Assert.Equal(to, back[0]);
         Assert.Equal(from, back[^1]);
-        Assert.True(Plan(back) < 3.5f, $"the return route detoured: {Plan(back):F2} m across a 3 m floor");
+        Assert.True(Plan(back) < 3.2f, $"the return route materially detoured: {Plan(back):F2} m");
     }
 
     // A 6 m tent-shaped ridge — 2 m of run either side of the crest — laid along +Z from z = -2 to the

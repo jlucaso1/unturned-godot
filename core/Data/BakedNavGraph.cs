@@ -8,10 +8,11 @@ using Godot;
 
 namespace UnturnedGodot.Data;
 
-// CPU path graph for very large pre-baked maps. Godot's NavigationServer performs a global polygon merge
-// even when its input is split into small regions; at California2's 266k triangles that merge can occupy
-// one engine worker for minutes and prevents process teardown. The source data is already a baked graph,
-// so large maps do not need to be rasterized/merged again: shared indexed edges are its exact adjacency.
+// CPU path graph for the pre-baked Recast maps. Their tile boundaries contain T-junctions: one side of
+// a seam can end in the middle of the other side's edge. NavigationServer does not join those inside one
+// region, so even PEI's 42k triangles produced long false detours. Larger maps add a second failure mode:
+// Godot's global polygon merge can occupy a worker for minutes. The source is already baked, so preserve
+// its indexed and overlapping-edge adjacency directly instead of rasterizing and merging it again.
 public sealed class BakedNavGraph
 {
     private const uint CacheMagic = 0x43424755; // UGBC
@@ -1031,44 +1032,108 @@ public sealed class BakedNavGraph
             return changed;
         }
 
-        // Does an ENABLED face still sit across this vertex pair from `triangle`? An edge is not always
-        // shared by exactly two faces — the builder connects every pair that shares one — so disabling
-        // one of three leaves the other two joined and the edge is still not a wall. Assuming otherwise
-        // narrows portals in the middle of open mesh: on a flat field, one disabled flap on a shared
-        // diagonal bent a dead-straight run into (2, 16) -> (17, 15.55) -> (30, 16).
+        // Does enabled floor cover this whole edge from the other side? Connections produced by a
+        // T-junction stitch name the OVERLAP, not necessarily an indexed edge of either face. Comparing
+        // only vertex ids therefore called every stitched opening a wall again: the middle vertex on the
+        // split side does not exist in the spanning triangle. Work in the edge's geometric parameter so
+        // several stitched pieces can cover one long edge and a single piece can cover one split edge.
         //
-        // The caller has already cleared `_enabled` for the face being disabled, so it excludes itself.
+        // An edge is not always shared by exactly two faces — the builder connects every pair that shares
+        // one — so disabling one of three leaves the other two joined. Faces on the same side do not count:
+        // a coplanar duplicate alongside an outer edge must not hide that wall.
         private bool StillShared(int triangle, int vertexA, int vertexB)
         {
-            // Across, not merely alongside. A duplicated or overlapping face shares an edge from the
-            // SAME side, and counting it turns a real outer boundary into an interior edge: the wall
-            // stops being tested for clearance and its vertices stop being borders, so a route can run
-            // half a metre from the edge of the navmesh with the capsule hanging off it. Every use of
-            // this asks "is there still floor on the other side", which is what this now answers.
-            int mine = OppositeVertex(triangle, vertexA, vertexB);
-            if (mine < 0)
-                return false;
-            float here = SideOfEdge(vertexA, vertexB, mine);
-            for (int at = _edgeStart[triangle]; at < _edgeStart[triangle + 1]; at++)
+            float slack = EdgeParameterSlack(vertexA, vertexB);
+            float covered = 0f;
+            int connections = _edgeStart[triangle + 1] - _edgeStart[triangle];
+            for (int pass = 0; pass < connections && covered < 1f - slack; pass++)
             {
-                Connection c = _edges[at];
-                if (!_enabled[c.To])
-                    continue;
-                if ((c.VertexA != vertexA || c.VertexB != vertexB)
-                    && (c.VertexA != vertexB || c.VertexB != vertexA))
-                    continue;
-                int theirs = OppositeVertex(c.To, vertexA, vertexB);
-                if (theirs >= 0 && here * SideOfEdge(vertexA, vertexB, theirs) < 0f)
-                    return true;
+                float next = covered;
+                for (int at = _edgeStart[triangle]; at < _edgeStart[triangle + 1]; at++)
+                    if (TryAcrossInterval(triangle, vertexA, vertexB, _edges[at], out float lo,
+                            out float hi)
+                        && lo <= covered + slack && hi > next)
+                        next = hi;
+                if (next <= covered + 1e-6f)
+                    break;
+                covered = next;
             }
+            return covered >= 1f - slack;
+        }
+
+        private bool EndpointShared(int triangle, int vertexA, int vertexB, bool atEnd)
+        {
+            float endpoint = atEnd ? 1f : 0f;
+            float slack = EdgeParameterSlack(vertexA, vertexB);
+            for (int at = _edgeStart[triangle]; at < _edgeStart[triangle + 1]; at++)
+                if (TryAcrossInterval(triangle, vertexA, vertexB, _edges[at], out float lo,
+                        out float hi)
+                    && endpoint >= lo - slack && endpoint <= hi + slack)
+                    return true;
             return false;
         }
 
+        private float EdgeParameterSlack(int vertexA, int vertexB)
+        {
+            Vector3 a = Source.Vertices[vertexA], b = Source.Vertices[vertexB];
+            float length = new Vector2(b.X - a.X, b.Z - a.Z).Length();
+            return length <= 1e-6f ? 0f : JoinPlanarSlack / length;
+        }
+
+        // The connection's portal must overlap this edge and its destination face must be geometrically
+        // across it. `OppositeVertex(destination, portalA, portalB)` cannot answer for a T-junction: one
+        // portal end is precisely the vertex the long-side triangle does not have.
+        private bool TryAcrossInterval(int triangle, int edgeA, int edgeB, in Connection connection,
+            out float lo, out float hi)
+        {
+            lo = hi = 0f;
+            if (!_enabled[connection.To])
+                return false;
+
+            Vector3 p = Source.Vertices[edgeA], q = Source.Vertices[edgeB];
+            float ex = q.X - p.X, ez = q.Z - p.Z;
+            float lengthSquared = (ex * ex) + (ez * ez);
+            if (lengthSquared <= 1e-8f)
+                return false;
+            float length = MathF.Sqrt(lengthSquared);
+            Vector3 a = Source.Vertices[connection.VertexA];
+            Vector3 b = Source.Vertices[connection.VertexB];
+            if (MathF.Abs(((a.X - p.X) * ez) - ((a.Z - p.Z) * ex)) / length > JoinPlanarSlack
+                || MathF.Abs(((b.X - p.X) * ez) - ((b.Z - p.Z) * ex)) / length > JoinPlanarSlack)
+                return false;
+
+            float ta = (((a.X - p.X) * ex) + ((a.Z - p.Z) * ez)) / lengthSquared;
+            float tb = (((b.X - p.X) * ex) + ((b.Z - p.Z) * ez)) / lengthSquared;
+            lo = MathF.Max(0f, MathF.Min(ta, tb));
+            hi = MathF.Min(1f, MathF.Max(ta, tb));
+            // These connections have already passed the builder's topology checks. Do not reuse the
+            // 5 cm T-junction discovery threshold here: exact authored edges can legitimately be finer
+            // than that (the clearance stress fixture uses 5 cm faces). Only a point contact is not an
+            // interval covering this edge.
+            if ((hi - lo) * length < 1e-6f)
+                return false;
+
+            float here = TriangleSide(triangle, p, ex, ez);
+            float there = TriangleSide(connection.To, p, ex, ez);
+            return MathF.Abs(here) > 1e-6f && MathF.Abs(there) > 1e-6f && here * there < 0f;
+        }
+
+        private float TriangleSide(int triangle, Vector3 edgeStart, float edgeX, float edgeZ)
+        {
+            for (int i = 0; i < 3; i++)
+            {
+                Vector3 vertex = Source.Vertices[Source.Triangles[(triangle * 3) + i]];
+                float side = (edgeX * (vertex.Z - edgeStart.Z))
+                    - (edgeZ * (vertex.X - edgeStart.X));
+                if (MathF.Abs(side) > 1e-6f)
+                    return side;
+            }
+            return 0f;
+        }
+
         // Which vertices sit on the edge of the walkable region — the wall corners. Derived from the CSR
-        // alone: an edge of an enabled triangle is a border edge when no ENABLED neighbour is listed as
-        // sharing that vertex pair. A triangle has at most three connections, so this is O(3 * 3) per
-        // triangle with no dictionary, which is why it can be re-derived after a cache read and after
-        // every Disable rather than being serialized and going stale.
+        // alone: an endpoint is a border when no enabled floor covers that end from across the edge.
+        // Re-deriving it after a cache read keeps this geometric interpretation out of the cache format.
         private void RecomputeBorderVertices()
         {
             Array.Clear(_borderVertex);
@@ -1081,14 +1146,13 @@ public sealed class BakedNavGraph
                 {
                     int v0 = Source.Triangles[(t * 3) + e];
                     int v1 = Source.Triangles[(t * 3) + ((e + 1) % 3)];
-                    // One definition of "still has floor across it", shared with Disable and with the
-                    // line walk's clearance test, so a wall cannot be a wall to one of them and not the
-                    // others.
-                    if (!StillShared(t, v0, v1))
-                    {
+                    // Border classification follows every connection in the selected corridor,
+                    // including stitches. The any-angle walker is deliberately stricter because it
+                    // must not invent a corridor across collision-only geometry; see Walk.
+                    if (!EndpointShared(t, v0, v1, atEnd: false))
                         _borderVertex[v0] = true;
+                    if (!EndpointShared(t, v0, v1, atEnd: true))
                         _borderVertex[v1] = true;
-                    }
                 }
             }
         }
@@ -1422,10 +1486,10 @@ public sealed class BakedNavGraph
                     if (va != vertex && vb != vertex)
                         continue; // not one of the fan's edges around this vertex
 
-                    // One pass over the adjacency answers both questions this needs — whether anything
-                    // enabled still shares the edge, and where to spread next. Asking StillShared first
-                    // and then scanning again to step walks the same list twice, which measured at
-                    // roughly double the cost of the whole search.
+                    // A stitched overlap is deliberately conservative here. The funnel may traverse
+                    // the corridor A* selected through that portal, but the any-angle passes must not
+                    // invent a different corridor through it: collision-only walls can sit on a seam
+                    // that is indistinguishable from open ground in the baked XZ topology.
                     bool shared = false;
                     int mine = OppositeVertex(at, va, vb);
                     float here = mine >= 0 ? SideOfEdge(va, vb, mine) : 0f;
@@ -1437,8 +1501,6 @@ public sealed class BakedNavGraph
                         if ((c.VertexA != va || c.VertexB != vb)
                             && (c.VertexA != vb || c.VertexB != va))
                             continue;
-                        // Across, not merely alongside — the same rule StillShared applies. A face
-                        // duplicated on this side would otherwise hide a real wall from the inset.
                         int theirs = OppositeVertex(c.To, va, vb);
                         if (theirs < 0 || here * SideOfEdge(va, vb, theirs) >= 0f)
                             continue;
@@ -1947,7 +2009,7 @@ public sealed class BakedNavGraph
                 // route that crosses one non-manifold edge loses all of its shortcutting.
                 //
                 // The face to cross to is the one whose opposite vertex lies on the far side of the
-                // edge from this face's.
+                // exact indexed edge. T-junction stitches remain corridor-only; see WallsAt.
                 int next = -1;
                 float here = SideOfEdge(exitA, exitB, exitR);
                 for (int at = _edgeStart[current]; at < _edgeStart[current + 1] && next < 0; at++)
@@ -2111,9 +2173,10 @@ public sealed class BakedNavGraph
                     if (MathF.Abs(height - reach.HeightAt(along)) > StoreyTolerance)
                         continue; // another storey: neither a wall the body can meet, nor a way to one
 
-                    // One pass over the adjacency answers both questions, the way WallsAt does it:
-                    // whether an enabled face still sits ACROSS this edge — a duplicate alongside is
-                    // not floor across it — and where to spread next.
+                    // A stitched overlap is deliberately conservative here, just as in WallsAt and
+                    // Walk. It is a portal only inside the corridor A* chose; following it while an
+                    // any-angle clearance probe spreads sideways could authorize a shortcut through a
+                    // collision-only wall that happens to lie on that navmesh seam.
                     bool shared = false;
                     int mine = OppositeVertex(at, va, vb);
                     float here = mine >= 0 ? SideOfEdge(va, vb, mine) : 0f;

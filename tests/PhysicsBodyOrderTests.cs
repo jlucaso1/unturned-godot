@@ -144,7 +144,7 @@ public class PhysicsBodyOrderTests
     }
 
     [Fact]
-    public void LargeNavigationGraph_IsBuiltOffTheMainThreadAfterReconciliation()
+    public void NavigationGraph_IsBuiltOffTheMainThreadAfterReconciliation()
     {
         if (FindRepositoryFile(Path.Combine("src", "Net", "ZombieNavigation.cs")) is not { } path)
             return;
@@ -156,6 +156,8 @@ public class PhysicsBodyOrderTests
         Assert.Contains("await PublishAsync(fingerprint, cachePath == null ? null : cachePath + \".csr\")", source);
         Assert.Contains("BakedNavGraph.TryRead", source);
         Assert.Contains("built.Write(output, fingerprint)", source);
+        Assert.Contains("bool found = _bakedGraph?.TryPath", source);
+        Assert.DoesNotContain("NavigationServer3D", source);
     }
 
     [Fact]

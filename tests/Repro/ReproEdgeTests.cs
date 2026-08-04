@@ -48,10 +48,10 @@ public class ReproEdgeTests
         Assert.Null(bare.System.VisionBlocked);
     }
 
-    // A session and a replay can disagree about ROUTING alone: the live map may have answered from the
-    // engine's pathfinder where the replay has only the baked graph. Turning the whole oracle off to
-    // see that also changes the ground and collision under the body, so the two causes cannot be told
-    // apart afterwards. RecomputePaths drops the recorded routes and keeps everything else.
+    // A session and a replay can disagree about ROUTING alone: the live map had the full reconciled
+    // graph where a self-contained replay may have only the dump's local slice. Turning the whole oracle
+    // off also changes ground and collision, so the two causes cannot be told apart afterwards.
+    // RecomputePaths drops the recorded routes and keeps everything else.
     [Fact]
     public void RecomputingPathsDropsTheRecordedRoutesAndKeepsTheRest()
     {
@@ -164,8 +164,8 @@ public class ReproEdgeTests
         ReproReplayReport report = scenario.Run(extraTicks: 5);
         Assert.True(asked > 0);
         Assert.True(scenario.GeometryAnswers > 0);
-        // Recomputed routes are called out on their own: they are the one answer a replay cannot
-        // reproduce faithfully when the live map used the engine's pathfinder.
+        // Recomputed routes are called out on their own: a local graph slice cannot always reproduce
+        // the live full-map route faithfully.
         Assert.Equal(asked, report.RoutesRecomputed);
         Assert.Contains("routes           ", report.Describe(), StringComparison.Ordinal);
     }

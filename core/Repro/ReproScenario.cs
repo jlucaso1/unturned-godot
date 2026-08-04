@@ -18,10 +18,9 @@ public sealed class ReproScenarioOptions
     public bool UseGeometry { get; init; } = true;
 
     // Recompute ROUTES over the dump's navmesh while still serving the recorded move, ground and
-    // vision answers. A session and a replay can disagree about routing alone — the live map may have
-    // used the engine's pathfinder where the replay has only the baked graph — and turning the whole
-    // oracle off to see that also changes the physics under the body, so the two effects cannot be
-    // told apart. This isolates the one that matters when the question is "is the ROUTE the problem".
+    // vision answers. A local dump slice can disagree with the live full-map graph about routing;
+    // turning the whole oracle off to see that also changes the physics under the body, so the two
+    // effects cannot be told apart. This isolates the one that matters: "is the ROUTE the problem?"
     public bool RecomputePaths { get; init; }
 
     // The generator a replay rolls from when the dump could not carry the session's own state.
@@ -75,12 +74,11 @@ public sealed class ReproScenario
     // reproduced: a tail simulated past the recording is expected to ask questions nobody recorded.
     public int UnansweredInWindow { get; private set; }
 
-    // Routes recomputed rather than replayed, called out separately because they are the one world
-    // answer a replay cannot reproduce faithfully: a map inside Godot's polygon budget paths through
-    // the engine's NavigationServer, and a replay has no engine, so it paths over the baked graph.
-    // The two agree most of the time and then disagree about which side of a building to pass, after
-    // which the trajectories have nothing left to say to each other. A run with this above zero is
-    // answering "does the body still hit the same walls", not "does this build still do it".
+    // Routes recomputed rather than replayed, called out separately because a dump normally carries a
+    // local navmesh slice rather than the full reconciled graph. The two can disagree about which side
+    // of a building to pass, after which the trajectories have nothing left to say to each other. A run
+    // with this above zero answers "does the body still hit the same walls", not "does this build still
+    // follow the session's exact route".
     public int RoutesRecomputed { get; private set; }
 
     public ReproScenario(ReproDump dump, ReproScenarioOptions? options = null)
@@ -503,8 +501,8 @@ public sealed class ReproReplayReport
             .Append('\n');
         if (RoutesRecomputed > 0)
             text.Append("  routes           ").Append(RoutesRecomputed)
-                .Append(" recomputed over the baked graph rather than replayed; the live map may have "
-                    + "used the engine's pathfinder, so a divergence here is expected\n");
+                .Append(" recomputed over the available baked graph rather than replayed; a local dump "
+                    + "slice can differ from the live full-map graph, so divergence is expected\n");
         text.Append("  verdict          ").Append(ReproducesRecording
             ? "reproduces the recording"
             : "diverges from the recording (expected if the code under replay changed)").Append('\n');

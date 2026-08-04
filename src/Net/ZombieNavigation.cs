@@ -9,35 +9,20 @@ using UnturnedGodot.Zombies;
 namespace UnturnedGodot;
 
 // Turns the level's PRE-BAKED navmesh (Environment/Navigation_<N>.dat) into the ZombiePathQuery used by
-// the Seeker port. Normal maps use bounded NavigationServer regions and its funnel-quality paths. Very
-// large maps use the baked shared-edge graph directly, because Godot's global polygon merge can otherwise
-// occupy an engine worker for minutes and prevent shutdown. Both paths work headless.
+// the Seeker port. The source is Recast tile output: adjacent tiles can meet in T-junctions, where one
+// side has a vertex in the middle of the other side's edge. Godot's NavigationServer only joins exact
+// edge pairs inside a region and therefore severs those surfaces. BakedNavGraph preserves the authored
+// topology, including those joins, and works headless.
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed class ZombieNavigation
 {
-    // Above this size Godot 4.7's global NavMapBuilder merge is unbounded in practice (California2's
-    // 266k faces kept one worker busy for minutes). Large maps use the already-baked shared-edge graph
-    // directly; smaller maps retain NavigationServer's funnel-quality paths.
-    private const int MaxGodotTriangles = 100_000;
-
-    private readonly Rid _map;
-    private readonly List<Rid> _regions = new();
-    private readonly bool _useBakedGraph;
     private BakedNavGraph? _bakedGraph;
-    private BakedNavGraph? _progressGraph; // small-map fallback while NavigationServer synchronizes
-    private Task? _wideBodyBuild; // one-shot: the CPU graph a body wider than the default needs
-    private bool _synced; // the map's FIRST (async) synchronization pass has completed (map_changed)
-    private bool _ready;  // a real route resolved: the map actually answers queries
-    private bool _published;
+    private bool _ready;
     private bool _disposed;
-    private Vector3 _probeFrom;
-    private Vector3 _probeTo;
 
     public ZombiePathQuery Query { get; }
 
-    // Polling this also advances the small-map readiness probe. Consumers use it to distinguish a graph
-    // that is still being built from a live graph that definitively found no route.
-    public bool IsReady => EnsureReady() || (!_useBakedGraph && _progressGraph != null);
+    public bool IsReady => !_disposed && _ready && _bakedGraph != null;
 
     public static ZombieNavigation? Build(IReadOnlyList<NavFlag>? flags)
     {
@@ -46,9 +31,8 @@ public sealed class ZombieNavigation
         return new ZombieNavigation(flags, publishImmediately: true);
     }
 
-    // Interactive loading parses the baked data early, but deliberately does not publish it to Godot yet.
-    // The old preload created the full map, then ReconcileNavigation threw it away and created it again;
-    // California2 consequently had two 250k-polygon synchronizations racing in the engine worker pool.
+    // Interactive loading parses the baked data early, but deliberately does not build its graph yet.
+    // Reconciliation publishes a progressive graph once the collision world exists, then its final graph.
     private static IReadOnlyList<NavFlag>? PreloadedFlags;
     private static string? PreloadedLevelDir;
 
@@ -83,101 +67,18 @@ public sealed class ZombieNavigation
     private ZombieNavigation(IReadOnlyList<NavFlag> flags, bool publishImmediately, string? levelDir = null)
     {
         _levelDir = levelDir;
-        int totalTriangles = 0;
-        foreach (NavFlag flag in flags)
-            totalTriangles += flag.Triangles.Length / 3;
-        _useBakedGraph = totalTriangles > MaxGodotTriangles;
-        _map = _useBakedGraph ? default : NavigationServer3D.MapCreate();
-        // Readiness probe: two corners of the first flag's first triangle. map_changed only says the
-        // FIRST synchronization pass finished — measured live, real routes still resolve empty for a
-        // few more seconds while the edge merge completes, so readiness is only declared once this
-        // route actually resolves (probing earlier than map_changed would spam console errors).
-        if (flags[0].Triangles.Length >= 3)
-        {
-            _probeFrom = flags[0].Vertices[flags[0].Triangles[0]];
-            _probeTo = flags[0].Vertices[flags[0].Triangles[1]];
-        }
-        // The pre-baked mesh was recast at cellSize 0.1 (doorways and dense clutter produce edges
-        // that close together); the map's default 0.25 rasterization cell collapses distinct edges
-        // into the same cell and DROPS their connections — houses lost their doorway link and
-        // zombies pushed at windows. Match the map grid to the source data's resolution.
-        if (!_useBakedGraph)
-        {
-            NavigationServer3D.MapSetCellSize(_map, 0.1f);
-            NavigationServer3D.MapSetCellHeight(_map, 0.1f);
-            NavigationServer3D.MapSetUseAsyncIterations(_map, true);
-            NavigationServer3D.MapSetUseEdgeConnections(_map, true);
-        }
-
         _flags = flags;
         if (publishImmediately)
             Publish();
 
-        // The final Godot map synchronizes asynchronously (about 5 s for PEI's 42k triangles). Queries
-        // are gated until its regions have iteration IDs; interactive loading serves the progressive
-        // CPU graph during that interval, so the brain never falls back to a straight line through walls.
-        if (!_useBakedGraph)
-            NavigationServer3D.Singleton.MapChanged += OnMapChanged;
-
-        Rid map = _map;
         bool debug = EnvFlag.IsOn(OS.GetEnvironment("NAV_DEBUG"), whenUnset: false);
         Query = (Vector3 from, Vector3 to, List<Vector3> path, float radius) =>
         {
-            if (_useBakedGraph)
-                return _bakedGraph?.TryPath(from, to, path, radius) == true;
-
-            // NavigationServer bakes ONE agent radius into its map, so it cannot serve a body wider
-            // than the default however the query asks. That is not a corner case: this branch covers
-            // every map at or under MaxGodotTriangles, which is most of them, so leaving it would mean
-            // a mega reverts to a 0.40 m route the moment the map finishes synchronizing.
-            //
-            // So the CPU graph is kept rather than discarded once the server is ready, and the wider
-            // bodies are routed on it. Collision reconciliation already writes to whichever graph is
-            // live, so it does not go stale, and it is only retained on maps small enough that the
-            // server took them in the first place.
-            bool ready = EnsureReady();
-            if (!ready || radius > BakedNavGraph.AgentRadius)
-            {
-                if (_progressGraph != null)
-                    return _progressGraph.TryPath(from, to, path, radius);
-                if (!ready)
-                    return false;
-                // Nothing built to serve the wider body — which is the dedicated-server flow, where the
-                // map is published immediately and collision reconciliation never runs, so nothing ever
-                // creates the CPU graph and the fallback above has nothing to fall back to. Start it,
-                // once, and take the server's default-radius route in the meantime: a route aimed
-                // slightly too close beats no route, and the caller keeps its previous one on false.
-                EnsureWideBodyGraph();
-            }
-            Vector3[] points = NavigationServer3D.MapGetPath(map, from, to, optimize: true);
-            if (points.Length < 2)
-                return false; // live graph, no route: the brain keeps its old route or stands
-            for (int i = 0; i < points.Length; i++)
-                path.Add(points[i]);
-            if (debug)
-                RecordDetour(from, to, points);
-            return true;
+            bool found = _bakedGraph?.TryPath(from, to, path, radius) == true;
+            if (debug && found)
+                RecordDetour(from, to, path);
+            return found;
         };
-    }
-
-    private bool EnsureReady()
-    {
-        if (_disposed)
-            return false;
-        if (_useBakedGraph)
-            return _ready && _bakedGraph != null;
-        if (_ready)
-            return true;
-
-        // MapChanged can be emitted for queued changes before every async region builder has landed.
-        // Iteration IDs are the server's completion counters; require all of them before issuing the
-        // probe query that declares the graph live.
-        if (!_published || !_synced || !IterationsReady()
-            || NavigationServer3D.MapGetPath(_map, _probeFrom, _probeTo, optimize: true).Length < 2)
-            return false;
-        _ready = true;
-        Log.Print("[nav] navmesh answering queries; zombie pathfinding live");
-        return true;
     }
 
     // NAV_DEBUG=1 diagnostics: how far each route wanders compared with flying straight there. A route
@@ -191,14 +92,14 @@ public sealed class ZombieNavigation
     private static double Worst;
     private static int SinceReport;
 
-    private static void RecordDetour(Vector3 from, Vector3 to, Vector3[] points)
+    private static void RecordDetour(Vector3 from, Vector3 to, IReadOnlyList<Vector3> points)
     {
         float direct = from.DistanceTo(to);
         if (direct < 1f)
             return; // too short for the ratio to mean anything
 
         float walked = 0f;
-        for (int i = 1; i < points.Length; i++)
+        for (int i = 1; i < points.Count; i++)
             walked += points[i - 1].DistanceTo(points[i]);
 
         double ratio = walked / direct;
@@ -221,68 +122,24 @@ public sealed class ZombieNavigation
 
     private IReadOnlyList<NavFlag> _flags = System.Array.Empty<NavFlag>();
 
-    // Publishes the final, reconciled graph once. Each spatial region is capped at a few thousand
-    // triangles so Godot's async region builder has bounded jobs instead of one map-sized task that can
-    // monopolize a worker through shutdown.
+    // Publishes the final graph synchronously for flows that do not run interactive reconciliation.
     private void Publish()
     {
         if (_disposed)
             return;
 
-        if (_useBakedGraph)
-        {
-            var watch = Stopwatch.StartNew();
-            _bakedGraph = BakedNavGraph.Build(_flags, _unreachable);
-            _published = true;
-            _ready = true;
-            int graphTriangles = 0, graphDropped = 0;
-            foreach (NavFlag flag in _flags)
-            {
-                graphTriangles += flag.Triangles.Length / 3;
-                if (_unreachable.TryGetValue(flag, out HashSet<int>? skip))
-                    graphDropped += skip.Count;
-            }
-            Log.Print($"[nav] large baked graph ready: {graphTriangles - graphDropped} triangles, {graphDropped} dropped "
-                + $"in {watch.ElapsedMilliseconds} ms (NavigationServer bypassed)");
-            return;
-        }
-
-        if (_published)
-            NavigationServer3D.MapSetActive(_map, false);
-        foreach (Rid old in _regions)
-            NavigationServer3D.FreeRid(old);
-        _regions.Clear();
-
-        int triangles = 0, dropped = 0;
+        var watch = Stopwatch.StartNew();
+        _bakedGraph = BakedNavGraph.Build(_flags, _unreachable);
+        _ready = true;
+        int graphTriangles = 0, graphDropped = 0;
         foreach (NavFlag flag in _flags)
         {
-            _unreachable.TryGetValue(flag, out HashSet<int>? skip);
-            dropped += skip?.Count ?? 0;
-            foreach (NavmeshRegionData part in NavmeshPartition.Build(flag, skip))
-            {
-                var mesh = new NavigationMesh { Vertices = part.Vertices };
-                for (int i = 0; i + 2 < part.Triangles.Length; i += 3)
-                    mesh.AddPolygon(new[] { part.Triangles[i], part.Triangles[i + 1], part.Triangles[i + 2] });
-
-                Rid region = NavigationServer3D.RegionCreate();
-                NavigationServer3D.RegionSetUseAsyncIterations(region, true);
-                NavigationServer3D.RegionSetUseEdgeConnections(region, true);
-                NavigationServer3D.RegionSetNavigationMesh(region, mesh);
-                NavigationServer3D.RegionSetMap(region, _map);
-                _regions.Add(region);
-                triangles += part.SourceTriangleCount;
-            }
+            graphTriangles += flag.Triangles.Length / 3;
+            if (_unreachable.TryGetValue(flag, out HashSet<int>? skip))
+                graphDropped += skip.Count;
         }
-
-        _ready = false;
-        _synced = false;
-        _published = true;
-        NavigationServer3D.MapSetActive(_map, true);
-
-        Log.Print(dropped == 0
-            ? $"[nav] navmesh up: {_regions.Count} bounded regions, {triangles} triangles (pre-baked)"
-            : $"[nav] navmesh reconciled with collision: {dropped} unwalkable triangles dropped, "
-              + $"{triangles} kept in {_regions.Count} bounded regions");
+        Log.Print($"[nav] baked graph ready: {graphTriangles - graphDropped} triangles, "
+            + $"{graphDropped} dropped in {watch.ElapsedMilliseconds} ms");
     }
 
     // California2's shared-edge graph takes roughly 100 ms to assemble. Reconciliation itself is
@@ -290,12 +147,6 @@ public sealed class ZombieNavigation
     // the hitch the frame-budgeted probing avoids (including on a persistent-cache hit).
     private async Task PublishAsync(string? fingerprint = null, string? graphCachePath = null)
     {
-        if (!_useBakedGraph)
-        {
-            Publish();
-            return;
-        }
-
         var watch = Stopwatch.StartNew();
         string? cacheWarning = null;
         (BakedNavGraph graph, bool cacheHit) = await Task.Run(() =>
@@ -328,7 +179,6 @@ public sealed class ZombieNavigation
             Log.PushWarning($"[nav] CSR cache write failed ({cacheWarning})");
 
         _bakedGraph = graph;
-        _published = true;
         _ready = true;
         int graphTriangles = 0, graphDropped = 0;
         foreach (NavFlag flag in _flags)
@@ -337,9 +187,9 @@ public sealed class ZombieNavigation
             if (_unreachable.TryGetValue(flag, out HashSet<int>? skip))
                 graphDropped += skip.Count;
         }
-        Log.Print($"[nav] large baked graph ready: {graphTriangles - graphDropped} triangles, {graphDropped} dropped "
+        Log.Print($"[nav] baked graph ready: {graphTriangles - graphDropped} triangles, {graphDropped} dropped "
             + $"in {watch.ElapsedMilliseconds} ms off the main thread "
-            + $"({(cacheHit ? "CSR cache hit" : "CSR built")}, NavigationServer bypassed)");
+            + $"({(cacheHit ? "CSR cache hit" : "CSR built")})");
     }
 
     // What reconciliation has taken out of the graph, for whoever needs to DESCRIBE the graph rather
@@ -359,14 +209,9 @@ public sealed class ZombieNavigation
     // where only a fresh build can stitch a seam a removed face just exposed. A mid-reconciliation dump
     // that carried these would therefore replay over connections the session did not have. Carrying
     // none instead makes it behave exactly like a dump from before this field existed.
-    // Reconciliation finished AND the graph it produced is the one answering queries. On a small map
-    // PublishAsync only hands the mesh to the NavigationServer and returns; the map goes on
-    // synchronizing for seconds afterwards, and Query keeps using _progressGraph until it is ready —
-    // which is the same EnsureReady the IsReady property asks. Derived from that rather than tracked
-    // separately, because a second flag is a second thing that can be true at the wrong moment, and
-    // this gate has now been wrong at three different moments for exactly that reason.
+    // Reconciliation finished AND the graph it produced is the one answering queries.
     public IReadOnlyDictionary<int, IReadOnlySet<int>> DisabledFaces =>
-        _reconciled && (_useBakedGraph || EnsureReady()) ? _disabledByFlag : Empty;
+        _reconciled && IsReady ? _disabledByFlag : Empty;
 
     private static readonly Dictionary<int, IReadOnlySet<int>> Empty = new();
 
@@ -438,7 +283,7 @@ public sealed class ZombieNavigation
     private async Task ReconcileAsync(Node owner, PhysicsDirectSpaceState3D space, float stepOffset,
         IReadOnlySet<Guid> colliderGuids, CollisionFieldBuilder? collision)
     {
-        // Diagnostic/benchmark aid: isolates NavigationServer publication cost from collision probing.
+        // Diagnostic/benchmark aid: isolates graph publication cost from collision probing.
         if (EnvFlag.IsOn(OS.GetEnvironment("NAV_SKIP_RECONCILE"), whenUnset: false))
         {
             Publish();
@@ -509,8 +354,6 @@ public sealed class ZombieNavigation
                             }
                         if (restored == _flags.Count)
                         {
-                            if (!_useBakedGraph)
-                                await PublishProgressGraphAsync();
                             await PublishAsync(fingerprint, cachePath + ".csr");
                             _reconciled = true;
                             Log.Print($"[nav] collision reconciliation cache hit ({fingerprint[..12]})");
@@ -539,8 +382,8 @@ public sealed class ZombieNavigation
         }
 
 
-        // Always expose navigation before the cooperative collision scan starts. Large maps update this
-        // graph in place; small maps use it as a deterministic fallback until the final Godot map syncs.
+        // Always expose navigation before the cooperative collision scan starts, then update it in place
+        // as each flag's rejected faces are known.
         await PublishProgressGraphAsync();
 
         // The CPU copy of the solid world, if the load recorded one. Building it is pure CPU (mostly the
@@ -611,7 +454,7 @@ public sealed class ZombieNavigation
                 return; // shutting down
             _unreachable[flag] = unreachable;
             RememberDisabled(flag, unreachable);
-            (_useBakedGraph ? _bakedGraph : _progressGraph)?.Disable(flag, unreachable);
+            _bakedGraph?.Disable(flag, unreachable);
             if (partialCheckpoints && cachePath != null && fingerprint != null)
                 QueueCheckpoint(cachePath, fingerprint, triangleCounts);
         }
@@ -954,44 +797,15 @@ public sealed class ZombieNavigation
         return _disposed || AppShutdown.IsShuttingDown ? null : unreachable;
     }
 
-    // Built on first demand rather than at startup. A server that never spawns a body wider than the
-    // default pays nothing, and BakedNavGraph.Build over a 100k-face map is far too much to do on the
-    // tick that asked for the route — so it goes to a worker and the query that triggered it falls
-    // through this once.
-    //
-    // Reading _unreachable off the tick is safe HERE specifically: this only runs when _progressGraph
-    // is null, which in turn only happens on the flow that never reconciles, so the dictionary is empty
-    // and nobody is writing to it. The interactive flow builds the graph itself and never reaches this.
-    // The assignment is a reference store, which is atomic, and the reader takes whatever it sees.
-    private void EnsureWideBodyGraph()
-    {
-        if (_wideBodyBuild != null || _disposed)
-            return;
-        _wideBodyBuild = Task.Run(() =>
-        {
-            BakedNavGraph graph = BakedNavGraph.Build(_flags, _unreachable);
-            if (!_disposed && !AppShutdown.IsShuttingDown)
-                _progressGraph = graph;
-        });
-    }
-
     private async Task PublishProgressGraphAsync()
     {
-        if ((_useBakedGraph ? _bakedGraph : _progressGraph) != null)
+        if (_bakedGraph != null)
             return;
         BakedNavGraph graph = await Task.Run(() => BakedNavGraph.Build(_flags, _unreachable));
         if (_disposed || AppShutdown.IsShuttingDown)
             return;
-        if (_useBakedGraph)
-        {
-            _bakedGraph = graph;
-            _published = true;
-            _ready = true;
-        }
-        else
-        {
-            _progressGraph = graph;
-        }
+        _bakedGraph = graph;
+        _ready = true;
         Log.Print($"[nav] progressive collision graph ready ({_unreachable.Count}/{_flags.Count} flags reconciled)");
     }
 
@@ -1036,9 +850,9 @@ public sealed class ZombieNavigation
         }
     }
 
-    // Once Publish has copied the rejected-triangle decisions into either Godot's regions or the
-    // immutable CSR graph (and the persistent cache has been written), these sets have no remaining
-    // runtime consumer. California2 can hold hundreds of thousands of HashSet entries here otherwise.
+    // Once Publish has copied the rejected-triangle decisions into the CSR graph (and the persistent
+    // cache has been written), these sets have no remaining runtime consumer. California2 can hold
+    // hundreds of thousands of HashSet entries here otherwise.
     private void ReleaseReconciliationState()
     {
         if (EnvFlag.IsOn(OS.GetEnvironment("UG_KEEP_NAV_RECONCILE_STATE"), whenUnset: false))
@@ -1052,44 +866,13 @@ public sealed class ZombieNavigation
         Log.Print($"[nav] released reconciliation state: {rejected:N0} indices across {flags:N0} flags");
     }
 
-    private bool IterationsReady()
-    {
-        if (_useBakedGraph)
-            return _bakedGraph != null;
-        if (NavigationServer3D.MapGetIterationId(_map) == 0)
-            return false;
-        foreach (Rid region in _regions)
-            if (NavigationServer3D.RegionGetIterationId(region) == 0)
-                return false;
-        return true;
-    }
-
-    private void OnMapChanged(Rid map)
-    {
-        if (map != _map || _synced)
-            return;
-        _synced = true;
-        Log.Print("[nav] navmesh first synchronization done");
-    }
-
     public void Free()
     {
         if (_disposed)
             return;
         _disposed = true;
         _unreachable.Clear();
-        if (_useBakedGraph)
-        {
-            _bakedGraph = null;
-            return;
-        }
-        _progressGraph = null;
-        NavigationServer3D.Singleton.MapChanged -= OnMapChanged;
-        if (_published)
-            NavigationServer3D.MapSetActive(_map, false);
-        foreach (Rid region in _regions)
-            NavigationServer3D.FreeRid(region);
-        _regions.Clear();
-        NavigationServer3D.FreeRid(_map);
+        _bakedGraph = null;
+        _ready = false;
     }
 }
