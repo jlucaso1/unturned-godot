@@ -45,9 +45,10 @@ in view.
 - **First-person arms**: the swing animates in first person, but what it animates is the third-person
   body drawn from inside its own head, not the game's purpose-built arms. The `Viewmodel` rig carries a
   single renderer whose skin weights live in the compressed vertex stream this port does not decode yet,
-  so it imports as an unposable bind-pose mesh. Its framing cannot be borrowed either — Unturned renders
-  the arms from a camera parented to *that* rig's skull, and the body rig's skull is a different bone in
-  a different skeleton. `UG_VIEWMODEL_OFFSET="x,y,z"` nudges it meanwhile.
+  so it imports as an unposable bind-pose mesh. The stand-in rig does ride its own skull the way the game
+  parents its `ViewmodelCamera` under `firstSkeleton/Spine/Skull`, so the framing holds across stances and
+  through a swing; what cannot be borrowed is that camera's authored *rotation*, which only means something
+  on the rig it was authored against. `UG_VIEWMODEL_OFFSET="x,y,z"` nudges it meanwhile.
 - **Breaking the world visually**: a punched tree or rubble pile loses health on the server and the
   destruction is reported (`PUNCH_LOG=1`), but the placement is still drawn. Objects are rendered as
   batched `MultiMesh` instances with no per-instance handle, so removing one — or swapping a felled tree

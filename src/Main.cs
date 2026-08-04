@@ -81,9 +81,18 @@ public partial class Main : Node3D
         string shotOnly = OS.GetEnvironment("SCREENSHOT_PATH");
         if (EnvFlag.IsOn(OS.GetEnvironment("CHAR_ONLY"), whenUnset: false) && !string.IsNullOrEmpty(shotOnly))
         {
-            if (CharacterModel.Build(unturnedPath) is { } model)
+            // CHAR_FIRST=1 frames the character the way first person does — the arms rig parented to the
+            // camera and riding its own Skull — so the per-stance framing can be read off a shot that
+            // takes seconds, instead of a full-world build. CHAR_REST_ANCHOR=1 pins it to the BIND pose
+            // instead, which is the shape of the bug the live anchor fixes.
+            bool charFirst = EnvFlag.IsOn(OS.GetEnvironment("CHAR_FIRST"), whenUnset: false);
+            var cam = new Camera3D { Current = true };
+            Node3D? model = charFirst
+                ? CharacterModel.BuildPlayerRigs(unturnedPath).Viewmodel
+                : CharacterModel.Build(unturnedPath);
+            if (model is { } built)
             {
-                if (model is CharacterSkeleton rig && OS.GetEnvironment("CHAR_STANCE") is { Length: > 0 } s)
+                if (built is CharacterSkeleton rig && OS.GetEnvironment("CHAR_STANCE") is { Length: > 0 } s)
                 {
                     rig.SetState(System.Enum.Parse<Player.EPlayerStance>(s, ignoreCase: true),
                         EnvFlag.IsOn(OS.GetEnvironment("CHAR_MOVING"), whenUnset: false));
@@ -91,7 +100,18 @@ public partial class Main : Node3D
                         rig.SetPitch(cp.ToFloat()); // look pitch -> spine/skull bend
                     rig.Seek(OS.GetEnvironment("CHAR_ANIM_TIME") is { Length: > 0 } at ? at.ToFloat() : 0f);
                 }
-                AddChild(model);
+                if (charFirst)
+                    cam.AddChild(built);
+                else
+                    AddChild(built);
+                if (charFirst && built is CharacterSkeleton eyed)
+                {
+                    int skull = eyed.FindBone("Skull");
+                    if (skull >= 0 && EnvFlag.IsOn(OS.GetEnvironment("CHAR_REST_ANCHOR"), whenUnset: false))
+                        eyed.Position = -eyed.GetBoneGlobalRest(skull).Origin;
+                    else if (skull >= 0)
+                        eyed.AnchorEyeToBone(skull, Vector3.Zero);
+                }
             }
             AddChild(new DirectionalLight3D { RotationDegrees = new Vector3(-50, -140, 0) });
             AddChild(new WorldEnvironment
@@ -103,13 +123,15 @@ public partial class Main : Node3D
                     AmbientLightEnergy = 1.0f,
                 },
             });
-            var cam = new Camera3D { Current = true };
             AddChild(cam);
-            float side = EnvFlag.IsOn(OS.GetEnvironment("CHAR_BACK"), whenUnset: false) ? 3.2f : -3.2f; // -Z is the front
-            cam.Position = EnvFlag.IsOn(OS.GetEnvironment("CHAR_SIDE"), whenUnset: false)
-                ? new Vector3(4.0f, 1.0f, 0f)  // side profile, for reading prone/lie-down poses
-                : new Vector3(0, 1.1f, side);  // full-body 3/4-front, so any stance is framed
-            cam.LookAt(new Vector3(0, 0.5f, 0));
+            if (!charFirst)
+            {
+                float side = EnvFlag.IsOn(OS.GetEnvironment("CHAR_BACK"), whenUnset: false) ? 3.2f : -3.2f; // -Z is the front
+                cam.Position = EnvFlag.IsOn(OS.GetEnvironment("CHAR_SIDE"), whenUnset: false)
+                    ? new Vector3(4.0f, 1.0f, 0f)  // side profile, for reading prone/lie-down poses
+                    : new Vector3(0, 1.1f, side);  // full-body 3/4-front, so any stance is framed
+                cam.LookAt(new Vector3(0, 0.5f, 0));
+            }
             int settle = OS.GetEnvironment("CHAR_SETTLE") is { Length: > 0 } sf ? int.Parse(sf) : 5;
             _ = CaptureAndQuit(shotOnly, settle); // more settle frames -> the animation advances further
             return;

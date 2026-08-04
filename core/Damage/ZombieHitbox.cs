@@ -34,15 +34,19 @@ public static class ZombieHitbox
     // And where within the torso band the arm gives way to the hand — the hand is the lower half of it.
     public const float HandBand = 0.62f;
 
-    // The capsule the zombie occupies, as the mover sweeps it: standing on the zombie's feet, as tall as
-    // ZombieBody's top, and as thick as the instance's own radius (megas are wider).
+    // How tall the hittable zombie stands, from its feet.
+    //
+    // This follows the MODEL scale, not the mover's radius. Unturned gives a mega and a normal zombie the
+    // same 2 m CharacterController and only widens the mega's radius; what differs is the avatar under
+    // the animator, and it is that scaled skeleton the game's bone colliders — the things a raycast
+    // actually hits — hang off. Scaling by the radius ratio instead (0.75/0.4) would stand a mega up at
+    // 3.75 m: three quarters of a metre of empty air above the drawn body would still take punches, and
+    // every band below it would be read against a body a quarter taller than the one on screen.
     public static float HeightOf(ZombieInstance zombie)
     {
         ArgumentNullException.ThrowIfNull(zombie);
-        // The mega's body is the same capsule scaled by its radius, which is what the client scales its
-        // avatar by too (Zombie.cs's spawn scale). Deriving it keeps the two from drifting.
-        float scale = zombie.Radius / BakedNavGraph.AgentRadius;
-        return ZombieBody.CapsuleTop * MathF.Max(1f, scale);
+        return ZombieBody.CapsuleTop
+            * ZombieBody.ModelScaleFor(zombie.Speciality == EZombieSpeciality.Mega);
     }
 
     // The way the zombie faces, in the yaw convention the brain uses throughout: the model looks along

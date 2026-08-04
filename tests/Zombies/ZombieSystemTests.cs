@@ -74,6 +74,26 @@ public class ZombieSystemTests
         Assert.Equal(system.Zombies.Count, system.Zombies.Select(z => z.Position.X).Distinct().Count());
     }
 
+    // Ids come off ONE counter for the whole level, not one per bound. The client's kill tombstones
+    // depend on that (ZombiesView._killed keeps them for the session): an id that named a different
+    // zombie in another region could not be remembered as dead without suppressing a live one.
+    [Fact]
+    public void Spawn_NumbersTheWholeLevelFromOneCounter()
+    {
+        var system = new ZombieSystem(new[] { Table() }, TwoBounds(), FlatGround);
+        var spawns = new List<ZombieSpawnpointData>();
+        for (int i = 0; i < 8; i++)
+        {
+            spawns.Add(At(i * 5, 0));          // bound 0
+            spawns.Add(At(1000 + (i * 5), 0)); // bound 1
+        }
+        system.Spawn(spawns, new Random(1));
+
+        Assert.Contains(system.Zombies, z => z.Bound == 0);
+        Assert.Contains(system.Zombies, z => z.Bound == 1);
+        Assert.Equal(system.Zombies.Count, system.Zombies.Select(z => z.Id).Distinct().Count());
+    }
+
     [Fact]
     public void Spawn_RespectsFlagMaxZombies()
     {

@@ -37,11 +37,28 @@ public class ZombieHitboxTests
     public void NormalBodyIsTheMoversCapsule() =>
         Assert.Equal(ZombieBody.CapsuleTop, ZombieHitbox.HeightOf(Zombie()), 3);
 
-    // A mega is wider, and its body scales with that width — the same scale the client gives its avatar.
+    // A mega is drawn at Zombie.cs's 1.5x avatar scale, so it is hittable to 3 m. It is NOT scaled by its
+    // radius: the game gives both a 2 m CharacterController and only widens the mega's, so taking the
+    // 0.75/0.4 ratio would stand it up at 3.75 m and leave three quarters of a metre of punchable air.
     [Fact]
-    public void MegaIsTaller() =>
-        Assert.True(ZombieHitbox.HeightOf(Zombie(speciality: EZombieSpeciality.Mega))
-            > ZombieHitbox.HeightOf(Zombie()));
+    public void MegaFollowsTheAvatarScaleAndNotTheMoversRadius()
+    {
+        ZombieInstance mega = Zombie(speciality: EZombieSpeciality.Mega);
+        Assert.Equal(ZombieBody.CapsuleTop * ZombieBody.MegaModelScale, ZombieHitbox.HeightOf(mega), 3);
+        Assert.Equal(3f, ZombieHitbox.HeightOf(mega), 3);
+        Assert.True(ZombieHitbox.HeightOf(mega) > ZombieHitbox.HeightOf(Zombie()));
+
+        // The ratio the height must not be taken from: it is the mover's, and it is bigger.
+        Assert.True(mega.Radius / UnturnedGodot.Data.BakedNavGraph.AgentRadius > ZombieBody.MegaModelScale);
+    }
+
+    // Everything but a mega draws at ~1x, so the bands are read against the plain 2 m body.
+    [Theory]
+    [InlineData(EZombieSpeciality.Normal)]
+    [InlineData(EZombieSpeciality.Crawler)]
+    [InlineData(EZombieSpeciality.Sprinter)]
+    public void EveryOtherSpecialityIsTheUnscaledBody(EZombieSpeciality speciality) =>
+        Assert.Equal(ZombieBody.CapsuleTop, ZombieHitbox.HeightOf(Zombie(speciality: speciality)), 3);
 
     // Dead on the centre line, so `lateral` is exactly zero and the side falls to the right.
     [Theory]

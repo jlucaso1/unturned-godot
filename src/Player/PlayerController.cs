@@ -654,10 +654,11 @@ public partial class PlayerController : CharacterBody3D
             PlaceThirdPersonCamera();
     }
 
-    // Hangs the first-person arms off the head so they follow the look, and slides the rig so its Skull
-    // bone lands on the camera — which is exactly where Unturned parents its ViewmodelCamera. Deriving the
-    // offset from the rig's own rest pose keeps it correct if the character is ever re-authored, instead
-    // of pinning a measured number. UG_VIEWMODEL_OFFSET="x,y,z" nudges it from there.
+    // Hangs the first-person arms off the head so they follow the look, and rides the rig on its own Skull
+    // bone — which is exactly where Unturned parents its ViewmodelCamera, under firstSkeleton/Spine/Skull.
+    // The rig re-anchors on every posed frame (ViewmodelAnchor), so the stance clips carry the eye with the
+    // head instead of leaving it at the height the bind pose happened to put it.
+    // UG_VIEWMODEL_OFFSET="x,y,z" nudges it from there.
     private void AttachViewmodel()
     {
         if (ViewmodelModel is { } imported && imported is not CharacterSkeleton)
@@ -676,8 +677,10 @@ public partial class PlayerController : CharacterBody3D
 
         _viewmodel = rig;
         int skull = rig.FindBone("Skull");
-        Vector3 offset = skull >= 0 ? -rig.GetBoneGlobalRest(skull).Origin : Vector3.Zero;
-        rig.Position = offset + EnvOffset("UG_VIEWMODEL_OFFSET");
+        if (skull >= 0)
+            rig.AnchorEyeToBone(skull, EnvOffset("UG_VIEWMODEL_OFFSET"));
+        else
+            rig.Position = EnvOffset("UG_VIEWMODEL_OFFSET");
         // Close to the near plane and lit like the world around it, but never casting into it: an arm a
         // handspan from the eye throws a shadow across the whole view.
         foreach (Node child in rig.GetChildren())

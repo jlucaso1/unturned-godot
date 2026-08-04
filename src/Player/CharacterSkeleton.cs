@@ -35,6 +35,11 @@ public partial class CharacterSkeleton : Skeleton3D
     private EPlayerStance _lastStateStance;
     private bool _lastStateMoving;
 
+    // The bone the viewer looks out of, for the one rig that is looked THROUGH rather than at, and the
+    // operator's manual nudge on top of it. -1 on every rig drawn from outside (all third-person ones).
+    private int _eyeBone = -1;
+    private Vector3 _eyeNudge;
+
     // The current clip is a FINISHED one-shot, parked on its last key rather than looping. Distinct from
     // the overlay's IsPlaying, which is already false by then: this covers the frames after a gesture
     // ends but before a movement clip has taken the rig back — one frame in the ordinary case, and
@@ -71,6 +76,25 @@ public partial class CharacterSkeleton : Skeleton3D
     {
         _spine = spine;
         _skull = skull;
+    }
+
+    // Rides this rig on its own head, the way Unturned parents the first-person camera under the
+    // viewmodel skeleton's Skull (ViewmodelAnchor has the reasoning). Re-applied after every pose,
+    // because the stance clips move the skull and a bind-pose offset only agrees with one of them.
+    public void AnchorEyeToBone(int bone, Vector3 nudge)
+    {
+        _eyeBone = bone;
+        _eyeNudge = nudge;
+        AnchorEye();
+    }
+
+    // One skeleton read per posed frame, on the single rig the local player looks through — the
+    // interop budget this class otherwise guards is per-BONE, and this is per-rig.
+    private void AnchorEye()
+    {
+        if (_eyeBone < 0)
+            return;
+        Position = ViewmodelAnchor.RigPosition(GetBoneGlobalPose(_eyeBone).Origin, _eyeNudge);
     }
 
     // Godot pitch degrees (0 = horizon, + up, - down); the body leans toward where the player looks.
@@ -176,6 +200,10 @@ public partial class CharacterSkeleton : Skeleton3D
             active = _current.Length > 0 && IsVisibleInTree(); // the resume may have changed the clip
         }
         SetProcess(active);
+        // A rig that was hidden froze its clock, so the pose it comes back with is the one it left —
+        // and if the stance changed meanwhile, Resume just swapped the clip. Anchor before the first
+        // drawn frame rather than one frame into it.
+        AnchorEye();
     }
 
     public override void _Notification(int what)
@@ -305,6 +333,9 @@ public partial class CharacterSkeleton : Skeleton3D
         }
 
         (_written, _writing) = (_writing, _written);
+
+        // The pose has just moved the head; the eye follows it in the same frame it moved.
+        AnchorEye();
     }
 
     private Quaternion WithPitch(int bone, Quaternion sampled, float halfDegrees)
