@@ -24,10 +24,19 @@ public sealed class RemotePlayer
     public bool Moving { get; private set; }
     public bool Grounded { get; private set; } = true;
 
-    public RemotePlayer(string name, in PoseSnapshot initial, double now, uint knownAtVersion = 0)
+    public RemotePlayer(string name, in PoseSnapshot initial, double now, uint knownAtVersion = 0,
+        uint spawnedAtTick = 0)
     {
         Name = name;
         KnownAtVersion = knownAtVersion;
+        // The gesture floor is the tick this player was admitted on, carried by the roster entry that
+        // named them. Player ids are RECYCLED, and a gesture names only an id: without a floor, a swing
+        // thrown by the previous holder of this one and retransmitted late would play on whoever holds it
+        // now. Nothing that happened before this player arrived belongs to them — and taking the date
+        // from the message rather than from whatever tick had been heard most recently is what keeps a
+        // punch thrown just after the join, but delivered before its roster entry, from dating too late
+        // to survive its own arrival.
+        _lastGestureTick = spawnedAtTick;
         _buffer.UpdateLastSnapshot(initial, now);
         _lastUpdatePos = initial.Position;
     }
@@ -47,6 +56,35 @@ public sealed class RemotePlayer
     }
 
     public PoseSnapshot Sample(double now) => _buffer.GetCurrentSnapshot(now);
+
+    // A one-shot hand animation this player performed, waiting to be played on their avatar. Held as a
+    // single pending gesture rather than a queue: two punches cannot land inside one render frame at the
+    // cooldown the simulation enforces, and if the network ever delivered a burst, the newest swing is
+    // the one worth showing — replaying the older one late would only put the avatar behind.
+    public UnturnedGodot.Player.EPlayerGesture PendingGesture { get; private set; }
+
+    private uint _lastGestureTick;
+
+    // Accepts a gesture only if it is newer than the last one heard — which starts as the tick this
+    // avatar was learned at, so the guard covers a recycled id as well as a stale retransmission.
+    // Reliable delivery retransmits but does not order, so an early swing re-sent late can arrive behind
+    // a later one; wrap-safe signed comparison, the same rule the server's own input freshness guard
+    // uses.
+    public void PushGesture(uint tick, UnturnedGodot.Player.EPlayerGesture gesture)
+    {
+        if (unchecked((int)(tick - _lastGestureTick)) <= 0)
+            return;
+        _lastGestureTick = tick;
+        PendingGesture = gesture;
+    }
+
+    // Hands the pending gesture over and clears it, so a renderer plays each one exactly once.
+    public UnturnedGodot.Player.EPlayerGesture TakeGesture()
+    {
+        UnturnedGodot.Player.EPlayerGesture gesture = PendingGesture;
+        PendingGesture = UnturnedGodot.Player.EPlayerGesture.None;
+        return gesture;
+    }
 }
 
 // The client-side session over any IClientTransport: sends the Hello handshake and 12.5 Hz inputs,
@@ -133,7 +171,9 @@ public sealed class NetClient
         {
             // The server stopped talking to us (session dropped, host restarted): rejoin from scratch.
             // The tombstones go too — a host that restarted counts its roster versions from zero, and
-            // stale ones would refuse every listing in the fresh roster it sends us.
+            // stale ones would refuse every listing in the fresh roster it sends us. Nothing has to be
+            // done about the gesture tick floors: each one arrives with the roster entry that creates its
+            // avatar, so a restarted host's own low ticks come with the avatars they date.
             Joined = false;
             _remotes.Clear();
             Array.Clear(_leftAtVersion);
@@ -166,7 +206,7 @@ public sealed class NetClient
                         break;
                     }
 
-                    (byte id, _, uint rosterVersion, List<PlayerListing> players) = welcome;
+                    (byte id, uint welcomeTick, uint rosterVersion, List<PlayerListing> players) = welcome;
                     PlayerId = id;
                     Joined = true;
                     _lastStateAt = now;
@@ -187,7 +227,7 @@ public sealed class NetClient
                             continue; // we already know they left, later than this roster was taken
                         _rosterIds.Add(p.PlayerId);
                         if (!_remotes.ContainsKey(p.PlayerId))
-                            _remotes[p.PlayerId] = SpawnRemote(p, now, rosterVersion);
+                            _remotes[p.PlayerId] = SpawnRemote(p, now, rosterVersion, welcomeTick);
                     }
 
                     if (_remotes.Count > _rosterIds.Count)
@@ -216,7 +256,7 @@ public sealed class NetClient
                         break;
                     }
 
-                    (uint joinedVersion, PlayerListing p) = joined;
+                    (uint joinedVersion, uint joinedTick, PlayerListing p) = joined;
                     // A join can be the stale message. Someone who connects and drops straight back out
                     // produces a join and a leave moments apart, and the leave may arrive first: acting
                     // on the join then leaves that player standing there for good, because nothing
@@ -229,7 +269,7 @@ public sealed class NetClient
                         && (!_remotes.TryGetValue(p.PlayerId, out RemotePlayer? held)
                             || held.KnownAtVersion < joinedVersion))
                     {
-                        _remotes[p.PlayerId] = SpawnRemote(p, now, joinedVersion);
+                        _remotes[p.PlayerId] = SpawnRemote(p, now, joinedVersion, joinedTick);
                     }
                     break;
                 }
@@ -286,25 +326,52 @@ public sealed class NetClient
                     }
                     break;
                 }
+            case ENetMessage.PlayerGesture:
+                {
+                    if (!MalformedPacket.TryDecode(payload, ReadPlayerGesture, out var gesture))
+                    {
+                        MalformedPacketsDropped++;
+                        break;
+                    }
+
+                    // Only for players we actually hold. Both messages are reliable, but reliable here
+                    // means retransmitted, not ordered, so a punch thrown immediately after joining can
+                    // genuinely overtake the PlayerJoined that names its thrower — and this drops it.
+                    // Deliberately: holding it until the roster catches up means keeping gestures for
+                    // players who may never arrive, and player IDs are reused, so the buffer would need
+                    // to tell one occupant of an ID from the next before it dared play anything. That is
+                    // a real piece of protocol state to buy back one animation frame on an avatar that
+                    // is still fading in. Revisit it when a gesture costs someone health.
+                    if (_remotes.TryGetValue(gesture.PlayerId, out RemotePlayer? gesturing))
+                        gesturing.PushGesture(gesture.Tick, gesture.Gesture);
+                    break;
+                }
         }
     }
 
     // Cached so a method group does not allocate a delegate on every received message.
     private static readonly Func<byte[], ENetMessage> ReadType = NetMessages.TypeOf;
     private static readonly
+        Func<byte[], (byte PlayerId, uint Tick, UnturnedGodot.Player.EPlayerGesture Gesture)>
+            ReadPlayerGesture = NetMessages.ReadPlayerGesture;
+    private static readonly
         Func<byte[], (byte PlayerId, uint Tick, uint RosterVersion, List<PlayerListing> Players)> ReadWelcome =
             NetMessages.ReadWelcome;
-    private static readonly Func<byte[], (uint RosterVersion, PlayerListing Player)> ReadPlayerJoined =
-        NetMessages.ReadPlayerJoined;
+    private static readonly Func<byte[], (uint RosterVersion, uint Tick, PlayerListing Player)>
+        ReadPlayerJoined = NetMessages.ReadPlayerJoined;
     private static readonly Func<byte[], JoinRejection> ReadReject = NetMessages.ReadReject;
     private static readonly Func<byte[], (uint RosterVersion, byte PlayerId)> ReadPlayerLeft =
         NetMessages.ReadPlayerLeft;
     private static readonly Func<byte[], (uint Tick, List<PlayerSnapshotState> States)> ReadStateUpdate =
         NetMessages.ReadStateUpdate;
 
-    private static RemotePlayer SpawnRemote(PlayerListing p, double now, uint knownAtTick)
+    // The newest server tick heard, from any message that carries one. State updates are unreliable and
+    // unordered, so newest-wins rather than last-wins; wrap-safe like every other sequence comparison.
+    private static RemotePlayer SpawnRemote(PlayerListing p, double now, uint knownAtVersion,
+        uint spawnedAtTick)
     {
-        var remote = new RemotePlayer(p.Name, Pose(p.Position, p.Pitch, p.Yaw), now, knownAtTick);
+        var remote = new RemotePlayer(p.Name, Pose(p.Position, p.Pitch, p.Yaw), now, knownAtVersion,
+            spawnedAtTick);
         remote.Push(Pose(p.Position, p.Pitch, p.Yaw), p.Stance, moving: false, grounded: true, now);
         return remote;
     }

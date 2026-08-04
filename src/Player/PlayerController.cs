@@ -24,13 +24,20 @@ public partial class PlayerController : CharacterBody3D
     // The third-person body model; when null a simple placeholder figure is used instead.
     public Node3D? BodyModel { get; set; }
 
+    // The first-person arms (the prefab's Viewmodel rig). Optional: without it first person simply shows
+    // no hands, which is what the port did before.
+    public Node3D? ViewmodelModel { get; set; }
+
     // Movement audio (footsteps + landing), built by the caller with the map's terrain material data.
     public MovementAudio? Footsteps { get; set; }
 
+    // The shared positional voice pool, for the sounds a gesture makes. The owner plays its own swing
+    // straight away for the same reason it animates it straight away: the sound belongs to the frame the
+    // button went down, not to the round trip.
+    public OneShotAudio? Sounds { get; set; }
+
     // Multiplayer session, when hosting or joined: the controller forwards inputs at the 12.5 Hz cadence.
     public UnturnedGodot.Net.NetClient? Net { get; set; }
-    private double _netInputTimer;
-    private uint _netFrame;
 
     // The camera this controller drives, for screen-space passes that must render in front of it.
     public Camera3D Camera => _camera;
@@ -41,6 +48,42 @@ public partial class PlayerController : CharacterBody3D
     private CapsuleShape3D _capsule = null!;
     private Node3D _model = null!;
     private CharacterSkeleton? _rig; // the real body, when present, so stance changes repose it
+    private CharacterSkeleton? _viewmodel; // the first-person arms, posed by the same clips as the body
+
+    // The hands. Everything the player does with them — punching today, a swung machete or a fired gun
+    // later — is decided here, on the same 12.5 Hz tick the server re-runs it on.
+    private readonly UnturnedGodot.Player.PlayerEquipment _equipment = new();
+
+    // The 12.5 Hz simulation counter. ONE counter, not one for the hands and another for the wire: it is
+    // both the frame number the server orders our inputs by and the tick PlayerEquipment measures its
+    // cooldown in, and two of them would part company the moment a session attached mid-run.
+    private uint _tick;
+
+    // The tick is scheduled against elapsed time rather than drained from an accumulator. An accumulator
+    // that subtracts one interval per physics frame runs the tick at the FRAME rate while it works off
+    // whatever a hitch left in it — six ticks inside a tenth of a second — and the hands count their
+    // cooldown in ticks, so the owner would accept and announce a swing the server's real-time rule then
+    // refuses. Dropping that backlog instead is the opposite error: the counter would then lose the
+    // seconds a stall ate and refuse a swing whose cooldown had really expired. The tick therefore
+    // advances by the intervals that genuinely passed, which is the only reading of it that stays a
+    // measure of real time in both directions. See the tick block in _PhysicsProcess.
+    private double _elapsed;
+    private double _nextTickAt = UnturnedGodot.Net.ServerSimulation.TickRate;
+    private EAttackInputFlags _primaryPending;
+    private EAttackInputFlags _secondaryPending;
+
+    // The swing being announced, and how many more frames it is announced on. One number per accepted
+    // swing, repeated verbatim: that is what lets the server tell a retransmission from a second punch.
+    private byte _swingSequence;
+    private EPlayerPunch _swingFist;
+    private int _swingRepeats;
+
+    // How many input frames a thrown swing is announced on. Input datagrams are unreliable, so a single
+    // dropped one would eat the swing for everyone else while the thrower saw their own — the one desync
+    // a locally-predicted action can produce. Repeating is safe because every copy carries the same
+    // number: the server answers the first it receives and recognises the rest as that same swing, so
+    // which of them survives the trip changes nothing about what anyone sees.
+    private const int AttackEdgeRepeats = 2;
 
     private EPlayerStance _stance = EPlayerStance.Stand;
     private bool _wantCrouch;
@@ -93,6 +136,7 @@ public partial class PlayerController : CharacterBody3D
         AddChild(_head);
         _camera = new Camera3D { Fov = _settings.VerticalFovDegrees, Current = true, Name = "PlayerCamera" };
         _head.AddChild(_camera);
+        AttachViewmodel();
         ApplyPerspective();
 
         Input.MouseMode = Input.MouseModeEnum.Captured;
@@ -108,6 +152,20 @@ public partial class PlayerController : CharacterBody3D
             _pitch = Mathf.Clamp(_pitch + (dir * motion.Relative.Y * _settings.MouseSensitivity), down, up);
             _head.RotationDegrees = new Vector3(_pitch, 0, 0);
             return;
+        }
+
+        // Attack input is latched as an EDGE, not sampled as held state: PlayerEquipment reacts to the
+        // tick a button went down, and polling it on the physics step would miss a click that started and
+        // ended inside one 0.08 s tick.
+        if (@event is InputEventMouseButton { Pressed: true } button
+            && Input.MouseMode == Input.MouseModeEnum.Captured)
+        {
+            // The repeat counter is NOT armed here: it repeats a swing, and whether this press becomes
+            // one is the next tick's decision.
+            if (button.ButtonIndex == _settings.AttackPrimary)
+                _primaryPending |= EAttackInputFlags.Start;
+            // The secondary button is deliberately not bound yet: with an item equipped it aims rather
+            // than punches, and binding it to a right-hand swing now would have to be taken back.
         }
 
         if (@event is InputEventKey { Pressed: true, Echo: false } key
@@ -143,6 +201,9 @@ public partial class PlayerController : CharacterBody3D
         bool stanceChanged = UpdateStance(moving, wantSprint);
         _rig?.SetState(_stance, moving); // crossfades to Idle_/Move_<stance>
         _rig?.SetPitch(_pitch);          // bends the upper body toward the look
+        // The arms follow the same movement state so they idle and bob like the body; the camera already
+        // carries the look, so they take no pitch bend of their own.
+        _viewmodel?.SetState(_stance, moving);
 
         float speed = PlayerConfig.SpeedFor(_stance);
         bool wasOnFloor = IsOnFloor();
@@ -182,27 +243,85 @@ public partial class PlayerController : CharacterBody3D
         // does for every player (local and remote) — movement audio never travels over the network.
         Footsteps?.Tick(_stance, moving, isOnFloor, GlobalPosition, dt);
 
-        // Multiplayer: forward one input frame per 0.08 s (PlayerInput.RATE). Idle frames still flow so
-        // the server keeps simulating (gravity) and other players see us stop.
-        if (Net != null)
+        // The 12.5 Hz simulation tick (PlayerInput.RATE). It runs whether or not a session is attached,
+        // because the hands are simulated on it too — a punch has to work the same in a local world as in
+        // a joined one. Idle frames still flow to the server so it keeps simulating (gravity) and other
+        // players see us stop.
+        _elapsed += dt;
+        if (_elapsed >= _nextTickAt)
         {
-            _netInputTimer += dt;
-            if (_netInputTimer >= UnturnedGodot.Net.ServerSimulation.TickRate)
+            // The counter advances by however many intervals of real time have ACTUALLY elapsed — one on
+            // an ordinary frame, several at once after a hitch. The hands measure their cooldown in it,
+            // so this is what keeps that cooldown measuring real seconds from both directions: it never
+            // runs at the frame rate while a backlog drains, and it never swallows the seconds a stall
+            // ate and leaves the owner unable to punch for a cooldown that has already expired.
+            uint intervals = 1 + (uint)((_elapsed - _nextTickAt) / UnturnedGodot.Net.ServerSimulation.TickRate);
+            _tick += intervals;
+            _nextTickAt += intervals * UnturnedGodot.Net.ServerSimulation.TickRate;
+            // The hands run on the fresh press, once. What goes on the wire afterwards is the swing they
+            // threw, announced under a number of its own for a few frames; see AttackEdgeRepeats.
+            EAttackInputFlags primary = _primaryPending;
+            EAttackInputFlags secondary = _secondaryPending;
+            _primaryPending = EAttackInputFlags.None;
+            _secondaryPending = EAttackInputFlags.None;
+
+            EPlayerGesture gesture = SimulateHands(primary, secondary);
+            if (gesture is EPlayerGesture.PunchLeft or EPlayerGesture.PunchRight)
             {
-                _netInputTimer -= UnturnedGodot.Net.ServerSimulation.TickRate;
+                // A new number is what makes this a new swing to everyone downstream. It is minted only
+                // when the hands ACCEPTED one, so a press the cooldown or the prone gate refused never
+                // reaches the wire at all.
+                _swingSequence = (byte)((_swingSequence + 1) & 0x7F);
+                _swingFist = gesture == EPlayerGesture.PunchRight ? EPlayerPunch.Right : EPlayerPunch.Left;
+                _swingRepeats = AttackEdgeRepeats;
+            }
+
+            bool sendSwing = _swingRepeats > 0;
+            if (sendSwing)
+                _swingRepeats--;
+
+            if (Net != null)
+            {
                 bool jumpHeld = inputCaptured && Input.IsKeyPressed(_settings.Jump);
                 // Trusted-client frame: our position already resolved collision against the full world
-                // (objects, buildings) that the server's heightfield solver doesn't know about.
-                Net.SendInput(new UnturnedGodot.Net.InputCommand(_netFrame++,
+                // (objects, buildings) that the server's heightfield solver doesn't know about. The
+                // attack flags are NOT trusted the same way — the server re-runs the same rule on them
+                // and is what tells everyone else a punch happened.
+                Net.SendInput(new UnturnedGodot.Net.InputCommand(_tick,
                     (sbyte)input.X, (sbyte)input.Y, jumpHeld, wantSprint,
                     UnturnedGodot.Net.NetAngles.QuantizeYaw(RotationDegrees.Y),
                     UnturnedGodot.Net.NetAngles.QuantizePitch(_pitch + 90f),
-                    _stance, GlobalPosition, isOnFloor));
+                    _stance, GlobalPosition, isOnFloor, sendSwing, _swingSequence, _swingFist));
             }
         }
 
         UpdateCamera(dt);
         Benchmark.RuntimeCounters.Record(Benchmark.RuntimeCounters.Counter.PlayerPhysics, benchmarkStarted);
+    }
+
+    // Runs the hands for one simulation tick and plays whatever they did. The owner acts on its own
+    // decision immediately rather than waiting for the server to confirm it, exactly as PlayerEquipment
+    // does — the swing has to start on the frame the button went down, and the server's copy of the same
+    // rule reaches the other players a round trip later.
+    private EPlayerGesture SimulateHands(EAttackInputFlags primary, EAttackInputFlags secondary)
+    {
+        if (primary == EAttackInputFlags.None && secondary == EAttackInputFlags.None)
+            return EPlayerGesture.None;
+
+        EPlayerGesture gesture = _equipment.Simulate(_tick, primary, secondary,
+            new HandState { Stance = _stance });
+
+        // Chest height, matching what the other clients play for this same swing off the replicated
+        // gesture — the owner just does not wait for the round trip to hear it.
+        if (PlayerGestures.SoundFor(gesture) is { } sound)
+            Sounds?.Play(sound, GlobalPosition + Vector3.Up,
+                PlayerGestures.PunchVolume, PlayerGestures.PunchMaxDistance);
+
+        if (PlayerGestures.ClipFor(gesture) is not { } clip)
+            return gesture;
+
+        DrawnRig?.PlayOnce(clip);
+        return gesture;
     }
 
     private bool UpdateStance(bool moving, bool wantSprint)
@@ -264,9 +383,72 @@ public partial class PlayerController : CharacterBody3D
             PlaceThirdPersonCamera();
     }
 
+    // Hangs the first-person arms off the head so they follow the look, and slides the rig so its Skull
+    // bone lands on the camera — which is exactly where Unturned parents its ViewmodelCamera. Deriving the
+    // offset from the rig's own rest pose keeps it correct if the character is ever re-authored, instead
+    // of pinning a measured number. UG_VIEWMODEL_OFFSET="x,y,z" nudges it from there.
+    private void AttachViewmodel()
+    {
+        if (ViewmodelModel is { } imported && imported is not CharacterSkeleton)
+        {
+            // The import succeeded but produced a static bind-pose mesh rather than a rig — the arms
+            // decoded, their skinning did not. It cannot be posed, so it would hang in front of the
+            // camera in one frozen attitude and never throw the punch it is there for. The body can be
+            // posed, so first person is better off with that; this is freed rather than left parentless,
+            // which is a Godot node nothing owns and nothing frees for the rest of the session.
+            imported.QueueFree();
+            ViewmodelModel = null;
+        }
+
+        if (ViewmodelModel is not CharacterSkeleton rig)
+            return;
+
+        _viewmodel = rig;
+        int skull = rig.FindBone("Skull");
+        Vector3 offset = skull >= 0 ? -rig.GetBoneGlobalRest(skull).Origin : Vector3.Zero;
+        rig.Position = offset + EnvOffset("UG_VIEWMODEL_OFFSET");
+        // Close to the near plane and lit like the world around it, but never casting into it: an arm a
+        // handspan from the eye throws a shadow across the whole view.
+        foreach (Node child in rig.GetChildren())
+            if (child is GeometryInstance3D geometry)
+                geometry.CastShadow = GeometryInstance3D.ShadowCastingSetting.Off;
+        _camera.AddChild(rig);
+    }
+
+    private static Vector3 EnvOffset(string name)
+    {
+        string[] parts = OS.GetEnvironment(name).Split(',');
+        if (parts.Length != 3)
+            return Vector3.Zero;
+        return float.TryParse(parts[0], System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out float x)
+            && float.TryParse(parts[1], System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out float y)
+            && float.TryParse(parts[2], System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out float z)
+            // TryParse accepts "NaN"/"Infinity", and either would put the rig on an invalid transform.
+            && float.IsFinite(x) && float.IsFinite(y) && float.IsFinite(z)
+            ? new Vector3(x, y, z)
+            : Vector3.Zero;
+    }
+
+    // The rig the player is actually looking at, which is the only one worth animating: a hidden rig
+    // stops advancing its clock (CharacterSkeleton pauses _Process off screen), so arming one leaves a
+    // stale gesture to thaw and replay the next time it is shown. Derived from the same condition
+    // ApplyPerspective shows them by, so the two cannot drift apart.
+    private CharacterSkeleton? DrawnRig => _thirdPerson || _viewmodel == null ? _rig : _viewmodel;
+
     private void ApplyPerspective()
     {
-        _model.Visible = _thirdPerson; // hide own body in first person
+        // With a separate arms rig, first person hides the body and shows the arms. WITHOUT one, hiding
+        // the body would leave first person empty — which is what it was doing. Unturned's own first
+        // person is not an arms-only viewmodel anyway: the character is drawn from inside its own head,
+        // which is why you can look down and see your legs. So the body stays visible and the camera,
+        // already at eye height inside the head, sees it from within: the head's own faces point away
+        // and are culled, and what is left in view is the torso, arms and legs — the swing included.
+        _model.Visible = _thirdPerson || _viewmodel == null;
+        if (_viewmodel != null)
+            _viewmodel.Visible = !_thirdPerson;
         // The third-person collision ray belongs to UpdateCamera in _PhysicsProcess. _Ready and _Input
         // both call this method outside a physics notification, where separate-threaded physics can have
         // its direct space locked. The next physics tick places a newly enabled third-person camera.

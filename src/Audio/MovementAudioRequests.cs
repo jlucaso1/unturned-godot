@@ -18,6 +18,13 @@ public static class MovementAudioRequests
     // normal zombie; megas override at play time). They only exist in the game's own bundle.
     public static IReadOnlyList<AudioExtractor.RawClipGroup> ZombieClipGroups { get; } = BuildZombieGroups();
 
+    // The bare-handed swing, the same way: two raw clips in the core bundle's Sounds root, with no
+    // definition of their own. See PlayerGestures.PunchSound for where the envelope comes from.
+    public static AudioExtractor.RawClipGroup PunchClipGroup { get; } = new(
+        UnturnedGodot.Player.PlayerGestures.PunchSound,
+        new[] { "Sounds/MeleeAttack_01.mp3", "Sounds/MeleeAttack_02.mp3" },
+        Volume: 1f, MinPitch: 1f, MaxPitch: 1f);
+
     private static List<AudioExtractor.RawClipGroup> BuildZombieGroups()
     {
         var roarPaths = new string[16];
@@ -31,6 +38,18 @@ public static class MovementAudioRequests
             new("ZombieRoars", roarPaths, Volume: 1f, MinPitch: 0.9f, MaxPitch: 1.1f),
             new("ZombieGroans", groanPaths, Volume: 1f, MinPitch: 0.9f, MaxPitch: 1.1f),
         };
+    }
+
+    // Every raw clip group the game's own bundle owes, which is what a core-bundle request carries. Built
+    // as its own list rather than by appending to ZombieClipGroups: static initializers run in
+    // declaration order, so a group declared below that one would still be null when it ran.
+    public static IReadOnlyList<AudioExtractor.RawClipGroup> CoreClipGroups { get; } =
+        BuildCoreGroups();
+
+    private static List<AudioExtractor.RawClipGroup> BuildCoreGroups()
+    {
+        var groups = new List<AudioExtractor.RawClipGroup>(ZombieClipGroups) { PunchClipGroup };
+        return groups;
     }
 
     // The physics materials of every source, which is what names the definitions. A workshop map defines
@@ -52,7 +71,7 @@ public static class MovementAudioRequests
             MovementAudioPlan.DefPathsByBundle(sources, bank, corePath))
         {
             requests.Add(new AudioExtractor.Request(bundle, TagOf(sources, bundle), paths,
-                bundle == corePath ? ZombieClipGroups : null, audioCacheDir));
+                bundle == corePath ? CoreClipGroups : null, audioCacheDir));
         }
 
         return requests;

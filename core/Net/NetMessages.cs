@@ -31,6 +31,13 @@ public enum ENetMessage : byte
     ServerInfoRequest, // client -> server, reliable
     ServerInfo,        // server -> client, reliable: protocol version, level, population
     Reject,            // server -> client, reliable: why this Hello will never be admitted
+
+    // NEW MESSAGE TYPES GO HERE, at the end. The three above run BEFORE the protocol handshake gates
+    // anything — ServerQuery asks an unknown server what it is running — so their byte values are the
+    // one part of this enum two different builds must still agree on. Inserting a type above them
+    // renumbers them, and a version query between mismatched builds then decodes as some other message
+    // and times out instead of reporting the mismatch it exists to report.
+    PlayerGesture, // server -> all but the owner, reliable: a one-shot hand animation (a punch today)
 }
 
 // Why a Hello was refused. Sent before the connection is closed so the player is told what happened
@@ -102,8 +109,26 @@ public readonly struct InputCommand
     public readonly bool HasPosition;
     public readonly Vector3 Position;
 
+    // The swing this frame announces, if any: which fist, and the number the OWNER gave it when its own
+    // hands accepted it.
+    //
+    // An IDENTITY rather than a button edge, and that distinction is the whole design. Input is
+    // unreliable, so a frame carrying a swing is repeated (PlayerController.AttackEdgeRepeats) — and a
+    // repeated EDGE is indistinguishable from a second press. The server then judges it again, against
+    // whatever stance and whatever moment the repeat happened to land in: punch standing, go prone, lose
+    // the first datagram, and the repeat is refused for a stance the swing was never thrown in. Every
+    // copy of one swing carries one number instead, so the server recognises the repeats as the swing it
+    // has already answered and answers nothing twice.
+    public readonly bool HasSwing;
+
+    // Wraps, and is only ever compared for EQUALITY against the last swing played — never ordered. Seven
+    // bits is far more than the two frames a repeat spans.
+    public readonly byte SwingSequence;
+    public readonly EPlayerPunch SwingFist;
+
     public InputCommand(uint frame, sbyte inputX, sbyte inputY, bool jump, bool sprint, byte yaw, byte pitch,
-        EPlayerStance stance = EPlayerStance.Stand, bool grounded = true)
+        EPlayerStance stance = EPlayerStance.Stand, bool grounded = true,
+        bool hasSwing = false, byte swingSequence = 0, EPlayerPunch swingFist = EPlayerPunch.Left)
     {
         Frame = frame;
         InputX = inputX;
@@ -116,11 +141,16 @@ public readonly struct InputCommand
         Grounded = grounded;
         HasPosition = false;
         Position = Vector3.Zero;
+        HasSwing = hasSwing;
+        SwingSequence = swingSequence;
+        SwingFist = swingFist;
     }
 
     public InputCommand(uint frame, sbyte inputX, sbyte inputY, bool jump, bool sprint, byte yaw, byte pitch,
-        EPlayerStance stance, Vector3 position, bool grounded = true)
-        : this(frame, inputX, inputY, jump, sprint, yaw, pitch, stance, grounded)
+        EPlayerStance stance, Vector3 position, bool grounded = true,
+        bool hasSwing = false, byte swingSequence = 0, EPlayerPunch swingFist = EPlayerPunch.Left)
+        : this(frame, inputX, inputY, jump, sprint, yaw, pitch, stance, grounded, hasSwing, swingSequence,
+            swingFist)
     {
         HasPosition = true;
         Position = position;
@@ -173,7 +203,7 @@ public sealed class PlayerListing
 public static class NetMessages
 {
     // Bump whenever a message layout changes; the server refuses mismatched clients at the handshake.
-    public const byte ProtocolVersion = 7;
+    public const byte ProtocolVersion = 8;
 
     // Two level names denote the same world. The name on the wire is the map's FOLDER name — the one
     // identity that survives the trip between two machines (paths and workshop ids do not) — and it
@@ -344,20 +374,26 @@ public static class NetMessages
         return (id, tick, rosterVersion, players);
     }
 
-    public static byte[] WritePlayerJoined(uint rosterVersion, PlayerListing player)
+    // `tick` is the simulation tick this player was admitted on. It travels with the roster entry because
+    // it is what dates the avatar: a gesture names only a player id, ids are recycled, and nothing that
+    // happened before this player arrived belongs to them. Carrying it here rather than having the client
+    // guess from the newest tick it happens to have heard also keeps it in the SERVER's own tick space,
+    // so a restarted host counting from zero again needs no special case.
+    public static byte[] WritePlayerJoined(uint rosterVersion, uint tick, PlayerListing player)
     {
         using var ms = new MemoryStream();
         using var w = new BinaryWriter(ms);
         w.Write((byte)ENetMessage.PlayerJoined);
         w.Write(rosterVersion);
+        w.Write(tick);
         WriteListing(w, player);
         return ms.ToArray();
     }
 
-    public static (uint RosterVersion, PlayerListing Player) ReadPlayerJoined(byte[] payload)
+    public static (uint RosterVersion, uint Tick, PlayerListing Player) ReadPlayerJoined(byte[] payload)
     {
         using BinaryReader r = Reader(payload);
-        return (r.ReadUInt32(), ReadListing(r));
+        return (r.ReadUInt32(), r.ReadUInt32(), ReadListing(r));
     }
 
     // The leave is versioned too, so a roster older than it cannot put the player back on the map.
@@ -384,11 +420,16 @@ public static class NetMessages
         w.Write(input.Frame);
         w.Write(input.InputX);
         w.Write(input.InputY);
+        // A swing is announced by a flag bit and paid for by one extra byte, the same shape the trusted
+        // position already uses: the frames that carry one are a handful per session, and every other
+        // input frame stays exactly the width it was.
         w.Write((byte)((input.Jump ? 1 : 0) | (input.Sprint ? 2 : 0) | (input.HasPosition ? 4 : 0)
-            | (input.Grounded ? 8 : 0)));
+            | (input.Grounded ? 8 : 0) | (input.HasSwing ? 16 : 0)));
         w.Write(input.Yaw);
         w.Write(input.Pitch);
         w.Write((byte)input.Stance);
+        if (input.HasSwing)
+            w.Write((byte)(((input.SwingSequence & 0x7F) << 1) | (input.SwingFist == EPlayerPunch.Right ? 1 : 0)));
         if (input.HasPosition)
         {
             w.Write(input.Position.X);
@@ -411,10 +452,45 @@ public static class NetMessages
         bool jump = (flags & 1) != 0;
         bool sprint = (flags & 2) != 0;
         bool grounded = (flags & 8) != 0;
+        bool hasSwing = (flags & 16) != 0;
+        byte swingSequence = 0;
+        EPlayerPunch swingFist = EPlayerPunch.Left;
+        if (hasSwing)
+        {
+            byte swing = r.ReadByte();
+            swingSequence = (byte)(swing >> 1);
+            swingFist = (swing & 1) != 0 ? EPlayerPunch.Right : EPlayerPunch.Left;
+        }
         if ((flags & 4) == 0)
-            return new InputCommand(frame, x, y, jump, sprint, yaw, pitch, stance, grounded);
+            return new InputCommand(frame, x, y, jump, sprint, yaw, pitch, stance, grounded, hasSwing,
+                swingSequence, swingFist);
         var position = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
-        return new InputCommand(frame, x, y, jump, sprint, yaw, pitch, stance, position, grounded);
+        return new InputCommand(frame, x, y, jump, sprint, yaw, pitch, stance, position, grounded, hasSwing,
+            swingSequence, swingFist);
+    }
+
+    // A one-shot hand animation somebody else performed. Reliable and event-shaped rather than a bit in
+    // the state stream: a punch is a moment, and the 12.5 Hz snapshot that carried it as a flag would
+    // either be missed by a client that dropped that datagram or be replayed by one that got it twice.
+    //
+    // The server tick rides along because reliable delivery here retransmits but does not ORDER: a lost
+    // datagram can be re-sent late enough to arrive behind a gesture that came after it, and without a
+    // sequence the older swing would replace the newer one on the avatar. Same reasoning as the roster
+    // version above, and the same shape.
+    public static byte[] WritePlayerGesture(byte playerId, uint tick, EPlayerGesture gesture)
+    {
+        var payload = new byte[7];
+        payload[0] = (byte)ENetMessage.PlayerGesture;
+        payload[1] = playerId;
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(2), tick);
+        payload[6] = (byte)gesture;
+        return payload;
+    }
+
+    public static (byte PlayerId, uint Tick, EPlayerGesture Gesture) ReadPlayerGesture(byte[] payload)
+    {
+        using BinaryReader r = Reader(payload);
+        return (r.ReadByte(), r.ReadUInt32(), (EPlayerGesture)r.ReadByte());
     }
 
     private const int SnapshotBytes = 16; // id 1 + position 12 + pitch 1 + yaw 1 + stance/flags 1

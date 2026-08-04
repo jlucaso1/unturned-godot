@@ -762,15 +762,21 @@ public partial class Main : Node3D
             network.Configure(heights, spawnPosition);
         AddChild(network);
 
+        (Node3D? Body, Node3D? Viewmodel) rigs = CharacterModel.BuildPlayerRigs(unturnedPath);
         var player = new PlayerController
         {
             Name = "Player",
             Position = spawnPosition,
             RotationDegrees = new Vector3(0, spawnYaw, 0),
             StartThirdPerson = thirdPerson,
-            BodyModel = CharacterModel.Build(unturnedPath), // real Unturned body, or null -> placeholder
+            // Both rigs out of one read of resources.assets: the body other players see, and the
+            // first-person arms, so a swing is visible from inside the head too. Either may be null —
+            // no game data means the placeholder figure, no Viewmodel rig means no hands in first person.
+            BodyModel = rigs.Body,
+            ViewmodelModel = rigs.Viewmodel,
         };
         (player.Footsteps, _movementAudioFactory) = BuildMovementAudio(unturnedPath);
+        player.Sounds = _oneShotAudio; // BuildMovementAudio created the pool; gestures share it
         AddChild(player);
         _dayNight?.AttachCamera(player.Camera);
 
@@ -822,7 +828,7 @@ public partial class Main : Node3D
             return;
         player.Net = network.Client;
         AddChild(RemotePlayersView.Create(network.Client, unturnedPath, _movementAudioFactory,
-            player.BodyModel));
+            player.BodyModel, _oneShotAudio));
         // The zombies view tracks the LOCAL player's nav bound (Player.PlayerMovement.updateBounds runs client-
         // side in the original too) to drop the avatars of a region it leaves.
         var navBounds = LevelNavigationData.Load(
