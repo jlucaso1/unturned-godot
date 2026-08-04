@@ -124,6 +124,12 @@ Some objects are decoded again by a later pass, and the suite prices those separ
 | Shader | 20 ms / 29.5 MiB | 2x | ≤ 20 ms / 29.5 MiB | shaders a resolved material names |
 | SkinnedMeshRenderer | 0.6 ms / 0.7 MiB | 2x | ≤ 1 ms / 0.7 MiB | parts clearing mesh+anchor checks |
 
+Repeats are not confined to single objects, either: on a cold face cache `CharacterModel.LoadFace` goes
+through `ModelExtractor.ReadMasterbundleFile`, which re-reads the bundle and decodes the **whole**
+SerializedFile node again — ~4.6 s — to fetch one small inline texture the streamer's own pass had already
+decoded. That dwarfs every per-object repeat here and is recorded in `docs/PROFILING.md` rather than in
+this table, which prices objects rather than passes.
+
 **This table is a lower bound on repeated decode work, not a total.** It is a hand-maintained mirror of
 what several `src/` passes happen to do, much of it behind conditions the harness cannot observe — which
 map is loaded, which caches are warm, which env flags are set. Successive review rounds found six such

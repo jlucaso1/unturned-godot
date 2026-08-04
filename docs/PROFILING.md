@@ -64,10 +64,8 @@ suite skips cleanly when its input is missing, so it runs on any machine with so
 Measured with `PerfHarness -- lzma` and `-- bundle` on a 4-vCPU container, against the game's own
 `core_linux.masterbundle` (110.9 MiB on disk, 1,371.9 MiB decompressed, one LZMA block):
 
-The pass splits in two, because the audio node and one container decode only happen when audio is wanted
-— `ObjectStreamer.PlanAudio` returns nothing under `FREECAM`/`STEP_PROBE` or once the audio cache is warm,
-and `ModelExtractor.ReadSerializedNode` then never plans `.resource` ranges at all. Those two flags are
-exactly the modes the benchmarks run in, so **a measured load never pays the bottom block**:
+The pass has two independent conditions on top of the work every load does. Read the blocks together for
+the session you care about — the combinations are spelled out under the tables.
 
 | every load | bytes | time | share of 12.92 s |
 |---|---:|---:|---:|
@@ -86,22 +84,47 @@ exactly the modes the benchmarks run in, so **a measured load never pays the bot
 
 | only when the face cache is cold | bytes | time |
 |---|---:|---:|
+| LZMA, the SerializedFile node **again** (`ReadMasterbundleFile`) | 170.9 MiB | 4.60 s |
+| `SerializedFile.Read` again | 103,549 objects | 0.01 s |
 | a third *extra* container decode (`CharacterModel.ExtractInlineTexture`) | 1 object | 0.09 s |
 
-The two conditions are independent: audio is gated by `PlanAudio`, the face texture by whether
-`user://` already holds that face. A session hitting both totals 15.21 s.
+The conditions are independent — audio is gated by `ObjectStreamer.PlanAudio`, the face texture by
+whether `user://face_<n>.tex` is present and current:
+
+| session | total | LZMA share |
+|---|---:|---:|
+| both caches warm | 12.92 s | 95.4% |
+| cold audio cache | 15.12 s | 95.5% |
+| cold face cache | 17.62 s | — |
+| both cold | **19.82 s** | 96.1% |
+
+**Which of those a benchmark measures depends on the tier, not on a blanket rule.** `FREECAM` and
+`STEP_PROBE` spawn no player, so they skip the audio request entirely and never load a face. Tier 3
+(`UG_RUNTIME_BENCH_SECS=12 SOLO=1`) sets neither flag and *does* spawn a player, so on cold caches it pays
+both blocks — a first Tier 3 run on a fresh `user://` measures something close to 19.8 s and a repeat run
+12.9 s, for the same code. Warm the caches once before comparing runs, or the difference between them is
+mostly cache state.
+
+**The cold face path deserves its own note**: `CharacterModel.LoadFace` falls through to
+`ModelExtractor.ReadMasterbundleFile`, which re-reads the bundle from disk and decodes the whole
+SerializedFile node a second time — 4.7 s, more than a third of the entire always-run pass — to fetch one
+small inline face texture. Everything it needs was already decoded minutes earlier by the streamer's own
+pass. That is the largest single piece of avoidable work this measurement found, and like the container
+repeats the fix is a `src/` change: hand the already-decoded `SerializedFile` to the face loader instead
+of letting it start over.
 
 **The pass is LZMA-bound and nothing else is close.** The two always-run LZMA rows are 12.33 s of that
-12.92 s — **95.4%**. Adding the audio block moves the total to 15.12 s and the LZMA share to 95.5%; adding
-the cold face cache too makes it 15.21 s and 94.9%.
+12.92 s — **95.4%**, and the share only rises as the conditional blocks come in, since both are mostly
+LZMA themselves (96.1% with both).
 The object table is free, and the TypeTree reader — the obvious-looking target, and the only part of this
 that is the port's own code — is **1.7%** for what every load unconditionally scans, 2.1% adding the
 partly-scanned row, and 4.4% counting the container repeat and everything a map could place. Eliminating
-it entirely would take well under a second off a ~13–15 s pass. Work aimed at cold load time should go at
+it entirely would take well under a second off a 13–20 s pass. Work aimed at cold load time should go at
 *what is decoded and when* (`ress`, deferral, caching) rather than at how fast the port turns
-already-decoded bytes into values.
+already-decoded bytes into values — and the two exceptions below are both of exactly that kind: decoding
+something a second time rather than decoding it slowly.
 
-The one exception, and the cheapest win in the area, is the AssetBundle container. `m_Container` is a
+After the cold face path above, the next avoidable cost is the AssetBundle container. `m_Container` is a
 single object costing ~0.09 s and 51.5 MiB to decode, and **four** places decode it from scratch against
 this bundle: `PrefabGraph.ReadContainer` and `BundleTextures.Locate` on every cold load,
 `AudioExtractor.Plan` when audio is wanted, and `CharacterModel.ExtractInlineTexture` on a cold face cache
