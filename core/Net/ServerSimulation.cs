@@ -366,8 +366,9 @@ public sealed class ServerSimulation
     // the last tick is the best date available and the one the loop would have used anyway.
     public void QueueInput(byte id, in InputCommand input) => QueueInput(id, input, _clock);
 
-    // One swing, judged once. Repeats of it carry the same number and are recognised as the swing already
-    // answered, so losing the first datagram costs nothing and receiving all of them costs nothing either.
+    // One swing, answered once. Repeats of it carry the same number and are recognised as the swing
+    // already answered, so losing the first datagram costs nothing and receiving all of them costs
+    // nothing either. A swing the rate limit refuses is not "answered" — see below.
     private void AcceptSwing(Entry entry, in InputCommand input, double receivedAt)
     {
         // Wrap-safe seven-bit order. Distance 0 is the repeat of the swing already answered; anything in
@@ -377,9 +378,6 @@ public sealed class ServerSimulation
         // enough to produce now that swings are judged ahead of the freshness guard.
         if (entry.HasSwung && ((input.SwingSequence - entry.LastSwingSequence) & 0x7F) is 0 or >= 0x40)
             return;
-
-        entry.HasSwung = true;
-        entry.LastSwingSequence = input.SwingSequence;
 
         // Allowance accrues with real time and a swing spends one, rather than the rule being a gap
         // since the last swing. A gap cannot be measured when a stall makes the transport hand over a
@@ -395,9 +393,19 @@ public sealed class ServerSimulation
         entry.HasSwingAllowance = true;
         entry.AllowanceAt = receivedAt;
 
+        // Refused, and deliberately NOT recorded as answered. The number is what the repeat frames carry
+        // to survive an unreliable channel, so burning it here would spend the swing's only redundancy on
+        // a refusal: a punch that arrived a hair inside the cooldown — jitter between the client's own
+        // gate and this clock is enough — would have its repeats swallowed by the guard above and never
+        // be answered at all, while its owner watched the swing connect. Leaving the number unspent makes
+        // a refusal retryable, and the retry costs nothing: allowance is a time integral, so re-running
+        // the accrual above is the same arithmetic, and a grant still spends one whatever the client does.
         if (entry.SwingAllowance < 1)
-            return; // faster than the rule allows, whatever the client says its frame numbers were
+            return;
+
         entry.SwingAllowance -= 1;
+        entry.HasSwung = true;
+        entry.LastSwingSequence = input.SwingSequence;
         // The swing's own aim, not the delivering frame's: a repeat that arrives first belongs to a later
         // frame, and the punch is the one the owner threw. See InputCommand.SwingYaw.
         entry.PendingGestures.Enqueue(new PendingGesture(Player.PlayerGestures.For(input.SwingFist),

@@ -137,6 +137,64 @@ public class PunchReplicationTests
         Assert.Equal(EPlayerStance.Stand, thrown.Stance);
     }
 
+    // A swing the rate limit refuses must stay retryable. The repeat frames carry the same number to
+    // survive an unreliable channel, so recording a REFUSAL against that number would spend the swing's
+    // only redundancy: an honest punch landing a hair inside the cooldown — the client's own gate and
+    // this clock need only differ by jitter — would have its repeats swallowed and never be answered,
+    // while its owner watched the swing connect.
+    [Fact]
+    public void Server_LetsARefusedSwingBeRetriedByItsOwnRepeat()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        sim.QueueInput(1, Attack());
+        sim.Step();
+        Assert.Single(sim.Gestures); // the first spends the starting allowance
+
+        // A second swing immediately after: inside the cooldown, so refused.
+        InputCommand tooSoon = Attack();
+        sim.QueueInput(1, tooSoon);
+        sim.Step();
+        Assert.Empty(sim.Gestures);
+
+        // Its repeats keep arriving while the allowance recovers. One of them must land.
+        int answered = 0;
+        for (int i = 0; i < 12; i++)
+        {
+            sim.QueueInput(1, RepeatSwing());
+            sim.Step();
+            answered += sim.Gestures.Count;
+        }
+        Assert.Equal(1, answered);
+    }
+
+    // ...and exactly once. Once a refused swing is finally granted it IS recorded, so the repeats still
+    // in flight behind it are the ordinary duplicates again.
+    [Fact]
+    public void Server_AnswersARetriedSwingOnlyOnce()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        sim.QueueInput(1, Attack());
+        sim.Step();
+        Assert.Single(sim.Gestures);
+
+        sim.QueueInput(1, Attack()); // refused, inside the cooldown
+        sim.Step();
+
+        int answered = 0;
+        for (int i = 0; i < 40; i++)
+        {
+            sim.QueueInput(1, RepeatSwing());
+            sim.Step();
+            answered += sim.Gestures.Count;
+        }
+        // Forty repeats of ONE swing, over five seconds of accruing allowance, are still one punch.
+        Assert.Equal(1, answered);
+    }
+
     [Fact]
     public void Server_TurnsASwingIntoAGesture()
     {
