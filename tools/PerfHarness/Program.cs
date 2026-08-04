@@ -510,9 +510,19 @@ public static class Program
                 + "were not scanned — their objects are missing from the numbers below");
         }
 
-        byte[] tableBytes = files[0].Bytes;
-        Bench("SerializedFile.Read (first node)", () => SerializedFile.Read(tableBytes));
-        long tableAlloc = AllocatedBy(() => SerializedFile.Read(tableBytes));
+        // Every serialized node, so the timed row covers the same files the object counts below do.
+        var tableBytes = new List<byte[]>(files.Count);
+        foreach ((string _, SerializedFile _, byte[] b) in files)
+            tableBytes.Add(b);
+
+        void ParseTables()
+        {
+            foreach (byte[] b in tableBytes)
+                SerializedFile.Read(b);
+        }
+
+        Bench($"SerializedFile.Read (all {files.Count} node(s))", ParseTables);
+        long tableAlloc = AllocatedBy(ParseTables);
         int totalObjects = 0, totalTrees = 0;
         foreach ((string _, SerializedFile f, byte[] _) in files)
         {
@@ -520,7 +530,7 @@ public static class Program
             totalTrees += f.TypeTreesByClassId.Count;
         }
         Console.WriteLine($"    {totalObjects:N0} objects across {files.Count} serialized file(s), "
-            + $"{totalTrees} class type trees, {Mb(tableAlloc)} allocated for the first");
+            + $"{totalTrees} class type trees, {Mb(tableAlloc)} allocated");
 
         // Objects whose type tree was stripped cannot be decoded without a donor file; they are not part
         // of what this measures, so they are excluded from every set rather than silently throwing.
@@ -534,11 +544,8 @@ public static class Program
         var targeted = new HashSet<int>(TargetedClasses);
         var scannedSet = new List<(SerializedObject Obj, SerializedFile File)>();
         var targetedSet = new List<(SerializedObject Obj, SerializedFile File)>();
-        var containerSet = new List<(SerializedObject Obj, SerializedFile File)>();
         foreach ((SerializedObject o, SerializedFile f) in readable)
         {
-            if (o.ClassId == AssetBundleClassId)
-                containerSet.Add((o, f));
             if (scanned.Contains(o.ClassId))
                 scannedSet.Add((o, f));
             else if (targeted.Contains(o.ClassId))
@@ -551,18 +558,17 @@ public static class Program
                 + "and are excluded from the decode below");
         }
 
-        // Every row is the cost of decoding each object ONCE. That is not the same as what a load pays:
-        // the AssetBundle container is re-decoded by every pass that walks it, which is why it is also
-        // timed on its own below.
+        // Every row decodes each object exactly ONCE, which is a floor and not what a load pays: several
+        // objects are decoded again by a later pass, and the table after these prices those repeats.
         //
         // Far fewer iterations than the default 15: one pass over every object is seconds, not
         // milliseconds, and fifteen of them would cost more than the rest of the harness put together.
         // The coarser the row, the smaller its budget.
         ReadPass("TypeTreeReader.Read (scanned classes, once each)", scannedSet, iters: 5);
-        ReadPass("TypeTreeReader.Read (targeted classes — a bound)", targetedSet, iters: 5);
-        ReadPass("TypeTreeReader.Read (every object — a bound)", readable, iters: 3);
+        ReadPass("TypeTreeReader.Read (targeted classes, once each)", targetedSet, iters: 5);
+        ReadPass("TypeTreeReader.Read (every object, once each)", readable, iters: 3);
 
-        ContainerRescanCost(containerSet);
+        RepeatDecodeTable(readable);
         PerClassTable(readable);
         Console.WriteLine();
     }
@@ -595,63 +601,116 @@ public static class Program
             + $"({(input > 0 ? alloc / (double)input : 0):0.0}x), {alloc / (double)objects.Count / 1024:0.0} KiB per object");
     }
 
-    // The AssetBundle object holds `m_Container`, the path -> asset table, and every pass that needs to
-    // resolve a name walks it by decoding the whole object again from scratch. Five independent scans of
-    // it exist in the port — PrefabGraph.ReadContainer, BundleTextures.Locate, AudioExtractor.Plan,
-    // RoadsBuilder and CharacterModel — and at least the first three run against the core masterbundle on
-    // a cold load. The rows above decode each object once, so they price ONE of those; this prices the
-    // repeat, because on this bundle a single container decode is a large share of the scanned row.
-    private static void ContainerRescanCost(List<(SerializedObject Obj, SerializedFile File)> containers)
+    // Objects the port decodes MORE THAN ONCE per load, and what the extra decodes cost. The rows above
+    // decode everything exactly once, so they already contain the first decode of each of these; only the
+    // decodes beyond the first are additional, which is what the "extra" column reports.
+    //
+    // Each entry names where the repeats are, so the count can be checked against the code rather than
+    // trusted. Both are deliberately the low end.
+    private static readonly (int ClassId, int Decodes, string Where)[] RepeatDecoded =
     {
-        if (containers.Count == 0)
-            return;
+        // PrefabGraph.ReadContainer, BundleTextures.Locate and AudioExtractor.Plan each walk m_Container
+        // by decoding the whole AssetBundle object again. RoadsBuilder and CharacterModel scan one too,
+        // but their own bundle rather than this one, so they are not counted.
+        (AssetBundleClassId, 3, "PrefabGraph.ReadContainer + BundleTextures.Locate + AudioExtractor.Plan"),
 
-        void Pass()
+        // MapObjectKeysToMeshes decodes each skinned renderer in the mesh-part sweep, then
+        // MeshRendererMaterials reaches the same component from its GameObject and decodes it again.
+        (137, 2, "MapObjectKeysToMeshes sweep + MeshRendererMaterials"),
+    };
+
+    // Materials have no fixed multiplicity to report: MaterialResolver.Resolve decodes the material on
+    // EVERY call and is called per submesh, so the count is the number of submeshes sharing it, which is
+    // a property of the map's placements rather than of the bundle. Named here because it is the reason
+    // the targeted row is a floor rather than a ceiling.
+    private const string TargetedRepeatNote =
+        "MaterialResolver.Resolve re-decodes a material on every submesh that uses it (no cache), so the "
+        + "targeted row above is a floor, not a bound";
+
+    private static void RepeatDecodeTable(List<(SerializedObject Obj, SerializedFile File)> readable)
+    {
+        var byClass = new Dictionary<int, List<(SerializedObject Obj, SerializedFile File)>>();
+        foreach ((SerializedObject o, SerializedFile f) in readable)
         {
-            foreach ((SerializedObject o, SerializedFile f) in containers)
-                TypeTreeReader.Read(o.TypeTree, f.ReaderFor(o));
+            if (!byClass.TryGetValue(o.ClassId, out List<(SerializedObject, SerializedFile)>? list))
+                byClass[o.ClassId] = list = new List<(SerializedObject, SerializedFile)>();
+            list.Add((o, f));
         }
 
-        double median = Bench($"one AssetBundle container scan x{containers.Count:N0}", Pass,
-            warmup: 1, iters: 5);
-        long alloc = AllocatedBy(Pass);
-        Console.WriteLine($"    {Mb(alloc)} allocated per scan; the port scans this table from {ContainerScanSites} "
-            + "independent places, so a cold load pays a multiple of this line, not one of it");
-        Console.WriteLine($"    at {ContainerScanSites} scans that is {median * ContainerScanSites:N0} ms and "
-            + $"{Mb(alloc * ContainerScanSites)} — re-decoding one object the load already had");
+        bool header = false;
+        foreach ((int classId, int decodes, string where) in RepeatDecoded)
+        {
+            if (!byClass.TryGetValue(classId, out List<(SerializedObject Obj, SerializedFile File)>? objects)
+                || objects.Count == 0)
+                continue;
+
+            if (!header)
+            {
+                Console.WriteLine("  decoded more than once per load (the rows above count only the first):");
+                header = true;
+            }
+
+            void Pass()
+            {
+                foreach ((SerializedObject o, SerializedFile f) in objects)
+                    TypeTreeReader.Read(o.TypeTree, f.ReaderFor(o));
+            }
+
+            string name = ClassNames.TryGetValue(classId, out string? n) ? n : classId.ToString();
+            double median = Bench($"  {name} x{objects.Count:N0}, one decode", Pass, warmup: 1, iters: 5);
+            long alloc = AllocatedBy(Pass);
+            Console.WriteLine($"      {decodes} decodes per load, so {decodes - 1} extra: "
+                + $"{median * (decodes - 1):N0} ms and {Mb(alloc * (decodes - 1))} beyond the rows above");
+            Console.WriteLine($"      {where}");
+        }
+
+        Console.WriteLine($"  note: {TargetedRepeatNote}");
     }
 
-    // PrefabGraph.ReadContainer, BundleTextures.Locate and AudioExtractor.Plan all scan the core bundle's
-    // container on a cold load. RoadsBuilder and CharacterModel scan their own bundles, so they are not
-    // counted here: this is deliberately the low end.
-    private const int ContainerScanSites = 3;
-
-    // Where the decode time and allocation actually sit, per Unity class, from a single pass. Every object
-    // is individually timed here, so the column sums above the uninstrumented pass — read it for the shape,
-    // and take the totals from the passes above. A class nothing scans can still dominate this table, which
-    // is exactly why the scanned subset is timed on its own.
+    // Where the decode time and allocation actually sit, per Unity class.
+    //
+    // Timed one CLASS at a time rather than one object at a time, with the GC levelled before each class.
+    // Timing every object individually put a stopwatch boundary around every allocation in a pass that
+    // leaves gigabytes of garbage, so whichever object happened to trip a Gen2/LOH collection was billed
+    // for it — the sorted column could rank GC pauses rather than decode cost. Batching per class makes
+    // each measurement long enough that the per-call overhead disappears, and collecting first means a
+    // class is not charged for the previous one's garbage. It cannot remove a collection provoked from
+    // *within* a class's own batch, which is honest: that allocation really is that class's doing.
     private static void PerClassTable(List<(SerializedObject Obj, SerializedFile File)> objects)
     {
         var scannedClasses = new HashSet<int>(ScannedClasses);
         var targetedClasses = new HashSet<int>(TargetedClasses);
-        var perClass = new Dictionary<int, (int Count, double Ms, long Input, long Alloc)>();
+
+        var byClass = new Dictionary<int, List<(SerializedObject Obj, SerializedFile File)>>();
         foreach ((SerializedObject o, SerializedFile f) in objects)
         {
+            if (!byClass.TryGetValue(o.ClassId, out List<(SerializedObject, SerializedFile)>? list))
+                byClass[o.ClassId] = list = new List<(SerializedObject, SerializedFile)>();
+            list.Add((o, f));
+        }
+
+        var perClass = new Dictionary<int, (int Count, double Ms, long Input, long Alloc)>();
+        foreach (KeyValuePair<int, List<(SerializedObject Obj, SerializedFile File)>> entry in byClass)
+        {
+            long input = 0;
+            foreach ((SerializedObject o, SerializedFile _) in entry.Value)
+                input += o.ByteSize;
+
+            GC.Collect(); // level the field: this class is not billed for the previous class's garbage
             long before = GC.GetAllocatedBytesForCurrentThread();
             var sw = Stopwatch.StartNew();
-            TypeTreeReader.Read(o.TypeTree, f.ReaderFor(o));
+            foreach ((SerializedObject o, SerializedFile f) in entry.Value)
+                TypeTreeReader.Read(o.TypeTree, f.ReaderFor(o));
             sw.Stop();
             long alloc = GC.GetAllocatedBytesForCurrentThread() - before;
-            perClass.TryGetValue(o.ClassId, out (int Count, double Ms, long Input, long Alloc) v);
-            perClass[o.ClassId] = (v.Count + 1, v.Ms + sw.Elapsed.TotalMilliseconds, v.Input + o.ByteSize,
-                v.Alloc + alloc);
+            perClass[entry.Key] = (entry.Value.Count, sw.Elapsed.TotalMilliseconds, input, alloc);
         }
 
         var ordered = new List<KeyValuePair<int, (int Count, double Ms, long Input, long Alloc)>>(perClass);
         ordered.Sort((a, b) => b.Value.Ms.CompareTo(a.Value.Ms));
 
-        Console.WriteLine("    by class (individually timed; 'how' is scan = every object decoded, "
-            + "targeted = by id)");
+        Console.WriteLine("    by class (one batch each, GC levelled between; 'how' is scan = every object "
+            + "decoded, targeted = by id)");
         Console.WriteLine("      class                      count      input        ms      alloc  how");
         int shown = 0;
         foreach (KeyValuePair<int, (int Count, double Ms, long Input, long Alloc)> entry in ordered)

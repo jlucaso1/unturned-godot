@@ -70,22 +70,23 @@ Measured with `PerfHarness -- lzma` and `-- bundle` on a 4-vCPU container, again
 | LZMA, `.resS` texture node | 1,180.2 MiB | 7.73 s | 51% |
 | LZMA, `.resource` audio node | 20.8 MiB | 2.11 s | 14% |
 | `SerializedFile.Read` | 103,549 objects | 0.01 s | <1% |
-| `TypeTreeReader.Read`, classes every load scans, once each | 42,010 objects | 0.22 s | 1.5% |
-| re-decoding the AssetBundle container (3 passes) | 1 object, 3x | 0.30 s | 2% |
+| `TypeTreeReader.Read`, classes every load scans, once each | 42,010 objects | 0.21 s | 1.4% |
+| re-decoding the AssetBundle container (2 *extra* passes) | 1 object | 0.20 s | 1.3% |
 
 **The pass is LZMA-bound and nothing else is close.** Decompression is ~98% of it; the object table is
 free, and the TypeTree reader — the obvious-looking target, and the only part of this that is the port's
-own code — is 1.5%. The classes a map actually places add a bounded 0.28 s on top, so even the loosest
-reading puts the reader at 3-4%: eliminating it entirely would take well under a second off a ~15 s pass.
+own code — is 1.4%. The classes a map places add ~0.28 s on top, so even the loosest reading puts the
+reader at 3-4%: eliminating it entirely would take well under a second off a ~15 s pass.
 Work aimed at cold load time should go at *what is decoded and when* (`ress`, deferral, caching) rather
 than at how fast the port turns already-decoded bytes into values.
 
 The one exception, and the cheapest win in the area, is the AssetBundle container. `m_Container` is a
-single object costing 0.10 s and 51.5 MiB to decode, and `PrefabGraph.ReadContainer`,
-`BundleTextures.Locate` and `AudioExtractor.Plan` each decode it again from scratch on a cold load —
-~0.30 s and ~154 MiB re-deriving a table the load already built. For scale, decoding all 42,010
-unconditionally-scanned objects once costs 0.22 s. Decoding the container once and passing it around is a
-`src/` change rather than a parser one, which is why it is recorded here rather than fixed in `core/`.
+single object costing ~0.10 s and 51.5 MiB to decode, and `PrefabGraph.ReadContainer`,
+`BundleTextures.Locate` and `AudioExtractor.Plan` each decode it from scratch on a cold load. The first of
+those three is already counted in the row above, so the **extra** is ~0.20 s and ~103 MiB re-deriving a
+table the load already built — which is what decoding it once and passing it around would save. For
+scale, decoding all 42,010 unconditionally-scanned objects once costs 0.21 s. That fix is a `src/` change
+rather than a parser one, which is why it is recorded here rather than made in `core/`.
 
 Two specifics worth carrying. The decode rate is not one number: it varies 15x between the three nodes
 and tracks how compressible each one is, so a rate sampled in one node cannot price a deferral in
