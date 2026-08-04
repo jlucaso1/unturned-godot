@@ -365,8 +365,9 @@ public class PhysicsBodyOrderTests
         Assert.Contains("rid.Add(multimesh", foliage);
         Assert.Contains("new MultiMeshRidRenderer { Name = label + \"Batches\" }", objects);
         // Objects reach the shared RID owner through AddLevels, which emits either one batch or the
-        // LOD-0/LOD-1 pair; either way the batch itself still goes through AddRenderBatch.
-        Assert.Contains("AddLevels(root, render, renderMesh, lodMesh", objects);
+        // LOD-0/LOD-1 pair; either way the batch itself still goes through AddRenderBatch. What it is
+        // handed is a merged submission's mesh levels, not a GUID's — see RenderBatchGrouping.
+        Assert.Contains("AddLevels(root, render, levels[group.Key.Level0],", objects);
         Assert.Contains("AddRenderBatch(root, renderer, BuildMultiMesh", objects);
         // Batches carry their cell centre, not identity: Godot measures a visibility range from the
         // instance origin, so identity would switch every object on its distance from the map origin.

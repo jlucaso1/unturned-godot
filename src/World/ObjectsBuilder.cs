@@ -115,17 +115,25 @@ public static class ObjectsBuilder
         int renderBatches = 0, sparseGroups = 0, sparseExtraBatches = 0;
         if (renderGeometry && EnvFlag.IsOn(OS.GetEnvironment("UG_OBJECT_PROFILE"), whenUnset: false))
             PrintObjectCosts(byMesh, meshLibrary, db);
-        foreach ((Guid guid, List<Transform3D> transforms) in byMesh)
+        if (renderGeometry)
         {
-            if (renderGeometry)
+            // A level index per distinct mesh RESOURCE, which is what "the same mesh" means to the
+            // renderer: two assets ModelLibrary deduplicated onto one ArrayMesh share it. See LevelIndex.
+            var levels = new List<ArrayMesh>();
+            var levelOf = new Dictionary<ulong, int>();
+            var partitioned = new List<RenderBatch>();
+
+            // No MaterialOverride: the mesh's per-submesh surface materials carry the textures.
+            // The lower level is the prefab's own, if it shipped one. AddLevels derives the distance past
+            // which it takes over from the batch it is actually given, so chunked cells switch on their own
+            // largest placement rather than on the whole map's.
+            foreach ((Guid guid, List<Transform3D> transforms) in byMesh)
             {
-                // No MaterialOverride: the mesh's per-submesh surface materials carry the textures.
                 ArrayMesh renderMesh = meshLibrary[guid];
-                // The prefab's own lower level, if it shipped one. AddLevels derives the distance past which
-                // it takes over from the batch it is actually given, so chunked cells switch on their own
-                // largest placement rather than on the whole map's.
                 ArrayMesh? lodMesh = LodEnabled && lod1Library != null
                     && lod1Library.TryGetValue(guid, out ArrayMesh? candidate) ? candidate : null;
+                var key = new RenderMeshKey(LevelIndex(levels, levelOf, renderMesh),
+                    lodMesh == null ? RenderMeshKey.NoLevel : LevelIndex(levels, levelOf, lodMesh));
                 // A visibility range is a property of the whole batch, never of the placements inside it: a
                 // batch spanning the map is wholly near or wholly far, so whichever level it picks says
                 // nothing about the objects the camera is actually looking at — and picking the far level for
@@ -156,17 +164,28 @@ public static class ObjectsBuilder
                         sparseExtraBatches += cells.Count - 1;
                     }
                     foreach (((int x, int z), List<Transform3D> inCell) in cells)
-                    {
-                        renderBatches += AddLevels(root, render, renderMesh, lodMesh, inCell);
-                    }
+                        partitioned.Add(new RenderBatch(key, chunkMetres, inCell));
                 }
                 else
                 {
-                    renderBatches += AddLevels(root, render, renderMesh, lodMesh, transforms);
+                    // No cell size was promised for this group, so no merge may claim one either.
+                    partitioned.Add(new RenderBatch(key, 0f, transforms));
                 }
                 withMesh += transforms.Count;
             }
 
+            List<MergedRenderGroup> submitted = RenderBatchGrouping.Merge(partitioned);
+            foreach (MergedRenderGroup group in submitted)
+                renderBatches += AddLevels(root, render, levels[group.Key.Level0],
+                    group.Key.Level1 == RenderMeshKey.NoLevel ? null : levels[group.Key.Level1],
+                    group.Transforms);
+            if (submitted.Count < partitioned.Count)
+                Log.Print($"[unturned-godot] {label} batch merge: {partitioned.Count} partitioned "
+                    + $"batches share {submitted.Count} co-located mesh batches");
+        }
+
+        foreach ((Guid guid, List<Transform3D> transforms) in byMesh)
+        {
             // Only LARGE/MEDIUM objects block the player (SMALL objects have their collider stripped in
             // Unturned). Resources (trees/rocks/bushes) have no such gate: ResourceSpawnpoint instantiates
             // the Resource prefab with all of its colliders while the resource is alive — and at map load
@@ -226,6 +245,20 @@ public static class ObjectsBuilder
                 $"+{sparseExtraBatches} batches)");
 
         return root;
+    }
+
+    // Placements are collected per GUID because collision, ladders and asset policy are keyed there. The
+    // renderer only cares which mesh RESOURCE a placement draws, and ModelLibrary already hands one
+    // ArrayMesh to every asset whose cached geometry is byte-identical (UG_DEDUP_GPU) — so the RID, not
+    // the GUID, is the identity a batch is keyed on. See RenderBatchGrouping for what may then share one.
+    private static int LevelIndex(List<ArrayMesh> levels, Dictionary<ulong, int> levelOf, ArrayMesh mesh)
+    {
+        ulong rid = mesh.GetRid().Id;
+        if (levelOf.TryGetValue(rid, out int existing))
+            return existing;
+        levelOf.Add(rid, levels.Count);
+        levels.Add(mesh);
+        return levels.Count - 1;
     }
 
     private static float EnvFloat(string name, float fallback, float min, float max) =>

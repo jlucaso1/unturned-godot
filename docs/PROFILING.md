@@ -201,6 +201,23 @@ aggregate-AABB range, so an instance near a chunk edge never fades early. These 
 materials, shadows and world transforms; they change only submission/culling granularity and how quickly
 the already-usable baked navigation graph is refined.
 
+What a batch is keyed on is worth stating separately, because it is not what the placement data is keyed
+on. `ObjectsBuilder` collects placements per asset GUID — collision, ladder volumes and asset policy all
+need that — but a *submission* is keyed on the pair of mesh levels it draws, so two assets that
+`ModelLibrary` handed the same deduplicated `ArrayMesh` can share one batch instead of building two over
+that one mesh. `RenderBatchGrouping` merges the partitioner's batches only where all three hold: the same
+pair of levels (a shared base mesh is not enough — assets with different authored lower levels draw
+different geometry past their switch distance), overlapping placement footprints, and a merged footprint
+that still fits the cell size the partitioner chose. On PEI that takes 573 partitioned batches to 560 and
+908 render batches to 891.
+
+The last two constraints are the whole design, and dropping them is measurably worse. Merging on the mesh
+pair alone — same mesh anywhere on the map — takes PEI's aerial poses from 709 draw calls to 683, but it
+also joins batches sitting in different parts of the island, and the ground pose goes from 623,238
+primitives to 626,052 and `ground_diag` from 692,305 to 695,057. Two batches are two culling decisions;
+one batch is one. Only merging what already sits together keeps the draw-call saving without spending
+rejection to get it.
+
 Every boolean flag below goes through `EnvFlag`, so `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` all
 work, in any case. A value that is none of those is treated as unset and the flag keeps its default —
 previously the value was compared rather than read, so `UG_FOLIAGE_RESIDENCY=false` *enabled* residency
@@ -464,6 +481,28 @@ now build the same scene.
 raw texture key, and a MultiMesh submits one draw per surface whichever material resource that surface
 points at. What this saves is material resources and their GPU parameter buffers, not submissions — measure
 it with the log lines above and `uniqueMaterials`, not with `runtime.drawCalls.median`.
+
+## Where a ground frame's submissions actually go
+
+Before optimizing what is submitted, it is worth knowing which pass submits it. `UG_SHADOW=0` against
+the default is the control, and the answer is lopsided enough to change where the effort goes. Tier 2,
+GPU-less container, shipped defaults (64 m `DirectionalShadowMaxDistance`, 2 splits, blended):
+
+| Pose | PEI draws / primitives | of which shadow pass | Germany draws / primitives | of which shadow pass |
+|---|---:|---:|---:|---:|
+| `ground` | 707 / 624,486 | 332 (47%) / 360,535 (58%) | 1,482 / 1,488,431 | 475 (32%) / 516,264 (35%) |
+| `ground_diag` | 767 / 693,691 | 378 (49%) / 365,908 (53%) | 1,340 / 1,464,999 | 525 (39%) / 542,587 (37%) |
+| `overhead`, `oblique_*`, `zoom`, `tight` | — | **0** | — | **0** |
+
+The elevated poses are byte-identical with shadows off, on both maps: the cascade only reaches 64 m from
+the camera, so from 900 m up nothing is in it and the shadow pass submits nothing at all. At eye level it
+is between a third and a half of everything the frame submits.
+
+That asymmetry is a property of the batch, not of the geometry. A MultiMesh is submitted or culled whole,
+and object cells are 1024 m (or coarser); a cell that reaches within 64 m of the camera has its entire
+instance buffer rasterized into the cascade, however few of those instances could cast a shadow anyone
+can see. Anything aimed at the ground view should be measured against this split rather than against the
+aggregate, and any measurement that moves only the elevated poses has not touched the shadow pass at all.
 
 ## Object LOD ideas that were measured and dropped
 
