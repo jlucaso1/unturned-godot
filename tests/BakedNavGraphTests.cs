@@ -719,6 +719,32 @@ public class BakedNavGraphTests
     }
 
     [Fact]
+    public void ACharacterizationRadius_IsProbedWithoutPoisoningAProductionRadiusCache()
+    {
+        bool blocked = false;
+        int probes = 0;
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { TJunction() }, portalProbe:
+            (from, to, _) =>
+            {
+                probes++;
+                return blocked ? from : to;
+            });
+        Vector3 from = new(0.5f, 0f, 1f), target = new(3.5f, 0f, 1f);
+
+        var open = new List<Vector3>();
+        Assert.True(graph.TryPath(from, target, open, radius: 0.6f));
+        Assert.Equal(target, open[^1]);
+        int afterOpen = probes;
+        Assert.True(afterOpen > 0);
+
+        blocked = true;
+        var closed = new List<Vector3>();
+        Assert.True(graph.TryPath(from, target, closed, radius: 0.6f));
+        Assert.NotEqual(target, closed[^1]);
+        Assert.True(probes > afterOpen, "an arbitrary-radius verdict leaked into a production cache slot");
+    }
+
+    [Fact]
     public void ALongColdStitchedPortal_NeverExceedsThePerPathPhysicsBudget()
     {
         int probes = 0;

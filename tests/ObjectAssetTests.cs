@@ -84,6 +84,38 @@ public class ObjectAssetTests
         Assert.NotEqual(0u, layer & CollisionLayers.World);
     }
 
+    [Fact]
+    public void NonFenceBundleOverridesRemainPassableToZombies()
+    {
+        DatDictionary root = DatParser.Parse(
+            "GUID 2e698a7b85e94c019b3f91ec8796a961\nType Medium\nID 1\n" +
+            "Bundle_Override_Path /Objects/Medium/Furniture/Grave_0\n");
+        Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset? asset));
+        asset.Directory = "/Workshop/Objects/Medium/Holiday/Grave_Snow";
+
+        Assert.Equal(CollisionLayers.MediumFurniture | CollisionLayers.VisionBlocker,
+            ObjectCollisionPolicy.PhysicsLayer(asset));
+    }
+
+    [Theory]
+    [InlineData("Resource", CollisionLayers.World)]
+    [InlineData("Large", CollisionLayers.World | CollisionLayers.VisionBlocker)]
+    [InlineData("Small", 0u)]
+    public void NonMediumObjectTypesKeepTheirExistingCollisionPolicy(string type, uint expectedLayer)
+    {
+        DatDictionary root = DatParser.Parse(
+            $"GUID 2e698a7b85e94c019b3f91ec8796a961\nType {type}\nID 1\n");
+        Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset? asset));
+
+        Assert.Equal(expectedLayer, ObjectCollisionPolicy.PhysicsLayer(asset));
+    }
+
+    [Fact]
+    public void CollisionPolicyRejectsANullAsset()
+    {
+        Assert.Throws<ArgumentNullException>(() => ObjectCollisionPolicy.PhysicsLayer(null!));
+    }
+
     [RealDataFact]
     public void PeiWoodFenceAsset_IsPublishedAsAWorldBarrier()
     {
