@@ -183,6 +183,14 @@ a second full 1.4 GB pass, but it is the most expensive 20 MiB in the file and w
 before anything else is moved behind it.
 
 To A/B a candidate optimization: copy the current implementation into a local variant, `Bench()` both,
-and **gate on an output-equivalence check first**. A variant that skips work the real code does
-(allocations, output structures) will "win" dishonestly — this harness caught exactly that twice, and
-the `bundle` negative result above is what an honest zero looks like.
+and **gate on an output-equivalence check first**. The gate compares the *output* — every value and the
+structure holding it — and a variant that omits output the real code produces will "win" dishonestly.
+This harness caught exactly that twice, and the `bundle` negative result above is what an honest zero
+looks like.
+
+Allocation is measured *after* that gate passes, and reported alongside the time rather than folded into
+it. The two answer different questions: equivalence asks whether the variant still produces what the real
+code produces, and the allocation delta asks what it cost to. Allocating **less** while producing the same
+output is not a failure of the gate — on this reader it is the only optimization the numbers above point
+at. Allocating *more* for a faster time is a cost moved rather than removed, which is why it is reported
+and not hidden.

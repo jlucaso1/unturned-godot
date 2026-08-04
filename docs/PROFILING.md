@@ -64,21 +64,25 @@ suite skips cleanly when its input is missing, so it runs on any machine with so
 Measured with `PerfHarness -- lzma` and `-- bundle` on a 4-vCPU container, against the game's own
 `core_linux.masterbundle` (110.9 MiB on disk, 1,371.9 MiB decompressed, one LZMA block):
 
+Shares are of the 15.14 s these rows total, so they sum to 100%:
+
 | | bytes | time | share |
 |---|---:|---:|---:|
-| LZMA, SerializedFile node | 170.9 MiB | 4.60 s | 30% |
-| LZMA, `.resS` texture node | 1,180.2 MiB | 7.73 s | 51% |
-| LZMA, `.resource` audio node | 20.8 MiB | 2.11 s | 14% |
-| `SerializedFile.Read` | 103,549 objects | 0.01 s | <1% |
+| LZMA, SerializedFile node | 170.9 MiB | 4.60 s | 30.4% |
+| LZMA, `.resS` texture node | 1,180.2 MiB | 7.73 s | 51.1% |
+| LZMA, `.resource` audio node | 20.8 MiB | 2.11 s | 13.9% |
+| `SerializedFile.Read` | 103,549 objects | 0.01 s | 0.1% |
 | `TypeTreeReader.Read`, classes every load scans, once each | 42,010 objects | 0.21 s | 1.4% |
 | re-decoding the AssetBundle container (2 *extra* passes) | 1 object | 0.20 s | 1.3% |
+| `TypeTreeReader.Read`, classes a map places (a bound) | 50,739 objects | 0.28 s | 1.8% |
 
-**The pass is LZMA-bound and nothing else is close.** Decompression is ~98% of it; the object table is
-free, and the TypeTree reader — the obvious-looking target, and the only part of this that is the port's
-own code — is 1.4%. The classes a map places add ~0.28 s on top, so even the loosest reading puts the
-reader at 3-4%: eliminating it entirely would take well under a second off a ~15 s pass.
-Work aimed at cold load time should go at *what is decoded and when* (`ress`, deferral, caching) rather
-than at how fast the port turns already-decoded bytes into values.
+**The pass is LZMA-bound and nothing else is close.** The three LZMA rows are 14.44 s — **95%** of that
+15.14 s, or 97% if the last row (which only a map placing the whole bundle would pay) is left out. The
+object table is free, and the TypeTree reader — the obvious-looking target, and the only part of this
+that is the port's own code — is 1.4% for what every load decodes, 2.7% counting the container repeat
+and 4.6% counting everything a map could place. Eliminating it entirely would take well under a second off
+a ~15 s pass. Work aimed at cold load time should go at *what is decoded and when* (`ress`, deferral,
+caching) rather than at how fast the port turns already-decoded bytes into values.
 
 The one exception, and the cheapest win in the area, is the AssetBundle container. `m_Container` is a
 single object costing ~0.10 s and 51.5 MiB to decode, and `PrefabGraph.ReadContainer`,
