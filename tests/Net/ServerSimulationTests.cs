@@ -302,6 +302,28 @@ public class ServerSimulationTests
         Assert.Equal(Vector3.Zero, state.Position - new Vector3(0, 10f, 0));
     }
 
+    // The other half of the split budget: an ordinary walking step sideways does not buy an arbitrary
+    // climb. Horizontal and vertical are checked independently, so staying inside one of them is not a
+    // licence to leave the other.
+    [Fact]
+    public void TrustedPosition_VerticalBudgetIsNotBoughtByStayingSlowSideways()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, new Vector3(0, 10f, 0));
+        sim.QueueInput(1, new InputCommand(30, 0, 0, false, false, 0, 90,
+            EPlayerStance.Stand, new Vector3(0, 10f, 0), grounded: false));
+        sim.Step();
+
+        // 0.1 m sideways is well inside a walking tick; 60 m up is far outside terminal fall speed over
+        // one, so the claim is refused whole rather than clamped to its acceptable component.
+        sim.QueueInput(1, new InputCommand(31, 0, -1, false, false, 0, 90,
+            EPlayerStance.Stand, new Vector3(0.1f, 70f, 0), grounded: false));
+        sim.Step();
+
+        Assert.True(sim.TryGetState(1, out PlayerMoveState state));
+        Assert.Equal(new Vector3(0, 10f, 0), state.Position);
+    }
+
     [Fact]
     public void TrustedPosition_FastVerticalFallRemainsValid()
     {
