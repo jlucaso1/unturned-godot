@@ -735,6 +735,67 @@ public class BakedNavGraphTests
     }
 
     [Fact]
+    public void IndexedValidationWithoutACollisionResolver_LeavesTheGraphUsable()
+    {
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { Strip(4) },
+            validateIndexedPortals: true);
+        var path = new List<Vector3>();
+
+        Assert.True(graph.TryPath(new Vector3(0.1f, 0f, 0.5f),
+            new Vector3(3.9f, 0f, 0.5f), path));
+        Assert.Equal(2, path.Count);
+    }
+
+    [Fact]
+    public void RouteSweepDefersWhenAStitchedPortalSpentTheWholeProbeBudget()
+    {
+        int probes = 0;
+        NavFlag flag = TJunction(5f, 2.5f);
+        var removed = new Dictionary<NavFlag, HashSet<int>>
+        {
+            [flag] = new HashSet<int> { 4, 5 }, // retain only the lower half of the split seam
+        };
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { flag }, removed,
+            portalProbe: (_, to, _) => { probes++; return to; },
+            validateIndexedPortals: true);
+        Vector3 from = new(0.5f, 0f, 1.25f), target = new(3.5f, 0f, 1.25f);
+
+        Assert.False(graph.TryPath(from, target, new List<Vector3>()));
+        Assert.Equal(BakedNavGraph.PortalProbeBudgetPerPath, probes);
+
+        var path = new List<Vector3>();
+        Assert.True(graph.TryPath(from, target, path), $"probes after second query: {probes}");
+        Assert.Equal(target, path[^1]);
+        Assert.Equal(BakedNavGraph.PortalProbeBudgetPerPath + 1, probes);
+    }
+
+    [Fact]
+    public void ClosestPortalPoint_HandlesOrdinaryAndDegenerateProjectedEdges()
+    {
+        Assert.Equal(new Vector3(1f, 0f, 0f), BakedNavGraph.ClosestPointOnSegmentXZ(
+            new Vector3(1f, 4f, 2f), Vector3.Zero, new Vector3(3f, 0f, 0f)));
+
+        Vector3 verticalA = new(2f, 1f, 3f), verticalB = new(2f, 5f, 3f);
+        Assert.Equal(verticalA, BakedNavGraph.ClosestPointOnSegmentXZ(
+            new Vector3(9f, 0f, 9f), verticalA, verticalB));
+    }
+
+    [Fact]
+    public void FirstActionableWaypoint_MatchesTheFollowersOneMetreDiscardRule()
+    {
+        var path = new[]
+        {
+            Vector3.Zero,
+            new Vector3(0.4f, 0f, 0f),
+            new Vector3(1.2f, 0f, 0f),
+            new Vector3(2f, 0f, 0f),
+        };
+
+        Assert.Equal(2, BakedNavGraph.FirstActionableWaypoint(path, 0));
+        Assert.Equal(3, BakedNavGraph.FirstActionableWaypoint(path, 2));
+    }
+
+    [Fact]
     public void IndexedPortalValidation_IsAlsoActiveAfterLoadingTheCsrCache()
     {
         NavFlag flag = Strip(4);

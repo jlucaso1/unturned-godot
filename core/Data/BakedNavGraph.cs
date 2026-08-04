@@ -106,6 +106,33 @@ public sealed class BakedNavGraph
         Mathf.Abs(point.X - flag.Center.X) <= (flag.Size.X * 0.5f) + margin
         && Mathf.Abs(point.Z - flag.Center.Z) <= (flag.Size.Z * 0.5f) + margin;
 
+    // The follower discards sub-metre waypoints before steering. Route validation must inspect the
+    // same first leg or it can spend its one bounded sweep on a point movement will never target.
+    internal static int FirstActionableWaypoint(IReadOnlyList<Vector3> path, int begin)
+    {
+        Vector3 from = path[begin];
+        int actionable = begin + 1;
+        while (actionable < path.Count - 1)
+        {
+            float dx = path[actionable].X - from.X;
+            float dz = path[actionable].Z - from.Z;
+            if ((dx * dx) + (dz * dz) >= 1f)
+                break;
+            actionable++;
+        }
+        return actionable;
+    }
+
+    internal static Vector3 ClosestPointOnSegmentXZ(Vector3 point, Vector3 a, Vector3 b)
+    {
+        float dx = b.X - a.X, dz = b.Z - a.Z;
+        float lengthSquared = (dx * dx) + (dz * dz);
+        float along = lengthSquared > 1e-10f
+            ? (((point.X - a.X) * dx) + ((point.Z - a.Z) * dz)) / lengthSquared
+            : 0f;
+        return a.Lerp(b, Mathf.Clamp(along, 0f, 1f));
+    }
+
     // Progressive collision reconciliation disables faces monotonically. Keeping the original CSR edges
     // is safe: endpoint lookup and A* both reject disabled faces, while edges between surviving faces are
     // exactly the same as in a freshly rebuilt graph. This makes a usable graph available during the long
@@ -1556,15 +1583,7 @@ public sealed class BakedNavGraph
             if (probeBudget <= 0)
                 return false;
             Vector3 from = output[begin];
-            int actionable = begin + 1;
-            while (actionable < output.Count - 1)
-            {
-                float dx = output[actionable].X - from.X;
-                float dz = output[actionable].Z - from.Z;
-                if ((dx * dx) + (dz * dz) >= 1f) // follower's pickNextWaypointDist = 1 m
-                    break;
-                actionable++;
-            }
+            int actionable = FirstActionableWaypoint(output, begin);
             Vector3 to = output[actionable];
             Vector3 resolved;
             probeBudget--;
@@ -1586,7 +1605,7 @@ public sealed class BakedNavGraph
             {
                 if (_stitchedPortal[portal.EdgeAt] >= 0 || IsTrackedPortal(portal.EdgeAt))
                     continue;
-                Vector3 crossing = ClosestPointXZ(contact, portal.Span.A, portal.Span.B);
+                Vector3 crossing = ClosestPointOnSegmentXZ(contact, portal.Span.A, portal.Span.B);
                 float dx = crossing.X - contact.X, dz = crossing.Z - contact.Z;
                 float distance = (dx * dx) + (dz * dz);
                 if (distance < nearest)
@@ -1613,16 +1632,6 @@ public sealed class BakedNavGraph
             // reconciliation and the movement timeout own that case; inventing a portal verdict here
             // would remove an unrelated edge and make the graph less truthful.
             return true;
-        }
-
-        private static Vector3 ClosestPointXZ(Vector3 point, Vector3 a, Vector3 b)
-        {
-            float dx = b.X - a.X, dz = b.Z - a.Z;
-            float lengthSquared = (dx * dx) + (dz * dz);
-            float along = lengthSquared > 1e-10f
-                ? (((point.X - a.X) * dx) + ((point.Z - a.Z) * dz)) / lengthSquared
-                : 0f;
-            return a.Lerp(b, Mathf.Clamp(along, 0f, 1f));
         }
 
         // A T-junction proves only that two baked faces meet in XZ. It cannot prove that the map's

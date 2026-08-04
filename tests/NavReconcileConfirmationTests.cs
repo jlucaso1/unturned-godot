@@ -300,6 +300,35 @@ public class NavReconcileConfirmationTests
             Array.Empty<bool>(), Array.Empty<float>(), Array.Empty<bool>(), margin: 0.05f));
         Assert.Empty(NavmeshReachability.Unreachable(empty, StepOffset, Array.Empty<float>(),
             Array.Empty<bool>()));
+        Assert.Empty(NavmeshReachability.UnverifiedDrops(empty, StepOffset, Array.Empty<float>(),
+            Array.Empty<bool>(), new HashSet<int>()));
+    }
+
+    [Fact]
+    public void AnIsolatedNearThresholdFaceNeedsNoDestructiveConfirmation()
+    {
+        var isolated = new NavFlag
+        {
+            Vertices = new[] { Vector3.Zero, Vector3.Right, Vector3.Forward },
+            Triangles = new[] { 0, 1, 2 },
+        };
+
+        Assert.Empty(NavmeshReachability.NeedsConfirmation(isolated, StepOffset,
+            new[] { StepOffset }, new[] { true }, new[] { 0.01f }, new[] { false },
+            margin: 0.05f));
+    }
+
+    [Fact]
+    public void UnverifiedDrops_IgnoresUnknownAndAlreadyVerifiedFaces()
+    {
+        NavFlag flag = FlatGrid(1); // two connected faces
+        float[] clearance = { 1f, 1f };
+        bool[] known = { true, false };
+
+        Assert.Equal(new[] { 0 }, NavmeshReachability.UnverifiedDrops(flag, StepOffset,
+            clearance, known, new HashSet<int>()));
+        Assert.Empty(NavmeshReachability.UnverifiedDrops(flag, StepOffset,
+            clearance, known, new HashSet<int> { 0 }));
     }
 
     [Fact]
