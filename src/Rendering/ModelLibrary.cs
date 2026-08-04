@@ -280,8 +280,101 @@ public static class ModelLibrary
 
         // Same angle thresholds the terrain uses: meshoptimizer collapses what it can without folding
         // hard edges, and Godot picks the level from screen coverage at draw time.
+        //
+        // Generated over the WHOLE pool, before slicing, and deliberately so. Godot derives each level's
+        // switch threshold from the surface's own bounding box, and a surface holding only its own
+        // vertices has a tighter box than one holding the mesh's — so slicing first would move 67 of PEI's
+        // 757 surfaces onto their coarser levels nearer the camera. That is a change to what gets
+        // submitted, not to what is resident, and it is not this pass's to make.
         importer.GenerateLods(25f, 60f, new Godot.Collections.Array());
-        return new PreparedMesh(guid, contentKey, importer, surfaces);
+        return new PreparedMesh(guid, contentKey, SliceSurfaces(importer, groups, gverts, gnormals, guvs,
+            hasUv), surfaces);
+    }
+
+    // Each surface re-added over only the vertices its triangles reach, carrying the levels already
+    // generated for it.
+    //
+    // A surface gets its own vertex buffer on the GPU, so handing every one of them the mesh's whole pool
+    // uploads that pool once per surface while each one's triangles only index its own slice. The slice
+    // holds the same vertices, the same attributes and the same triangles — only their numbering changes
+    // — and every generated level travels with it under its original switch threshold, so the mesh draws
+    // exactly what it drew before at exactly the same distances.
+    //
+    // The source mesh is returned unchanged when no surface can be sliced, which is the single-surface
+    // meshes that are most of any map.
+    private static ImporterMesh SliceSurfaces(ImporterMesh source,
+        List<(CachedSubmesh rep, List<int> indices)> groups, Vector3[] gverts, Vector3[] gnormals,
+        Vector2[] guvs, bool hasUv)
+    {
+        var slices = new SurfaceVertexSlice.Result?[groups.Count];
+        bool any = false;
+        for (int s = 0; s < groups.Count; s++)
+        {
+            slices[s] = SurfaceVertexSlice.Compact(groups[s].indices, gverts.Length);
+            any |= slices[s].HasValue;
+        }
+        if (!any)
+            return source;
+
+        var sliced = new ImporterMesh();
+        for (int s = 0; s < groups.Count; s++)
+        {
+            using var lods = new Godot.Collections.Dictionary();
+            Vector3[] sverts = gverts;
+            Vector3[] snormals = gnormals;
+            Vector2[] suvs = guvs;
+            int[] sindices;
+
+            if (slices[s] is { } slice && MoveLods(source, s, slice.Remap, lods))
+            {
+                sverts = SurfaceVertexSlice.Gather(gverts, slice.Kept, gverts.Length);
+                snormals = SurfaceVertexSlice.Gather(gnormals, slice.Kept, gverts.Length);
+                suvs = SurfaceVertexSlice.Gather(guvs, slice.Kept, gverts.Length);
+                sindices = slice.Indices;
+            }
+            else
+            {
+                // Either nothing to slice, or a level reached outside the slice. Re-add the surface whole,
+                // with its own levels, rather than shipping a mesh whose LOD chain lost a level.
+                lods.Clear();
+                if (!MoveLods(source, s, remap: null, lods))
+                    return source; // unreachable without a remap; bail rather than drop levels
+                sindices = groups[s].indices.ToArray();
+            }
+
+            using var arrays = new Godot.Collections.Array();
+            arrays.Resize((int)Mesh.ArrayType.Max);
+            arrays[(int)Mesh.ArrayType.Vertex] = sverts;
+            arrays[(int)Mesh.ArrayType.Normal] = snormals;
+            if (hasUv)
+                arrays[(int)Mesh.ArrayType.TexUV] = suvs;
+            arrays[(int)Mesh.ArrayType.Index] = sindices;
+
+            sliced.AddSurface(Mesh.PrimitiveType.Triangles, arrays, blendShapes: null, lods);
+        }
+        return sliced;
+    }
+
+    // Copies one surface's generated levels into `lods`, keyed by the switch threshold Godot already chose
+    // for them. With a remap, each level's indices move onto the slice; without one they are copied as is.
+    // False means a level reached a vertex the slice does not hold, which the caller answers by not
+    // slicing that surface at all.
+    private static bool MoveLods(ImporterMesh source, int surface, int[]? remap,
+        Godot.Collections.Dictionary lods)
+    {
+        int levels = source.GetSurfaceLodCount(surface);
+        for (int l = 0; l < levels; l++)
+        {
+            int[] indices = source.GetSurfaceLodIndices(surface, l);
+            if (remap != null)
+            {
+                if (SurfaceVertexSlice.Remap(indices, remap) is not { } moved)
+                    return false;
+                indices = moved;
+            }
+            lods[source.GetSurfaceLodSize(surface, l)] = indices;
+        }
+        return true;
     }
 
     // Area-weighted smooth normals over all submeshes (CCW front faces, so the cross product points out).
