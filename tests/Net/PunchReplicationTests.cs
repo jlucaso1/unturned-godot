@@ -196,6 +196,26 @@ public class PunchReplicationTests
         Assert.Equal(1, swings);
     }
 
+    // Inputs are read between steps, so the simulation clock always describes the PREVIOUS tick — and
+    // after a stall, one a long way back. A swing is dated by when its datagram arrived.
+    [Fact]
+    public void Server_DatesASwingByWhenItArrived_NotByTheLastTick()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        sim.QueueInput(1, Attack(), receivedAt: 0);
+        sim.Step();
+        Assert.Single(sim.Gestures);
+
+        // The loop has only managed one tick, so its clock reads 0.08 s. The socket, though, read this
+        // datagram a full cooldown after the first — and that is the elapsed time the rule is about.
+        sim.QueueInput(1, Attack(), receivedAt: ServerSimulation.PunchCooldownSeconds + 0.01);
+        sim.Step();
+
+        Assert.Single(sim.Gestures);
+    }
+
     [Fact]
     public void Server_SeparatesPlayersCooldowns()
     {

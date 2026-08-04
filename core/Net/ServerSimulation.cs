@@ -246,7 +246,11 @@ public sealed class ServerSimulation
         return false;
     }
 
-    public void QueueInput(byte id, in InputCommand input)
+    // Inputs off a real socket carry the moment they arrived. That is the clock the swing rate limit is
+    // measured on, and it is NOT the simulation's: QueueInput runs between steps, so _clock still
+    // describes the previous tick — and after a stall it can describe one a long way back, which would
+    // refuse a swing that really had waited out its cooldown.
+    public void QueueInput(byte id, in InputCommand input, double receivedAt)
     {
         if (!_players.TryGetValue(id, out Entry? entry))
             return;
@@ -290,7 +294,7 @@ public sealed class ServerSimulation
         // the frames around it. Answering on arrival also means the trim can no longer swallow a punch,
         // so nothing has to be carried past it.
         if (input.HasSwing)
-            AcceptSwing(entry, input);
+            AcceptSwing(entry, input, receivedAt);
 
         // The loop plays one frame per tick, so a client that sends faster than the server ticks builds
         // a backlog that never drains — and a backlog is time: the avatar everyone else sees keeps
@@ -303,9 +307,13 @@ public sealed class ServerSimulation
             entry.Inputs.Dequeue();
     }
 
+    // For callers with no clock of their own — tests, and anything driving the simulation directly —
+    // the last tick is the best date available and the one the loop would have used anyway.
+    public void QueueInput(byte id, in InputCommand input) => QueueInput(id, input, _clock);
+
     // One swing, judged once. Repeats of it carry the same number and are recognised as the swing already
     // answered, so losing the first datagram costs nothing and receiving all of them costs nothing either.
-    private void AcceptSwing(Entry entry, in InputCommand input)
+    private void AcceptSwing(Entry entry, in InputCommand input, double receivedAt)
     {
         if (entry.HasSwung && input.SwingSequence == entry.LastSwingSequence)
             return; // a repeat of the swing we already answered
@@ -315,9 +323,9 @@ public sealed class ServerSimulation
         entry.HasSwung = true;
         entry.LastSwingSequence = input.SwingSequence;
 
-        if (_clock - entry.LastSwingAt < PunchCooldownSeconds)
+        if (receivedAt - entry.LastSwingAt < PunchCooldownSeconds)
             return; // faster than the rule allows, whatever the client says its frame numbers were
-        entry.LastSwingAt = _clock;
+        entry.LastSwingAt = receivedAt;
         entry.PendingGesture = Player.PlayerGestures.For(input.SwingFist);
     }
 

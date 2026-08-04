@@ -257,8 +257,10 @@ public sealed class NetServer
                     break;
                 }
             case ENetMessage.Input when session.Joined:
+                // Dated by when it ARRIVED, not by the last tick: the swing rate limit is measured in
+                // real seconds, and a stall is exactly when the two stop being the same thing.
                 if (MalformedPacket.TryDecode(payload, ReadInput, out InputCommand input))
-                    _simulation.QueueInput(session.PlayerId, input);
+                    _simulation.QueueInput(session.PlayerId, input, now);
                 else
                     MalformedPacketsDropped++;
                 break;

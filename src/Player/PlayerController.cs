@@ -58,7 +58,16 @@ public partial class PlayerController : CharacterBody3D
     // both the frame number the server orders our inputs by and the tick PlayerEquipment measures its
     // cooldown in, and two of them would part company the moment a session attached mid-run.
     private uint _tick;
-    private double _tickTimer;
+
+    // The tick is scheduled against elapsed time rather than drained from an accumulator. An accumulator
+    // that subtracts one interval per physics frame runs the tick at the FRAME rate while it works off
+    // whatever a hitch left in it — six ticks inside a tenth of a second — and the hands count their
+    // cooldown in ticks, so the owner would accept and announce a swing the server's real-time rule then
+    // refuses. Here a hitch simply moves the next tick to now: the time a stall ate is gone, not owed.
+    // Advancing by exactly one interval when on schedule is also what keeps this from drifting slow,
+    // which resetting the accumulator would have done.
+    private double _elapsed;
+    private double _nextTickAt = UnturnedGodot.Net.ServerSimulation.TickRate;
     private EAttackInputFlags _primaryPending;
     private EAttackInputFlags _secondaryPending;
 
@@ -237,10 +246,11 @@ public partial class PlayerController : CharacterBody3D
         // because the hands are simulated on it too — a punch has to work the same in a local world as in
         // a joined one. Idle frames still flow to the server so it keeps simulating (gravity) and other
         // players see us stop.
-        _tickTimer += dt;
-        if (_tickTimer >= UnturnedGodot.Net.ServerSimulation.TickRate)
+        _elapsed += dt;
+        if (_elapsed >= _nextTickAt)
         {
-            _tickTimer -= UnturnedGodot.Net.ServerSimulation.TickRate;
+            _nextTickAt = System.Math.Max(_nextTickAt + UnturnedGodot.Net.ServerSimulation.TickRate,
+                _elapsed);
             _tick++;
             // The hands run on the fresh press, once. What goes on the wire afterwards is the swing they
             // threw, announced under a number of its own for a few frames; see AttackEdgeRepeats.
