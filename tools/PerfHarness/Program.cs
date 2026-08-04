@@ -1385,9 +1385,12 @@ public static class Program
 
         // 32 MiB keeps the per-window table readable over a 1.4 GB blob; LZMA_WINDOW=8 resolves the tail
         // finely enough to see where a node's rate changes.
+        // The upper guard matters: `configured << 20` on a large-but-valid long wraps to a non-positive
+        // window, and the read loop below would then decode nothing and report rates over a zero divisor.
+        // Anything out of range keeps the default rather than failing, since this is a diagnostic.
         long window = 32L << 20;
         if (long.TryParse(Environment.GetEnvironmentVariable("LZMA_WINDOW"), out long configured)
-            && configured > 0)
+            && configured > 0 && configured <= (long.MaxValue >> 20))
             window = configured << 20;
 
         Console.WriteLine($"== lzma: decode rate by region over {Path.GetFileName(path)} ==");

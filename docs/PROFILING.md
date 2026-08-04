@@ -84,8 +84,16 @@ exactly the modes the benchmarks run in, so **a measured load never pays the bot
 | LZMA, `.resource` audio node | 20.8 MiB | 2.11 s |
 | a second *extra* container decode (`AudioExtractor.Plan`) | 1 object | 0.09 s |
 
+| only when the face cache is cold | bytes | time |
+|---|---:|---:|
+| a third *extra* container decode (`CharacterModel.ExtractInlineTexture`) | 1 object | 0.09 s |
+
+The two conditions are independent: audio is gated by `PlanAudio`, the face texture by whether
+`user://` already holds that face. A session hitting both totals 15.21 s.
+
 **The pass is LZMA-bound and nothing else is close.** The two always-run LZMA rows are 12.33 s of that
-12.92 s — **95.4%** — and adding the audio block moves the total to 15.12 s and the LZMA share to 95.5%.
+12.92 s — **95.4%**. Adding the audio block moves the total to 15.12 s and the LZMA share to 95.5%; adding
+the cold face cache too makes it 15.21 s and 94.9%.
 The object table is free, and the TypeTree reader — the obvious-looking target, and the only part of this
 that is the port's own code — is **1.7%** for what every load unconditionally scans, 2.1% adding the
 partly-scanned row, and 4.4% counting the container repeat and everything a map could place. Eliminating
