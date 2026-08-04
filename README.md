@@ -73,6 +73,10 @@ GODOT=/usr/bin/godot-mono
 "$GODOT"                                   # windowed, boots to the map browser
 "$GODOT" --headless                        # load + validate the data, then exit
 SCREENSHOT_PATH=/tmp/pei.png "$GODOT" --resolution 1600x900   # render one frame to a PNG
+
+# Linux automation: isolate the game in a headless Gamescope compositor so it cannot steal focus
+SCREENSHOT_PATH=/tmp/pei.png gamescope --backend headless -W 1600 -H 900 -w 1600 -h 900 -- \
+  "$GODOT" --resolution 1600x900
 ```
 
 ```powershell
@@ -110,7 +114,8 @@ to LAN* in the pause menu, or run a dedicated server:
 **Useful environment flags** (mostly for automation and screenshots): `UNTURNED_PATH`, `MAP=Washington`
 (skip the browser and load that map), `SOLO=1` (boot straight into a local session), `FREECAM=1`,
 `JOIN=host:port`, `OPEN_LAN=1`, `PLAYER=1`, `SCREENSHOT_PATH`, `TIME_OF_DAY=0..1`, `DAY_SPEED=N`,
-`NAV_DEBUG=1`, `AUDIO_DEBUG=1`, `REPRO_*` ([docs/REPRO.md](docs/REPRO.md)).
+`NAV_DEBUG=1`, `NAV_PREVIEW=1` (`NAV_XRAY`, `NAV_LIFT`, `NAV_RIM`, `NAV_BEACONS`, `NAV_BOUNDS`),
+`AUDIO_DEBUG=1`, `REPRO_*` ([docs/REPRO.md](docs/REPRO.md)).
 
 ### Export
 
@@ -176,6 +181,14 @@ says why. Each defect has a shape you can recognise once it is drawn:
 | A red rim line in the middle of open floor | A hole: the walkable surface stops there |
 | A patch in its own colour with a beacon over it | An island nothing can walk to from the rest of the map |
 | Magenta box reaching well past the coloured surface | Spawn ground (Bounds.dat, expanded 64 m) with no navmesh under it |
+
+With X-ray off, realised terrain, sidewalks and object floors can hide a baked face that sits slightly
+below them; a missing patch in that view alone is therefore not a navmesh hole. Toggle X-ray and look at
+the red rim: a real topological hole remains empty and has a rim, while an occluded face becomes visible.
+X-ray also reveals legitimate separate floors underground or inside buildings, so their different colours
+are not by themselves defects. The default 0.55 m lift clears ordinary kerbs while leaving walls able to
+occlude the overlay. When the overlay is loaded, **Copy screenshot cmd** includes all of its toggles and
+lift so the runtime capture reproduces the diagnostic view as well as the camera pose.
 
 It reads only the map's `Environment/` folder — no masterbundle, no warm cache, no map preview — so it is up
 in well under a second, and the dock's log summarizes what it found. Islands, rims and everything else come

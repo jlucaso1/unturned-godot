@@ -114,6 +114,8 @@ public partial class NetworkManager : Node
         {
             zombies.PathQuery = _zombieNavigation.Query;
             zombies.PathReady = () => _zombieNavigation?.IsReady == true;
+            zombies.NavmeshProject = _zombieNavigation.ProjectToSurface;
+            zombies.NavmeshSupportsSegment = _zombieNavigation.SupportsLocalSegment;
         }
 
         // PATH_PROBE="x,y,z>x,y,z": log the navmesh route between two points — the exact tool for

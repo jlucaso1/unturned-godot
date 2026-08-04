@@ -103,6 +103,69 @@ public sealed partial class BakedNavGraph
         return best != null && best.FindPath(bestFrom, bestTo, from, bestDestination, path, radius);
     }
 
+    // Local collision recovery must use the walkable surface, not merely the rectangular NavFlag
+    // territory. A point inside that box can still sit in a disabled building footprint, a navmesh
+    // hole, or a different storey. Prefer the enabled face containing its XZ on the closest level.
+    public bool TryProject(Vector3 point, out Vector3 projected)
+    {
+        projected = default;
+        float best = float.MaxValue;
+        bool found = false;
+        foreach (FlagGraph flag in _flags)
+        {
+            if (!flag.Source.ContainsXZ(point)
+                || !flag.TryProjectLocal(point, out Vector3 candidate, out _))
+                continue;
+            float score = candidate.DistanceSquaredTo(point);
+            if (score >= best)
+                continue;
+            best = score;
+            projected = candidate;
+            found = true;
+        }
+        return found;
+    }
+
+    // The baked data can leave disconnected islands on opposite sides of a physically open doorway.
+    // Candidate endpoints remain constrained to enabled faces; continuous support between them belongs
+    // to the caller's authoritative ground sampler, which is what can distinguish that doorway from a
+    // cliff without reintroducing the graph disconnection this fallback exists to repair.
+    internal const float MaxLocalSurfaceSnap = 0.75f;
+
+    public bool SupportsLocalSegment(Vector3 from, Vector3 to, float radius = AgentRadius)
+    {
+        _ = radius;
+        return TryProject(from, out _) && TryProject(to, out _);
+    }
+
+    // Progressive reconciliation keeps answering while the final CSR graph is built. Indexed portals
+    // disproved by live collision are runtime evidence rather than CSR topology, so copy their stable
+    // directed-face identity before swapping graphs. The new graph deliberately revalidates the cached
+    // span, but it never trusts the portal as an ordinary edge again in the meantime.
+    public void PreserveRuntimeEvidenceFrom(BakedNavGraph? previous)
+    {
+        if (previous == null || ReferenceEquals(previous, this))
+            return;
+        foreach (FlagGraph current in _flags)
+            foreach (FlagGraph old in previous._flags)
+                if (ReferenceEquals(current.Source, old.Source))
+                {
+                    current.ImportTrackedPortals(old.SnapshotTrackedPortals());
+                    break;
+                }
+    }
+
+    internal int TrackedPortalCount
+    {
+        get
+        {
+            int count = 0;
+            foreach (FlagGraph flag in _flags)
+                count += flag.TrackedPortalCount;
+            return count;
+        }
+    }
+
     private static bool ContainsExpandedXZ(NavFlag flag, Vector3 point, float margin) =>
         Mathf.Abs(point.X - flag.Center.X) <= (flag.Size.X * 0.5f) + margin
         && Mathf.Abs(point.Z - flag.Center.Z) <= (flag.Size.Z * 0.5f) + margin;
@@ -262,6 +325,7 @@ public sealed partial class BakedNavGraph
     }
 
     private readonly record struct Connection(int To, int VertexA, int VertexB);
+    internal readonly record struct TrackedPortal(int From, int To, int VertexA, int VertexB);
 
     // One gate for all flags because the host's physics query objects and the repro world's candidate
     // buffer are intentionally reused. Queries normally run on the physics thread; the gate also keeps
@@ -1240,6 +1304,56 @@ public sealed partial class BakedNavGraph
             }
         }
 
+        public bool TryProjectContained(Vector3 point, out Vector3 projected, out int triangle)
+        {
+            triangle = ClosestTriangle(point, out _);
+            if (triangle < 0)
+            {
+                projected = default;
+                return false;
+            }
+            Vector3 a = Source.Vertices[Source.Triangles[triangle * 3]];
+            Vector3 b = Source.Vertices[Source.Triangles[(triangle * 3) + 1]];
+            Vector3 c = Source.Vertices[Source.Triangles[(triangle * 3) + 2]];
+            if (!ContainsXZ(a, b, c, point))
+            {
+                projected = default;
+                return false;
+            }
+
+            float denominator = ((b.Z - c.Z) * (a.X - c.X))
+                + ((c.X - b.X) * (a.Z - c.Z));
+            float y;
+            if (MathF.Abs(denominator) <= 1e-8f)
+                y = _centres[triangle].Y;
+            else
+            {
+                float wa = (((b.Z - c.Z) * (point.X - c.X))
+                    + ((c.X - b.X) * (point.Z - c.Z))) / denominator;
+                float wb = (((c.Z - a.Z) * (point.X - c.X))
+                    + ((a.X - c.X) * (point.Z - c.Z))) / denominator;
+                y = (wa * a.Y) + (wb * b.Y) + ((1f - wa - wb) * c.Y);
+            }
+            projected = new Vector3(point.X, y, point.Z);
+            return true;
+        }
+
+        public bool TryProjectLocal(Vector3 point, out Vector3 projected, out int triangle)
+        {
+            if (TryProjectContained(point, out projected, out triangle))
+                return true;
+            triangle = ClosestTriangle(point, out _);
+            if (triangle < 0)
+            {
+                projected = default;
+                return false;
+            }
+            projected = ClosestPointXZ(triangle, point);
+            float dx = projected.X - point.X, dz = projected.Z - point.Z;
+            return (dx * dx) + (dz * dz) <= MaxLocalSurfaceSnap * MaxLocalSurfaceSnap
+                && MathF.Abs(projected.Y - point.Y) <= 0.75f;
+        }
+
         public int Disable(IReadOnlySet<int> triangles)
         {
             int changed = 0;
@@ -1786,13 +1900,70 @@ public sealed partial class BakedNavGraph
         {
             lock (validator.Gate)
             {
-                if (!_trackedPortals.ContainsKey(edgeAt))
-                    _trackedPortals.Add(edgeAt, new PortalCache());
-                int wordAt = edgeAt >> 5;
-                int mask = 1 << (edgeAt & 31);
-                Volatile.Write(ref _trackedPortalBits[wordAt],
-                    Volatile.Read(ref _trackedPortalBits[wordAt]) | mask);
+                TrackPortalLocked(edgeAt);
             }
+        }
+
+        private void TrackPortalLocked(int edgeAt)
+        {
+            if (!_trackedPortals.ContainsKey(edgeAt))
+                _trackedPortals.Add(edgeAt, new PortalCache());
+            int wordAt = edgeAt >> 5;
+            int mask = 1 << (edgeAt & 31);
+            Volatile.Write(ref _trackedPortalBits[wordAt],
+                Volatile.Read(ref _trackedPortalBits[wordAt]) | mask);
+        }
+
+        internal int TrackedPortalCount
+        {
+            get
+            {
+                PortalValidator? validator = _portalValidator;
+                if (validator == null)
+                    return 0;
+                lock (validator.Gate)
+                    return _trackedPortals.Count;
+            }
+        }
+
+        internal List<TrackedPortal> SnapshotTrackedPortals()
+        {
+            var result = new List<TrackedPortal>();
+            PortalValidator? validator = _portalValidator;
+            if (validator == null || _trackedPortalBits.Length == 0)
+                return result;
+            lock (validator.Gate)
+                for (int triangle = 0; triangle + 1 < _edgeStart.Length; triangle++)
+                    for (int edgeAt = _edgeStart[triangle]; edgeAt < _edgeStart[triangle + 1]; edgeAt++)
+                    {
+                        if (_stitchedPortal[edgeAt] >= 0 || !IsTrackedPortal(edgeAt))
+                            continue;
+                        Connection edge = _edges[edgeAt];
+                        result.Add(new TrackedPortal(triangle, edge.To, edge.VertexA, edge.VertexB));
+                    }
+            return result;
+        }
+
+        internal void ImportTrackedPortals(IReadOnlyList<TrackedPortal> portals)
+        {
+            PortalValidator? validator = _portalValidator;
+            if (validator == null || _trackedPortalBits.Length == 0 || portals.Count == 0)
+                return;
+            lock (validator.Gate)
+                foreach (TrackedPortal portal in portals)
+                {
+                    if ((uint)portal.From >= (uint)(_edgeStart.Length - 1))
+                        continue;
+                    for (int edgeAt = _edgeStart[portal.From]; edgeAt < _edgeStart[portal.From + 1]; edgeAt++)
+                    {
+                        Connection edge = _edges[edgeAt];
+                        if (_stitchedPortal[edgeAt] >= 0 || edge.To != portal.To
+                            || edge.VertexA != portal.VertexA || edge.VertexB != portal.VertexB)
+                            continue;
+                        TrackPortalLocked(edgeAt);
+                        break;
+                    }
+                }
         }
 
         private PortalValidation CreatePortalValidation(int triangle, Connection edge, float radius)

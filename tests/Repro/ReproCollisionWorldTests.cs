@@ -107,6 +107,23 @@ public class ReproCollisionWorldTests
     }
 
     [Fact]
+    public void ALongClearanceProbeCannotSkipAThinFenceBetweenFixedSamples()
+    {
+        var geometry = new ReproWorlds.Geometry().Ground()
+            // A fixed 16-sample sweep from -7 to +7 checks x=0 and x=0.875 around this fence.
+            // Neither capsule overlaps there, despite the continuous motion crossing the barrier.
+            .Box("thin fence", new Vector3(0.43f, 1.5f, 0f),
+                new Vector3(0.01f, 1.5f, 5f));
+        ReproCollisionWorld world = World(geometry);
+
+        Vector3 result = world.Resolve(new Vector3(-7f, 0f, 0f),
+            new Vector3(7f, 0f, 0f), Radius);
+
+        Assert.True(result.X < 0.1f, $"long clearance probe skipped the thin fence: {result}");
+        Assert.Equal("thin fence", world.LastBlocker);
+    }
+
+    [Fact]
     public void ADoorway_LetsTheBodyThrough()
     {
         var doorway = new ReproWorlds.Geometry().Ground()

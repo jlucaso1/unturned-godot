@@ -12,13 +12,14 @@ namespace UnturnedGodot.Repro;
 //
 // It models the host's resolver rather than approximating it — the same capsule (ZombieBody), the same
 // four-pass collide-and-slide, the same step-up attempt on first contact, the same ground and vision
-// probes and the same layer masks. What it cannot model is the engine's depenetration of a body that
-// starts inside geometry; there it stops at the surface, which is also what a single CastMotion does.
+// probes and the same layer masks. Initial-overlap recovery uses the captured triangle contacts rather
+// than Godot's solver, but follows the same conservative rule: escape away from the requested barrier.
 public sealed class ReproCollisionWorld
 {
     // How the sweep finds first contact: walk the motion in coarse samples until one overlaps, then
-    // bisect that interval. 16 samples over one tick's 0.44 m step is 2.8 cm of coarse resolution, and
-    // 10 bisections take the answer under a tenth of a millimetre.
+    // bisect that interval. 16 samples over one tick's 0.44 m step is 2.8 cm of coarse resolution.
+    // Navigation also sends multi-metre clearance probes, so their sample count grows with distance;
+    // keeping spacing below half the capsule radius prevents a thin fence from fitting between samples.
     private const int SweepSamples = 16;
     private const int SweepRefinements = 10;
 
@@ -283,10 +284,12 @@ public sealed class ReproCollisionWorld
             return 1f;
 
         float radiusSquared = radius * radius;
+        int samples = Math.Max(SweepSamples,
+            (int)MathF.Ceiling(motion.Length() / MathF.Max(0.05f, radius * 0.5f)));
         float blocked = -1f;
-        for (int sample = 1; sample <= SweepSamples; sample++)
+        for (int sample = 1; sample <= samples; sample++)
         {
-            float time = sample / (float)SweepSamples;
+            float time = sample / (float)samples;
             if (!Overlaps(at + (motion * time) + center, half, radiusSquared, mask,
                     out _, out _, out _))
                 continue;
@@ -296,7 +299,7 @@ public sealed class ReproCollisionWorld
         if (blocked < 0f)
             return 1f;
 
-        float free = blocked - (1f / SweepSamples);
+        float free = blocked - (1f / samples);
         if (free < 0f)
             free = 0f;
         for (int i = 0; i < SweepRefinements; i++)

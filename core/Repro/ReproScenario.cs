@@ -52,6 +52,7 @@ public sealed class ReproScenario
     private readonly Dictionary<int, ZombieInstance> _byId = new();
     private readonly ReproHeightSampler? _heights;
     private readonly ZombiePathQuery? _pathQuery;
+    private readonly BakedNavGraph? _pathGraph;
     private readonly bool _routesAreSliced;
     private readonly float _navmeshRadius;
     private readonly Vector3 _navmeshCentre;
@@ -122,7 +123,10 @@ public sealed class ReproScenario
                 MoveResolver = true,
                 GroundSnap = true,
                 VisionBlocked = true,
-                PhysicalLineBlocked = true,
+                // PhysicalLineBlocked was added together with explicit seam metadata. A legacy dump
+                // cannot have recorded answers for a delegate that did not exist yet; VisionBlocked
+                // remains its historical attack/recovery fallback.
+                PhysicalLineBlocked = false,
                 PathQuery = flags != null,
             };
         if (Oracle != null || Collision != null)
@@ -141,7 +145,15 @@ public sealed class ReproScenario
             // Without a pathfinder handed in, the dump's own navmesh slice becomes one. It routes
             // correctly around the incident and nowhere else, which is the trade a self-contained
             // bug report makes; pass the real map's flags (or a pathfinder) to lift it.
-            _pathQuery = _options.PathQuery ?? BuildGraph(flags, dump.World, _options.NavFlags == null);
+            if (_options.PathQuery != null)
+                _pathQuery = _options.PathQuery;
+            else
+            {
+                _pathGraph = BuildGraph(flags, dump.World, _options.NavFlags == null);
+                _pathQuery = _pathGraph.TryPath;
+                System.NavmeshProject = _pathGraph.TryProject;
+                System.NavmeshSupportsSegment = _pathGraph.SupportsLocalSegment;
+            }
             // Whether that graph covers the whole map or only what the dump sliced out. A slice can
             // only answer near the incident, and a route asked for beyond it comes back "no route"
             // from a graph that simply has no triangles there — which is not the same claim.
@@ -186,7 +198,7 @@ public sealed class ReproScenario
     // numbered differently from the slice, and applying the slice's indices to it would take out faces
     // chosen at random — a worse lie than not applying them at all. A dump from before this was
     // recorded carries none, and behaves as it always did.
-    private ZombiePathQuery BuildGraph(IReadOnlyList<NavFlag> flags, ReproWorldData world,
+    private BakedNavGraph BuildGraph(IReadOnlyList<NavFlag> flags, ReproWorldData world,
         bool flagsAreTheDumps)
     {
         // Excluded at BUILD time, the way the session's own graph was built, rather than disabled
@@ -231,9 +243,8 @@ public sealed class ReproScenario
         BakedNavPortalProbe? portalProbe = Collision == null
             ? null
             : ResolvePortal;
-        BakedNavGraph graph = BakedNavGraph.Build(flags, exclusions.Count > 0 ? exclusions : null,
+        return BakedNavGraph.Build(flags, exclusions.Count > 0 ? exclusions : null,
             portalProbe, validateIndexedPortals: _options.ReconcilePaths);
-        return graph.TryPath;
     }
 
     private bool ProbeNavSurface(Vector3 point, out float y) =>

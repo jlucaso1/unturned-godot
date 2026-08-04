@@ -214,6 +214,51 @@ public class NavmeshReachabilityTests
     }
 
     [Fact]
+    public void OneLocalObstacleDoesNotDeleteAWholeBroadFloorFace()
+    {
+        NavFlag flag = Strip(1, width: 10f);
+        var centres = new Vector3[2];
+        for (int triangle = 0; triangle < 2; triangle++)
+            centres[triangle] = (flag.Vertices[flag.Triangles[triangle * 3]]
+                + flag.Vertices[flag.Triangles[(triangle * 3) + 1]]
+                + flag.Vertices[flag.Triangles[(triangle * 3) + 2]]) / 3f;
+
+        HashSet<int> drop = NavmeshReachability.Unreachable(flag, 0.5f,
+            (Vector3 point, out float y) =>
+            {
+                y = point.DistanceTo(centres[0]) < 0.01f
+                    || point.DistanceTo(centres[1]) < 0.01f ? 1.2f : 0f;
+                return true;
+            });
+
+        Assert.Empty(drop);
+    }
+
+    [Fact]
+    public void AWholeBroadFaceAboveTheStepIsStillRemoved()
+    {
+        NavFlag flag = Strip(1, width: 10f);
+
+        HashSet<int> drop = NavmeshReachability.Unreachable(flag, 0.5f,
+            (Vector3 _, out float y) => { y = 1.2f; return true; });
+
+        Assert.Equal(2, drop.Count);
+    }
+
+    [Fact]
+    public void HalfOfTheMeasuredBroadFaceIsNotAWholeFaceObstruction()
+    {
+        Vector3 a = new(0f, 0f, 0f), b = new(10f, 0f, 0f), c = new(0f, 0f, 10f);
+        Vector3[] points = { a, b, c, (a + b) * 0.5f, (b + c) * 0.5f, (c + a) * 0.5f };
+        float[] surfaces = { 1.2f, 1.2f, 1.2f, 0f, 0f, 0f };
+
+        float climb = NavmeshReachability.RequiredClimbForFace(a, b, c, 0.5f, 1.2f,
+            points, surfaces);
+
+        Assert.Equal(0f, climb);
+    }
+
+    [Fact]
     public void WindowFacesAreRemoved_AndPlannerUsesTheOpenDoorCorridor()
     {
         // Two rooms separated by a raised collision band. The baked ground mesh incorrectly spans the

@@ -83,8 +83,8 @@ public static class NavmeshSurfaceSampling
 
             if (highestClearance != float.MinValue)
             {
-                clearance[triangle] = NavmeshReachability.RequiredClimb(highestClearance,
-                    points[..hitSamples], surfaces[..hitSamples]);
+                clearance[triangle] = NavmeshReachability.RequiredClimbForFace(a, b, c, stepOffset,
+                    highestClearance, points[..hitSamples], surfaces[..hitSamples]);
                 known[triangle] = true;
             }
             slack[triangle] = worstSlack;

@@ -17,6 +17,10 @@ namespace UnturnedGodot.ReproHarness;
 //                                                                       [--reconcile-paths]
 //   dotnet run -c Release --project tools/ReproHarness -- verify  dump.json
 //   dotnet run -c Release --project tools/ReproHarness -- pretty   dump.json [out.json]
+//   dotnet run -c Release --project tools/ReproHarness -- map      dump.json [--output out.svg]
+//                                                                        [--radius 16] [--ticks 5]
+//                                                                        [--recompute-paths]
+//                                                                        [--reconcile-paths]
 //
 // `verify` is the one to run first with a dump someone hands you: it replays the recorded window
 // against the code in your working tree and says whether it still comes out the same. On unmodified
@@ -33,7 +37,7 @@ public static class Program
         if (args.Length < 2)
         {
             Console.Error.WriteLine(
-                "usage: reproharness <info|replay|verify|pretty> <dump.json[.gz]> [options]");
+                "usage: reproharness <info|replay|verify|pretty|map> <dump.json[.gz]> [options]");
             return 2;
         }
 
@@ -63,6 +67,7 @@ public static class Program
             "replay" => Replay(dump, args, verify: false),
             "verify" => Replay(dump, args, verify: true),
             "pretty" => Pretty(dump, args),
+            "map" => Map(dump, args),
             _ => Unknown(command),
         };
     }
@@ -182,6 +187,7 @@ public static class Program
         Console.WriteLine("tick  position                 yaw     state   route  wp  blocked  step");
         Vector3 previous = zombie.Position;
         string lastShape = "";
+        string lastDetour = "";
         for (int i = 0; i < scenario.WindowTicks + Math.Max(0, extra); i++)
         {
             scenario.Step();
@@ -203,6 +209,18 @@ public static class Program
             {
                 Console.WriteLine($"      route: {shape}");
                 lastShape = shape;
+            }
+            string detour = zombie.LastCollisionDetourResult == EZombieCollisionDetourResult.None
+                ? ""
+                : $"{zombie.LastCollisionDetourResult}, {zombie.LastCollisionDetourProbes} motion "
+                    + $"probes, {zombie.LastCollisionDetourRoutePoints} points"
+                    + (zombie.LastCollisionDetourFailedEdge >= 0
+                        ? $", rejected edge {zombie.LastCollisionDetourFailedEdge}"
+                        : "");
+            if (detour != lastDetour)
+            {
+                Console.WriteLine($"      detour: {detour}");
+                lastDetour = detour;
             }
         }
         return 0;
@@ -230,6 +248,62 @@ public static class Program
         dump.Write(output, pretty: true);
         Console.WriteLine($"wrote {output} ({new FileInfo(output).Length / 1024} KB)");
         return 0;
+    }
+
+    private static int Map(ReproDump dump, string[] args)
+    {
+        float? radius = null;
+        if (Option(args, "--radius") is { } radiusText)
+        {
+            if (!float.TryParse(radiusText, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out float parsed)
+                || !float.IsFinite(parsed) || parsed <= 0f)
+            {
+                Console.Error.WriteLine("--radius needs a positive number of metres");
+                return 2;
+            }
+            radius = parsed;
+        }
+
+        int ticks = 0;
+        if (Option(args, "--ticks") is { } ticksText
+            && (!int.TryParse(ticksText, out ticks) || ticks < 0))
+        {
+            Console.Error.WriteLine("--ticks needs a non-negative integer");
+            return 2;
+        }
+
+        IReadOnlyList<ZombieInstance>? zombies = null;
+        if (ticks > 0)
+        {
+            string? level = Option(args, "--level");
+            var scenario = new ReproScenario(dump, new ReproScenarioOptions
+            {
+                UseRecordedAnswers = !Has(args, "--no-oracle"),
+                UseGeometry = !Has(args, "--no-geometry"),
+                RecomputePaths = Has(args, "--recompute-paths"),
+                ReconcilePaths = Has(args, "--reconcile-paths"),
+                NavFlags = LoadNavmesh(level),
+            });
+            for (int i = 0; i < ticks; i++)
+                scenario.Step();
+            zombies = scenario.System.Zombies;
+        }
+
+        string output = Option(args, "--output") ?? MapOutputPath(args[1]);
+        string svg = ReproMapSvg.Render(dump, zombies, ticks, radius);
+        File.WriteAllText(output, svg);
+        Console.WriteLine($"wrote {output} ({new FileInfo(output).Length / 1024} KB)");
+        return 0;
+    }
+
+    private static string MapOutputPath(string input)
+    {
+        string suffix = input.EndsWith(".json.gz", StringComparison.OrdinalIgnoreCase)
+            ? input[..^8]
+            : Path.Combine(Path.GetDirectoryName(input) ?? "",
+                Path.GetFileNameWithoutExtension(input));
+        return suffix + ".map.svg";
     }
 
     private static string? Option(string[] args, string name)

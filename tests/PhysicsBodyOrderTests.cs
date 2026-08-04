@@ -222,9 +222,14 @@ public class PhysicsBodyOrderTests
             StringComparison.Ordinal);
         int accept = source.IndexOf("at += motion", cast, StringComparison.Ordinal);
         int unsafeContact = source.IndexOf("cast[1]", destination, StringComparison.Ordinal);
+        int initialOverlap = source.IndexOf(
+            "TryOverlapCorrection(space, query, motion, out Vector3 initialCorrection)",
+            StringComparison.Ordinal);
 
         Assert.True(cast >= 0 && destination > cast && accept > destination,
             "a clear sweep may be accepted only after its destination capsule is proven unoccupied");
+        Assert.True(initialOverlap >= 0 && initialOverlap < cast,
+            "a long clear sweep may be accepted only after its starting overlap is recovered");
         Assert.True(unsafeContact > accept,
             "the slide normal must be queried at the first unsafe point, not the last safe point");
         Assert.Contains("float safeFraction = destinationOccupied ? 0f : cast[0]", source);

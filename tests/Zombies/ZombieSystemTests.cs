@@ -1387,6 +1387,217 @@ public class ZombieSystemTests
     }
 
     [Fact]
+    public void CollisionRecoveryPhysicsBudget_IsSharedByTheWholeHordeTick()
+    {
+        var system = new ZombieSystem(new[] { Table() }, TwoBounds(), FlatGround);
+        system.Spawn(Enumerable.Range(0, 40).Select(i => At(0f, -40f + (i * 2f))).ToList(),
+            new Random(7));
+        Assert.True(system.Zombies.Count > 1);
+        var player = Player(1, new Vector3(30f, 5f, 0f));
+        system.PathQuery = (_, _, _, _) => false; // routes below remain installed during this tick
+        int moves = 0, grounds = 0;
+        system.MoveResolver = (from, to, _) =>
+        {
+            moves++;
+            const float wallX = 15f;
+            return (from.X - wallX) * (to.X - wallX) <= 0f ? from : to;
+        };
+        system.GroundSnap = (Vector3 point, out float y) =>
+        {
+            grounds++;
+            y = 5f;
+            return true;
+        };
+        foreach (ZombieInstance zombie in system.Zombies)
+        {
+            zombie.Position = new Vector3(14.7f, 5f, zombie.Position.Z);
+            zombie.State = EZombieState.Chase;
+            zombie.TargetPlayer = player.Id;
+            zombie.Yaw = -90f;
+            zombie.RepathTimer = 10f;
+            zombie.BlockedRouteTime = ZombieSystem.BlockedRouteTimeout;
+            zombie.PathPoints.Clear();
+            zombie.PathPoints.Add(zombie.Position);
+            zombie.PathPoints.Add(player.Position);
+            zombie.CurrentWaypointIndex = 1;
+        }
+
+        system.Tick(new[] { player }, ImpassableDt);
+
+        int ordinaryQueries = system.Zombies.Count * 2; // one movement and one ground snap per body
+        Assert.InRange(moves + grounds, 1,
+            ZombieSystem.MaxCollisionDetourPhysicsQueriesPerTick + ordinaryQueries);
+        Assert.True(moves + grounds > ZombieCollisionDetour.MaxPolarEdgeProbes,
+            $"the fixture spent only {moves} move + {grounds} ground queries");
+
+        // The winner clears its failed route; every saturated waiter then becomes the oldest on a
+        // later tick instead of fixed list order giving the same zombie the whole budget forever.
+        for (int tick = 1; tick < system.Zombies.Count * 3; tick++)
+            system.Tick(new[] { player }, ImpassableDt);
+        Assert.All(system.Zombies, zombie =>
+            Assert.Equal(EZombieCollisionDetourResult.SearchFailed,
+                zombie.LastCollisionDetourResult));
+    }
+
+    [Fact]
+    public void CollisionRecoveryAllowsPhysicallyCheckedBoundaryLegsOffTheAuthoredMesh()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        var player = Player(1, new Vector3(10f, 5f, 0f));
+        zombie.State = EZombieState.Chase;
+        zombie.TargetPlayer = player.Id;
+        zombie.Path = EZombiePath.Rush;
+        zombie.Yaw = -90f;
+        zombie.RepathTimer = 10f;
+        zombie.BlockedRouteTime = ZombieSystem.BlockedRouteTimeout;
+        zombie.PathPoints.Add(zombie.Position);
+        zombie.PathPoints.Add(player.Position);
+        zombie.CurrentWaypointIndex = 1;
+        system.PathQuery = (_, _, _, _) => false;
+        system.NavmeshProject = (Vector3 _, out Vector3 projected) =>
+        {
+            projected = default;
+            return false; // both the object floor and target are outside enabled baked faces
+        };
+        system.NavmeshSupportsSegment = (_, _, _) => false;
+        system.MoveResolver = (from, to, _) =>
+            new Vector2(to.X - from.X, to.Z - from.Z).Length() < 1f ? from : to;
+        system.GroundSnap = (Vector3 _, out float y) =>
+        {
+            y = 5f;
+            return true;
+        };
+
+        system.Tick(new[] { player }, ImpassableDt);
+
+        Assert.True(zombie.CollisionEscapeRoute);
+        Assert.Equal(EZombieCollisionDetourResult.Installed, zombie.LastCollisionDetourResult);
+        Assert.Equal(2, zombie.PathPoints.Count); // physically swept start -> target boundary leg
+    }
+
+    [Fact]
+    public void CollisionRecoveryRejectsAnOpenSweepWhoseGroundHasAHole()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        var player = Player(1, new Vector3(10f, 5f, 0f));
+        zombie.State = EZombieState.Chase;
+        zombie.TargetPlayer = player.Id;
+        zombie.Path = EZombiePath.Rush;
+        zombie.Yaw = -90f;
+        zombie.RepathTimer = 10f;
+        zombie.BlockedRouteTime = ZombieSystem.BlockedRouteTimeout;
+        zombie.PathPoints.Add(zombie.Position);
+        zombie.PathPoints.Add(player.Position);
+        zombie.CurrentWaypointIndex = 1;
+        system.PathQuery = (_, _, _, _) => false;
+        system.NavmeshProject = (Vector3 point, out Vector3 projected) =>
+        {
+            projected = point;
+            return true;
+        };
+        system.NavmeshSupportsSegment = (_, _, _) => true;
+        // Ordinary sub-metre movement is pinned to arm recovery; its long validation sweep is clear.
+        system.MoveResolver = (from, to, _) =>
+            new Vector2(to.X - from.X, to.Z - from.Z).Length() < 1f ? from : to;
+        system.GroundSnap = (Vector3 point, out float y) =>
+        {
+            y = 5f;
+            return point.X is < 4f or > 6f;
+        };
+
+        system.Tick(new[] { player }, ImpassableDt);
+
+        Assert.False(zombie.CollisionEscapeRoute);
+        Assert.True(zombie.PathPoints.Count == 0,
+            $"route remained with blocked={zombie.BlockedRouteTime:F2}, state={zombie.State}, "
+            + $"position={zombie.Position}: {string.Join(" ", zombie.PathPoints)}");
+        Assert.True(zombie.RouteEscapingCollision);
+    }
+
+    [Fact]
+    public void CollisionRecoveryRejectsCandidatesOutsideEnabledNavmeshFaces()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        ZombiePlayerView player = ArmCollisionRecovery(zombie);
+        system.PathQuery = (_, _, _, _) => false;
+        system.MoveResolver = (from, _, _) => from;
+        system.NavmeshProject = (Vector3 _, out Vector3 projected) =>
+        {
+            projected = default;
+            return false;
+        };
+
+        system.Tick(new[] { player }, ImpassableDt);
+
+        Assert.Equal(EZombieCollisionDetourResult.SearchFailed, zombie.LastCollisionDetourResult);
+        Assert.False(zombie.CollisionEscapeRoute);
+    }
+
+    [Fact]
+    public void CollisionRecoveryRejectsCandidatesWithoutPhysicalGround()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        ZombiePlayerView player = ArmCollisionRecovery(zombie);
+        system.PathQuery = (_, _, _, _) => false;
+        system.MoveResolver = (from, _, _) => from;
+        system.NavmeshProject = (Vector3 point, out Vector3 projected) =>
+        {
+            projected = point;
+            return true;
+        };
+        system.GroundSnap = (Vector3 _, out float y) =>
+        {
+            y = 0f;
+            return false;
+        };
+
+        system.Tick(new[] { player }, ImpassableDt);
+
+        Assert.Equal(EZombieCollisionDetourResult.SearchFailed, zombie.LastCollisionDetourResult);
+        Assert.False(zombie.CollisionEscapeRoute);
+    }
+
+    [Fact]
+    public void CollisionRecoveryRejectsADirectRouteWhenTerrainSupportIsUnknown()
+    {
+        bool groundKnown = true;
+        bool Ground(float _x, float _z, out float y)
+        {
+            y = 5f;
+            return groundKnown;
+        }
+        var system = new ZombieSystem(new[] { Table() }, TwoBounds(), Ground);
+        system.Spawn(new[] { At(0f, 0f) }, new Random(1));
+        ZombieInstance zombie = Assert.Single(system.Zombies);
+        zombie.Speciality = EZombieSpeciality.Normal;
+        ZombiePlayerView player = ArmCollisionRecovery(zombie);
+        system.PathQuery = (_, _, _, _) => false;
+        system.MoveResolver = (from, to, _) =>
+            new Vector2(to.X - from.X, to.Z - from.Z).Length() < 1f ? from : to;
+        groundKnown = false;
+
+        system.Tick(new[] { player }, ImpassableDt);
+
+        Assert.Equal(EZombieCollisionDetourResult.GroundRejected, zombie.LastCollisionDetourResult);
+        Assert.False(zombie.CollisionEscapeRoute);
+    }
+
+    private static ZombiePlayerView ArmCollisionRecovery(ZombieInstance zombie)
+    {
+        var player = Player(1, new Vector3(10f, 5f, 0f));
+        zombie.State = EZombieState.Chase;
+        zombie.TargetPlayer = player.Id;
+        zombie.Path = EZombiePath.Rush;
+        zombie.Yaw = -90f;
+        zombie.RepathTimer = 10f;
+        zombie.BlockedRouteTime = ZombieSystem.BlockedRouteTimeout;
+        zombie.PathPoints.Add(zombie.Position);
+        zombie.PathPoints.Add(player.Position);
+        zombie.CurrentWaypointIndex = 1;
+        return player;
+    }
+
+    [Fact]
     public void TheFirstUnprovenRecoveryRoute_CannotVetoTheLaterWorkingDetour()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
@@ -2038,7 +2249,10 @@ public class ZombieSystemTests
             system.Tick(new[] { player }, ImpassableDt);
 
         float gap = new Vector2(zombie.Position.X - 10f, zombie.Position.Z).Length();
-        Assert.True(rounded, $"never went round the wall: parked {gap:F2} m out in {zombie.State}");
+        Assert.True(rounded, $"never went round the wall: parked {gap:F2} m out in {zombie.State}; "
+            + $"escape={zombie.RouteEscapingCollision}/{zombie.CollisionEscapeRoute}, "
+            + $"blocked={zombie.BlockedRouteTime:F2}, wp={zombie.CurrentWaypointIndex}: "
+            + string.Join(" ", zombie.PathPoints));
         Assert.True(gap < 1f, $"stopped {gap:F2} m short in {zombie.State} on the stale route");
         Assert.Equal(EZombieState.Attack, zombie.State);
     }

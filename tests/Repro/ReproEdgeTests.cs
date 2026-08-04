@@ -50,6 +50,76 @@ public class ReproEdgeTests
         Assert.Null(bare.System.PhysicalLineBlocked);
     }
 
+    [Fact]
+    public void ALegacyDumpDoesNotInventTheNewPhysicalLineSeam()
+    {
+        var dump = new ReproDump
+        {
+            World = new ReproWorldData
+            {
+                HasNavmesh = false,
+                Bounds = { Box() },
+                Geometry = new ReproWorlds.Geometry().Ground().Build(Vector3.Zero, 8f),
+            },
+            // Null is the defining legacy shape: these per-delegate flags did not exist yet.
+            Zombies = new ReproZombieSection { Seams = null },
+        };
+
+        var scenario = new ReproScenario(dump);
+        Assert.NotNull(scenario.System.MoveResolver);
+        Assert.NotNull(scenario.System.GroundSnap);
+        Assert.NotNull(scenario.System.VisionBlocked);
+        Assert.Null(scenario.System.PhysicalLineBlocked);
+    }
+
+    [Fact]
+    public void ARecordedWorldWithoutAPathQueryDoesNotInventOneFromItsNavmesh()
+    {
+        NavFlag field = ReproWorlds.FlatField();
+        var dump = new ReproDump
+        {
+            World = new ReproWorldData
+            {
+                HasNavmesh = true,
+                Bounds = { Box() },
+                NavFlags = { ReproCapture.Slice(field, new Vector3(6f, 0f, 6f), 6f) },
+            },
+            Zombies = new ReproZombieSection { Seams = new ReproWorldSeams { PathQuery = false } },
+        };
+
+        var scenario = new ReproScenario(dump);
+
+        Assert.Null(scenario.System.PathQuery);
+        Assert.Null(scenario.System.NavmeshProject);
+        Assert.Null(scenario.System.NavmeshSupportsSegment);
+    }
+
+    [Fact]
+    public void ALineWithOnlyOneEndpointInsideTheCollisionSliceIsNotClaimedAsComplete()
+    {
+        var dump = new ReproDump
+        {
+            World = new ReproWorldData
+            {
+                HasNavmesh = false,
+                Bounds = { Box() },
+                Geometry = new ReproWorlds.Geometry().Ground().Build(Vector3.Zero, 8f),
+            },
+            Zombies = new ReproZombieSection
+            {
+                Oracle = new ReproOracleData(), // present, but this particular line was not recorded
+                Seams = new ReproWorldSeams { VisionBlocked = true, PhysicalLineBlocked = true },
+            },
+        };
+        var scenario = new ReproScenario(dump);
+        Vector3 inside = new(0f, 2f, 0f), outside = new(20f, 2f, 0f);
+
+        Assert.False(scenario.System.VisionBlocked!(inside, outside));
+        Assert.False(scenario.System.PhysicalLineBlocked!(inside, outside));
+        Assert.False(scenario.System.VisionBlocked!(outside, inside));
+        Assert.False(scenario.System.PhysicalLineBlocked!(outside, inside));
+    }
+
     // A session and a replay can disagree about ROUTING alone: the live map had the full reconciled
     // graph where a self-contained replay may have only the dump's local slice. Turning the whole oracle
     // off also changes ground and collision, so the two causes cannot be told apart afterwards.

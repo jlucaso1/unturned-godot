@@ -17,7 +17,7 @@ public class ZombieCollisionDetourTests
         var target = new Vector3(2f, 0f, 0f);
 
         Assert.True(planner.TryFind(from, target, 0.4f, Ground,
-            (_, _, _) => true, path));
+            (_, to, _) => to, path));
         Assert.Equal(new[] { from, target }, path);
         Assert.Equal(1, planner.LastProbeCount);
     }
@@ -31,7 +31,7 @@ public class ZombieCollisionDetourTests
         var from = new Vector3(-2f, 0f, 0f);
         var target = new Vector3(2f, 0f, 0f);
 
-        Assert.True(planner.TryFind(from, target, 0.4f, Ground, SegmentClear, first));
+        Assert.True(planner.TryFind(from, target, 0.4f, Ground, Resolve, first));
         Assert.InRange(planner.LastProbeCount, 1, ZombieCollisionDetour.MaxEdgeProbes);
         Assert.True(first.Count > 2, "the physically blocked direct segment was returned");
         Assert.Equal(from, first[0]);
@@ -40,8 +40,41 @@ public class ZombieCollisionDetourTests
             Assert.True(SegmentClear(first[i - 1], first[i], 0.4f),
                 $"unproven edge {first[i - 1]} -> {first[i]}");
 
-        Assert.True(planner.TryFind(from, target, 0.4f, Ground, SegmentClear, second));
+        Assert.True(planner.TryFind(from, target, 0.4f, Ground, Resolve, second));
         Assert.Equal(first, second);
+    }
+
+    [Theory]
+    [InlineData(-0.18f)]
+    [InlineData(-0.06f)]
+    [InlineData(0f)]
+    [InlineData(0.06f)]
+    [InlineData(0.18f)]
+    public void AWallExitDoesNotDependOnThePolarGridsStartingPhase(float startZ)
+    {
+        var planner = new ZombieCollisionDetour();
+        var path = new List<Vector3>();
+        var from = new Vector3(-2f, 0f, startZ);
+        var target = new Vector3(2f, 0f, 0f);
+
+        Assert.True(planner.TryFind(from, target, 0.4f, Ground, Resolve, path));
+        Assert.True(path.Count > 2);
+        Assert.Contains(path, point => MathF.Abs(point.Z) > 4.4f);
+        for (int i = 1; i < path.Count; i++)
+            Assert.True(SegmentClear(path[i - 1], path[i], 0.4f));
+    }
+
+    [Fact]
+    public void ASubFiveCentimetreCollisionStopIsNotMistakenForAClearFence()
+    {
+        var planner = new ZombieCollisionDetour();
+        var path = new List<Vector3>();
+        var from = new Vector3(-2f, 0f, 0f);
+        var target = new Vector3(2f, 0f, 0f);
+
+        Assert.False(planner.TryFind(from, target, 0.4f, Ground,
+            (a, b, _) => b with { X = b.X - 0.02f }, path));
+        Assert.Empty(path);
     }
 
     [Fact]
@@ -53,9 +86,10 @@ public class ZombieCollisionDetourTests
         var target = new Vector3(2f, 0f, 0f);
 
         Assert.False(planner.TryFind(from, target, 0.4f, Ground,
-            (a, b, radius) => SegmentClear(a, b, radius, halfLength: 20f), path));
+            (a, b, radius) => SegmentClear(a, b, radius, halfLength: 20f) ? b : a, path));
         Assert.Empty(path);
-        Assert.Equal(ZombieCollisionDetour.MaxEdgeProbes, planner.LastProbeCount);
+        Assert.InRange(planner.LastProbeCount, ZombieCollisionDetour.MaxPolarEdgeProbes,
+            ZombieCollisionDetour.MaxEdgeProbes);
     }
 
     [Fact]
@@ -67,7 +101,7 @@ public class ZombieCollisionDetourTests
         var target = new Vector3(2f, 0f, 0f);
 
         Assert.True(planner.TryFind(from, target, 0.4f, Ground,
-            (a, b, radius) => SegmentClear(a, b, radius, halfLength: 12f), path));
+            (a, b, radius) => SegmentClear(a, b, radius, halfLength: 12f) ? b : a, path));
         Assert.True(path.Exists(p => MathF.Abs(p.Z) > 12.4f),
             $"route did not go around the deep obstacle: {string.Join(" ", path)}");
         Assert.InRange(planner.LastProbeCount, 1, ZombieCollisionDetour.MaxEdgeProbes);
@@ -81,6 +115,9 @@ public class ZombieCollisionDetourTests
 
     private static bool SegmentClear(Vector3 from, Vector3 to, float radius) =>
         SegmentClear(from, to, radius, halfLength: 4f);
+
+    private static Vector3 Resolve(Vector3 from, Vector3 to, float radius) =>
+        SegmentClear(from, to, radius) ? to : from;
 
     // A zero-thickness wall on x=0, expanded by the body radius exactly as a capsule sweep sees it.
     private static bool SegmentClear(Vector3 from, Vector3 to, float radius, float halfLength)

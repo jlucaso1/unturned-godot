@@ -61,6 +61,8 @@ public partial class DedicatedServer : Node
                 node._selectedColliderGuids = selectedGuids;
                 zombies.PathQuery = node._zombieNavigation.Query;
                 zombies.PathReady = () => node._zombieNavigation?.IsReady == true;
+                zombies.NavmeshProject = node._zombieNavigation.ProjectToSurface;
+                zombies.NavmeshSupportsSegment = node._zombieNavigation.SupportsLocalSegment;
             }
             else
                 navigationField.Release();

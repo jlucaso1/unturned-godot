@@ -36,6 +36,18 @@ public enum EZombiePath : byte
     Right = 2,
 }
 
+// Last bounded local-recovery outcome. This is diagnostic only (not replicated or serialized into the
+// brain state), so the headless repro trace can explain why a body did not receive a physical route.
+public enum EZombieCollisionDetourResult : byte
+{
+    None = 0,
+    Deferred = 1,
+    SearchFailed = 2,
+    NavmeshRejected = 3,
+    GroundRejected = 4,
+    Installed = 5,
+}
+
 public sealed class ZombieInstance
 {
     public ushort Id;
@@ -77,6 +89,10 @@ public sealed class ZombieInstance
     // distinct from an ordinary partial route lets the body finish walking round an in-face obstacle
     // instead of accepting the same blocked graph answer at every repath.
     public bool CollisionEscapeRoute;
+    public EZombieCollisionDetourResult LastCollisionDetourResult;
+    public int LastCollisionDetourProbes;
+    public int LastCollisionDetourRoutePoints;
+    public int LastCollisionDetourFailedEdge = -1;
 
     // ZombieManager.getZombieSpeed with Slow_Movement=false (NORMAL difficulty).
     public float Speed => Speciality switch
@@ -147,6 +163,12 @@ public delegate Vector3 ZombieMoveResolver(Vector3 from, Vector3 to, float radiu
 // the graph — it has to travel with the request.
 public delegate bool ZombiePathQuery(Vector3 from, Vector3 to, List<Vector3> path, float radius);
 
+// Local physical recovery is constrained to enabled baked faces rather than the NavFlag's rectangular
+// territory. The segment predicate permits only the graph's walkable corridor or one bounded authored
+// seam whose physical ground is checked separately by ZombieSystem.
+public delegate bool ZombieNavmeshProject(Vector3 point, out Vector3 projected);
+public delegate bool ZombieNavmeshSegmentProbe(Vector3 from, Vector3 to, float radius);
+
 // Samples the REAL walking surface near a position — object floors, sidewalks, stairs — the way a
 // CharacterController's grounding does, using the current height as the reference so stacked floors
 // resolve to the right one. Null falls back to the terrain heightfield alone.
@@ -183,6 +205,10 @@ public sealed partial class ZombieSystem
     // PEI's map after warm-up, so a saturated budget is ~10 ms of an 80 ms tick — deliberate
     // headroom spent on route freshness.
     public const int MaxRepathsPerTick = 8;
+    internal const int MaxCollisionDetourPhysicsQueriesPerTick =
+        ZombieCollisionDetour.MaxEdgeProbes + (ZombieCollisionDetour.Rings * ZombieCollisionDetour.Spokes)
+        + ZombieCollisionDetour.MaxWallFollowPointProbes
+        + 224; // final-route ground support, never speculative rejected edges
     // A valid slide can deliver less than the requested forward component while still moving around an
     // obstacle. Only sustained near-zero delivery invalidates a route, so a stale path through a window
     // cannot outrank the pathfinder's later partial-but-executable route through the door forever.
@@ -234,6 +260,9 @@ public sealed partial class ZombieSystem
 
     // The Seeker's navmesh pathfinding, wired to the baked graph by the host (optional).
     public ZombiePathQuery? PathQuery;
+
+    public ZombieNavmeshProject? NavmeshProject;
+    public ZombieNavmeshSegmentProbe? NavmeshSupportsSegment;
 
     // False while an attached pathfinder is still publishing/reconciling its graph. This is distinct
     // from PathQuery returning false for a READY graph, which means the destination is unreachable.
@@ -351,6 +380,26 @@ public sealed partial class ZombieSystem
         // The bug-repro recorder brackets the tick here (ZombieSystemState.cs): everything below is
         // what a dump has to be able to put back, and the state it must be put back to is this one.
         Observer?.BeginTick(this, players, dt);
+        // A blocked horde shares one physical-query allowance. Without this, every body crossing the
+        // timeout in the same frame could synchronously spend a full 1,024-edge local search plus its
+        // 288 ground candidates against Godot physics.
+        _collisionDetourPhysicsBudget = MaxCollisionDetourPhysicsQueriesPerTick;
+        // A failed local search can consume that entire allowance. Grant the first heavy recovery to
+        // the body carrying the most blocked-route evidence; bodies not granted keep their saturated
+        // evidence for the next tick. Once the winner is reset, the next-oldest waiter naturally wins,
+        // so fixed simulation order cannot let one permanently blocked zombie starve the rest.
+        _collisionDetourGranted = null;
+        float oldestBlocked = BlockedRouteTimeout - MathF.Max(0f, dt);
+        for (int i = 0; i < _zombies.Count; i++)
+        {
+            ZombieInstance candidate = _zombies[i];
+            if (candidate.PathPoints.Count == 0
+                || candidate.State is not (EZombieState.Chase or EZombieState.Attack or EZombieState.Return)
+                || candidate.BlockedRouteTime + 1e-6f < oldestBlocked)
+                continue;
+            oldestBlocked = candidate.BlockedRouteTime;
+            _collisionDetourGranted = candidate;
+        }
         // Poll the asynchronously published pathfinder once per authoritative tick, not once per hunter.
         // A horde must not turn one readiness check into hundreds of identical calls.
         _pathReadyThisTick = PathQuery != null && (PathReady?.Invoke() ?? true);
@@ -406,6 +455,8 @@ public sealed partial class ZombieSystem
     }
 
     private int _repathCursor;
+    private int _collisionDetourPhysicsBudget;
+    private ZombieInstance? _collisionDetourGranted;
 
     // PlayerStance's 0.1 s stealth alert per player, against the zombies of the player's nav region.
     // (Indexed loops throughout: foreach over the IReadOnlyList interface boxes an enumerator per call,
@@ -974,9 +1025,10 @@ public sealed partial class ZombieSystem
         }
         else
         {
+            float pickNext = zombie.CollisionEscapeRoute ? 0.2f : PickNextWaypointDist;
             while (index < vp.Count - 1
                 && HorizontalDistanceSquared(vp[index], zombie.Position)
-                    < PickNextWaypointDist * PickNextWaypointDist)
+                    < pickNext * pickNext)
                 index++;
             segmentStart = vp[index - 1];
         }
@@ -1263,6 +1315,16 @@ public sealed partial class ZombieSystem
         if (zombie.BlockedRouteTime + 1e-6f < BlockedRouteTimeout)
             return;
 
+        if (!ReferenceEquals(_collisionDetourGranted, zombie))
+        {
+            // Do not discard the evidence while this tick's bounded physics allowance belongs to an
+            // older waiter. Keeping it saturated makes this body eligible again immediately next tick.
+            zombie.BlockedRouteTime = BlockedRouteTimeout;
+            SetCollisionDetourDiagnostic(zombie, EZombieCollisionDetourResult.Deferred,
+                probes: 0, routePoints: 0);
+            return;
+        }
+
         // The physics world is authoritative: after sustained failure this route is demonstrably stale.
         // Clear it before the next repath so a partial route with a worse endpoint can be considered on
         // executability instead of losing forever to the blocked route's perfect endpoint score. Remember
@@ -1289,9 +1351,39 @@ public sealed partial class ZombieSystem
     {
         if (MoveResolver == null)
             return false;
-        if (!_collisionDetour.TryFind(from, destination, zombie.Radius, DetourPoint,
-                CapsuleCanReach, _scratchPath))
+        if (_collisionDetourPhysicsBudget <= 0)
+        {
+            SetCollisionDetourDiagnostic(zombie, EZombieCollisionDetourResult.Deferred,
+                probes: 0, routePoints: 0);
             return false;
+        }
+        if (!_collisionDetour.TryFind(from, destination, zombie.Radius, DetourPoint,
+            ResolveCollisionDetourMotion, _scratchPath))
+        {
+            SetCollisionDetourDiagnostic(zombie, EZombieCollisionDetourResult.SearchFailed);
+            return false;
+        }
+        for (int i = 1; i < _scratchPath.Count; i++)
+            // PointProbe already constrained every generated waypoint to an enabled face. The body
+            // and the final target are deliberately exempt: either can stand on a real object floor
+            // omitted/disabled in the baked mesh, which is the graph seam this fallback repairs.
+            // Validate only generated-to-generated edges against nav topology; every edge, including
+            // the two boundary legs, is still checked continuously against physical ground below.
+            if (i > 1 && i < _scratchPath.Count - 1
+                && NavmeshSupportsSegment?.Invoke(
+                    _scratchPath[i - 1], _scratchPath[i], zombie.Radius) == false)
+            {
+                SetCollisionDetourDiagnostic(zombie, EZombieCollisionDetourResult.NavmeshRejected, i);
+                _scratchPath.Clear();
+                return false;
+            }
+            else if (!PhysicalGroundSupportsSegment(
+                _scratchPath[i - 1], _scratchPath[i], zombie.Radius))
+            {
+                SetCollisionDetourDiagnostic(zombie, EZombieCollisionDetourResult.GroundRejected, i);
+                _scratchPath.Clear();
+                return false;
+            }
         zombie.PathPoints.Clear();
         zombie.PathPoints.AddRange(_scratchPath);
         zombie.CurrentWaypointIndex = 1;
@@ -1300,27 +1392,89 @@ public sealed partial class ZombieSystem
         zombie.RouteServedAnotherTarget = false;
         zombie.CollisionEscapeRoute = true;
         zombie.RepathTimer = RepathRate;
+        SetCollisionDetourDiagnostic(zombie, EZombieCollisionDetourResult.Installed);
         return true;
+    }
+
+    private void SetCollisionDetourDiagnostic(ZombieInstance zombie,
+        EZombieCollisionDetourResult result, int failedEdge = -1,
+        int probes = -1, int routePoints = -1)
+    {
+        zombie.LastCollisionDetourResult = result;
+        zombie.LastCollisionDetourProbes = probes >= 0 ? probes : _collisionDetour.LastProbeCount;
+        zombie.LastCollisionDetourRoutePoints = routePoints >= 0 ? routePoints : _scratchPath.Count;
+        zombie.LastCollisionDetourFailedEdge = failedEdge;
     }
 
     private bool DetourPoint(Vector3 point, out Vector3 grounded)
     {
-        grounded = point;
-        if (!CheckNavigation(point))
-            return false;
+        if (NavmeshProject != null)
+        {
+            if (!NavmeshProject(point, out grounded))
+                return false;
+        }
+        else
+        {
+            grounded = point;
+            if (!CheckNavigation(point))
+                return false;
+        }
         if (GroundSnap != null)
         {
-            if (!GroundSnap(point, out float y))
+            if (!SpendCollisionDetourPhysicsQuery()
+                || !GroundSnap(grounded, out float y))
                 return false;
             grounded.Y = y;
         }
         return true;
     }
 
-    private bool CapsuleCanReach(Vector3 from, Vector3 target, float radius)
+    private Vector3 ResolveCollisionDetourMotion(Vector3 from, Vector3 target, float radius)
     {
-        Vector3 resolved = MoveResolver!(from, target, radius);
-        return resolved.DistanceSquaredTo(target) <= 0.05f * 0.05f;
+        if (!SpendCollisionDetourPhysicsQuery())
+            return from;
+        return MoveResolver!(from, target, radius);
+    }
+
+    private bool PhysicalGroundSupportsSegment(Vector3 from, Vector3 target, float radius)
+    {
+        float horizontal = MathF.Sqrt(HorizontalDistanceSquared(from, target));
+        if (horizontal <= 1e-5f)
+            return true;
+        float spacing = MathF.Max(0.25f, radius);
+        int intervals = Math.Max(1, (int)MathF.Ceiling(horizontal / spacing));
+        float step = horizontal / intervals;
+        float maxVerticalStep = MathF.Max(PlayerConfig.StepOffset,
+            MathF.Tan(Mathf.DegToRad(PlayerConfig.MaxWalkableSlopeDegrees)) * step) + 0.05f;
+        float previous = from.Y;
+        for (int i = 1; i <= intervals; i++)
+        {
+            Vector3 sample = from.Lerp(target, i / (float)intervals);
+            float y;
+            if (GroundSnap != null)
+            {
+                if (!SpendCollisionDetourPhysicsQuery() || !GroundSnap(sample, out y))
+                    return false;
+            }
+            else if (!_ground(sample.X, sample.Z, out y))
+                return false;
+            // A missing floor or cliff is the dangerous case: the horizontal capsule sweep cannot see
+            // support disappearing beneath it. Upward geometry is already authoritative in MoveResolver
+            // and a nearby counter top can legitimately win GroundSnap without lying on the centreline,
+            // so treating every upward sample as the path's floor rejects open door/counter routes.
+            if (previous - y > maxVerticalStep)
+                return false;
+            previous = y;
+        }
+        return true;
+    }
+
+    private bool SpendCollisionDetourPhysicsQuery()
+    {
+        if (_collisionDetourPhysicsBudget <= 0)
+            return false;
+        _collisionDetourPhysicsBudget--;
+        return true;
     }
 
     private static void Face(ZombieInstance zombie, Vector3 targetPosition, float dt)

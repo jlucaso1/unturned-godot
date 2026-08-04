@@ -107,6 +107,29 @@ public class BakedNavGraphTests
     }
 
     [Fact]
+    public void LocalRecoveryProjectionCannotLandInsideALargeDisabledFootprint()
+    {
+        NavFlag flag = Strip(5);
+        var removed = new Dictionary<NavFlag, HashSet<int>>
+        {
+            [flag] = new HashSet<int> { 2, 3, 4, 5 }, // two-metre hole from x=1 through x=3
+        };
+        BakedNavGraph graph = BakedNavGraph.Build(new[] { flag }, removed);
+
+        Assert.True(graph.TryProject(new Vector3(0.4f, 0.2f, 0.5f), out Vector3 enabled));
+        Assert.Equal(new Vector3(0.4f, 0f, 0.5f), enabled);
+        Assert.True(graph.TryProject(new Vector3(1.6f, 0f, 0.5f), out Vector3 nearEdge));
+        Assert.Equal(1f, nearEdge.X, 3); // bounded snap to the nearest enabled face
+        Assert.False(graph.TryProject(new Vector3(2f, 0f, 0.5f), out _));
+        Assert.True(graph.SupportsLocalSegment(
+            new Vector3(0.4f, 0f, 0.5f), new Vector3(0.8f, 0f, 0.5f)));
+        Assert.False(graph.SupportsLocalSegment(
+            new Vector3(0.4f, 0f, 0.5f), new Vector3(2f, 0f, 0.5f)));
+        Assert.False(graph.SupportsLocalSegment(
+            new Vector3(2f, 0f, 0.5f), new Vector3(0.4f, 0f, 0.5f)));
+    }
+
+    [Fact]
     public void EndpointsMustShareAnAuthoredFlag()
     {
         NavFlag left = Strip(1);
@@ -716,6 +739,43 @@ public class BakedNavGraphTests
         Assert.NotEqual(target, safe[^1]);
         Assert.True(safe[^1].X < 2f);
         Assert.InRange(probes - afterLearning, 1, 2); // bounded safe-leg checks, no full-span re-sampling
+    }
+
+    [Fact]
+    public void ReplacingAProgressiveGraphPreservesLearnedIndexedPortalEvidence()
+    {
+        NavFlag flag = Strip(4);
+        int oldProbes = 0;
+        BakedNavGraph progressive = BakedNavGraph.Build(new[] { flag },
+            portalProbe: ThinFenceProbe(2f, () => oldProbes++),
+            validateIndexedPortals: true);
+        Vector3 from = new(0.1f, 0f, 0.5f), target = new(3.9f, 0f, 0.5f);
+
+        Assert.False(progressive.TryPath(from, target, new List<Vector3>()));
+        Assert.True(progressive.TrackedPortalCount > 0);
+
+        int finalProbes = 0;
+        BakedNavGraph final = BakedNavGraph.Build(new[] { flag },
+            portalProbe: ThinFenceProbe(2f, () => finalProbes++),
+            validateIndexedPortals: true);
+        final.PreserveRuntimeEvidenceFrom(null);
+        final.PreserveRuntimeEvidenceFrom(final);
+        Assert.Equal(0, final.TrackedPortalCount);
+        final.PreserveRuntimeEvidenceFrom(progressive);
+        Assert.Equal(progressive.TrackedPortalCount, final.TrackedPortalCount);
+
+        BakedNavGraph unrelated = BakedNavGraph.Build(new[] { Strip(1) },
+            portalProbe: ThinFenceProbe(2f, () => { }), validateIndexedPortals: true);
+        unrelated.PreserveRuntimeEvidenceFrom(progressive);
+        Assert.Equal(0, unrelated.TrackedPortalCount);
+
+        // The replacement revalidates the cached span, but it already knows that this is a physical
+        // portal rather than briefly publishing the geometrically straight route again.
+        var safe = new List<Vector3>();
+        Assert.True(final.TryPath(from, target, safe));
+        Assert.NotEqual(target, safe[^1]);
+        Assert.True(safe[^1].X < 2f);
+        Assert.True(finalProbes > 0);
     }
 
     [Fact]

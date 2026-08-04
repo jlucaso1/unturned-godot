@@ -456,7 +456,7 @@ public class NavReconcileConfirmationTests
                 }
             known[t] = highestClearance != float.MinValue;
             surface[t] = known[t]
-                ? NavmeshReachability.RequiredClimb(highestClearance,
+                ? NavmeshReachability.RequiredClimbForFace(a, b, c, StepOffset, highestClearance,
                     points.AsSpan(0, samples), heights.AsSpan(0, samples)) : 0f;
         }
 

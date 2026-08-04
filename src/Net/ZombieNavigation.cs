@@ -21,6 +21,8 @@ public sealed class ZombieNavigation
     private bool _disposed;
 
     public ZombiePathQuery Query { get; }
+    public ZombieNavmeshProject ProjectToSurface { get; }
+    public ZombieNavmeshSegmentProbe SupportsLocalSegment { get; }
 
     public bool IsReady => !_disposed && _ready && _bakedGraph != null;
 
@@ -85,6 +87,15 @@ public sealed class ZombieNavigation
                 RecordDetour(from, to, path);
             return found;
         };
+        ProjectToSurface = (Vector3 point, out Vector3 projected) =>
+        {
+            if (_bakedGraph != null)
+                return _bakedGraph.TryProject(point, out projected);
+            projected = default;
+            return false;
+        };
+        SupportsLocalSegment = (from, to, radius) =>
+            _bakedGraph?.SupportsLocalSegment(from, to, radius) == true;
     }
 
     // NAV_DEBUG=1 diagnostics: how far each route wanders compared with flying straight there. A route
@@ -135,8 +146,10 @@ public sealed class ZombieNavigation
             return;
 
         var watch = Stopwatch.StartNew();
-        _bakedGraph = BakedNavGraph.Build(_flags, _unreachable, _portalProbe,
+        BakedNavGraph graph = BakedNavGraph.Build(_flags, _unreachable, _portalProbe,
             validateIndexedPortals: true);
+        graph.PreserveRuntimeEvidenceFrom(_bakedGraph);
+        _bakedGraph = graph;
         _ready = true;
         int graphTriangles = 0, graphDropped = 0;
         foreach (NavFlag flag in _flags)
@@ -187,6 +200,7 @@ public sealed class ZombieNavigation
         if (cacheWarning != null)
             Log.PushWarning($"[nav] CSR cache write failed ({cacheWarning})");
 
+        graph.PreserveRuntimeEvidenceFrom(_bakedGraph);
         _bakedGraph = graph;
         _ready = true;
         int graphTriangles = 0, graphDropped = 0;
@@ -788,7 +802,7 @@ public sealed class ZombieNavigation
                 }
             }
             clearance[triangle] = highestClearance == float.MinValue ? 0f
-                : NavmeshReachability.RequiredClimb(highestClearance,
+                : NavmeshReachability.RequiredClimbForFace(a, b, c, stepOffset, highestClearance,
                     surfacePoints.AsSpan(0, hitSamples), surfaceY.AsSpan(0, hitSamples));
             known[triangle] = highestClearance != float.MinValue;
         }

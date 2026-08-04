@@ -83,6 +83,26 @@ internal static class ZombiePhysics
             float initialHorizontalSquared = (motion.X * motion.X) + (motion.Z * motion.Z);
             bool longClearanceProbe = initialHorizontalSquared
                 > ZombieBody.MaxStepMotion * ZombieBody.MaxStepMotion;
+
+            // CastMotion ignores an overlap at the starting transform. Endpoint occupancy protects a
+            // real sub-metre movement because it cannot cross a fence plus the capsule diameter in one
+            // tick, but a multi-metre navigation probe can begin embedded and end clean on the other
+            // side. Recover that overlap before allowing its clear-cast fast path.
+            if (longClearanceProbe)
+            {
+                query.Transform = new Transform3D(Basis.Identity, at + chest);
+                query.Motion = Vector3.Zero;
+                if (TryOverlapCorrection(space, query, motion, out Vector3 initialCorrection))
+                {
+                    if (initialCorrection.LengthSquared() <= 1e-10f
+                        || initialCorrection.LengthSquared() > radius * radius * 4f)
+                    {
+                        return at;
+                    }
+                    at += initialCorrection + (initialCorrection.Normalized() * 0.001f);
+                    motion = to - at;
+                }
+            }
             for (int pass = 0; pass < ZombieBody.MaxSlides; pass++)
             {
                 if (motion.LengthSquared() < 1e-8f)
@@ -121,19 +141,8 @@ internal static class ZombiePhysics
                 {
                     query.Transform = new Transform3D(Basis.Identity, at + chest);
                     query.Motion = Vector3.Zero;
-                    Godot.Collections.Array<Vector3> contacts = space.CollideShape(query, 8);
-                    Vector3 correction = Vector3.Zero;
-                    for (int i = 0; i + 1 < contacts.Count; i += 2)
-                    {
-                        Vector3 candidate = contacts[i + 1] - contacts[i];
-                        Vector3 flatCandidate = candidate with { Y = 0f };
-                        Vector3 flatRequested = motion with { Y = 0f };
-                        if (flatCandidate.Dot(flatRequested) > 0f)
-                            candidate = -candidate;
-                        if (candidate.LengthSquared() > correction.LengthSquared())
-                            correction = candidate;
-                    }
-                    if (correction.LengthSquared() > 1e-10f
+                    if (TryOverlapCorrection(space, query, motion, out Vector3 correction)
+                        && correction.LengthSquared() > 1e-10f
                         && correction.LengthSquared() <= radius * radius * 4f)
                     {
                         at += correction + (correction.Normalized() * 0.001f);
@@ -222,5 +231,25 @@ internal static class ZombiePhysics
             }
             return ground(position.X, position.Z, out y);
         };
+    }
+
+    private static bool TryOverlapCorrection(PhysicsDirectSpaceState3D space,
+        PhysicsShapeQueryParameters3D query, Vector3 requestedMotion, out Vector3 correction)
+    {
+        Godot.Collections.Array<Vector3> contacts = space.CollideShape(query, 8);
+        correction = Vector3.Zero;
+        if (contacts.Count == 0)
+            return false;
+        for (int i = 0; i + 1 < contacts.Count; i += 2)
+        {
+            Vector3 candidate = contacts[i + 1] - contacts[i];
+            Vector3 flatCandidate = candidate with { Y = 0f };
+            Vector3 flatRequested = requestedMotion with { Y = 0f };
+            if (flatCandidate.Dot(flatRequested) > 0f)
+                candidate = -candidate;
+            if (candidate.LengthSquared() > correction.LengthSquared())
+                correction = candidate;
+        }
+        return true;
     }
 }

@@ -23,6 +23,11 @@ namespace UnturnedGodot.Data;
 // pass an analytic surface.
 public static class NavmeshReachability
 {
+    // Removing a whole broad Recast face for one local object turns a counter-sized obstruction into a
+    // room-sized navmesh hole. Below this area a face itself is local enough to be the cut; above it,
+    // destructive reconciliation requires a majority of its measured surface to exceed the body step.
+    private const float BroadFaceArea = 4f;
+
     // The real walking surface under a point. False when there is nothing there at all, in which case
     // the baked data is trusted rather than second-guessed.
     public delegate bool SurfaceProbe(Vector3 point, out float y);
@@ -72,7 +77,7 @@ public static class NavmeshReachability
 
             if (highestClearance == float.MinValue)
                 continue; // nothing under the whole face: leave the baked data alone
-            clearance[t] = RequiredClimb(highestClearance,
+            clearance[t] = RequiredClimbForFace(a, b, c, stepOffset, highestClearance,
                 pointSamples.AsSpan(0, samples), surfaceSamples.AsSpan(0, samples));
             known[t] = true;
         }
@@ -102,6 +107,30 @@ public static class NavmeshReachability
                     steepestRise = MathF.Max(steepestRise, rise);
             }
         return MathF.Max(0f, MathF.Max(highestClearance, steepestRise));
+    }
+
+    // Recast can cover a room with a handful of large triangles. A downward sample that happens to hit
+    // a counter, sill, or roof proves that local point blocked; it does not prove the other ten square
+    // metres of the same triangle unwalkable. Since the graph cannot subtract a small polygon from one
+    // face, keep a broad mixed face and let the authoritative capsule/portal checks handle that local
+    // object. Uniform or majority obstruction still removes it, as do all obstacles on small faces.
+    public static float RequiredClimbForFace(Vector3 a, Vector3 b, Vector3 c, float stepOffset,
+        float highestClearance, ReadOnlySpan<Vector3> points, ReadOnlySpan<float> surfaces)
+    {
+        float required = RequiredClimb(highestClearance, points, surfaces);
+        if (required <= stepOffset || surfaces.Length == 0)
+            return required;
+
+        Vector3 cross = (b - a).Cross(c - a);
+        float area = MathF.Abs(cross.Y) * 0.5f;
+        if (area <= BroadFaceArea)
+            return required;
+
+        int overStep = 0;
+        for (int i = 0; i < surfaces.Length; i++)
+            if (surfaces[i] - points[i].Y > stepOffset)
+                overStep++;
+        return overStep * 2 > surfaces.Length ? required : 0f;
     }
 
     // The decision itself, over already-sampled clearances above the authored face. Split out so a caller

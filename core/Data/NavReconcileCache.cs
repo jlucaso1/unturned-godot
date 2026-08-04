@@ -25,7 +25,9 @@ public static class NavReconcileCache
     // absolute heights between broad neighbours. Version 5 can contain false holes on continuous slopes.
     // 7: clearance also includes a physical rise steeper than the walkable slope within one face, so a
     // vertical wall cannot hide merely because Recast authored that face near the top of its sill.
-    public const int AlgorithmVersion = 7;
+    // 8: a single local high sample no longer deletes an entire broad face; those mixed faces remain
+    // available to the capsule and portal validators instead of becoming room-sized navigation holes.
+    public const int AlgorithmVersion = 8;
 
     public static string Fingerprint(string levelDir, string colliderCacheDir)
         => Fingerprint(levelDir, colliderCacheDir, selectedColliders: null);
