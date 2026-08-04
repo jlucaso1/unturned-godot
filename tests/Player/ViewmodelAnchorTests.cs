@@ -36,6 +36,41 @@ public class ViewmodelAnchorTests
         Assert.Equal(-0.57f, (stale + crouched).Y, 5);
     }
 
+    // The bug this whole anchor turned on. The head BONE is a joint at the neck; the prefab hangs the
+    // viewpoint an authored distance further along the head (Skull/Spot, which the game itself pairs with
+    // its first-person camera). Anchoring the joint puts the camera most of half a metre too low — inside
+    // the neck, with the head above the view and the shoulders at exactly eye level.
+    [Fact]
+    public void TheEyeIsTheAuthoredOffset_NotTheJoint()
+    {
+        var neck = new Transform3D(Basis.Identity, new Vector3(0f, 1.3202f, 0f)); // Skull, as posed
+        var alongTheHead = new Vector3(0f, 0.45f, 0f);                            // Spot, in its frame
+
+        Vector3 eye = ViewmodelAnchor.Eye(neck, alongTheHead);
+        Assert.Equal(1.7702f, eye.Y, 4);
+
+        // Anchoring the joint leaves the eye 0.45 m ABOVE the camera — which is to say the camera ends up
+        // that far down inside the neck, with the whole head still overhead and in shot.
+        Assert.Equal(0.45f, (ViewmodelAnchor.RigPosition(neck.Origin, Vector3.Zero) + eye).Y, 4);
+        // Anchoring the eye lands it on the camera, which is the invariant above.
+        Assert.Equal(0f, (ViewmodelAnchor.RigPosition(eye, Vector3.Zero) + eye).Y, 4);
+    }
+
+    // Composed with the bone's pose rather than added to its origin, so the viewpoint turns with the head
+    // instead of hovering at a fixed height above a skull that has looked somewhere else.
+    [Fact]
+    public void TheEyeTurnsWithTheHead()
+    {
+        var lookingDown = new Transform3D(
+            new Basis(new Quaternion(Vector3.Right, Mathf.DegToRad(-90f))), new Vector3(0f, 1.3202f, 0f));
+
+        Vector3 eye = ViewmodelAnchor.Eye(lookingDown, new Vector3(0f, 0.45f, 0f));
+
+        // A quarter turn about X takes the head's own up onto the world's forward (-Z).
+        Assert.Equal(1.3202f, eye.Y, 4);
+        Assert.Equal(-0.45f, eye.Z, 4);
+    }
+
     // UG_VIEWMODEL_OFFSET is a manual nudge on top, so it displaces the eye by exactly itself and
     // nothing else — a debugging knob, not a second source of truth for the framing.
     [Fact]

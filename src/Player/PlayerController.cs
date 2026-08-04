@@ -666,10 +666,10 @@ public partial class PlayerController : CharacterBody3D
             PlaceThirdPersonCamera();
     }
 
-    // Hangs the first-person arms off the head so they follow the look, and rides the rig on its own Skull
-    // bone — which is exactly where Unturned parents its ViewmodelCamera, under firstSkeleton/Spine/Skull.
-    // The rig re-anchors on every posed frame (ViewmodelAnchor), so the stance clips carry the eye with the
-    // head instead of leaving it at the height the bind pose happened to put it.
+    // Hangs the first-person arms off the head so they follow the look, and rides the rig on the eye the
+    // prefab authors (CharacterModel.BindEye: the head's Spot, which the game pairs with its own
+    // first-person camera). The rig re-anchors on every posed frame (ViewmodelAnchor), so the stance clips
+    // carry the eye with the head instead of leaving it where the bind pose happened to put it.
     // UG_VIEWMODEL_OFFSET="x,y,z" nudges it from there.
     private void AttachViewmodel()
     {
@@ -688,11 +688,7 @@ public partial class PlayerController : CharacterBody3D
             return;
 
         _viewmodel = rig;
-        int skull = rig.FindBone("Skull");
-        if (skull >= 0)
-            rig.AnchorEyeToBone(skull, EnvOffset("UG_VIEWMODEL_OFFSET"));
-        else
-            rig.Position = EnvOffset("UG_VIEWMODEL_OFFSET");
+        rig.AnchorEyeToCamera(EnvOffset("UG_VIEWMODEL_OFFSET"));
         // Close to the near plane and lit like the world around it, but never casting into it: an arm a
         // handspan from the eye throws a shadow across the whole view.
         foreach (Node child in rig.GetChildren())

@@ -23,7 +23,17 @@ namespace UnturnedGodot.Player;
 // right angle away from the view.
 public static class ViewmodelAnchor
 {
-    // `eyeBone` is the eye bone's origin in the rig's own space, as the CURRENT pose leaves it.
+    // `eye` is where the eye sits in the rig's own space, as the CURRENT pose leaves it. Note that it is
+    // the EYE and not the head bone's origin: the head bone is a joint at the neck, and the prefab puts
+    // the viewpoint at an authored offset up from it (CharacterModel.BindEye). Anchoring the bone instead
+    // parks the camera in the character's neck, with its own head above the view and its shoulders — at
+    // exactly the joint's height — sweeping the arms straight through the lens.
     // `nudge` is the operator's manual offset (UG_VIEWMODEL_OFFSET), zero in play.
-    public static Vector3 RigPosition(Vector3 eyeBone, Vector3 nudge) => nudge - eyeBone;
+    public static Vector3 RigPosition(Vector3 eye, Vector3 nudge) => nudge - eye;
+
+    // Where the eye has ended up, given the pose of the bone that carries it and its authored offset
+    // within that bone's frame. Composed rather than added, so the eye turns with the head: the offset
+    // points along the skull, and a head that has looked up or rolled takes its viewpoint with it.
+    public static Vector3 Eye(Transform3D boneGlobalPose, Vector3 localOffset) =>
+        boneGlobalPose * localOffset;
 }

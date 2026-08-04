@@ -98,6 +98,9 @@ public partial class Main : Node3D
                         EnvFlag.IsOn(OS.GetEnvironment("CHAR_MOVING"), whenUnset: false));
                     if (OS.GetEnvironment("CHAR_PITCH") is { Length: > 0 } cp)
                         rig.SetPitch(cp.ToFloat()); // look pitch -> spine/skull bend
+                    // CHAR_GESTURE=Punch_Left plays a one-shot over the stance, for reading a swing.
+                    if (OS.GetEnvironment("CHAR_GESTURE") is { Length: > 0 } gesture)
+                        rig.PlayOnce(gesture);
                     rig.Seek(OS.GetEnvironment("CHAR_ANIM_TIME") is { Length: > 0 } at ? at.ToFloat() : 0f);
                 }
                 if (charFirst)
@@ -109,8 +112,8 @@ public partial class Main : Node3D
                     int skull = eyed.FindBone("Skull");
                     if (skull >= 0 && EnvFlag.IsOn(OS.GetEnvironment("CHAR_REST_ANCHOR"), whenUnset: false))
                         eyed.Position = -eyed.GetBoneGlobalRest(skull).Origin;
-                    else if (skull >= 0)
-                        eyed.AnchorEyeToBone(skull, Vector3.Zero);
+                    else
+                        eyed.AnchorEyeToCamera(Vector3.Zero);
                 }
             }
             AddChild(new DirectionalLight3D { RotationDegrees = new Vector3(-50, -140, 0) });

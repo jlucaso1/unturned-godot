@@ -265,6 +265,12 @@ public static class CharacterModel
 
         foreach ((string name, AnimationClipData clip) in source.Clips)
             skeleton.StoreClip(name, clip);
+        // The bindings travel with the copy. The eye especially: a clone with no eye is exactly the rig
+        // that gets parked in its own neck, and this clone is the one first person looks through.
+        (int eyeBone, Vector3 eyeLocal) = source.Eye;
+        skeleton.BindEye(eyeBone, eyeLocal);
+        (int spine, int skull) = source.PitchBones;
+        skeleton.BindPitchBones(spine, skull);
         return skeleton;
     }
 
@@ -440,11 +446,45 @@ public static class CharacterModel
 
         StoreClips(file, byId, skeleton, boneByName, Id(smr["m_GameObject"]), entity);
         skeleton.BindPitchBones(boneByName.GetValueOrDefault("Spine", -1), boneByName.GetValueOrDefault("Skull", -1));
+        BindEye(file, byId, skeleton, boneByName, boneIds);
         skeleton.Play(entity.PrimaryIdle);
 
         Log.Print($"[unturned-godot] Character: real {entity.Root} skinned body loaded ({boneCount} bones, " +
             (skeleton.HasAnyPose ? "animated" : "bind pose") + ").");
         return skeleton;
+    }
+
+    // Where this character looks from, taken off the prefab.
+    //
+    // The eye is NOT the Skull bone's origin. Skull is a joint at the neck; the head hangs above it, and
+    // the prefab puts a child transform called Spot at the far end of it — 0.45 m along the head, which
+    // lands at the same 1.77 m as the prefab's own Aim/Fire. That Spot is the game's own answer to "where
+    // is the viewer": Player.cs resolves `thirdSpot` as Skeleton/Spine/Skull/Spot on the third-person rig
+    // and `firstSpot` as a child of the main camera itself, so the two name one point in the two
+    // perspectives. Anchoring first person on the bone instead put the camera in the neck, which is why
+    // the head hung over the top of the screen and the shoulders — at exactly the bone's height — swept
+    // the arms through the eye.
+    //
+    // Spot carries no vertex weights, so it is not in the renderer's bone list and cannot be a bone here.
+    // Its authored offset within the Skull's frame is read instead, which keeps this correct if the
+    // character is ever re-authored rather than pinning a measured number.
+    private static void BindEye(SerializedFile file, Dictionary<long, SerializedObject> byId,
+        CharacterSkeleton skeleton, Dictionary<string, int> boneByName, long[] boneIds)
+    {
+        if (!boneByName.TryGetValue("Skull", out int skull))
+            return;
+
+        foreach (object child in (List<object>)Read(file, byId, boneIds[skull])["m_Children"])
+        {
+            Dictionary<string, object> transform = Read(file, byId, Id(child));
+            if ((string)Read(file, byId, Id(transform["m_GameObject"]))["m_Name"] != "Spot")
+                continue;
+            skeleton.BindEye(skull, LocalTransformOf(transform).Origin);
+            return;
+        }
+
+        // No Spot: the head bone itself is the best point available, which is where this started.
+        skeleton.BindEye(skull, Vector3.Zero);
     }
 
     // The clips the on-foot animator plays (PlayerAnimator.updateState): idle + move per stance. They live in
