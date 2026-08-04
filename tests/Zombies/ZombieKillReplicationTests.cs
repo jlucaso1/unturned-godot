@@ -100,6 +100,9 @@ public class ZombieKillReplicationTests
             Host = new ZombieHost(System, Server);
         }
 
+        // Every zombie id a per-tick snapshot has mentioned since the client joined.
+        public readonly List<ushort> Snapshotted = new();
+
         public (NetClient Client, List<ZombieListing> Zoo, List<ushort> Killed) Join(string name)
         {
             var client = new NetClient(ServerTransport.CreateClient(), name, Level);
@@ -111,6 +114,13 @@ public class ZombieKillReplicationTests
                 {
                     case ENetMessage.ZombieList:
                         zoo.AddRange(ZombieNetMessages.ReadZombieList(payload).Listings);
+                        break;
+                    case ENetMessage.ZombieStates:
+                        foreach (ZombieSnapshotState state in
+                            ZombieNetMessages.ReadZombieStates(payload).States)
+                        {
+                            Snapshotted.Add(state.Id);
+                        }
                         break;
                     case ENetMessage.ZombieKilled:
                         KillMessages++;
@@ -133,10 +143,11 @@ public class ZombieKillReplicationTests
             }
         }
 
-        // A single zombie standing well clear of the spawn, so nothing aggros on its own.
-        public ZombieInstance Plant(ushort id)
+        // A single zombie, by default standing well clear of the spawn so nothing aggros on its own.
+        // `x` brings it inside the standing player's detection radius when a test wants it awake.
+        public ZombieInstance Plant(ushort id, float x = 60f)
         {
-            System.Spawn(new[] { new ZombieSpawnpointData(0, new Vector3(60f, 10f, 0)) }, new Random(3));
+            System.Spawn(new[] { new ZombieSpawnpointData(0, new Vector3(x, 10f, 0)) }, new Random(3));
             ZombieInstance zombie = Assert.Single(System.Zombies);
             zombie.Id = id;
             return zombie;
@@ -213,6 +224,31 @@ public class ZombieKillReplicationTests
         (_, _, List<ushort> killed) = h.Join("A");
         h.Pump(10);
         Assert.Empty(killed);
+    }
+
+    // The other half of a death travelling correctly: once it has, the server never mentions that
+    // zombie again. A snapshot arriving after the kill is what would put the avatar back — the client
+    // drops one for an id it no longer holds, but the server not sending it is the guarantee that
+    // makes the kill final rather than a race the client keeps having to win.
+    [Fact]
+    public void NothingIsSnapshottedForAZombieAfterItDies()
+    {
+        var h = new Harness();
+        // Close enough for the player who joins below to be noticed, so it wakes and streams: an idle
+        // zombie is never snapshotted at all, and the test would prove nothing.
+        ZombieInstance zombie = h.Plant(42, x: 6f);
+        (_, _, List<ushort> killed) = h.Join("A");
+        h.Pump(8);
+        Assert.Contains((ushort)42, h.Snapshotted);
+
+        h.System.Damage(zombie, 100, byte.MaxValue, Array.Empty<ZombiePlayerView>());
+        h.Host.ReportKilled(zombie);
+        h.Pump(2);
+        Assert.Equal(new ushort[] { 42 }, killed);
+
+        h.Snapshotted.Clear();
+        h.Pump(10);
+        Assert.Empty(h.Snapshotted);
     }
 
     // Reloading a bug-repro dump replaces the whole population under the same ids, so a death queued

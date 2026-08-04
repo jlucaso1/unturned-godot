@@ -246,11 +246,13 @@ public partial class Main : Node3D
             }
 
             // A screenshot uses the free camera + SHOT_CAM by default; PLAYER=1 spawns the character and
-            // shoots from its (third-person) camera instead.
+            // shoots from its camera instead — third person by default, and PLAYER_FIRST=1 for the
+            // first-person view, which is the only way to capture how the viewmodel rig is framed.
             if (EnvFlag.IsOn(OS.GetEnvironment("PLAYER"), whenUnset: false))
             {
+                bool firstPerson = EnvFlag.IsOn(OS.GetEnvironment("PLAYER_FIRST"), whenUnset: false);
                 // A screenshot run never reconciles the navmesh, so there is nothing to record into.
-                SpawnPlayer(world.Terrain, thirdPerson: true, unturnedPath, world.Heights,
+                SpawnPlayer(world.Terrain, thirdPerson: !firstPerson, unturnedPath, world.Heights,
                     navigationField: null);
                 RunPendingAudioExtraction(); // no streamer on this path; extract right away
                 int settle = OS.GetEnvironment("SETTLE") is { Length: > 0 } sv ? int.Parse(sv) : 40;
