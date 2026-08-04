@@ -18,6 +18,9 @@ namespace UnturnedGodot;
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class NpcsBuilder
 {
+    // What a standing character plays when it is doing nothing, which is all an NPC does here.
+    private const string IdleClip = "Idle_Stand";
+
     // Builds a root holding one character per placement. `placements` is expected to be only the NPC ones
     // (see Partition); anything whose clone fails is skipped rather than boxed, because a box is what this
     // exists to stop drawing.
@@ -46,6 +49,10 @@ public static class NpcsBuilder
         {
             if (CharacterModel.Clone(template) is not { } body)
                 continue;
+
+            // A fresh clone has the template's clips but none of them selected, so it would stand in the
+            // bind pose. ZombiesView plays a clip on every clone for the same reason.
+            (body as CharacterSkeleton)?.Play(IdleClip);
 
             var npc = new Node3D { Name = "Npc", Transform = ObjectPlacement.ComputeTransform(placement) };
             npc.AddChild(body);

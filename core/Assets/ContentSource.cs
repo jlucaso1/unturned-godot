@@ -34,6 +34,11 @@ public sealed class ContentSource
     // NPC character assets. They carry no prefab of their own — an NPC is the player's own rig wearing
     // what its .dat names — but a map places them by GUID like any other object, so they have to be in
     // the asset database for those placements to resolve at all.
+    //
+    // The Characters subtree specifically, not all of NPCs/: its Dialogues, Quests and Vendors siblings
+    // are records with a GUID, an ID and a Type of their own, and nothing places them. Scanned, they
+    // parse as Unknown-type assets and take a slot in the object legacy-id table — the game's own
+    // T.Rickster_Blackmarket vendor is ID 27, low in the range old maps place objects from.
     public string NpcsDir { get; }
 
     // The game's own content, as opposed to a workshop item.
@@ -102,7 +107,7 @@ public sealed class ContentSource
                 Path.Combine(bundles, "Assets"),
                 Path.Combine(bundles, "Vehicles"),
                 Path.Combine(bundles, "Spawns"),
-                Path.Combine(bundles, "NPCs"),
+                Path.Combine(bundles, "NPCs", "Characters"),
                 isCore: true));
         }
 
@@ -126,7 +131,7 @@ public sealed class ContentSource
         string assets = Path.Combine(itemDirectory, "Assets");
         string vehicles = Path.Combine(itemDirectory, "Vehicles");
         string spawns = Path.Combine(itemDirectory, "Spawns");
-        string npcs = Path.Combine(itemDirectory, "NPCs");
+        string npcs = Path.Combine(itemDirectory, "NPCs", "Characters");
         // Asset-only bundles are valid sources too. Foliage, physics materials, landscapes and spawn
         // tables are consumed independently of Objects/Resources, and every one of those scanners starts
         // from Discover's result. Rejecting an item that contains only one of them silently drops

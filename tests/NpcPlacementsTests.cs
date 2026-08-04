@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using Godot;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Dat;
 using UnturnedGodot.Data;
+using UnturnedGodot.Tests.Helpers;
 using Xunit;
 
 namespace UnturnedGodot.Tests;
@@ -59,6 +61,29 @@ public class NpcPlacementsTests
 
         Assert.Empty(NpcPlacements.Partition(placements, DatabaseWith()));
         Assert.Single(placements);
+    }
+
+    [Fact]
+    public void VendorAndQuestRecordsAreNotScanned()
+    {
+        // Bundles/NPCs also holds Dialogues, Quests and Vendors — records with a GUID, an ID and a Type
+        // that nothing places. The source points at the Characters subtree alone so they never reach the
+        // database: parsed, they are Unknown-type assets that take a slot in the object id table, and the
+        // game's own T.Rickster_Blackmarket vendor is ID 27.
+        using var dir = new TempDir();
+        dir.Write(Path.Combine("Bundles", "MasterBundle.dat"), "Asset_Bundle_Name core.masterbundle\n");
+        dir.Write(Path.Combine("Bundles", "core_linux.masterbundle"), "x");
+        dir.Write(Path.Combine("Bundles", "NPCs", "Characters", "Scout", "Asset.dat"),
+            "GUID 3afa17f491c441588a03f1f908712f9b\nType NPC\nID 753\n");
+        dir.Write(Path.Combine("Bundles", "NPCs", "Vendors", "Blackmarket", "Asset.dat"),
+            "GUID fb7bcb201ef74a5ba5262e57f9b69b81\nType Vendor\nID 27\n");
+
+        ObjectAssetDatabase db = ContentExtraction.ScanAssets(
+            ContentSource.Discover(dir.Path, UnturnedInstall.Platform.Linux));
+
+        Assert.NotNull(db.ResolveByGuid(new Guid("3afa17f491c441588a03f1f908712f9b")));
+        Assert.Null(db.ResolveByGuid(new Guid("fb7bcb201ef74a5ba5262e57f9b69b81")));
+        Assert.Null(db.ResolveById(27)); // the vendor did not claim an object id
     }
 
     [Fact]
