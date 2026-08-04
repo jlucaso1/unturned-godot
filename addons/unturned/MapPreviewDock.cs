@@ -263,7 +263,7 @@ public partial class MapPreviewDock : VBoxContainer
             }
 
             NavigationPreview.Attach(root, overlay);
-            RememberOverlayScene(root);
+            RememberScene(root);
             // The overlay's own checkboxes stay live while it builds, and their handler had nothing to
             // apply to until now, so anything toggled during the build would be silently dropped.
             NavigationPreview.Apply(overlay, NavigationOptions);
@@ -363,37 +363,59 @@ public partial class MapPreviewDock : VBoxContainer
         DropOverlayFromAnotherMap();
     }
 
-    // Every scene this dock has put an overlay into. The editor keeps other open scenes alive in their
+    // Every scene this dock has built something into. The editor keeps other open scenes alive in their
     // own tabs and GetEditedSceneRoot only ever names the current one, so clearing "the" overlay would
     // leave the previous map's navigation sitting in a tab one click away — with nothing on screen
     // saying which map it belongs to, and no way to take it down from a dock that has moved on.
-    private readonly List<Node> _overlayScenes = new();
+    //
+    // Kept across map changes rather than emptied with each sweep: this dock is the only thing that
+    // knows a background tab was ever touched, and once that is forgotten nothing can find what it
+    // left there. Pruned of dead scenes on every use, so it stays as short as the open tab list.
+    private readonly List<Node> _touchedScenes = new();
 
-    private void RememberOverlayScene(Node root)
+    private void RememberScene(Node root)
     {
-        _overlayScenes.RemoveAll(scene => !GodotObject.IsInstanceValid(scene));
-        if (!_overlayScenes.Exists(scene => scene.GetInstanceId() == root.GetInstanceId()))
-            _overlayScenes.Add(root);
+        _touchedScenes.RemoveAll(scene => !GodotObject.IsInstanceValid(scene));
+        if (!_touchedScenes.Exists(scene => scene.GetInstanceId() == root.GetInstanceId()))
+            _touchedScenes.Add(root);
     }
 
-    // Takes down every overlay this dock is responsible for. Returns how many there were.
+    // Every live scene this dock touched, plus the one in front of the user — which may hold something
+    // this dock did not put there (a reloaded plugin, a second dock), and the button in front of them
+    // should still take that down.
+    private IEnumerable<Node> ScenesToSweep()
+    {
+        _touchedScenes.RemoveAll(scene => !GodotObject.IsInstanceValid(scene));
+        foreach (Node scene in _touchedScenes)
+            yield return scene;
+        if (EditorInterface.Singleton.GetEditedSceneRoot() is { } edited
+            && !_touchedScenes.Exists(scene => scene.GetInstanceId() == edited.GetInstanceId()))
+            yield return edited;
+    }
+
+    // Takes down every navmesh overlay this dock is responsible for. Returns how many there were.
     private int ClearOverlays()
     {
         int cleared = 0;
-        foreach (Node scene in _overlayScenes)
-            if (GodotObject.IsInstanceValid(scene) && NavigationPreview.Clear(scene))
+        foreach (Node scene in ScenesToSweep())
+            if (NavigationPreview.Clear(scene))
                 cleared++;
-        _overlayScenes.Clear();
-
-        // The scene in front of the user may hold an overlay this dock did not put there — a reloaded
-        // plugin, or a second dock — and the button in front of them should still take it down.
-        if (EditorInterface.Singleton.GetEditedSceneRoot() is { } edited
-            && NavigationPreview.Clear(edited))
-            cleared++;
-
         if (cleared > 0)
             UpdateNavigationButton(shown: false);
         return cleared;
+    }
+
+    // Everything this dock ever added, across every scene still open. The plugin calls this on its way
+    // out: the dock owns the only record of which background tabs were touched, so freeing it first
+    // strands whatever is in them — unowned nodes nothing will ever look for again.
+    public void ClearEverything()
+    {
+        foreach (Node scene in ScenesToSweep())
+        {
+            NavigationPreview.Clear(scene);
+            WorldPreview.Clear(scene);
+        }
+        _touchedScenes.Clear();
     }
 
     private bool HideOverlays()
@@ -493,6 +515,7 @@ public partial class MapPreviewDock : VBoxContainer
             }
 
             WorldPreview.Attach(root, preview);
+            RememberScene(root);
             // Which map's ground this is, so the navmesh overlay can tell whether it is being drawn
             // over the terrain it describes. Metadata rather than a field: the preview outlives any
             // dock state (another dock, a reloaded plugin, the one-shot EditorScript).
