@@ -453,101 +453,126 @@ public static class Program
             return;
         }
 
-        MasterBundleStream.Node? metadata = null;
-        foreach (MasterBundleStream.Node node in stream.Nodes)
-            if (!IsResSNode(node.Path) && (metadata == null || node.Offset < metadata.Value.Offset))
-                metadata = node;
-        if (metadata == null)
-        {
-            Console.WriteLine($"== bundle: SKIP ({Path.GetFileName(path)} declares no serialized file) ==\n");
-            return;
-        }
+        // EVERY serialized node, not just the first: the streaming load processes each in physical order,
+        // so measuring one of several would report too few objects and hide the later files' cost. Nodes
+        // sitting behind a stream node are counted and skipped rather than scanned — reaching them means
+        // decoding the ~1.18 GB of pixels in between, which is the cost this suite exists to stay off.
+        var ordered = new List<MasterBundleStream.Node>(stream.Nodes);
+        ordered.Sort((a, b) => a.Offset.CompareTo(b.Offset));
 
         Console.WriteLine($"== bundle: object decode over {Path.GetFileName(path)} ==");
         Console.WriteLine($"  {Mb(new FileInfo(path).Length)} on disk, {Mb(stream.TotalSize)} decompressed");
 
-        // The stream is forward-only and starts at offset 0, so a bundle whose serialized file sits behind
-        // a stream node has to be wound past it first — reading at the cursor would hand SerializedFile a
-        // slice of somebody else's pixels. The real masterbundles put it at offset 0 and skip nothing; a
-        // bundle named by BUNDLE_PATH need not.
-        if (metadata.Value.Offset > 0)
+        var files = new List<(string Name, SerializedFile File, byte[] Bytes)>();
+        int skippedBehindStream = 0;
+        bool pastFirstStream = false;
+        foreach (MasterBundleStream.Node node in ordered)
         {
-            Console.WriteLine($"  winding {Mb(metadata.Value.Offset)} forward: the serialized file is not "
-                + "this bundle's first node");
-            var skip = new byte[1 << 20];
-            long skipped = 0;
-            while (skipped < metadata.Value.Offset)
+            if (IsResSNode(node.Path))
             {
-                int n = stream.Read(skip, 0, (int)Math.Min(skip.Length, metadata.Value.Offset - skipped));
-                if (n <= 0)
-                    break;
-                skipped += n;
+                pastFirstStream = true;
+                continue;
             }
-            if (skipped < metadata.Value.Offset)
+
+            if (pastFirstStream)
             {
-                Console.WriteLine("== bundle: SKIP (the stream ended before the serialized file) ==\n");
-                return;
+                skippedBehindStream++;
+                continue;
             }
+
+            // The stream is forward-only, so anything between the cursor and this node has to be consumed
+            // before it can be read — otherwise SerializedFile is handed a slice of somebody else's bytes.
+            if (!WindTo(stream, node.Offset))
+            {
+                Console.WriteLine($"  note: the stream ended before {LastSegment(node.Path)} — not measured");
+                break;
+            }
+
+            var timer = Stopwatch.StartNew();
+            byte[] bytes = stream.Read((int)node.Size);
+            timer.Stop();
+            Console.WriteLine($"  serialized: {LastSegment(node.Path)} {Mb(bytes.Length)} LZMA-decoded in "
+                + $"{timer.Elapsed.TotalSeconds:0.00} s "
+                + $"({bytes.Length / 1048576.0 / timer.Elapsed.TotalSeconds:0.0} MiB/s) — setup, not a measurement");
+            files.Add((LastSegment(node.Path), SerializedFile.Read(bytes), bytes));
         }
 
-        // Decoded once: this is setup, not a measurement, and it is the only part that needs the LZMA
-        // pass. The rate it reports is the metadata region's alone — see the `lzma` diagnostic for why
-        // that is nothing like the rate the rest of the blob decodes at.
-        var timer = Stopwatch.StartNew();
-        byte[] bytes = stream.Read((int)metadata.Value.Size);
-        timer.Stop();
-        Console.WriteLine($"  metadata node: {Mb(bytes.Length)} LZMA-decoded in {timer.Elapsed.TotalSeconds:0.00} s "
-            + $"({bytes.Length / 1048576.0 / timer.Elapsed.TotalSeconds:0.0} MiB/s) — setup, not a measurement");
+        if (files.Count == 0)
+        {
+            Console.WriteLine($"== bundle: SKIP ({Path.GetFileName(path)} declares no readable serialized "
+                + "file ahead of its stream nodes) ==\n");
+            return;
+        }
 
-        Bench("SerializedFile.Read", () => SerializedFile.Read(bytes));
-        SerializedFile file = SerializedFile.Read(bytes);
-        long tableAlloc = AllocatedBy(() => SerializedFile.Read(bytes));
-        Console.WriteLine($"    {file.Objects.Count:N0} objects, {file.TypeTreesByClassId.Count} class type trees, "
-            + $"{Mb(tableAlloc)} allocated");
+        if (skippedBehindStream > 0)
+        {
+            Console.WriteLine($"  note: {skippedBehindStream} serialized file(s) sit behind a stream node and "
+                + "were not scanned — their objects are missing from the numbers below");
+        }
+
+        byte[] tableBytes = files[0].Bytes;
+        Bench("SerializedFile.Read (first node)", () => SerializedFile.Read(tableBytes));
+        long tableAlloc = AllocatedBy(() => SerializedFile.Read(tableBytes));
+        int totalObjects = 0, totalTrees = 0;
+        foreach ((string _, SerializedFile f, byte[] _) in files)
+        {
+            totalObjects += f.Objects.Count;
+            totalTrees += f.TypeTreesByClassId.Count;
+        }
+        Console.WriteLine($"    {totalObjects:N0} objects across {files.Count} serialized file(s), "
+            + $"{totalTrees} class type trees, {Mb(tableAlloc)} allocated for the first");
 
         // Objects whose type tree was stripped cannot be decoded without a donor file; they are not part
-        // of what this measures, so they are excluded from both sets rather than silently throwing.
-        var readable = new List<SerializedObject>(file.Objects.Count);
-        foreach (SerializedObject o in file.Objects)
-            if (o.TypeTree.Count > 0)
-                readable.Add(o);
+        // of what this measures, so they are excluded from every set rather than silently throwing.
+        var readable = new List<(SerializedObject Obj, SerializedFile File)>(totalObjects);
+        foreach ((string _, SerializedFile f, byte[] _) in files)
+            foreach (SerializedObject o in f.Objects)
+                if (o.TypeTree.Count > 0)
+                    readable.Add((o, f));
 
         var scanned = new HashSet<int>(ScannedClasses);
         var targeted = new HashSet<int>(TargetedClasses);
-        var scannedSet = new List<SerializedObject>();
-        var targetedSet = new List<SerializedObject>();
-        foreach (SerializedObject o in readable)
+        var scannedSet = new List<(SerializedObject Obj, SerializedFile File)>();
+        var targetedSet = new List<(SerializedObject Obj, SerializedFile File)>();
+        var containerSet = new List<(SerializedObject Obj, SerializedFile File)>();
+        foreach ((SerializedObject o, SerializedFile f) in readable)
         {
+            if (o.ClassId == AssetBundleClassId)
+                containerSet.Add((o, f));
             if (scanned.Contains(o.ClassId))
-                scannedSet.Add(o);
+                scannedSet.Add((o, f));
             else if (targeted.Contains(o.ClassId))
-                targetedSet.Add(o);
+                targetedSet.Add((o, f));
         }
 
-        if (readable.Count < file.Objects.Count)
+        if (readable.Count < totalObjects)
         {
-            Console.WriteLine($"    note: {file.Objects.Count - readable.Count:N0} object(s) carry no type tree "
+            Console.WriteLine($"    note: {totalObjects - readable.Count:N0} object(s) carry no type tree "
                 + "and are excluded from the decode below");
         }
 
-        // Three rows, and only the first is load work measured. The other two are upper bounds and are
-        // labelled as such: a map places a subset of the bundle, so it decodes a subset of the targeted
-        // classes, and nothing decodes every object.
+        // Every row is the cost of decoding each object ONCE. That is not the same as what a load pays:
+        // the AssetBundle container is re-decoded by every pass that walks it, which is why it is also
+        // timed on its own below.
         //
         // Far fewer iterations than the default 15: one pass over every object is seconds, not
         // milliseconds, and fifteen of them would cost more than the rest of the harness put together.
         // The coarser the row, the smaller its budget.
-        ReadPass("TypeTreeReader.Read (scanned classes)", scannedSet, file, iters: 5);
-        ReadPass("TypeTreeReader.Read (targeted classes — a bound)", targetedSet, file, iters: 5);
-        ReadPass("TypeTreeReader.Read (every object — a bound)", readable, file, iters: 3);
+        ReadPass("TypeTreeReader.Read (scanned classes, once each)", scannedSet, iters: 5);
+        ReadPass("TypeTreeReader.Read (targeted classes — a bound)", targetedSet, iters: 5);
+        ReadPass("TypeTreeReader.Read (every object — a bound)", readable, iters: 3);
 
-        PerClassTable(readable, file);
+        ContainerRescanCost(containerSet);
+        PerClassTable(readable);
         Console.WriteLine();
     }
 
+    private const int AssetBundleClassId = 142;
+
     // Median time and allocation for decoding one set of objects. Allocation is reported alongside because
     // this reader's cost is dominated by it — boxed leaves, a Dictionary per struct and a List per array.
-    private static void ReadPass(string label, List<SerializedObject> objects, SerializedFile file, int iters)
+    private static void ReadPass(string label, List<(SerializedObject Obj, SerializedFile File)> objects,
+        int iters)
     {
         if (objects.Count == 0)
         {
@@ -557,33 +582,64 @@ public static class Program
 
         void Pass()
         {
-            foreach (SerializedObject o in objects)
-                TypeTreeReader.Read(o.TypeTree, file.ReaderFor(o));
+            foreach ((SerializedObject o, SerializedFile f) in objects)
+                TypeTreeReader.Read(o.TypeTree, f.ReaderFor(o));
         }
 
         Bench($"{label} x{objects.Count:N0}", Pass, warmup: 1, iters: iters);
         long alloc = AllocatedBy(Pass);
         long input = 0;
-        foreach (SerializedObject o in objects)
+        foreach ((SerializedObject o, SerializedFile _) in objects)
             input += o.ByteSize;
         Console.WriteLine($"    {Mb(alloc)} allocated over {Mb(input)} of object bytes "
             + $"({(input > 0 ? alloc / (double)input : 0):0.0}x), {alloc / (double)objects.Count / 1024:0.0} KiB per object");
     }
 
+    // The AssetBundle object holds `m_Container`, the path -> asset table, and every pass that needs to
+    // resolve a name walks it by decoding the whole object again from scratch. Five independent scans of
+    // it exist in the port — PrefabGraph.ReadContainer, BundleTextures.Locate, AudioExtractor.Plan,
+    // RoadsBuilder and CharacterModel — and at least the first three run against the core masterbundle on
+    // a cold load. The rows above decode each object once, so they price ONE of those; this prices the
+    // repeat, because on this bundle a single container decode is a large share of the scanned row.
+    private static void ContainerRescanCost(List<(SerializedObject Obj, SerializedFile File)> containers)
+    {
+        if (containers.Count == 0)
+            return;
+
+        void Pass()
+        {
+            foreach ((SerializedObject o, SerializedFile f) in containers)
+                TypeTreeReader.Read(o.TypeTree, f.ReaderFor(o));
+        }
+
+        double median = Bench($"one AssetBundle container scan x{containers.Count:N0}", Pass,
+            warmup: 1, iters: 5);
+        long alloc = AllocatedBy(Pass);
+        Console.WriteLine($"    {Mb(alloc)} allocated per scan; the port scans this table from {ContainerScanSites} "
+            + "independent places, so a cold load pays a multiple of this line, not one of it");
+        Console.WriteLine($"    at {ContainerScanSites} scans that is {median * ContainerScanSites:N0} ms and "
+            + $"{Mb(alloc * ContainerScanSites)} — re-decoding one object the load already had");
+    }
+
+    // PrefabGraph.ReadContainer, BundleTextures.Locate and AudioExtractor.Plan all scan the core bundle's
+    // container on a cold load. RoadsBuilder and CharacterModel scan their own bundles, so they are not
+    // counted here: this is deliberately the low end.
+    private const int ContainerScanSites = 3;
+
     // Where the decode time and allocation actually sit, per Unity class, from a single pass. Every object
     // is individually timed here, so the column sums above the uninstrumented pass — read it for the shape,
     // and take the totals from the passes above. A class nothing scans can still dominate this table, which
     // is exactly why the scanned subset is timed on its own.
-    private static void PerClassTable(List<SerializedObject> objects, SerializedFile file)
+    private static void PerClassTable(List<(SerializedObject Obj, SerializedFile File)> objects)
     {
         var scannedClasses = new HashSet<int>(ScannedClasses);
         var targetedClasses = new HashSet<int>(TargetedClasses);
         var perClass = new Dictionary<int, (int Count, double Ms, long Input, long Alloc)>();
-        foreach (SerializedObject o in objects)
+        foreach ((SerializedObject o, SerializedFile f) in objects)
         {
             long before = GC.GetAllocatedBytesForCurrentThread();
             var sw = Stopwatch.StartNew();
-            TypeTreeReader.Read(o.TypeTree, file.ReaderFor(o));
+            TypeTreeReader.Read(o.TypeTree, f.ReaderFor(o));
             sw.Stop();
             long alloc = GC.GetAllocatedBytesForCurrentThread() - before;
             perClass.TryGetValue(o.ClassId, out (int Count, double Ms, long Input, long Alloc) v);
@@ -606,6 +662,22 @@ public static class Program
             Console.WriteLine($"      {name,-24} {entry.Value.Count,7:N0} {Mb(entry.Value.Input),10} "
                 + $"{entry.Value.Ms,9:0} {Mb(entry.Value.Alloc),10}  {(scannedClasses.Contains(entry.Key) ? "scan" : targetedClasses.Contains(entry.Key) ? "targeted" : "-"),-8}");
         }
+    }
+
+    // Consumes the forward-only stream up to `offset`, returning false if it ended first.
+    private static bool WindTo(MasterBundleStream stream, long offset)
+    {
+        if (stream.Cursor >= offset)
+            return stream.Cursor == offset;
+
+        var skip = new byte[1 << 20];
+        while (stream.Cursor < offset)
+        {
+            int n = stream.Read(skip, 0, (int)Math.Min(skip.Length, offset - stream.Cursor));
+            if (n <= 0)
+                return false;
+        }
+        return true;
     }
 
     // Bytes allocated on this thread by one call, with the GC levelled first so a collection triggered by

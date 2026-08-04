@@ -14,9 +14,10 @@ Suites: `lz4` (synthetic, no data needed), `foliage`, `heightmap`, `splat`, `obj
 drives included); the map from `MAP` (default `PEI`).
 
 `bundle` prices the masterbundle's object metadata: `SerializedFile.Read` over the real object table, then
-`TypeTreeReader.Read` over it. It is the slowest suite in the default set (~22 s of a ~41 s run) because
-its input has to be LZMA-decoded once before anything can be timed; `BUNDLE_PATH` points it at a bundle
-outside the install. See [`bundle`](#bundle--what-the-object-metadata-costs) below for what it found.
+`TypeTreeReader.Read` over it. Every serialized node ahead of the bundle's stream nodes is measured, not
+just the first. It is the slowest suite in the default set (~22 s of a ~41 s run) because its input has to
+be LZMA-decoded once before anything can be timed; `BUNDLE_PATH` points it at a bundle outside the
+install. See [`bundle`](#bundle--what-the-object-metadata-costs) below for what it found.
 
 `navprobe` measures the pass that navmesh reconciliation now runs on workers instead of on the physics
 thread: it probes the map's real navmesh against a `CollisionField` built from the map's real terrain, and
@@ -77,8 +78,9 @@ the object table, then the TypeTree-driven object reader over three sets:
 
 - **scanned classes** — classes a bundle-wide loop decodes *every* object of, on any load, whatever the
   map: `PrefabGraph`'s `ReadContainer` (AssetBundle), `BuildTransformMaps` (Transform), the
-  MeshFilter/SkinnedMeshRenderer sweep and the collider sweep. Each filters on class id alone, so this row
-  is load work **measured**.
+  MeshFilter/SkinnedMeshRenderer sweep and the collider sweep. Each filters on class id alone. The row is
+  each such object decoded **once** — a floor on load work, since several passes re-scan the same
+  container (below).
 - **targeted classes** — Mesh, Material, Texture2D, Shader, MeshRenderer, GameObject, AudioClip and the
   audio MonoBehaviours, which the port reaches only by path-id or GUID lookup from an asset that names
   them. `ModelExtractor` skips GUIDs the map does not need before it touches any of them, so a map that
@@ -93,17 +95,30 @@ interleaved runs in one session — the range across those runs is the last colu
 
 | | count | input | median | allocated | across runs |
 |---|---:|---:|---:|---:|---:|
-| `SerializedFile.Read` | 103,549 objects | 170.9 MiB | 9.7 ms | 9.9 MiB | 8.9–9.9 ms |
-| `TypeTreeReader.Read`, scanned | 42,010 | 5.5 MiB | 230 ms | 125 MiB | 221–243 ms |
-| `TypeTreeReader.Read`, targeted (bound) | 50,739 | 102.7 MiB | 284 ms | 384 MiB | 271–307 ms |
-| `TypeTreeReader.Read`, every object (bound) | 103,549 | 167.9 MiB | 2,666 ms | 2,121 MiB | 2,599–2,758 ms |
+| `SerializedFile.Read` (first node) | 103,549 objects | 170.9 MiB | 9.9 ms | 9.9 MiB | 8.7–10.4 ms |
+| `TypeTreeReader.Read`, scanned, once each | 42,010 | 5.5 MiB | 220 ms | 125 MiB | 208–222 ms |
+| `TypeTreeReader.Read`, targeted (bound) | 50,739 | 102.7 MiB | 278 ms | 384 MiB | 255–288 ms |
+| `TypeTreeReader.Read`, every object (bound) | 103,549 | 167.9 MiB | 2,555 ms | 2,121 MiB | 2,513–2,677 ms |
+| one AssetBundle container scan | **1** | 2.9 MiB | 100 ms | 51.5 MiB | 94–109 ms |
+
+Every row above decodes each object **once**, which is not what a load pays.
 
 The allocation figures are byte-identical run to run, as they should be for a deterministic decode; only
 the clock moves.
 
-Three things fall out. The object table itself is free — 9.7 ms to index 103k objects, so nothing is to
-be gained by making it lazier. The decode every load pays unconditionally is **230 ms**, which against a
-~15 s LZMA pass is 1.5%; even the loosest bound on it is 2%. And **the reader's cost is allocation, not
+**The one object that is decoded again and again.** `m_Container` — the AssetBundle's path-to-asset table
+— is a single object that costs 100 ms and 51.5 MiB to decode, and every pass that needs to resolve a name
+decodes the whole thing from scratch. Five independent scans of it exist in the port
+(`PrefabGraph.ReadContainer`, `BundleTextures.Locate`, `AudioExtractor.Plan`, `RoadsBuilder`,
+`CharacterModel`); at least the first three run against the core masterbundle on a cold load, so that is
+**~300 ms and ~154 MiB re-deriving something the load already had**. Compare it against the whole scanned
+row: 42,010 objects cost 220 ms, and this one object re-read twice costs as much again. That is the
+cheapest real win in this whole area, and the only reason it is not in this PR is that the fix lives in
+`src/` — decode the container once and hand it around — which is another lane's call.
+
+Three more things fall out. The object table itself is free — ~10 ms to index 103k objects, so nothing is
+to be gained by making it lazier. The unique-object decode every load pays is **220 ms**, which against a
+~15 s LZMA pass is 1.5%; even the loosest bound is 2%. And **the reader's cost is allocation, not
 parsing**: the scanned set turns 5.5 MiB of object bytes into 125 MiB of managed objects — **22.9x** —
 because a Transform or a BoxCollider is a handful of floats that becomes nested `Dictionary` objects with
 a boxed leaf each. Over the whole file it is 168 MiB into 2,121 MiB. That is inherent in the output shape
