@@ -21,7 +21,8 @@ and checked byte-for-byte against the game's own data, using
 | **Foliage** | `Foliage.blob` grass, flowers and pebbles as chunked MultiMeshes (~667k instances on PEI, 7.2M on Germany) |
 | **Roads / water** | Bezier splines lofted through the port of `Road.buildMesh`, real road textures; sea plane from the map's lighting |
 | **Lighting** | Day/night cycle driven by the map's `Lighting.dat` keyframes: sun, ambient, fog, ported skybox (sun disc, stars, moon phases, clouds) |
-| **Player** | Port of `PlayerMovement`/`PlayerLook`/`PlayerStance` with the game's own constants; real character model, skeleton and animations; first/third person. Left click throws a punch (`PlayerEquipment`), replicated so everyone sees it; ladders are climbable — walk into one or look at it and interact, both through the game's own climb rules |
+| **Player** | Port of `PlayerMovement`/`PlayerLook`/`PlayerStance` with the game's own constants; real character model, skeleton and animations; first/third person. Left click throws a punch (`PlayerEquipment`), animated from either camera and replicated so everyone sees it; ladders are climbable — walk into one or look at it and interact, both through the game's own climb rules |
+| **Damage** | `PlayerEquipment`'s punch table, ported number for number: 15 base scaled per limb, 20 to a resource, 5 to a destructible object, 2 to a buildable, and the vehicle turned off. Zombies carry the map's own table health and die to it; trees and rubble carry theirs off the asset `.dat` (`Health`, `Vulnerable_To_Fists`, `Rubble_Health`, `Rubble_Blade_ID`) |
 | **Audio** | Footsteps/landings resolved through the terrain splat like `PhysicsTool.GetTerrainMaterialName`, clips extracted from the master bundle's FSB5 banks |
 | **Zombies** | Spawn tables, navigation bounds and the pre-baked navmeshes; detection, hunting and the `Zombie.cs` animation set |
 | **Vehicles** | The map's own `Spawns/Vehicles.dat` rolled through its spawn tables and redirectors, as many as the level's size allows, each drawn from its real `Vehicle.prefab`. Parked scenery for now: no driving, physics or damage |
@@ -36,10 +37,17 @@ in view.
   needs — it costs one extra forward pass over the bundle on a cold cache, and only when something still
   to be extracted has a streamed buffer. Quantized geometry (`m_CompressedMesh`), which workshop bundles
   lean on heavily, and texture pixels in `.resS` were already decoded.
-- **Gameplay**: no items, inventory, building, damage or survival stats. Zombies exist and hunt, and you
-  can swing at them, but the punch is an animation only — nothing takes damage yet. Vehicles spawn and
+- **Gameplay**: no items, inventory, building or survival stats. Punching works — zombies take the
+  game's own per-limb damage, aggro onto whoever hit them, and die — but the fist is the only damage
+  source there is, and nothing yet gives the player a health bar of their own. Vehicles spawn and
   render, but they are scenery: nothing drives, collides with or damages them, and a vehicle sits at the
   height its spawnpoint was authored at instead of settling onto the ground as its rigidbody would.
+- **Breaking the world visually**: a punched tree or rubble pile loses health on the server and the
+  destruction is reported (`PUNCH_LOG=1`), but the placement is still drawn. Objects are rendered as
+  batched `MultiMesh` instances with no per-instance handle, so removing one — or swapping a felled tree
+  for its stump prefab, which is what the game does — needs that batching to carry an index first. Worth
+  knowing: none of the game's own trees is `Vulnerable_To_Fists`, so bare hands never fell one anyway;
+  the rubble props are what a fist really breaks.
 - **Ladders**: the ones a map places as objects are climbable. Player-built barricade ladders are not,
   because barricades do not exist here yet — their prefabs carry the same climbing volume on the same
   layer, so they come for free once they do. Neither does the climb/swim transition, for the same reason:

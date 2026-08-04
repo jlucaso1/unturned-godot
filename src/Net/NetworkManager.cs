@@ -38,6 +38,22 @@ public partial class NetworkManager : Node
     // message and the way back to the menu, instead of a session that silently never starts.
     public System.Action<JoinRejection>? OnRejected;
 
+    // The server half of PlayerEquipment.punch, once zombies exist to punch. Null on a pure client.
+    public UnturnedGodot.Damage.PunchDamageHost? PunchDamage { get; private set; }
+
+    // The level's breakable placements, handed over by the object streamer once it has read the map.
+    // Assigning it late is the normal case: the session is up and hosting long before the world has
+    // finished streaming, and until then a punch can still hit a zombie, just not a tree.
+    public UnturnedGodot.Damage.DamageableWorld? Damageable
+    {
+        get => PunchDamage?.World;
+        set
+        {
+            if (PunchDamage != null)
+                PunchDamage.World = value;
+        }
+    }
+
     private static bool FlatFallback(float x, float z, out float y)
     {
         y = 0f;
@@ -334,6 +350,7 @@ public partial class NetworkManager : Node
         }
 
         var host = new UnturnedGodot.Zombies.ZombieHost(zombies, _server);
+        PunchDamage = AttachPunchDamage(zombies, host);
 
         // The bug-report key (F7): keeps the last few seconds of the simulation in memory so a session
         // that just did something wrong can be written out and replayed. Off with REPRO=0.
@@ -347,6 +364,17 @@ public partial class NetworkManager : Node
 
         Log.Print($"[zombies] {zombies.Zombies.Count} zombies spawned from the level's spawnpoints "
             + $"(ZOMBIE_SEED={seed})");
+    }
+
+    // The punch host, cast against this session's own physics world. Hooked AFTER the zombie host so
+    // damage resolves against the population the tick has already moved, and so a kill it reports is
+    // broadcast on the next tick rather than racing that tick's snapshots.
+    private UnturnedGodot.Damage.PunchDamageHost AttachPunchDamage(
+        UnturnedGodot.Zombies.ZombieSystem zombies, UnturnedGodot.Zombies.ZombieHost host)
+    {
+        var punches = new UnturnedGodot.Damage.PunchDamageHost(_server!, zombies, host);
+        PunchPhysics.Attach(punches, () => GetViewport()?.World3D);
+        return punches;
     }
 
     // Raycasts our collision world down onto every Nth navmesh vertex and reports the height error.

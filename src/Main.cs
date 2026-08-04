@@ -756,6 +756,13 @@ public partial class Main : Node3D
             streamer.MeshesReady += elapsedMs => _ = RunStepProbe(stepProbe);
         // Only now do the object colliders exist, so only now can the navmesh be checked against them.
         streamer.Finished += () => _network?.ReconcileNavigation(streamer.NeededGuids, navigationField);
+        // The hosted server can damage the world's trees and rubble as soon as it knows what they are.
+        // Late by design: the session is already up and punching zombies while the map streams in.
+        streamer.Finished += () =>
+        {
+            if (_network != null && streamer.Damageable != null)
+                _network.Damageable = streamer.Damageable;
+        };
         if (OS.GetEnvironment("UG_RUNTIME_BENCH_SECS") is { Length: > 0 } duration
             && double.TryParse(duration, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out double seconds))

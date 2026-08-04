@@ -24,8 +24,9 @@ public partial class PlayerController : CharacterBody3D
     // The third-person body model; when null a simple placeholder figure is used instead.
     public Node3D? BodyModel { get; set; }
 
-    // The first-person arms (the prefab's Viewmodel rig). Optional: without it first person simply shows
-    // no hands, which is what the port did before.
+    // The first-person rig: the prefab's own Viewmodel arms where they can be imported, and otherwise a
+    // clone of the body (see CharacterModel.ViewmodelFromBody). Optional — without one first person
+    // shows no hands and no swing, which is what the port did before there was a fallback.
     public Node3D? ViewmodelModel { get; set; }
 
     // Movement audio (footsteps + landing), built by the caller with the map's terrain material data.

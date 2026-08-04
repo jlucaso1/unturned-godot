@@ -152,7 +152,32 @@ public partial class ZombiesView : Node3D
                 foreach (ZombieSnapshotState state in update.States)
                     Push(state, now);
                 break;
+            case ENetMessage.ZombieKilled:
+                if (!MalformedPacket.TryDecode(payload, ReadZombieKilled, out var killed))
+                {
+                    MalformedPacketsDropped++;
+                    break;
+                }
+
+                // The bound is not checked the way the list's is. A kill for a region already left names
+                // an avatar DropForeignRegions is about to free anyway, and one that arrives while the
+                // player is mid-transition still names a zombie that is genuinely gone — the one thing
+                // that must not happen is leaving a dead zombie standing because the message looked
+                // late.
+                foreach (ushort id in killed.Ids)
+                    Kill(id);
+                break;
         }
+    }
+
+    // ZombieManager's death: the avatar goes. Unturned plays a ragdoll here (Zombie.askDamage hands
+    // askDamage's force to the ragdoll and the body falls); there is no ragdoll in this port, so the
+    // body is simply freed, which is what its own dead-zombie cleanup does once the ragdoll expires.
+    private void Kill(ushort id)
+    {
+        if (!_avatars.Remove(id, out ZombieAvatar? avatar))
+            return; // never spawned here, or already removed on a region change
+        avatar.Root.QueueFree();
     }
 
     // Zombie datagrams that reached a decoder and did not survive it; see NetServer.MalformedPacketsDropped.
@@ -164,6 +189,8 @@ public partial class ZombiesView : Node3D
         ZombieNetMessages.ReadZombieList;
     private static readonly System.Func<byte[], (uint Tick, List<ZombieSnapshotState> States)> ReadZombieStates =
         ZombieNetMessages.ReadZombieStates;
+    private static readonly System.Func<byte[], (byte Bound, List<ushort> Ids)> ReadZombieKilled =
+        ZombieNetMessages.ReadZombieKilled;
 
     private void SpawnOrReset(in ZombieListing listing, byte bound)
     {

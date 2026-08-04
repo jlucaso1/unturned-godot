@@ -27,6 +27,8 @@ public static class ReproZombieState
             Gear = zombie.Gear,
             Move = zombie.Move,
             Idle = zombie.Idle,
+            Health = zombie.Health,
+            MaxHealth = zombie.MaxHealth,
             Home = ReproVector.From(zombie.Home),
             Position = ReproVector.From(zombie.Position),
             Yaw = ReproVector.Round(zombie.Yaw),
@@ -54,8 +56,17 @@ public static class ReproZombieState
     public static ZombieInstance FromRecord(ReproZombieRecord record)
     {
         ArgumentNullException.ThrowIfNull(record);
+        // A dump written before health existed carries zero for both, and zero health is DEAD — the
+        // replay would start with a population the brain immediately treats as corpses. Absent means
+        // "as it spawned", which without the table in hand is whatever MaxHealth says, and when that is
+        // absent too the zombie is simply left at full: the old dumps this covers were all taken in a
+        // build where nothing could take health off in the first place.
+        ushort maxHealth = record.MaxHealth;
+        ushort health = record.Health != 0 ? record.Health : maxHealth;
         var zombie = new ZombieInstance
         {
+            Health = health,
+            MaxHealth = maxHealth,
             Id = (ushort)record.Id,
             Bound = record.Bound,
             Type = record.Type,

@@ -149,16 +149,47 @@ public static class CharacterModel
         // placeholder figure; no viewmodel means first person shows no hands, which is what a prefab
         // without a Viewmodel subtree already gives. Sharing one catch would let an unsupported mesh in
         // that subtree throw away a body that imported perfectly and drop the whole player to a capsule.
+        Node3D? viewmodel = null;
         try
         {
-            return (body, BuildFrom(source, PlayerViewmodelEntity));
+            viewmodel = BuildFrom(source, PlayerViewmodelEntity);
         }
         catch (System.Exception e)
         {
             Log.PrintErr($"[unturned-godot] Character: failed to load the {ViewmodelSubtree} rig "
-                + $"({e.GetType().Name}: {e.Message}); first person will show no hands.");
-            return (body, null);
+                + $"({e.GetType().Name}: {e.Message}); falling back to the body rig for first person.");
         }
+
+        if (viewmodel is CharacterSkeleton arms)
+            return (body, arms);
+
+        // The import produced something, but not a rig — a static bind-pose mesh, which cannot be posed
+        // and so would hang in front of the camera in one frozen attitude. It is a Node nothing owns and
+        // nothing else will free, so it is freed here rather than left to the collector that does not
+        // exist for Godot objects.
+        viewmodel?.Free();
+        return (body, ViewmodelFromBody(body));
+    }
+
+    // First person without the prefab's own arms rig.
+    //
+    // The Viewmodel subtree carries a single renderer, Model_0, and Model_0's skin weights live in the
+    // compressed vertex stream this pipeline does not decode — so BuildFrom finds no skinnable mesh
+    // there and returns a static bind-pose mesh, which cannot be posed and therefore cannot throw a
+    // punch. That is why first person had no swing while third person did: not a missing clip, a
+    // missing RIG.
+    //
+    // The body rig is skinnable (Model_1 decodes), carries the same Punch_Left/Punch_Right clips, and is
+    // the same character — Unturned's first-person view IS the character seen from inside its own head,
+    // which is why looking down there shows you your own legs. So a clone of it stands in: PlayerController
+    // parents it to the camera with the rig's own Skull bone landing on the eye, so what is drawn is the
+    // part of the body a head sees. Cheap, because Clone shares the mesh, the skin and the decoded clips.
+    private static CharacterSkeleton? ViewmodelFromBody(Node3D? body)
+    {
+        CharacterSkeleton? clone = Clone(body);
+        if (clone != null)
+            clone.Name = "Viewmodel";
+        return clone;
     }
 
     // Builds the skinned Zombie_Client character with the real zombie skin tone and face.

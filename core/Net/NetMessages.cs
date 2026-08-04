@@ -38,6 +38,7 @@ public enum ENetMessage : byte
     // renumbers them, and a version query between mismatched builds then decodes as some other message
     // and times out instead of reporting the mismatch it exists to report.
     PlayerGesture, // server -> all but the owner, reliable: a one-shot hand animation (a punch today)
+    ZombieKilled,  // server -> a region's clients, reliable: zombies that died this tick
 }
 
 // Why a Hello was refused. Sent before the connection is closed so the player is told what happened
@@ -205,7 +206,9 @@ public static class NetMessages
     // Bump whenever a message layout changes; the server refuses mismatched clients at the handshake.
     // Version 9 does not move a byte: it adds the value 0 (Climb) to the stance a build can send, which
     // a version 8 peer would read as a stance it has no state for. Refusing the mix is the cheap answer.
-    public const byte ProtocolVersion = 9;
+    // Version 10 adds ZombieKilled, which a version 9 client would drop as an unknown type — leaving
+    // the corpse of every punched zombie standing on its screen forever.
+    public const byte ProtocolVersion = 10;
 
     // Two level names denote the same world. The name on the wire is the map's FOLDER name — the one
     // identity that survives the trip between two machines (paths and workshop ids do not) — and it

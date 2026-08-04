@@ -48,13 +48,51 @@ public sealed class ObjectAsset
     // transparent pixels have to survive instead of being scissored away at half alpha.
     public bool DecalBlends { get; }
 
+    // --- What it takes to break it (ResourceAsset / ObjectAsset's rubble block) ---
+
+    // Resource only: the tree or rock's own hit points, from the .dat's "Health". Every placed copy of
+    // the asset starts here (ResourceSpawnpoint.health = asset.health) — 800 for a birch, 1400 for a
+    // clay deposit — which is what makes a fist at 20 damage a forty-punch proposition.
+    public ushort Health { get; }
+
+    // ResourceAsset.vulnerableToFists, off "Vulnerable_To_Fists". Absent means false: the DEFAULT is
+    // that bare hands do nothing to a resource, and the handful that opt in are the ones a survivor can
+    // gather without a tool.
+    public bool VulnerableToFists { get; }
+
+    // ResourceAsset.bladeID: which family of cutting tool may harvest this. Zero is "any blade"; a tree
+    // that names one can only be felled by a weapon whose own blade list contains it.
+    public byte BladeId { get; }
+
+    // Object only: the destructible-rubble block, written either as "Rubble_*" or, on an object whose
+    // interactability IS rubble, as "Interactability_*". Both spellings mean the same fields and
+    // Unturned parses whichever is present, so this does too.
+    public bool HasRubble { get; }
+    public ushort RubbleHealth { get; }
+    public byte RubbleBladeId { get; }
+
+    // rubbleIsVulnerable is the NEGATION of a bare flag: an object is destructible unless it says
+    // "Rubble_Invulnerable". An object with no rubble block at all is not destructible either, which
+    // HasRubble above answers separately.
+    public bool RubbleIsVulnerable { get; }
+
     private ObjectAsset(Guid guid, ushort id, EObjectType type, string rawType, string? explicitName,
         string? dataName, string? bundleOverridePath, Guid materialPaletteGuid, Guid redirectTargetGuid,
-        float decalX = 0f, float decalY = 0f, bool decalBlends = false)
+        float decalX = 0f, float decalY = 0f, bool decalBlends = false,
+        ushort health = 0, bool vulnerableToFists = false, byte bladeId = 0,
+        bool hasRubble = false, ushort rubbleHealth = 0, byte rubbleBladeId = 0,
+        bool rubbleIsVulnerable = false)
     {
         DecalX = decalX;
         DecalY = decalY;
         DecalBlends = decalBlends;
+        Health = health;
+        VulnerableToFists = vulnerableToFists;
+        BladeId = bladeId;
+        HasRubble = hasRubble;
+        RubbleHealth = rubbleHealth;
+        RubbleBladeId = rubbleBladeId;
+        RubbleIsVulnerable = rubbleIsVulnerable;
         Guid = guid;
         Id = id;
         Type = type;
@@ -94,9 +132,41 @@ public sealed class ObjectAsset
         // A bare flag: present with no value at all, which is how Unturned writes its booleans-by-presence.
         bool decalBlends = data.TryGetString("Decal_Alpha", out _);
 
+        // A resource's own hit points and what may take them off. Absent on everything that is not a
+        // Bundles/Trees asset, and harmless there: Health 0 is a thing nothing can damage, which is
+        // exactly what a decal or a bench is.
+        data.TryGetUInt16("Health", out ushort health);
+        data.TryGetByte("BladeID", out byte bladeId);
+        bool vulnerableToFists = data.GetBool("Vulnerable_To_Fists");
+
+        ReadRubble(data, out bool hasRubble, out ushort rubbleHealth, out byte rubbleBladeId,
+            out bool rubbleIsVulnerable);
+
         asset = new ObjectAsset(guid, id, ClassifyType(rawType), rawType, localizedName,
-            data.GetString("Name"), overridePath, paletteGuid, redirectTarget, decalX, decalY, decalBlends);
+            data.GetString("Name"), overridePath, paletteGuid, redirectTarget, decalX, decalY, decalBlends,
+            health, vulnerableToFists, bladeId, hasRubble, rubbleHealth, rubbleBladeId, rubbleIsVulnerable);
         return true;
+    }
+
+    // ObjectAsset's destructible block, under whichever of its two prefixes the file uses. An object
+    // whose Interactability IS "Rubble" writes the fields as "Interactability_*" and everything else
+    // writes them as "Rubble_*"; Unturned reads the interactability spelling first and falls back to the
+    // other, so the same object cannot be described twice and mean two different things.
+    private static void ReadRubble(DatDictionary data, out bool hasRubble, out ushort health,
+        out byte bladeId, out bool isVulnerable)
+    {
+        string prefix =
+            string.Equals(data.GetString("Interactability"), "Rubble", StringComparison.OrdinalIgnoreCase)
+                ? "Interactability_"
+                : "Rubble_";
+
+        // "Rubble" itself is the EObjectRubble mode (DESTROY / DISAPPEAR): its presence is what says the
+        // object has a rubble block at all, on the non-interactable path.
+        hasRubble = prefix == "Interactability_" || data.ContainsKey("Rubble");
+        data.TryGetUInt16(prefix + "Health", out health);
+        data.TryGetByte(prefix + "Blade_ID", out bladeId);
+        // The bare "…_Invulnerable" flag, negated: destructible unless it says otherwise.
+        isVulnerable = hasRubble && !data.ContainsKey(prefix + "Invulnerable");
     }
 
     public static EObjectType ClassifyType(string rawType)
