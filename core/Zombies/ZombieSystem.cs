@@ -173,6 +173,14 @@ public sealed partial class ZombieSystem
     // cannot outrank the pathfinder's later partial-but-executable route through the door forever.
     public const float BlockedRouteTimeout = 0.75f;
     public const float MinRouteProgressFraction = 0.2f;
+    // How much shorter a replacement route has to be before it is worth turning the body onto it.
+    // Both edges of the safe range are measured rather than derived. At 0 the tie-break does nothing
+    // and the spin it exists to cure comes back (415 degrees of turning to close 13 m in the
+    // two-equal-routes test). Replaying the captured horde, every value from 1.0 to 2.0 m produces
+    // identical trajectories. From 2.5 m up the band is wide enough to refuse a genuine improvement:
+    // one body clings to a worse route, turns 329 degrees instead of 200, and never reaches its
+    // target at all. So this sits in the middle of that plateau rather than on either edge.
+    public const float RouteTieBand = 1.5f;
     public const float MaxChaseDistanceSquared = 4096f; // Zombie.cs: target beyond 64 m -> leave
     public const float SwingInterval = 1f;              // Time.time - lastAttack > 1 starts a swing
     public const float AttackTime = 0.5f;               // dedicated-server Attack_0 fallback length
@@ -720,14 +728,31 @@ public sealed partial class ZombieSystem
 
     private readonly List<Vector3> _scratchPath = new();
 
-    // How much shorter a replacement must be before it is worth turning for: one repath's worth of
-    // travel. Below that the two answers are a tie the body cannot act on, because it will have moved
-    // this far by the time it is asked again.
-    private const float RouteSwapMargin = 2f;
-
     // Is the route in hand still the one to walk? Only asked of a complete replacement against a
     // complete incumbent that was built for this target: a partial incumbent, or one inherited from
     // another target, has no standing to refuse.
+    //
+    // A replacement shorter than what is left of the incumbent by more than the tie band is genuinely
+    // better and wins; anything inside the band is the coin flip this exists to stop.
+    //
+    // The band is NOT how far the body travels between repaths. Both lengths here are measured from
+    // the same position at the same instant, so travel does not enter the comparison — the quantity
+    // being absorbed is how much two near-tied answers to the SAME question can differ, which is a
+    // property of the geometry, not of the body asking. A sprinter and a crawler standing on the same
+    // spot get the same two routes and should make the same choice.
+    //
+    // The window is deliberately one-sided. An incumbent with nothing left to walk does beat every
+    // replacement on length, which reads like a hole — a target that steps out of reach leaves an
+    // endpoint still inside the completeness radius, so `oldError` keeps the veto armed while the way
+    // that arrives has become the long way round. It is not a hole, because a body parked on a route
+    // it has walked out delivers no motion, and BlockedRouteTimeout invalidates a route that stops
+    // delivering motion. Measured on that geometry: the route is thrown out 0.75 s after the body
+    // stops, and the way round is taken. Adding a second escape here would be an untestable one.
+    //
+    // Closing it by widening the window instead — refusing an incumbent much SHORTER than the offer —
+    // reads as the same fix and is not: it fires on every route in its final metres, which is every
+    // route, so the body re-adopts a fresh detour just as it was about to arrive. Measured, that walks
+    // 29 m AWAY from a target 14 m off while turning 4265 degrees, worse than the spin it cures.
     private static bool KeepsWalkingTheCurrentRoute(ZombieInstance zombie, List<Vector3> replacement)
     {
         if (zombie.PathPoints.Count == 0 || zombie.PathIsPartial || zombie.RouteServedAnotherTarget)
@@ -735,7 +760,7 @@ public sealed partial class ZombieSystem
         float remaining = RouteLengthFrom(zombie.Position, zombie.PathPoints,
             zombie.CurrentWaypointIndex);
         float offered = RouteLengthFrom(zombie.Position, replacement, 0);
-        return offered + RouteSwapMargin >= remaining;
+        return offered + RouteTieBand >= remaining;
     }
 
     // The ground still to cover: from where the body is to the waypoint it is heading for, then the

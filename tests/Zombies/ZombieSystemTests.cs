@@ -1341,6 +1341,79 @@ public class ZombieSystemTests
         Assert.True(turned < 360f, $"turned {turned:F0} degrees to close {closed:F2} m");
     }
 
+    // The tie-break above lets an incumbent refuse a replacement that is not clearly shorter, and an
+    // incumbent with nothing left to walk is shorter than everything — so on its own it would let a
+    // route the target has stepped out of reach of hold the body for ever. It does not, and this pins
+    // why: a body parked on a route it has walked out delivers no motion, and BlockedRouteTimeout
+    // throws out a route that stops delivering motion, so the veto expires whether or not it ever
+    // agrees to. That is load-bearing, not incidental — disarm the timeout and this exact geometry
+    // parks the body 2.51 m from its target, in Chase, for ever.
+    [Fact]
+    public void ARouteTheTargetHasSteppedBehind_LosesItsVetoWhenItRunsOut()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        var player = Player(1, new Vector3(10f, 5f, 0f));
+
+        // A wall along x = 7.5 that ends at z = -6, in the PHYSICS as well as the graph. A wall only
+        // in the graph lets the body coast the last stretch straight through it, which is how an
+        // earlier version of this test passed with the bug still in place.
+        const float wallX = 7.5f, wallEnd = -6f;
+        system.MoveResolver = (from, to, radius) =>
+            from.X < wallX && to.X >= wallX && to.Z > wallEnd
+                ? to with { X = wallX - 0.01f }
+                : to;
+
+        int queries = 0;
+        Vector3 stale = Vector3.Zero;
+        var corner = new Vector3(7.2f, 5f, -6.5f);
+        bool rounded = false;
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            if (queries++ == 0)
+                return false; // the graph is not answering yet: the body stands, and nothing is pinned
+            path.Add(from);
+            if (queries == 2)
+            {
+                // The answer built before the target stepped behind the wall, stopping 1.9 m short of
+                // the destination the follower asked for -- inside the 2 m that still counts as
+                // arriving. Measured against that destination and not the player, because the approach
+                // path offsets it a metre and it is the destination completeness is judged against.
+                stale = to + ((from - to) with { Y = 0f }).Normalized() * 1.9f;
+                path.Add(stale);
+                return true;
+            }
+            // The way that still arrives, round the end of the wall: about 16 m against a route with
+            // nothing left, so it can never win on length. A corner already turned is dropped, or the
+            // fixture would keep dragging the body back to it and be the thing that oscillates.
+            if (!rounded)
+            {
+                rounded = new Vector2(from.X - corner.X, from.Z - corner.Z).Length() < 1.5f;
+                if (!rounded)
+                {
+                    path.Add(corner);
+                    path.Add(corner with { X = 8.2f });
+                }
+            }
+            path.Add(to);
+            return true;
+        };
+
+        system.Tick(new[] { player }, ImpassableDt); // aggro: the approach path is rolled here
+        // Pin it to RUSH so the destination offset points back along the body's own forward. LEFT and
+        // RIGHT offset sideways, which puts every endpoint that still counts as complete within 2 m of
+        // the player -- inside the range where the follower stops steering by the route and turns
+        // straight at the target, and no route decision is observable at all.
+        zombie.Path = EZombiePath.Rush;
+
+        for (int tick = 0; tick < 600; tick++)
+            system.Tick(new[] { player }, ImpassableDt);
+
+        float gap = new Vector2(zombie.Position.X - 10f, zombie.Position.Z).Length();
+        Assert.True(rounded, $"never went round the wall: parked {gap:F2} m out in {zombie.State}");
+        Assert.True(gap < 1f, $"stopped {gap:F2} m short in {zombie.State} on the stale route");
+        Assert.Equal(EZombieState.Attack, zombie.State);
+    }
+
     private const float ImpassableDt = 0.1f;
 
     private readonly record struct ImpassableRun(int FirstBlockedTick, int InvalidatedAtTick,
