@@ -82,13 +82,30 @@ public partial class ZombiesView : Node3D
             _localPosition = localPosition,
         };
         client.OnUnhandledMessage += view.Handle;
+        client.OnSessionReset += view.ForgetSession;
         return view;
+    }
+
+    // The client gave up on the session and is rejoining from scratch. Whatever answers the next Hello
+    // may be a restarted host, which numbers its zombies from zero again — so every id this view holds
+    // stops meaning anything, tombstones included. Keeping them would refuse the new session's zombies
+    // one by one, exactly as a stale roster version would refuse its players.
+    private void ForgetSession()
+    {
+        _killed.Clear();
+        _localBound = LevelNavigationData.NoBound;
+        foreach (ZombieAvatar avatar in _avatars.Values)
+            avatar.Root.QueueFree();
+        _avatars.Clear();
     }
 
     public override void _ExitTree()
     {
         if (_client != null)
+        {
             _client.OnUnhandledMessage -= Handle;
+            _client.OnSessionReset -= ForgetSession;
+        }
 
         // Templates are deliberately not children (they must never render); unlike their shared Resources,
         // unparented Nodes are not reclaimed by tree teardown, so release them explicitly with the view.

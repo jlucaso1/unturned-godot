@@ -39,6 +39,104 @@ public class PunchReplicationTests
     private InputCommand Idle(EPlayerStance stance = EPlayerStance.Stand) =>
         new(_frame++, 0, 0, jump: false, sprint: false, yaw: 0, pitch: 90, stance, grounded: true);
 
+    // A punch is judged as it arrives, ahead of the freshness guard that stale MOVEMENT frames answer to.
+    // Deliver a later idle frame first and every copy of the swing behind it is older — before the swing
+    // moved ahead of the guard, all of them were discarded and the punch dealt nothing at all.
+    [Fact]
+    public void Server_AnswersASwingThatArrivedBehindANewerFrame()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        InputCommand swing = Attack();
+        InputCommand later = Idle();       // a frame AFTER the swing, delivered before it
+        sim.QueueInput(1, later);
+        sim.QueueInput(1, swing);
+
+        sim.Step();
+        Assert.Equal(EPlayerGesture.PunchLeft, Assert.Single(sim.Gestures).Gesture);
+    }
+
+    // ...and it is still answered only once: the repeats are reordered around the same newer frame.
+    [Fact]
+    public void Server_AnswersAReorderedSwingExactlyOnce()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        InputCommand swing = Attack();
+        InputCommand repeat = RepeatSwing();
+        sim.QueueInput(1, Idle());
+        sim.QueueInput(1, repeat);
+        sim.QueueInput(1, swing);
+
+        sim.Step();
+        Assert.Single(sim.Gestures);
+    }
+
+    // A swing that reaches the server behind a NEWER swing is not a new punch. Plain equality read the
+    // older number as unseen and answered the same arm twice.
+    [Fact]
+    public void Server_RefusesASwingOlderThanTheOneAlreadyAnswered()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        InputCommand first = Attack();
+        InputCommand second = Attack();
+        sim.QueueInput(1, second);
+        sim.QueueInput(1, first);   // the older swing, arriving late
+
+        sim.Step();
+        Assert.Single(sim.Gestures);
+    }
+
+    // The sequence is seven bits and wraps, so "newer" cannot be plain <. A swing numbered just past the
+    // wrap is newer than the one numbered just before it.
+    [Fact]
+    public void Server_ReadsTheSwingSequenceAcrossItsWrap()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        sim.QueueInput(1, new InputCommand(_frame++, 0, 0, false, false, 0, 90, EPlayerStance.Stand,
+            grounded: true, hasSwing: true, swingSequence: 0x7F, swingFist: EPlayerPunch.Left));
+        sim.Step();
+        Assert.Single(sim.Gestures);
+
+        for (int i = 0; i < 12; i++)
+            sim.Step(); // let the swing allowance accrue, so the sequence is what decides this
+
+        // 0 is one past 0x7F, not 127 behind it.
+        sim.QueueInput(1, new InputCommand(_frame++, 0, 0, false, false, 0, 90, EPlayerStance.Stand,
+            grounded: true, hasSwing: true, swingSequence: 0, swingFist: EPlayerPunch.Right));
+        sim.Step();
+        Assert.Equal(EPlayerGesture.PunchRight, Assert.Single(sim.Gestures).Gesture);
+    }
+
+    // The aim the punch is judged by is the swing's own, not the delivering frame's. Lose the frame that
+    // threw it, let a repeat sent after the player spun round arrive first, and the server must still
+    // raycast from where they were looking when they swung.
+    [Fact]
+    public void Server_JudgesTheSwingByTheAimItWasThrownWith()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        // A repeat frame: the frame's own aim has spun to yaw 200 and gone prone, but the swing still
+        // carries the aim it was minted with.
+        sim.QueueInput(1, new InputCommand(_frame++, 0, 0, false, false, yaw: 200, pitch: 30,
+            EPlayerStance.Prone, grounded: true, hasSwing: true, swingSequence: ++_swing,
+            swingFist: EPlayerPunch.Left,
+            swingYaw: 40, swingPitch: 90, swingStance: EPlayerStance.Stand));
+
+        sim.Step();
+        PlayerGestureEvent thrown = Assert.Single(sim.Gestures);
+        Assert.Equal(40, thrown.Yaw);
+        Assert.Equal(90, thrown.Pitch);
+        Assert.Equal(EPlayerStance.Stand, thrown.Stance);
+    }
+
     [Fact]
     public void Server_TurnsASwingIntoAGesture()
     {
@@ -375,6 +473,39 @@ public class PunchReplicationTests
         // ancient history and never plays.
         Deliver(NetMessages.WritePlayerGesture(9, 5, EPlayerGesture.PunchLeft), now);
         Assert.Equal(EPlayerGesture.PunchLeft, client.Remotes[9].PendingGesture);
+    }
+
+    // The same restart, from the point of view of everything ELSE keyed on server-assigned ids. The
+    // client already drops its roster versions there, for the reason above; anything holding zombie ids
+    // has to be told too, because a restarted host numbers those from zero again and the ids it reuses
+    // name different zombies. ZombiesView's kill tombstones are the subscriber this exists for: kept for
+    // the life of a session, they would otherwise refuse the new session's zombies one by one.
+    [Fact]
+    public void ARejoinTellsSubscribersToForgetTheSessionsIds()
+    {
+        var serverTransport = new LoopbackServerTransport();
+        LoopbackClientTransport ct = serverTransport.CreateClient();
+        Assert.True(serverTransport.TryReceive(out ServerTransportEvent connected));
+        ITransportConnection conn = connected.Connection;
+        var client = new NetClient(ct, "A", Level);
+
+        int resets = 0;
+        client.OnSessionReset += () => resets++;
+
+        double now = 1000.0;
+        conn.Send(NetMessages.WriteWelcome(1, 10, 1, System.Array.Empty<PlayerListing>()), ESendType.Reliable);
+        client.Update(now);
+        Assert.True(client.Joined);
+        Assert.Equal(0, resets); // joining is not a reset
+
+        now += NetClient.StateTimeout + 1.0;
+        client.Update(now);
+        Assert.False(client.Joined);
+        Assert.Equal(1, resets);
+
+        // And not again while it stays unjoined: the reset is the transition, not the state.
+        client.Update(now + 1.0);
+        Assert.Equal(1, resets);
     }
 
     [Fact]

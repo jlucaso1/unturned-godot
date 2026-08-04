@@ -288,9 +288,9 @@ public static class CharacterModel
 
     private static AssetSource? Open(string unturnedPath)
     {
-        string assetsPath = Path.Combine(unturnedPath, "Unturned_Data", "resources.assets");
+        string? assetsPath = UnturnedInstall.FindDataFile(unturnedPath, "resources.assets");
         string? bundlePath = UnturnedInstall.FindMasterBundle(unturnedPath);
-        if (!File.Exists(assetsPath) || bundlePath == null)
+        if (assetsPath == null || bundlePath == null)
             return null;
 
         // resources.assets ships with its type trees stripped (enableTypeTree = 0). Type trees are identical

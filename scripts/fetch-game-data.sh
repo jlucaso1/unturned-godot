@@ -89,6 +89,13 @@ verify_content() {
         ok=0
     fi
 
+    # Either data-directory layout will do; see the filelist above. Checked here so a cache from before
+    # this file was fetched fails verification and is refilled, rather than quietly drawing placeholders.
+    if [[ ! -f "$1/Unturned_Data/resources.assets" && ! -f "$1/Unturned_Headless_Data/resources.assets" ]]; then
+        echo "Missing: $1/Unturned_Headless_Data/resources.assets" >&2
+        ok=0
+    fi
+
     if [[ "$maps" == "all" ]]; then
         if ! verify_all_maps "$1" "$require_all_receipt"; then
             ok=0
@@ -399,6 +406,12 @@ trap 'rm -f -- "$filelist"' EXIT
 {
     printf 'regex:^Bundles/.*\n'
     printf 'regex:^Localization/.*\n'
+    # The Unity data file holding the character prefabs — Player_Client with its Viewmodel subtree, the
+    # zombies, the ragdolls — and the skybox materials. The server build calls its data directory
+    # Unturned_Headless_Data where the retail client calls it Unturned_Data; both carry the same object
+    # graph, and UnturnedInstall.FindDataFile accepts either. ~31 MB, and without it the game draws a
+    # placeholder capsule instead of the real character.
+    printf 'regex:^Unturned_Headless_Data/resources\\.(assets|resource)$\n'
     if [[ "$maps" == "all" ]]; then
         printf 'regex:^Maps/.*\n'
     else

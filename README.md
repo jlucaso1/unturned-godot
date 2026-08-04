@@ -85,7 +85,9 @@ Nothing else is needed: the master bundle, maps and assets are read directly out
 
 To *develop* rather than play, the Steam install is optional: `./scripts/fetch-game-data.sh` pulls the
 same content out of Unturned's anonymously-downloadable dedicated server, which is what CI and the agent
-sandboxes use. See [Game content without a Steam install](#game-content-without-a-steam-install).
+sandboxes use — including the character prefabs, which the server keeps in `Unturned_Headless_Data/`
+where the retail client keeps them in `Unturned_Data/`. See
+[Game content without a Steam install](#game-content-without-a-steam-install).
 
 ## Run
 
@@ -271,7 +273,7 @@ content the client reads. That is enough for the whole suite, and it needs no St
 and no Steam client:
 
 ```sh
-./scripts/fetch-game-data.sh                       # bundles + PEI (~165 MB) into build/game-data
+./scripts/fetch-game-data.sh                       # bundles + PEI + prefabs (~200 MB) into build/game-data
 export UNTURNED_PATH="$(./scripts/fetch-game-data.sh --print-dir)"
 dotnet test tests/UnturnedGodot.Tests.csproj       # now with the data-backed tests running for real
 ```

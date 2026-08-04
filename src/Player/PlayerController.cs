@@ -90,6 +90,10 @@ public partial class PlayerController : CharacterBody3D
     private byte _swingSequence;
     private EPlayerPunch _swingFist;
     private int _swingRepeats;
+    // The aim the current swing was thrown with, held for as long as its repeats are being sent.
+    private byte _swingYaw;
+    private byte _swingPitch;
+    private EPlayerStance _swingStance;
 
     // How many input frames a thrown swing is announced on. Input datagrams are unreliable, so a single
     // dropped one would eat the swing for everyone else while the thrower saw their own — the one desync
@@ -369,6 +373,13 @@ public partial class PlayerController : CharacterBody3D
                 _swingSequence = (byte)((_swingSequence + 1) & 0x7F);
                 _swingFist = gesture == EPlayerGesture.PunchRight ? EPlayerPunch.Right : EPlayerPunch.Left;
                 _swingRepeats = AttackEdgeRepeats;
+                // Pinned with the number, and sent unchanged on the repeat frames. A repeat that reaches
+                // the server first would otherwise hand it the aim of a LATER frame, and the server
+                // raycasts the punch from what it is given: turn or drop prone while the first datagram
+                // is being lost and the damage would come out of where the view had moved on to.
+                _swingYaw = UnturnedGodot.Net.NetAngles.QuantizeYaw(RotationDegrees.Y);
+                _swingPitch = UnturnedGodot.Net.NetAngles.QuantizePitch(_pitch + 90f);
+                _swingStance = _stance;
             }
 
             bool sendSwing = _swingRepeats > 0;
@@ -386,7 +397,8 @@ public partial class PlayerController : CharacterBody3D
                     (sbyte)input.X, (sbyte)input.Y, jumpHeld, wantSprint,
                     UnturnedGodot.Net.NetAngles.QuantizeYaw(RotationDegrees.Y),
                     UnturnedGodot.Net.NetAngles.QuantizePitch(_pitch + 90f),
-                    _stance, GlobalPosition, isOnFloor, sendSwing, _swingSequence, _swingFist));
+                    _stance, GlobalPosition, isOnFloor, sendSwing, _swingSequence, _swingFist,
+                    _swingYaw, _swingPitch, _swingStance));
             }
         }
 

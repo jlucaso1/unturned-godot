@@ -330,19 +330,26 @@ public sealed class ServerSimulation
         // played must not rewind the player — not just its position, but the stance, the jump and the
         // direction it was steering. Signed subtraction is the standard wrap-safe sequence comparison,
         // as long as the sender cannot be over 2^31 frames ahead.
-        if (entry.HasReceivedFrame && unchecked((int)(input.Frame - entry.LastReceivedFrame)) <= 0)
-            return;
-        entry.HasReceivedFrame = true;
-        entry.LastReceivedFrame = input.Frame;
-        entry.Inputs.Enqueue(input);
-
         // A swing is answered HERE, as it arrives, and never from the queue below. What the rate limit
         // measures is real elapsed time, and the queue is precisely where real time stops being legible:
         // an input can wait several ticks in it, be trimmed off it unplayed, or arrive in a burst beside
         // the frames around it. Answering on arrival also means the trim can no longer swallow a punch,
         // so nothing has to be carried past it.
+        //
+        // Ahead of the freshness guard, and that ordering is load-bearing. The guard exists to stop stale
+        // MOVEMENT from rewinding the player, and a swing is not movement: it carries its own aim, spends
+        // its own allowance, and is deduplicated by its own sequence. Behind the guard, one reordered
+        // datagram would lose the punch outright — deliver a later non-swing frame before the repeats of a
+        // swing and every copy of that swing is discarded as stale, so an honest hit the owner watched
+        // connect deals nothing at all.
         if (input.HasSwing)
             AcceptSwing(entry, input, receivedAt);
+
+        if (entry.HasReceivedFrame && unchecked((int)(input.Frame - entry.LastReceivedFrame)) <= 0)
+            return;
+        entry.HasReceivedFrame = true;
+        entry.LastReceivedFrame = input.Frame;
+        entry.Inputs.Enqueue(input);
 
         // The loop plays one frame per tick, so a client that sends faster than the server ticks builds
         // a backlog that never drains — and a backlog is time: the avatar everyone else sees keeps
@@ -363,11 +370,14 @@ public sealed class ServerSimulation
     // answered, so losing the first datagram costs nothing and receiving all of them costs nothing either.
     private void AcceptSwing(Entry entry, in InputCommand input, double receivedAt)
     {
-        if (entry.HasSwung && input.SwingSequence == entry.LastSwingSequence)
-            return; // a repeat of the swing we already answered
+        // Wrap-safe seven-bit order. Distance 0 is the repeat of the swing already answered; anything in
+        // the lower half is newer and is a swing of its own, gaps and all (a client whose swings were lost
+        // outright leaves them). The upper half is a swing that arrived BEHIND a newer one — plain
+        // equality would read that as new and answer the same punch twice, which reordering alone is
+        // enough to produce now that swings are judged ahead of the freshness guard.
+        if (entry.HasSwung && ((input.SwingSequence - entry.LastSwingSequence) & 0x7F) is 0 or >= 0x40)
+            return;
 
-        // Equality, not order: the number wraps, and a client whose swings were lost outright leaves gaps
-        // in it. What matters is only that a NEW number is a new swing.
         entry.HasSwung = true;
         entry.LastSwingSequence = input.SwingSequence;
 
@@ -388,8 +398,10 @@ public sealed class ServerSimulation
         if (entry.SwingAllowance < 1)
             return; // faster than the rule allows, whatever the client says its frame numbers were
         entry.SwingAllowance -= 1;
+        // The swing's own aim, not the delivering frame's: a repeat that arrives first belongs to a later
+        // frame, and the punch is the one the owner threw. See InputCommand.SwingYaw.
         entry.PendingGestures.Enqueue(new PendingGesture(Player.PlayerGestures.For(input.SwingFist),
-            input.Yaw, input.Pitch, input.Stance));
+            input.SwingYaw, input.SwingPitch, input.SwingStance));
     }
 
     // Advances one 0.08 s step on the nominal clock: each call is one tick of simulated time. What the

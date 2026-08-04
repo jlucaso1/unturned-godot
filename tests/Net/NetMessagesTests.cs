@@ -217,8 +217,42 @@ public class NetMessagesTests
             UnturnedGodot.Player.EPlayerStance.Stand, grounded: true,
             hasSwing: true, swingSequence: 3);
 
-        Assert.Equal(NetMessages.WriteInput(idle).Length + 1, NetMessages.WriteInput(swinging).Length);
+        // Four bytes on a swing frame: the fist-and-sequence byte, plus the swing's own yaw, pitch and
+        // stance — which is what lets a repeat that arrives first still be judged by the frame that
+        // threw it. An idle frame pays for none of them.
+        Assert.Equal(NetMessages.WriteInput(idle).Length + 4, NetMessages.WriteInput(swinging).Length);
         Assert.False(NetMessages.ReadInput(NetMessages.WriteInput(idle)).HasSwing);
+    }
+
+    // The swing's own aim rides the swing block and survives the round trip, distinct from the frame's.
+    [Fact]
+    public void Input_CarriesTheSwingsOwnAim()
+    {
+        var swinging = new InputCommand(9, 0, 0, false, false, yaw: 200, pitch: 30,
+            UnturnedGodot.Player.EPlayerStance.Prone, grounded: true,
+            hasSwing: true, swingSequence: 3, swingFist: EPlayerPunch.Right,
+            swingYaw: 40, swingPitch: 90, swingStance: UnturnedGodot.Player.EPlayerStance.Stand);
+
+        InputCommand read = NetMessages.ReadInput(NetMessages.WriteInput(swinging));
+        Assert.Equal(200, read.Yaw);
+        Assert.Equal(UnturnedGodot.Player.EPlayerStance.Prone, read.Stance);
+        Assert.Equal(40, read.SwingYaw);
+        Assert.Equal(90, read.SwingPitch);
+        Assert.Equal(UnturnedGodot.Player.EPlayerStance.Stand, read.SwingStance);
+    }
+
+    // A frame that pins nothing means "this frame threw it", which is the truth on the swing frame.
+    [Fact]
+    public void Input_DefaultsTheSwingAimToTheFramesOwn()
+    {
+        var swinging = new InputCommand(9, 0, 0, false, false, yaw: 77, pitch: 44,
+            UnturnedGodot.Player.EPlayerStance.Crouch, grounded: true,
+            hasSwing: true, swingSequence: 3);
+
+        InputCommand read = NetMessages.ReadInput(NetMessages.WriteInput(swinging));
+        Assert.Equal(77, read.SwingYaw);
+        Assert.Equal(44, read.SwingPitch);
+        Assert.Equal(UnturnedGodot.Player.EPlayerStance.Crouch, read.SwingStance);
     }
 
     [Fact]
