@@ -12,7 +12,9 @@ namespace UnturnedGodot.Data;
 // even when its input is split into small regions; at California2's 266k triangles that merge can occupy
 // one engine worker for minutes and prevents process teardown. The source data is already a baked graph,
 // so large maps do not need to be rasterized/merged again: shared indexed edges are its exact adjacency.
-public sealed class BakedNavGraph
+// The shape read-out the editor's navigation overlay draws from — islands, rims, pockets — is the other
+// half of this class, in NavmeshSurvey.cs.
+public sealed partial class BakedNavGraph
 {
     private const uint CacheMagic = 0x43424755; // UGBC
     // Bump whenever the TOPOLOGY this builds changes, not just the blob's layout. The fingerprint
@@ -209,7 +211,7 @@ public sealed class BakedNavGraph
     private const float JoinShortestOverlap = 0.05f;
     private readonly record struct DirectedConnection(int From, Connection Edge, long Order);
 
-    private sealed class FlagGraph
+    private sealed partial class FlagGraph
     {
         public NavFlag Source { get; }
         private readonly Vector3[] _centres;
