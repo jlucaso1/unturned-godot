@@ -59,6 +59,31 @@ dotnet run -c Release --project tools/PerfHarness -- foliage lz4
 Micro-benchmarks the Core parsers against the real game data. See `tools/PerfHarness/README.md`. Each
 suite skips cleanly when its input is missing, so it runs on any machine with some subset of the data.
 
+### Where the cold load's decode time actually goes
+
+Measured with `PerfHarness -- lzma` and `-- bundle` on a 4-vCPU container, against the game's own
+`core_linux.masterbundle` (110.9 MiB on disk, 1,371.9 MiB decompressed, one LZMA block):
+
+| | bytes | time | share |
+|---|---:|---:|---:|
+| LZMA, SerializedFile node | 170.9 MiB | 4.60 s | 30% |
+| LZMA, `.resS` texture node | 1,180.2 MiB | 7.73 s | 51% |
+| LZMA, `.resource` audio node | 20.8 MiB | 2.11 s | 14% |
+| `SerializedFile.Read` | 103,549 objects | 0.01 s | <1% |
+| `TypeTreeReader.Read`, bulk-scanned classes | 92,749 objects | 0.47 s | 3% |
+
+**The pass is LZMA-bound and nothing else is close.** Decompression is ~97% of it; the object table is
+free, and the TypeTree reader — the obvious-looking target, and the only part of this that is the port's
+own code — is 3%. Eliminating the reader entirely would take ~0.5 s off a ~15 s pass. Work aimed at cold
+load time should go at *what is decoded and when* (`ress`, deferral, caching) rather than at how fast the
+port turns already-decoded bytes into values.
+
+Two specifics worth carrying. The decode rate is not one number: it varies 15x between the three nodes
+and tracks how compressible each one is, so a rate sampled in one node cannot price a deferral in
+another. And the audio `.resource` node decodes at 9.9 MiB/s against the texture node's 152.7 — 1.5% of
+the bytes for 14% of the time — which makes it much the most expensive region in the file per megabyte.
+`tools/PerfHarness/README.md` has the per-node table and what it means for the `ress` numbers.
+
 ## Where the time and memory go
 
 - **GPU** (AMD, headless): `amdgpu_top -J -n 1` while the app runs, for GPU-busy % per block and VRAM used.
