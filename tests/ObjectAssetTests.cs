@@ -213,4 +213,44 @@ public class ObjectAssetTests
         Assert.Equal(EObjectType.Vehicle, asset.Type);
         Assert.Equal((ushort)58, asset.Id);
     }
+
+    [Fact]
+    public void ParsesDecalSize()
+    {
+        // A Decal ships no prefab: its .dat's Decal_X/Decal_Y are the metres its texture covers, and
+        // without them there is nothing to draw the decal.png on.
+        Assert.True(ObjectAsset.TryParse(
+            DatParser.Parse("GUID 982a81b1d5bc4c179a689b3b08caa15a\nType Decal\nID 729\n"
+                + "Decal_X 3\nDecal_Y 4.5\n"), null, out ObjectAsset? decal));
+
+        Assert.Equal(EObjectType.Decal, decal.Type);
+        Assert.Equal(3f, decal.DecalX);
+        Assert.Equal(4.5f, decal.DecalY);
+    }
+
+    [Fact]
+    public void ParsesTheBareDecalAlphaFlag()
+    {
+        // Test_Auto_Decal_Alpha declares it with no value at all, which is how Unturned writes a boolean
+        // it reads by presence. Its texture fades rather than clips.
+        Assert.True(ObjectAsset.TryParse(
+            DatParser.Parse("GUID f0a76ecfb0684da48bba7c5f5e5a0830\nType Decal\n"
+                + "Decal_X 6\nDecal_Y 3\nDecal_Alpha\n"), null, out ObjectAsset? blended));
+        Assert.True(blended.DecalBlends);
+
+        Assert.True(ObjectAsset.TryParse(
+            DatParser.Parse("GUID 982a81b1d5bc4c179a689b3b08caa15a\nType Decal\nDecal_X 3\nDecal_Y 3\n"),
+            null, out ObjectAsset? clipped));
+        Assert.False(clipped.DecalBlends);
+    }
+
+    [Fact]
+    public void DecalSize_IsZeroForEverythingElse()
+    {
+        Assert.True(ObjectAsset.TryParse(
+            DatParser.Parse($"GUID {System.Guid.NewGuid():N}\nType Large\n"), null, out ObjectAsset? large));
+
+        Assert.Equal(0f, large.DecalX);
+        Assert.Equal(0f, large.DecalY);
+    }
 }

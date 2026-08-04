@@ -23,7 +23,11 @@ public static class ExtractionIndex
     // recorded here; bumping MeshCache alone would leave those entries valid against an unchanged bundle
     // stamp, so the prefab would stay a placeholder box and never be retried. Bumping this is what asks
     // the question again.
-    private const uint Magic = 0x32584755;
+    // "UGX3": decals used to be recorded here as permanent misses, because the extractor found no prefab
+    // for them and nothing else could explain the absence. They have geometry now (a quad), so every
+    // existing cache's miss set has to be thrown away or those maps keep drawing boxes forever — a miss
+    // is never re-checked, which is the whole point of recording one.
+    private const uint Magic = 0x33584755;
     private const uint OwnerMagic = 0x314F4755; // "UGO1"
 
     // Sits next to the per-GUID meshes. Bundle filenames are not identities: unrelated workshop items

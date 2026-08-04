@@ -128,6 +128,35 @@ public class LegacyMapContentRealDataTests
         Assert.True(GameData.Prefabs.PartsByKey.ContainsKey("trees/ornament_0"));       // the override target
     }
 
+    [RealDataFact(RequiresMasterBundle = true)]
+    public void EveryDecalAsset_HasItsTextureUnderItsOwnPrefabKey()
+    {
+        // A Decal has no prefab, so nothing in the mesh pipeline could ever produce one and every decal
+        // the maps place rendered as a placeholder box. What it does have is a decal.png filed under its
+        // own key in the bundle, which is what the extractor now builds its quad around.
+        IReadOnlyList<ContentSource> sources = ContentSource.Discover(GameData.Install!);
+        ObjectAssetDatabase db = ContentExtraction.ScanAssets(sources);
+        PrefabGraph prefabs = GameData.Prefabs;
+
+        // Core-owned decals only: a subscribed workshop item may ship its own, and its texture lives in
+        // its own bundle rather than the core prefab graph this checks against.
+        var decals = 0;
+        foreach (ObjectAsset asset in db.All)
+        {
+            if (asset.Type != EObjectType.Decal || !sources[0].Owns(asset.Directory))
+                continue;
+
+            decals++;
+            string key = PrefabKey.For(asset, sources[0]);
+            Assert.True(prefabs.ContainerByPath.ContainsKey(prefabs.AssetPrefix + key + "/decal.png"),
+                $"{asset.Directory} has no decal.png at {key}");
+            Assert.True(asset.DecalX > 0f && asset.DecalY > 0f, $"{asset.Directory} has no decal size");
+            Assert.False(prefabs.PartsByKey.ContainsKey(key), $"{asset.Directory} unexpectedly has a prefab");
+        }
+
+        Assert.Equal(14, decals); // the game's own graffiti, faction tags and the Isaac memorial
+    }
+
     [RealDataFact]
     public void EveryInstalledMap_RoadAndTerrainBundlesDecode()
     {

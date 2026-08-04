@@ -79,4 +79,8 @@ public sealed class DatDictionary : DatNode
 
     public bool TryGetInt32(string key, out int value) =>
         int.TryParse(GetString(key), NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
+
+    // Unturned writes its .dat floats with an invariant decimal point, so the parse is culture-fixed too.
+    public bool TryGetSingle(string key, out float value) =>
+        float.TryParse(GetString(key), NumberStyles.Float, CultureInfo.InvariantCulture, out value);
 }
