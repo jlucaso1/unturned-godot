@@ -31,6 +31,36 @@ therefore originate from a physics notification; code started by an idle-frame s
 
 Add `--write-baseline` to record the current numbers as the new baseline.
 
+### Naming the view a measurement is about
+
+Tier 2's poses are derived from the scene bounds, which is what makes the tier comparable across maps.
+The cost of a frame, though, is a property of what was *built* there rather than of the bounding box: a
+dense street looking down its own length is where the draw calls are, and no fraction-of-extent pose
+lands on it. `UG_BENCH_POSES` measures poses named by hand instead:
+
+```sh
+UG_BENCH_POSES="heavy=-406.89,49.58,579.35,-7.5,-17.6" ./scripts/run-benchmark.sh gpu
+```
+
+Entries are `name=px,py,pz,pitch,yaw` separated by `;`, and each one is reported under its own
+`view_<name>` suffix (`gpu.drawCalls.median.view_heavy`). They take the 4 km gameplay far plane, like
+the derived ground poses. `UG_BENCH_POSES_ONLY=1` drops the derived poses entirely, which is both a much
+shorter run and a report with nothing in it but the view under study. A malformed spec fails the run
+rather than silently measuring something else, and `UG_SHOT` captures the first named pose in preference
+to `ground_diag`, so the frame that was measured is the frame that gets photographed.
+
+Those five numbers are the same ones `SHOT_CAM` takes and the debug overlay's `F4` copies, so a view can
+be moved between the benchmark, a screenshot and a repro dump unchanged. `bench/views.json` keeps them
+per map so they do not have to be pasted around:
+
+```sh
+MAP=California2 UG_BENCH_VIEWS=heavy UG_BENCH_POSES_ONLY=1 ./scripts/run-benchmark.sh gpu
+MAP=California2 ./scripts/perf-screenshots.sh before --views heavy
+```
+
+To add one: run the game with `FREECAM=1`, fly there, press `F4`, and copy the `SHOT_CAM=` value the log
+prints into `bench/views.json`. Name it after what makes it expensive.
+
 ### Baselines are yours
 
 `bench/baseline/` is git-ignored, so a fresh clone has none and the first run of each tier says so:
@@ -188,6 +218,43 @@ something drawn.
 - **Solo automation**: `SOLO=1` boots straight into the world with the loopback session (zombies and all
   server systems live) WITHOUT binding the UDP port. Only use `OPEN_LAN=1` when a second client actually
   joins the test.
+
+## Proving a change is invisible
+
+Almost everything on this page is meant to be *free*: the same frame, drawn or loaded for less. That
+claim needs the same rigour the timings get, and a still capture gives it cheaply, because everything a
+screenshot here depends on is pinnable — map, resolution, time of day, camera framing — leaving only the
+code under test free to differ.
+
+```sh
+git switch main       && ./scripts/perf-screenshots.sh before
+git switch my-change  && ./scripts/perf-screenshots.sh after
+
+./scripts/compare-screenshots.py build/screenshots/{before,after}/overview.png \
+    --diff build/screenshots/diff/overview.png --max-percent 0.0
+```
+
+`perf-screenshots.sh` captures three views by default — `overview` (the map-relative high three-quarter
+framing), `spawn` (third person at the map's own spawn point: gameplay height, near shadows, foliage and
+the character) and `night` (sun, moon, stars, fog, sky and ambient) — plus any name from
+`bench/views.json` or any `--cam name=px,py,pz,pitch,yaw`.
+
+`compare-screenshots.py` decodes both PNGs itself (no ImageMagick, no Pillow, neither of which is on a
+bare container), reports the differing share of the frame and the worst per-channel delta, and writes an
+amplified difference image where a one-step delta — invisible at 1:1, and exactly the kind that means
+geometry or a resource moved — is plainly visible.
+
+Two captures only compare if they were taken the same way. The script builds the project first, because
+Godot's command-line runner does not compile C# and would otherwise photograph a stale assembly twice
+and agree with itself. Capture against a **cold** cache when the change is in a parser or an extractor,
+since a warm run may read the old output back instead of executing the new code at all.
+
+`publish-screenshots.sh` puts a set on the orphan `perf-screenshots` branch and prints the Markdown
+table for a PR body — no code, no shared history with `main`, and nothing on it is ever merged, so the
+PNGs stay out of the object graph a normal clone walks.
+
+[agents/](agents/) has one self-contained brief per kind of performance work, each carrying this
+protocol in full.
 
 ## Spatial-culling A/B controls
 
