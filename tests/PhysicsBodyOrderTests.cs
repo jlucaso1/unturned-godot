@@ -263,6 +263,21 @@ public class PhysicsBodyOrderTests
         int tick = source.IndexOf("probe.Tick(views", probe, StringComparison.Ordinal);
         Assert.True(probe >= 0 && frame > probe && tick > frame,
             "the end-to-end probe must not issue DirectSpaceState queries from a timer callback");
+        Assert.Contains("NavmeshProject = zombies.NavmeshProject", source[probe..]);
+        Assert.Contains("NavmeshSupportsSegment = zombies.NavmeshSupportsSegment", source[probe..]);
+    }
+
+    [Fact]
+    public void ReproMapHandlesLegacyFacesAndRendersEveryPlayer()
+    {
+        if (FindRepositoryFile(Path.Combine("tools", "ReproHarness", "ReproMapSvg.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("flag.DisabledFaces ?? Array.Empty<int>()", source);
+        Assert.Contains("flag.DisabledFaces?.Length ?? 0", source);
+        Assert.Contains("foreach (ReproPlayerSample player in players)", source);
+        Assert.DoesNotContain("Players[0]", source);
     }
 
     [Fact]

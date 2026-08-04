@@ -180,6 +180,8 @@ public partial class NetworkManager : Node
                 {
                     PathQuery = zombies.PathQuery,
                     PathReady = zombies.PathReady,
+                    NavmeshProject = zombies.NavmeshProject,
+                    NavmeshSupportsSegment = zombies.NavmeshSupportsSegment,
                     MoveResolver = zombies.MoveResolver,
                     GroundSnap = zombies.GroundSnap,
                     VisionBlocked = zombies.VisionBlocked,

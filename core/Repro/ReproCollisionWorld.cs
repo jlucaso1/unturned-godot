@@ -117,8 +117,11 @@ public sealed class ReproCollisionWorld
     public Vector3 Resolve(Vector3 from, Vector3 to, float radius)
     {
         LastBlocker = "";
-        Vector3 motion = to - from;
-        Vector3 at = RecoverInitialOverlap(from, radius, motion);
+        Vector3 requestedMotion = to - from;
+        Vector3 at = RecoverInitialOverlap(from, radius, requestedMotion);
+        // Depenetration changes the start, not the requested destination. Keeping the original motion
+        // would translate the endpoint by the correction and disagree with Godot's live resolver.
+        Vector3 motion = to - at;
         float initialHorizontalSquared = (motion.X * motion.X) + (motion.Z * motion.Z);
         if (initialHorizontalSquared > ZombieBody.MaxStepMotion * ZombieBody.MaxStepMotion)
         {

@@ -71,6 +71,23 @@ public class ReproCollisionWorldTests
         Assert.True(away.X < result.X - 0.45f, $"recovered body remained embedded: {away}");
     }
 
+    [Fact]
+    public void ARecoveredLongProbeStillEndsAtTheRequestedDestination()
+    {
+        var geometry = new ReproWorlds.Geometry().Ground()
+            // The capsule begins intersecting the top of a very short ledge. Recovery is vertical;
+            // once raised, the long +X leg is clear and has no reason to change its requested endpoint.
+            .Box("ledge", new Vector3(0f, 0.25f, 0f), new Vector3(0.1f, 0.25f, 5f));
+        ReproCollisionWorld world = World(geometry);
+        var from = new Vector3(0f, 0f, 0f);
+        var target = new Vector3(5f, 0.401f, 0f);
+
+        Vector3 result = world.Resolve(from, target, Radius);
+
+        Assert.True(result.DistanceTo(target) < 0.002f,
+            $"depenetration translated the requested endpoint: {result} instead of {target}");
+    }
+
     // A kerb inside the CharacterController's step offset is climbed; a wall is not. (Anything under
     // 0.4 m never touches the capsule at all — it starts at the knees — and the ground snap lifts the
     // body over it, which is how the host models a CharacterController's grounding pass.)

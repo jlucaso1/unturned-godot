@@ -89,7 +89,7 @@ internal static class ReproMapSvg
         svg.Append("<g stroke-linejoin=\"round\">\n");
         foreach (ReproNavFlag flag in flags)
         {
-            var disabled = new HashSet<int>(flag.DisabledFaces);
+            var disabled = new HashSet<int>(flag.DisabledFaces ?? Array.Empty<int>());
             for (int face = 0; face * 3 + 2 < flag.Triangles.Length; face++)
             {
                 int ia = flag.Triangles[face * 3], ib = flag.Triangles[(face * 3) + 1];
@@ -139,14 +139,12 @@ internal static class ReproMapSvg
     private static void DrawRoutesAndActors(StringBuilder svg, ReproDump dump,
         IReadOnlyList<ZombieInstance>? live, int ticks, Vector3 focus, float radius, float scale)
     {
-        ReproPlayerSample? player = null;
+        IReadOnlyList<ReproPlayerSample> players = Array.Empty<ReproPlayerSample>();
         if (dump.Zombies is { Frames.Count: > 0 } section)
         {
             int frame = Math.Min(ticks, section.Frames.Count - 1);
-            if (section.Frames[frame].Players.Count > 0)
-                player = section.Frames[frame].Players[0];
+            players = section.Frames[frame].Players;
         }
-        Vector3 playerPosition = player == null ? Vector3.Zero : ReproVector.To(player.Position);
 
         var actors = new List<Actor>();
         if (live != null)
@@ -186,8 +184,9 @@ internal static class ReproMapSvg
             }
         }
 
-        if (player != null)
+        foreach (ReproPlayerSample player in players)
         {
+            Vector3 playerPosition = ReproVector.To(player.Position);
             float px = X(playerPosition.X, focus, radius, scale);
             float py = Y(playerPosition.Z, focus, radius, scale);
             svg.Append("<circle cx=\"").Append(F(px)).Append("\" cy=\"").Append(F(py))
@@ -233,7 +232,7 @@ internal static class ReproMapSvg
         int navFaces = dump.World.SlicedTriangleCount;
         int disabled = 0;
         foreach (ReproNavFlag flag in dump.World.NavFlags)
-            disabled += flag.DisabledFaces.Length;
+            disabled += flag.DisabledFaces?.Length ?? 0;
         int collision = dump.World.Geometry?.TriangleCount ?? 0;
         float x = PlotSize + 24f;
         svg.Append("<g font-family=\"Inter,system-ui,sans-serif\" fill=\"#e2e8f0\">\n")

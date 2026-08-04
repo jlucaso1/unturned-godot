@@ -165,14 +165,15 @@ public class NavmeshReachabilityTests
         // A collision sampler that follows the authored surface exactly reports zero residual at every
         // point. That must not hide an over-height transition: the middle quad climbs one metre over
         // 20 cm, far steeper than the body can walk, while the broad floors on either side stay valid.
+        // Its 50 m width deliberately puts each riser triangle above the broad-face threshold.
         float[] z = { 0f, 1f, 1.2f, 2.2f };
         float[] y = { 0f, 0f, 1f, 1f };
         var vertices = new List<Vector3>();
         var triangles = new List<int>();
         for (int row = 0; row < z.Length; row++)
         {
-            vertices.Add(new Vector3(-1f, y[row], z[row]));
-            vertices.Add(new Vector3(1f, y[row], z[row]));
+            vertices.Add(new Vector3(-25f, y[row], z[row]));
+            vertices.Add(new Vector3(25f, y[row], z[row]));
         }
         for (int row = 0; row + 1 < z.Length; row++)
         {
@@ -184,7 +185,7 @@ public class NavmeshReachabilityTests
             Vertices = vertices.ToArray(),
             Triangles = triangles.ToArray(),
             Center = new Vector3(0f, 0.5f, 1.1f),
-            Size = new Vector3(4f, 4f, 4f),
+            Size = new Vector3(52f, 4f, 4f),
         };
 
         HashSet<int> drop = NavmeshReachability.Unreachable(flag, 0.5f,

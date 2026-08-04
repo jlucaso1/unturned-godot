@@ -126,11 +126,28 @@ public static class NavmeshReachability
         if (area <= BroadFaceArea)
             return required;
 
+        // The broad-face exemption is only for LOCAL collision above an otherwise walkable authored
+        // plane. If the face itself rises faster than the body can walk, matching collision has zero
+        // residual at every sample and the majority test below cannot see it; retain that independently
+        // proven authored-riser verdict regardless of face area.
+        if (AuthoredEdgeIsTooSteep(a, b) || AuthoredEdgeIsTooSteep(b, c)
+            || AuthoredEdgeIsTooSteep(c, a))
+        {
+            return required;
+        }
+
         int overStep = 0;
         for (int i = 0; i < surfaces.Length; i++)
             if (surfaces[i] - points[i].Y > stepOffset)
                 overStep++;
         return overStep * 2 > surfaces.Length ? required : 0f;
+    }
+
+    private static bool AuthoredEdgeIsTooSteep(Vector3 a, Vector3 b)
+    {
+        float dx = b.X - a.X, dz = b.Z - a.Z;
+        float run = MathF.Sqrt((dx * dx) + (dz * dz));
+        return MathF.Abs(b.Y - a.Y) > run * MaxWalkableGradient;
     }
 
     // The decision itself, over already-sampled clearances above the authored face. Split out so a caller

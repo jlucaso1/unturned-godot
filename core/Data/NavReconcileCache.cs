@@ -27,7 +27,9 @@ public static class NavReconcileCache
     // vertical wall cannot hide merely because Recast authored that face near the top of its sill.
     // 8: a single local high sample no longer deletes an entire broad face; those mixed faces remain
     // available to the capsule and portal validators instead of becoming room-sized navigation holes.
-    public const int AlgorithmVersion = 8;
+    // 9: the broad-face exemption retains an independently over-slope authored plane, whose collision
+    // matches the baked Y and therefore has no residual majority by which v8 could recognize the riser.
+    public const int AlgorithmVersion = 9;
 
     public static string Fingerprint(string levelDir, string colliderCacheDir)
         => Fingerprint(levelDir, colliderCacheDir, selectedColliders: null);
