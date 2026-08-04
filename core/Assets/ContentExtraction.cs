@@ -36,6 +36,9 @@ public static class ContentExtraction
                 (source.ObjectsDir, ObjectAssetDatabase.DatOnly),
                 (source.TreesDir, ObjectAssetDatabase.DatOnly),
                 (source.VehiclesDir, ObjectAssetDatabase.DatAndAsset),
+                // NPC characters: no prefab of their own, but a map places them by GUID like any object,
+                // and without this every one of Russia's forty resolves to nothing at all.
+                (source.NpcsDir, ObjectAssetDatabase.DatOnly),
             })
             {
                 ObjectAssetDatabase scanned;

@@ -294,6 +294,11 @@ public static class WorldBuilder
         if (legacy > 0)
             Log.Print($"[unturned-godot] Legacy placements resolved by id: {legacy}");
 
+        // NPCs leave the list before the needed set is built, not after: they resolve to the player rig
+        // rather than to an extracted mesh, so a GUID left in here is one the extraction plan chases on
+        // every load and ObjectsBuilder then draws as a box (see NpcPlacements).
+        List<PlacedObject> npcs = NpcPlacements.Partition(objects, db);
+
         HashSet<Guid> neededGuids = db.ResolvePlacementGuids(objects);
         foreach (PlacedObject v in vehicles)
             neededGuids.Add(v.Guid);
@@ -349,6 +354,9 @@ public static class WorldBuilder
         if (lod1Library.Count > 0)
             Log.Print($"[world] object LOD levels: {lod1Library.Count} of {meshLibrary.Count} meshes "
                 + "have an authored lower level");
+        if (NpcsBuilder.Build(npcs, unturnedPath, out int npcsDrawn) is { } npcsRoot)
+            objectsRoot.AddChild(npcsRoot);
+        withMesh += npcsDrawn;
 
         Node3D vehiclesRoot = BuildVehicles(vehicles, db, meshLibrary, colliderLibrary, lod1Library);
 
@@ -356,9 +364,12 @@ public static class WorldBuilder
             ? FoliageBuilder.Build(foliageIndex, meshLibrary)
             : FoliageBuilder.Build(foliageData, meshLibrary);
         registry.ApplyAllAvailable();
-        Log.Print($"[unturned-godot] Rendered {withMesh}/{objects.Count} objects with real meshes " +
+        Log.Print($"[unturned-godot] Rendered {withMesh}/{objects.Count + npcs.Count} objects with real meshes " +
             $"({meshLibrary.Count} unique)");
-        return (objectsRoot, foliageRoot, vehiclesRoot, objects.Count, withMesh, meshLibrary.Count);
+        // NPCs are counted back in: they left `objects` to be built differently, not to stop being
+        // placements, and a rendered total that includes them over one that does not reads as nonsense.
+        return (objectsRoot, foliageRoot, vehiclesRoot, objects.Count + npcs.Count, withMesh,
+            meshLibrary.Count);
     }
 
     // Shared by both build paths so a vehicle is batched exactly like a placed object. The collider

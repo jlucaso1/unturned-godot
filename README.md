@@ -44,6 +44,11 @@ in view.
   because barricades do not exist here yet — their prefabs carry the same climbing volume on the same
   layer, so they come for free once they do. Neither does the climb/swim transition, for the same reason:
   there is no swimming stance to move between.
+<<<<<<< HEAD
+- **NPC clothing**: the NPC characters Russia places stand in the player rig's default look. Their
+  `.dat` names a Shirt, Pants, Hat and Face, and those are item assets whose meshes are a family nothing
+  reads yet, so every one of them is currently the same undressed character.
+=======
 - **NPC characters**: Russia places 40 of them (`Bundles/NPCs/Characters`), and nothing reads that asset
   family yet, so each one stands there as a placeholder box instead of a dressed character.
 - **Projected decals**: the `Decal` objects a map places (graffiti, faction tags) draw their texture on a
@@ -51,6 +56,7 @@ in view.
   uneven ground creases where this stays flat — every one the official maps place sits on a wall or a
   road, where the two agree. The decal a prefab carries as a child component (the blast marks Germany
   scatters) is a separate mechanism and is not read yet.
+>>>>>>> origin/main
 
 ## Requirements
 

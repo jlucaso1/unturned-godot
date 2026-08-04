@@ -44,6 +44,10 @@ public partial class ObjectStreamer : Node
     private string _cacheDir = "";
     private string _textureCacheDir = "";
     private LevelInfo _level = null!;
+    // Kept from StartPrepare: the NPC characters are imported out of the install's resources.assets at
+    // build time, long after the path was handed in.
+    private string _unturnedPath = "";
+    private List<PlacedObject> _npcs = new();
 
     private TextureRegistry _registry = null!;
     // One table for the whole load, so the base and lower-LOD libraries share their materials, and so the
@@ -185,6 +189,7 @@ public partial class ObjectStreamer : Node
     // that pass took over responsibility for completing LayerTextures.
     private bool Prepare(string unturnedPath, LevelInfo level)
     {
+        _unturnedPath = unturnedPath;
         LoadPlacements();
 
         // The terrain layers are planned first so the bundles that owe them are part of the extraction
@@ -417,6 +422,10 @@ public partial class ObjectStreamer : Node
         _vehicles = VehicleSpawnPlan.Load(_level, _sources, _db);
         Log.Print($"[stream] vehicles: {_vehicles.Count} spawned");
 
+        // NPCs leave the object list before the needed set is built: they resolve to the player rig, not
+        // to an extracted mesh, so counting them would keep every load looking cold (see NpcPlacements).
+        _npcs = NpcPlacements.Partition(_objects, _db);
+
         _neededGuids = _db.ResolvePlacementGuids(_objects);
         foreach (PlacedObject v in _vehicles)
             _neededGuids.Add(v.Guid);
@@ -505,6 +514,9 @@ public partial class ObjectStreamer : Node
                 + "have an authored lower level");
         double buildMs = stage.Elapsed.TotalMilliseconds;
         stage.Restart();
+        if (NpcsBuilder.Build(_npcs, _unturnedPath, out int npcsDrawn) is { } npcsRoot)
+            root.AddChild(npcsRoot);
+        withMesh += npcsDrawn;
         AddChild(root);
         AddChild(WorldBuilder.BuildVehicles(_vehicles, _db, meshLibrary, colliderLibrary, lod1Library));
         double attachMs = stage.Elapsed.TotalMilliseconds;
@@ -517,7 +529,7 @@ public partial class ObjectStreamer : Node
         Log.Print($"[stream] objects build {buildMs:0} ms, attach {attachMs:0} ms, "
             + $"foliage {stage.Elapsed.TotalMilliseconds:0} ms");
         _totalTextureKeys = _registry.PendingKeyCount;
-        Log.Print($"[stream] built {withMesh}/{_objects.Count} objects ({meshLibrary.Count} meshes), " +
+        Log.Print($"[stream] built {withMesh}/{_objects.Count + _npcs.Count} objects ({meshLibrary.Count} meshes), " +
             $"{_totalTextureKeys} texture keys pending");
 
         // These parsed inputs are consumed only up to here — the MultiMesh buffers now hold their own
