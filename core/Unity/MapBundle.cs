@@ -29,18 +29,22 @@ public sealed class MapBundle
     // Null when the bundle holds no SerializedFile (nothing but stream entries). Throws the way the
     // underlying readers do when the container or the SerializedFile is one this build cannot decode;
     // callers treat that as "this map keeps its flat fallback material".
+    //
+    // Takes the FIRST SerializedFile rather than the last: every map bundle the game ships holds exactly
+    // one beside its stream entries, and "first" at least makes a hypothetical second one a stable choice
+    // instead of one that depends on dictionary enumeration order. The masterbundle is the multi-file
+    // case, and ModelExtractor reads that one itself.
     public static MapBundle? Read(byte[] data)
     {
         IReadOnlyDictionary<string, byte[]> files = UnityRawBundle.IsRaw(data)
             ? UnityRawBundle.Read(data).Files
             : UnityBundle.Read(data).Files;
 
-        byte[]? serialized = null;
         foreach (KeyValuePair<string, byte[]> f in files)
             if (!IsStream(f.Key))
-                serialized = f.Value;
+                return new MapBundle(files, SerializedFile.Read(f.Value));
 
-        return serialized == null ? null : new MapBundle(files, SerializedFile.Read(serialized));
+        return null;
     }
 
     public static MapBundle? ReadFile(string path) =>

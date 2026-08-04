@@ -26,6 +26,9 @@ public class LegacyPlacementsTests
     private static PlacedObject Placement(ushort id, Guid guid) =>
         new(new Vector3(1, 2, 3), new Vector3(0, 90, 0), Vector3.One, id, guid);
 
+    private static PlacedTree Tree(ushort id, Guid guid) =>
+        new(new Vector3(4, 5, 6), Vector3.Zero, Vector3.One, guid, id);
+
     [Fact]
     public void ResolveGuids_FillsInTheGuidOfALegacyIdPlacement()
     {
@@ -64,6 +67,60 @@ public class LegacyPlacementsTests
         Assert.Equal(0, LegacyPlacements.ResolveGuids(placements, DatabaseWith(Asset(Guid.NewGuid(), 42))));
         Assert.Equal(Guid.Empty, placements[0].Guid);
         Assert.Equal(Guid.Empty, placements[1].Guid);
+    }
+
+    [Fact]
+    public void AppendTrees_ResolvesThroughTheResourceNamespace()
+    {
+        // The id collision that matters: every id Monolith's trees are placed with also names an object.
+        // Whichever the merged database indexed first, a tree must land on the resource.
+        var tree = Guid.NewGuid();
+        var house = Guid.NewGuid();
+        var placements = new List<PlacedObject>();
+
+        Assert.Equal(1, LegacyPlacements.AppendTrees(new[] { Tree(id: 3, guid: Guid.Empty) }, placements,
+            DatabaseWith(Asset(house, 3), Asset(tree, 3, "Resource"))));
+
+        Assert.Equal(tree, Assert.Single(placements).Guid);
+        Assert.Equal(new Vector3(4, 5, 6), placements[0].Position);
+        Assert.Equal(3, placements[0].Id);
+    }
+
+    [Fact]
+    public void AppendTrees_KeepsAGuidItAlreadyHas()
+    {
+        var placed = Guid.NewGuid();
+        var placements = new List<PlacedObject>();
+
+        // Not counted as resolved, and the resource sharing its id must not displace it.
+        Assert.Equal(0, LegacyPlacements.AppendTrees(new[] { Tree(id: 3, guid: placed) }, placements,
+            DatabaseWith(Asset(Guid.NewGuid(), 3, "Resource"))));
+
+        Assert.Equal(placed, Assert.Single(placements).Guid);
+    }
+
+    [Fact]
+    public void AppendTrees_UnknownIdStillTakesItsPlace()
+    {
+        // The tree is kept without a GUID rather than dropped: it renders as a placeholder box, which is
+        // how an unresolvable placement is meant to show up.
+        var placements = new List<PlacedObject>();
+
+        Assert.Equal(0, LegacyPlacements.AppendTrees(new[] { Tree(id: 9, guid: Guid.Empty) }, placements,
+            DatabaseWith(Asset(Guid.NewGuid(), 3, "Resource"))));
+
+        Assert.Equal(Guid.Empty, Assert.Single(placements).Guid);
+    }
+
+    [Fact]
+    public void ResolveGuids_DoesNotFollowResourceIds()
+    {
+        // The mirror of the tree case: an object placement must not land on the resource sharing its id.
+        var placements = new List<PlacedObject> { Placement(id: 3, guid: Guid.Empty) };
+
+        Assert.Equal(0, LegacyPlacements.ResolveGuids(placements,
+            DatabaseWith(Asset(Guid.NewGuid(), 3, "Resource"))));
+        Assert.Equal(Guid.Empty, placements[0].Guid);
     }
 
     [Fact]

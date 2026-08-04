@@ -99,13 +99,18 @@ public class LegacyMapContentRealDataTests
         // Version 5 predates GUIDs entirely: the legacy id is the only identity on the file.
         Assert.All(trees, t => Assert.Equal(Guid.Empty, t.Guid));
 
-        var placements = new List<PlacedObject>();
-        foreach (PlacedTree t in trees)
-            placements.Add(new PlacedObject(t.Position, t.EulerDegrees, t.Scale, t.Id, t.Guid));
-
         ObjectAssetDatabase db = ContentExtraction.ScanAssets(ContentSource.Discover(GameData.Install!));
-        Assert.Equal(trees.Count, LegacyPlacements.ResolveGuids(placements, db));
+        var placements = new List<PlacedObject>();
+        Assert.Equal(trees.Count, LegacyPlacements.AppendTrees(trees, placements, db));
         Assert.All(placements, p => Assert.NotEqual(Guid.Empty, p.Guid));
+
+        // Every one of Monolith's eight tree ids also names an object, and the merged database indexes the
+        // objects first — so resolving through the object namespace would silently plant a house here.
+        foreach (PlacedObject placement in placements)
+        {
+            Assert.Equal(EObjectType.Resource, db.ResolveByGuid(placement.Guid)!.Type);
+            Assert.NotEqual(db.ResolveById(placement.Id)?.Guid, placement.Guid);
+        }
     }
 
     [RealDataFact(RequiresMasterBundle = true)]

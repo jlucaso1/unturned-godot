@@ -65,7 +65,9 @@ public static class WorldPreview
             assetsDirs[i] = sources[i].AssetsDir;
 
         ObjectAssetDatabase assets = ContentExtraction.ScanAssets(sources);
-        HashSet<Guid> needed = MapAssetSet.Collect(mapPath, assetsDirs);
+        // With the asset database, so a pre-GUID map's legacy ids resolve into the needed set rather than
+        // dropping out of it (see LegacyPlacements).
+        HashSet<Guid> needed = MapAssetSet.Collect(mapPath, assets, assetsDirs);
         // The map's vehicles need their prefabs cached too, and MapAssetSet cannot roll for them from a
         // map folder alone — resolving a spawn table takes the installed sources and the asset database.
         // Left out, the dock would call a map fully cached while every vehicle was still missing.
@@ -254,13 +256,14 @@ public static class WorldPreview
     private static Placements ReadPlacements(string unturnedPath, LevelInfo level)
     {
         List<PlacedObject> objects = LevelObjects.Load(level.ObjectsDat);
-        foreach (PlacedTree t in LevelTrees.Load(Path.Combine(level.Path, "Terrain", "Trees.dat")))
-            objects.Add(new PlacedObject(t.Position, t.EulerDegrees, t.Scale, t.Id, t.Guid));
+        List<PlacedTree> trees = LevelTrees.Load(Path.Combine(level.Path, "Terrain", "Trees.dat"));
 
         IReadOnlyList<ContentSource> sources = ContentSource.Discover(unturnedPath);
         ObjectAssetDatabase db = ContentExtraction.ScanAssets(sources);
-        // Pre-GUID maps place by legacy id; the needed set below is keyed on GUIDs (see LegacyPlacements).
+        // Pre-GUID maps place by legacy id; the needed set below is keyed on GUIDs, and a tree's id comes
+        // from a different namespace than an object's (see LegacyPlacements).
         LegacyPlacements.ResolveGuids(objects, db);
+        LegacyPlacements.AppendTrees(trees, objects, db);
         LevelFoliage? foliage = LevelFoliage.Load(Path.Combine(level.Path, "Foliage.blob"));
         // The roll is seeded, so the preview shows the same vehicles a session would.
         List<PlacedObject> vehicles = VehicleSpawnPlan.Load(level, sources, db);

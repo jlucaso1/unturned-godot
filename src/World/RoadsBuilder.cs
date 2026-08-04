@@ -281,11 +281,12 @@ public static class RoadsBuilder
                 var info = (Dictionary<string, object>)pair["second"];
                 long assetId = Convert.ToInt64(((Dictionary<string, object>)info["asset"])["m_PathID"]);
                 // Container order is the material index order Unturned uses (material 0 -> Highway_0,
-                // 5 -> Trail, ...), so a texture that cannot be decoded still has to hold its slot.
-                if (byId.TryGetValue(assetId, out SerializedObject? texObj) && texObj.ClassId == 28)
-                    result.Add(bundle.TryReadTexture(texObj, out UnityTexture tex, out byte[] pixels)
-                        ? ModelLibrary.BuildTexture(CachedTexture.From(tex, pixels))
-                        : null);
+                // 5 -> Trail, ...), so EVERY entry takes a slot whether or not it yields a texture:
+                // dropping one would slide every later material onto the wrong image.
+                result.Add(byId.TryGetValue(assetId, out SerializedObject? texObj)
+                    && bundle.TryReadTexture(texObj, out UnityTexture tex, out byte[] pixels)
+                    ? ModelLibrary.BuildTexture(CachedTexture.From(tex, pixels))
+                    : null);
             }
         }
         return result;

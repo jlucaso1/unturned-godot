@@ -357,12 +357,14 @@ public partial class ObjectStreamer : Node
         // Three independent reads, and the bundle decode cannot start until all of them are in: the
         // placements (a hundred thousand of them on a workshop map), the asset database (thousands of
         // .dat files) and the foliage. Running them together is what lets the decode start sooner.
+        // Trees stay in their own list until the asset database is in: a pre-GUID one is placed by an id
+        // from the RESOURCE namespace, and only the database can turn that into a GUID without confusing
+        // it with the identically-numbered object (see LegacyPlacements).
+        var trees = new List<PlacedTree>();
         Task placements = Task.Run(() =>
         {
             _objects = LevelObjects.Load(_level.ObjectsDat);
-            List<PlacedTree> trees = LevelTrees.Load(Path.Combine(_level.Path, "Terrain", "Trees.dat"));
-            foreach (PlacedTree t in trees)
-                _objects.Add(new PlacedObject(t.Position, t.EulerDegrees, t.Scale, t.Id, t.Guid));
+            trees = LevelTrees.Load(Path.Combine(_level.Path, "Terrain", "Trees.dat"));
         });
 
         Task assets = Task.Run(() => _db = ContentExtraction.ScanAssets(_sources));
@@ -406,7 +408,8 @@ public partial class ObjectStreamer : Node
 
         // Needs both of the first two: a pre-GUID map names its objects and trees by legacy id, and only
         // the asset database can turn those into the GUIDs the rest of the load is keyed on.
-        int legacy = LegacyPlacements.ResolveGuids(_objects, _db);
+        int legacy = LegacyPlacements.ResolveGuids(_objects, _db)
+            + LegacyPlacements.AppendTrees(trees, _objects, _db);
         if (legacy > 0)
             Log.Print($"[stream] legacy placements resolved by id: {legacy}");
 
