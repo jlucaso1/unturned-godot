@@ -456,6 +456,7 @@ public partial class NetworkManager : Node
         // that just did something wrong can be written out and replayed. Off with REPRO=0.
         if (ReproService.Create(zombies, _server, _ground, host) is { } repro)
         {
+            repro.DisabledFaces = () => _zombieNavigation?.DisabledFaces;
             repro.LevelName = LevelName;
             repro.Map = System.IO.Path.GetFileName(levelDir.TrimEnd('/', '\\'));
             AddChild(repro);

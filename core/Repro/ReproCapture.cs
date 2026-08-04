@@ -35,6 +35,14 @@ public sealed class ReproCaptureRequest
     public float GroundRadius { get; init; } = 32f;
     public float GroundCell { get; init; } = 1f;
 
+    // Which faces reconciliation had already disabled, per flag, as the live graph held them. The
+    // navmesh is baked before the map's objects exist, so this is the difference between the graph the
+    // session routed on and one rebuilt from the same triangles — a building's footprint, mostly.
+    // Null when the session never reconciled (no collision world, or a dump taken during loading).
+    // Keyed by the flag's position in the system's navmesh, because NavFlag has reference equality and
+    // the interactive load deserializes the navmesh twice — a lookup by instance misses every time.
+    public IReadOnlyDictionary<int, IReadOnlySet<int>>? DisabledFaces { get; init; }
+
     public ReproSessionData Session { get; init; } = new();
     public ReproGeometryData? Geometry { get; init; }
     public IReadOnlyList<string> Log { get; init; } = Array.Empty<string>();
@@ -139,7 +147,13 @@ public static class ReproCapture
             });
         if (system.Navmesh != null)
             foreach (NavFlag flag in system.Navmesh)
-                world.NavFlags.Add(Slice(flag, request.Focus, request.NavmeshRadius));
+            {
+                IReadOnlySet<int>? disabled = null;
+                if (request.DisabledFaces != null
+                    && request.DisabledFaces.TryGetValue(world.NavFlags.Count, out IReadOnlySet<int>? set))
+                    disabled = set;
+                world.NavFlags.Add(Slice(flag, request.Focus, request.NavmeshRadius, disabled));
+            }
         // A focus outside every authored navigation flag is worth saying out loud: the replay will have
         // no routes there, and the reason is where the capture was taken rather than anything missing
         // from the dump. (It happens: PEI's own player spawn is 200 m from the nearest flag.)
@@ -152,12 +166,16 @@ public static class ReproCapture
     // One nav flag, keeping only the triangles near the focus and renumbering the vertices they use.
     // PEI's navmesh is 42k triangles; a 48 m disc around an incident is a few hundred, and the flag's
     // own box travels whole because checkNavigation and the player's nav region are decided by it.
-    public static ReproNavFlag Slice(NavFlag flag, Vector3 focus, float radius)
+    public static ReproNavFlag Slice(NavFlag flag, Vector3 focus, float radius,
+        IReadOnlySet<int>? disabled = null)
     {
         ArgumentNullException.ThrowIfNull(flag);
         var remap = new Dictionary<int, int>();
         var vertices = new List<float>();
         var triangles = new List<int>();
+        // Renumbered with the triangles, or they would point at whatever face the slice moved into
+        // their old position — a hole somewhere else on the map, silently.
+        var disabledOut = new List<int>();
         float radiusSquared = radius * radius;
         int[] source = flag.Triangles;
         for (int i = 0; i + 2 < source.Length; i += 3)
@@ -165,6 +183,8 @@ public static class ReproCapture
             if (!Meets(flag.Vertices[source[i]], flag.Vertices[source[i + 1]],
                 flag.Vertices[source[i + 2]], focus, radiusSquared))
                 continue;
+            if (disabled != null && disabled.Contains(i / 3))
+                disabledOut.Add(triangles.Count / 3);
             for (int corner = 0; corner < 3; corner++)
             {
                 int index = source[i + corner];
@@ -187,6 +207,7 @@ public static class ReproCapture
             Vertices = vertices.ToArray(),
             Triangles = triangles.ToArray(),
             Sliced = triangles.Count < source.Length,
+            DisabledFaces = disabledOut.ToArray(),
         };
     }
 

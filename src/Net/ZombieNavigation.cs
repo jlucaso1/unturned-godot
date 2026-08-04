@@ -342,6 +342,65 @@ public sealed class ZombieNavigation
             + $"({(cacheHit ? "CSR cache hit" : "CSR built")}, NavigationServer bypassed)");
     }
 
+    // What reconciliation has taken out of the graph, for whoever needs to DESCRIBE the graph rather
+    // than query it — the repro capture, which has to record the faces a rebuild would restore.
+    //
+    // Keyed by the flag's index, not the flag. NavFlag is a plain class with reference equality, and
+    // the interactive load deserializes the navmesh twice — Preload() here and ZombieWorld.Load() for
+    // the simulation — so the instances are not the same objects and a lookup by flag silently misses
+    // every time. The index is what both orders agree on, since both read the same file.
+    //
+    // Held separately from _unreachable because that is working state: it is cleared when
+    // reconciliation finishes, including on a cache hit, which is nearly always before anyone captures
+    // anything. This is the part that has to outlive it.
+    // Empty until the final graph is published, and that is not caution — it is the only honest answer
+    // while reconciliation runs. The live graph is being built ONCE and then Disabled face by face; a
+    // replay applies what it is given as build-time exclusions, and the two differ at T-junctions,
+    // where only a fresh build can stitch a seam a removed face just exposed. A mid-reconciliation dump
+    // that carried these would therefore replay over connections the session did not have. Carrying
+    // none instead makes it behave exactly like a dump from before this field existed.
+    // Reconciliation finished AND the graph it produced is the one answering queries. On a small map
+    // PublishAsync only hands the mesh to the NavigationServer and returns; the map goes on
+    // synchronizing for seconds afterwards, and Query keeps using _progressGraph until it is ready —
+    // which is the same EnsureReady the IsReady property asks. Derived from that rather than tracked
+    // separately, because a second flag is a second thing that can be true at the wrong moment, and
+    // this gate has now been wrong at three different moments for exactly that reason.
+    public IReadOnlyDictionary<int, IReadOnlySet<int>> DisabledFaces =>
+        _reconciled && (_useBakedGraph || EnsureReady()) ? _disabledByFlag : Empty;
+
+    private static readonly Dictionary<int, IReadOnlySet<int>> Empty = new();
+
+    private readonly Dictionary<int, IReadOnlySet<int>> _disabledByFlag = new();
+    private bool _reconciled;
+
+    // Only kept when a capture could ask for it. This doubles the rejected-face storage while
+    // reconciliation runs and then holds the copy for the lifetime of the navigation — and
+    // ReleaseReconciliationState exists precisely because that set reaches hundreds of thousands of
+    // entries on a large map. With REPRO=0 no ReproService is created and nothing can ever read it.
+    private static readonly bool CaptureEnabled =
+        EnvFlag.IsOn(OS.GetEnvironment("REPRO"), whenUnset: true);
+
+    // Snapshot one flag's disabled set at the moment it is decided, keyed by position in _flags.
+    //
+    // An EMPTY set removes rather than skips. A partial cache is loaded into here and then, if partial
+    // resumption is off, thrown away and every flag recomputed; a flag that came back non-empty from
+    // the cache and recomputes to empty would otherwise keep its old entry, and the dump would claim
+    // faces the live graph actually has. Last writer wins is the only rule that holds here.
+    private void RememberDisabled(NavFlag flag, HashSet<int> unreachable)
+    {
+        if (!CaptureEnabled)
+            return;
+        for (int i = 0; i < _flags.Count; i++)
+            if (ReferenceEquals(_flags[i], flag))
+            {
+                if (unreachable.Count == 0)
+                    _disabledByFlag.Remove(i);
+                else
+                    _disabledByFlag[i] = new HashSet<int>(unreachable);
+                return;
+            }
+    }
+
     private readonly Dictionary<NavFlag, HashSet<int>> _unreachable = new();
 
     // Removes the navmesh triangles a body cannot actually reach, using the real collision world.
@@ -445,6 +504,7 @@ public sealed class ZombieNavigation
                             if (cached[i] is { } completed)
                             {
                                 _unreachable[_flags[i]] = completed;
+                                RememberDisabled(_flags[i], completed);
                                 restored++;
                             }
                         if (restored == _flags.Count)
@@ -452,6 +512,7 @@ public sealed class ZombieNavigation
                             if (!_useBakedGraph)
                                 await PublishProgressGraphAsync();
                             await PublishAsync(fingerprint, cachePath + ".csr");
+                            _reconciled = true;
                             Log.Print($"[nav] collision reconciliation cache hit ({fingerprint[..12]})");
                             ReleaseReconciliationState();
                             return;
@@ -459,7 +520,13 @@ public sealed class ZombieNavigation
                         if (partialCheckpoints && restored > 0)
                             Log.Print($"[nav] resumed collision reconciliation: {restored}/{_flags.Count} flags cached");
                         else
+                        {
+                            // The snapshots go with it. Everything is about to be recomputed, and until
+                            // each flag gets there the live graph has none of these faces disabled —
+                            // a capture in that window would record holes that are not in it.
                             _unreachable.Clear();
+                            _disabledByFlag.Clear();
+                        }
                     }
                 }
             }
@@ -543,12 +610,14 @@ public sealed class ZombieNavigation
             if (unreachable == null)
                 return; // shutting down
             _unreachable[flag] = unreachable;
+            RememberDisabled(flag, unreachable);
             (_useBakedGraph ? _bakedGraph : _progressGraph)?.Disable(flag, unreachable);
             if (partialCheckpoints && cachePath != null && fingerprint != null)
                 QueueCheckpoint(cachePath, fingerprint, triangleCounts);
         }
 
         await PublishAsync(fingerprint, cachePath == null ? null : cachePath + ".csr");
+        _reconciled = true;
         if (cachePath != null && fingerprint != null)
             QueueCheckpoint(cachePath, fingerprint, triangleCounts);
         try
