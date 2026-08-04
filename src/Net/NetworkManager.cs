@@ -126,8 +126,12 @@ public partial class NetworkManager : Node
             var from = new Vector3(a[0].ToFloat(), a[1].ToFloat(), a[2].ToFloat());
             var to = new Vector3(b[0].ToFloat(), b[1].ToFloat(), b[2].ToFloat());
             double startedAt = Now;
-            void Probe()
+            async void Probe()
             {
+                // A previously unseen stitched portal asks MoveResolver to validate its opening. The
+                // resolver owns DirectSpaceState, so even this diagnostic must enter a physics
+                // notification before it can safely populate the portal cache.
+                await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame);
                 var waypoints = new System.Collections.Generic.List<Vector3>();
                 bool ok = zombies.PathQuery!(from, to, waypoints, BakedNavGraph.AgentRadius);
                 Log.Print($"[nav] path probe t={Now - startedAt:F1}s {from} -> {to}: " +

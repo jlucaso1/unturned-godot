@@ -214,6 +214,21 @@ public class PhysicsBodyOrderTests
     }
 
     [Fact]
+    public void PathProbeQueriesInsideAPhysicsNotification()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Net", "NetworkManager.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        int probe = source.IndexOf("if (OS.GetEnvironment(\"PATH_PROBE\")", StringComparison.Ordinal);
+        int frame = source.IndexOf("await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame)", probe,
+            StringComparison.Ordinal);
+        int query = source.IndexOf("zombies.PathQuery!(from, to", probe, StringComparison.Ordinal);
+        Assert.True(probe >= 0 && frame > probe && query > frame,
+            "the path probe must not validate stitched portals from a timer callback");
+    }
+
+    [Fact]
     public void BundleDecodePassesAreSerializedToBoundPeakMemory()
     {
         if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } path)
