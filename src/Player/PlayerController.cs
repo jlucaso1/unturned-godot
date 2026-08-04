@@ -389,6 +389,17 @@ public partial class PlayerController : CharacterBody3D
     // of pinning a measured number. UG_VIEWMODEL_OFFSET="x,y,z" nudges it from there.
     private void AttachViewmodel()
     {
+        if (ViewmodelModel is { } imported && imported is not CharacterSkeleton)
+        {
+            // The import succeeded but produced a static bind-pose mesh rather than a rig — the arms
+            // decoded, their skinning did not. It cannot be posed, so it would hang in front of the
+            // camera in one frozen attitude and never throw the punch it is there for. The body can be
+            // posed, so first person is better off with that; this is freed rather than left parentless,
+            // which is a Godot node nothing owns and nothing frees for the rest of the session.
+            imported.QueueFree();
+            ViewmodelModel = null;
+        }
+
         if (ViewmodelModel is not CharacterSkeleton rig)
             return;
 

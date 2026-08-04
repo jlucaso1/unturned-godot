@@ -230,14 +230,19 @@ public class PunchReplicationTests
         Assert.Single(sim.Gestures);
 
         // The server froze for a second. The player threw two more punches, comfortably apart, and both
-        // come off the socket in the same drain.
+        // come off the socket in the same drain — BEFORE any step, which is the order NetServer.Update
+        // actually works in and the reason a single pending slot would lose one of them.
         sim.QueueInput(1, Attack(), receivedAt: 1.0);
-        sim.Step();
-        Assert.Single(sim.Gestures);
+        sim.QueueInput(1, Attack(), receivedAt: 1.0);
 
-        sim.QueueInput(1, Attack(), receivedAt: 1.0);
-        sim.Step();
-        Assert.Single(sim.Gestures);
+        int swings = 0;
+        for (int i = 0; i < 4; i++)
+        {
+            sim.Step();
+            swings += sim.Gestures.Count;
+        }
+
+        Assert.Equal(2, swings);
     }
 
     // ...but the batch is not a licence. A client that sends a hundred swings at once gets the ceiling.

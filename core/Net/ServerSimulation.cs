@@ -137,7 +137,14 @@ public sealed class ServerSimulation
         // in. What the server owes the session is the part a client cannot be trusted with: that a player
         // cannot swing faster than the rule allows, and that one swing is shown once. The identity
         // answers the second, the clock answers the first.
-        public EPlayerGesture PendingGesture;
+        // A QUEUE, not a slot. The allowance deliberately lets a stall's worth of buffered swings through
+        // together, and NetServer drains the whole transport batch before it steps — so both reach here
+        // before either is broadcast, and a single slot would have the second quietly overwrite the
+        // first, making the allowance buy nothing it claims to. One is emitted per tick, which is also
+        // what keeps two from going out under the same tick number, where the client's freshness guard
+        // would read the second as a retransmission of the first and drop it. Bounded by the allowance,
+        // which is the most that can ever be accepted at once.
+        public readonly Queue<EPlayerGesture> PendingGestures = new();
         public bool HasSwung;
         public byte LastSwingSequence;
 
@@ -345,7 +352,7 @@ public sealed class ServerSimulation
         if (entry.SwingAllowance < 1)
             return; // faster than the rule allows, whatever the client says its frame numbers were
         entry.SwingAllowance -= 1;
-        entry.PendingGesture = Player.PlayerGestures.For(input.SwingFist);
+        entry.PendingGestures.Enqueue(Player.PlayerGestures.For(input.SwingFist));
     }
 
     // Advances one 0.08 s step on the nominal clock: each call is one tick of simulated time. What the
@@ -394,11 +401,8 @@ public sealed class ServerSimulation
             // tick, because an avatar cannot throw two punches inside 0.08 s and a client holds a single
             // pending swing on that basis — two events under the same tick number would read as a
             // retransmission of each other anyway.
-            if (entry.PendingGesture != EPlayerGesture.None)
-            {
-                _gestures.Add(new PlayerGestureEvent(id, entry.PendingGesture));
-                entry.PendingGesture = EPlayerGesture.None;
-            }
+            if (entry.PendingGestures.TryDequeue(out EPlayerGesture announced))
+                _gestures.Add(new PlayerGestureEvent(id, announced));
 
             states.Add(new PlayerSnapshotState(id, entry.State.Position,
                 NetAngles.QuantizePitch(entry.State.Pitch), NetAngles.QuantizeYaw(entry.State.Yaw),
