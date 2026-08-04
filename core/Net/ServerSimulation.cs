@@ -161,6 +161,10 @@ public sealed class ServerSimulation
         // reordered datagram recognisable as stale rather than as the latest word.
         public bool HasReceivedFrame;
         public uint LastReceivedFrame;
+
+        // Set by Teleport: the movement flag it restored is held until the client sends an input of
+        // its own, because the filler input the loop invents in the meantime holds no keys.
+        public bool HoldMovementUntilInput;
     }
 
     private readonly IMoveSolver _solver;
@@ -204,6 +208,35 @@ public sealed class ServerSimulation
     }
 
     public void RemovePlayer(byte id) => _players.Remove(id);
+
+    // Puts a player somewhere outright, and forgets the trusted-position baseline so the client's own
+    // next claim is adopted instead of being measured against where it used to be. Used by the bug-repro
+    // harness to stand the reporter back where the dump was taken: without clearing the baseline the
+    // speed budget would treat the jump as a cheat and rubber-band them back within a tick.
+    public bool Teleport(byte id, Vector3 position) =>
+        _players.TryGetValue(id, out Entry? entry)
+        && Teleport(id, position, entry.State.Stance, entry.State.Moving);
+
+    // With the stance and whether they were moving, because those are not decoration: the stealth
+    // radius a player is detected at is computed from both (ZombieDetection.RadiusFor), so putting a
+    // sprinting player back as a stander alerts a different set of zombies on the very first tick.
+    public bool Teleport(byte id, Vector3 position, EPlayerStance stance, bool moving)
+    {
+        if (!_players.TryGetValue(id, out Entry? entry) || !IsFinite(position))
+            return false;
+        entry.State.Stance = stance;
+        entry.State.Moving = moving;
+        entry.HoldMovementUntilInput = moving;
+        entry.State.Position = position;
+        entry.State.Velocity = Vector3.Zero;
+        entry.HasVerifiedPosition = false;
+        // Anything already queued was produced before the client was moved and still carries the old
+        // position. With the baseline cleared, the very next Step would adopt one of those outright
+        // and put the player straight back where they were — the teleport undone by a datagram that
+        // predates it. Only a claim made after the move may establish the new baseline.
+        entry.Inputs.Clear();
+        return true;
+    }
 
     // For callers that hold the joined-player invariant (NetServer); throws on a violated invariant.
     public PlayerMoveState GetState(byte id) => _players[id].State;
@@ -309,12 +342,22 @@ public sealed class ServerSimulation
             // frame — a flicker at 12.5 Hz that the whole session sees, hitbox included.
             // The FRAME carries over as well, and for the same reason: silence is not the client's clock
             // advancing. A starved tick must not age the attack cooldown that is measured in that clock.
-            InputCommand input = entry.Inputs.TryDequeue(out InputCommand queued)
-                ? queued
-                : new InputCommand(entry.LastInput.Frame, 0, 0, false, false,
+            bool starved = !entry.Inputs.TryDequeue(out InputCommand queued);
+            InputCommand input = starved
+                ? new InputCommand(entry.LastInput.Frame, 0, 0, false, false,
                     entry.LastInput.Yaw, entry.LastInput.Pitch,
-                    entry.State.Stance, entry.State.Grounded);
+                    entry.State.Stance, entry.State.Grounded)
+                : queued;
             entry.LastInput = input;
+
+            // A restored player has no input of their own yet, and the filler above holds no keys — so
+            // the solver would clear Moving before anyone reads it. The stealth radius a player is
+            // noticed at is computed from that flag, so the tick right after a repro dump is loaded is
+            // exactly the one it has to survive. Held only while STARVED: a client's own input saying
+            // "no keys" is the client speaking, and it wins.
+            bool holdRestoredMovement = entry.HoldMovementUntilInput && starved;
+            entry.HoldMovementUntilInput = holdRestoredMovement;
+            bool restoredMoving = entry.State.Moving;
 
             // Move the ceiling before anything reads a frame off this input. One frame of credit per
             // tick; a client that is behind does not accumulate more than the jitter allowance of it.
@@ -334,6 +377,8 @@ public sealed class ServerSimulation
                 ApplyTrustedPosition(entry, input);
             else
                 entry.State = _solver.Step(entry.State, input, TickRate);
+            if (holdRestoredMovement)
+                entry.State.Moving = restoredMoving;
 
             // After the move, so the stance the gate reads is this tick's: a player who went prone on the
             // same frame they clicked must not get the punch the pre-move stance would have allowed.
