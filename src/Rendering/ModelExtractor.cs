@@ -1268,17 +1268,19 @@ public static class ModelExtractor
     // bundle's own asset folder — "trees" for the game, "resources" for a workshop mod that keeps its
     // harvestables there. Deriving it from the directory keeps every layout working.
     //
-    // An override path is checked only after trees and vehicles, matching where it is honoured: it is an
-    // ObjectAsset field (a holiday variant reusing a base object's mesh), and neither of the other two
-    // categories declares one.
+    // An explicit override wins over all of that, whatever the category: Bundle_Override_Path is a field of
+    // Unturned's base Asset, not of ObjectAsset, and a holiday variant that reuses a base asset's prefab
+    // uses it the same way from either folder. Trees/Ornament_0_XMAS is the official one — it declares
+    // "/Trees/Ornament_0", and deriving its key from its own folder instead left the ornament on PEI,
+    // Washington and Yukon with no mesh at all.
     private static string PrefabKeyFor(ObjectAsset asset, ContentSource source)
     {
+        if (asset.BundleOverridePath is { Length: > 0 } overridePath)
+            return OverrideKey(overridePath);
         if (IsUnder(asset.Directory, source.TreesDir))
             return RootKey(source.TreesDir) + "/" + FolderKey(asset.Directory, source.TreesDir);
         if (IsUnder(asset.Directory, source.VehiclesDir))
             return RootKey(source.VehiclesDir) + "/" + FolderKey(asset.Directory, source.VehiclesDir);
-        if (asset.BundleOverridePath is { Length: > 0 } overridePath)
-            return OverrideKey(overridePath);
         return RootKey(source.ObjectsDir) + "/" + FolderKey(asset.Directory, source.ObjectsDir);
     }
 

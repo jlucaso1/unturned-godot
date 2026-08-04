@@ -12,24 +12,32 @@ public readonly struct PlacedTree
     public readonly Vector3 Position;      // Unity world space
     public readonly Vector3 EulerDegrees;
     public readonly Vector3 Scale;
-    public readonly Guid Guid;
+    public readonly ushort Id;             // legacy identifier (pre-GUID maps)
+    public readonly Guid Guid;             // modern identifier
 
-    public PlacedTree(Vector3 position, Vector3 euler, Vector3 scale, Guid guid)
+    public PlacedTree(Vector3 position, Vector3 euler, Vector3 scale, Guid guid, ushort id = 0)
     {
         Position = position;
         EulerDegrees = euler;
         Scale = scale;
+        Id = id;
         Guid = guid;
     }
 }
 
-// Ports LevelGround's Trees.dat reader (Unturned/Level/LevelGround.cs) for the current flat-list format
-// (version >= 7). Each tree stores a GUID, position, Euler rotation and scale. The pre-7 region-grid
-// encoding is not written by current maps and is skipped.
+// Ports LevelGround's Trees.dat reader (Unturned/Level/LevelGround.cs).
+//
+// Two encodings ship in the official maps. From version 7 the file is a flat list: a GUID, a position and
+// (from 8) an Euler rotation and scale per tree. Before that the trees are bucketed into Regions' 64x64
+// grid, each cell prefixed with its count, and each tree carries the legacy ushort id it was placed with —
+// plus, from version 6, the GUID that replaced it. Alpha Valley (6) and Monolith (5) are still written that
+// way, and skipping those files left both maps without a single tree.
 public static class LevelTrees
 {
+    private const byte GuidVersion = 6;             // SAVEDATA_TREES_VERSION_GUID
     private const byte IntRegionCoordsVersion = 7;  // SAVEDATA_TREES_VERSION_INT_REGION_COORDS
     private const byte RotationAndScaleVersion = 8;  // SAVEDATA_TREES_VERSION_ROTATION_AND_SCALE
+    private const int WorldSize = LevelObjects.WORLD_SIZE; // Regions.WORLD_SIZE
 
     public static List<PlacedTree> Load(string treesDatPath)
     {
@@ -40,8 +48,10 @@ public static class LevelTrees
         using var river = new River(treesDatPath);
 
         byte version = river.ReadByte();
-        if (version < IntRegionCoordsVersion)
+        if (version == 0)
             return result;
+        if (version < IntRegionCoordsVersion)
+            return LoadRegions(river, version, result);
 
         int count = river.ReadInt32();
         for (int i = 0; i < count; i++)
@@ -62,6 +72,32 @@ public static class LevelTrees
             // Unturned discards trees with no asset.
             if (guid != Guid.Empty)
                 result.Add(new PlacedTree(position, euler, scale, guid));
+        }
+
+        return result;
+    }
+
+    // The pre-7 encoding: one ushort count per region of the 64x64 grid, then that region's trees. Neither
+    // rotation nor scale exists yet (both arrived in 8), so every tree stands upright at its authored size.
+    private static List<PlacedTree> LoadRegions(River river, byte version, List<PlacedTree> result)
+    {
+        for (int x = 0; x < WorldSize; x++)
+        {
+            for (int y = 0; y < WorldSize; y++)
+            {
+                ushort count = river.ReadUInt16();
+                for (int i = 0; i < count; i++)
+                {
+                    ushort id = river.ReadUInt16();
+                    Guid guid = version >= GuidVersion ? river.ReadGuid() : Guid.Empty;
+                    Vector3 position = river.ReadSingleVector3();
+                    river.ReadBoolean(); // isGenerated
+
+                    // Unturned discards trees with no asset; before 6 that identity is the legacy id alone.
+                    if (guid != Guid.Empty || id != 0)
+                        result.Add(new PlacedTree(position, Vector3.Zero, Vector3.One, guid, id));
+                }
+            }
         }
 
         return result;

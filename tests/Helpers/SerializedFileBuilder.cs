@@ -11,43 +11,62 @@ public sealed class SerializedFileBuilder
     public int ClassId { get; set; } = 43;
     public int DependencyCount { get; set; } = 1;
     public bool EnableTypeTree { get; set; } = true;
-    public int Version { get; set; } = 22; // 22 (2022.3 masterbundle) or 15 (Unity 5.x per-map bundle)
+    // 22 (2022.3 masterbundle), 17 (2017-era per-map bundle), 15 (Unity 5.x) or 9 (Unity 4.x).
+    public int Version { get; set; } = 22;
 
     public byte[] Build()
     {
         var meta = new List<byte>();
         WriteCString(meta, "5.x.x");
         WriteI32Le(meta, 0);                 // target platform
-        meta.Add((byte)(EnableTypeTree ? 1 : 0));
+        if (Version >= 13)
+            meta.Add((byte)(EnableTypeTree ? 1 : 0)); // pre-13 files always carry their type trees
 
         WriteI32Le(meta, 1);          // type count
         WriteI32Le(meta, ClassId);
         if (Version >= 16)
-        {
             meta.Add(0);              // is stripped
+        if (Version >= 17)
             WriteI16Le(meta, 0);      // script type index
-        }
-        if ((Version < 16 && ClassId < 0) || (Version >= 16 && ClassId == 114))
-            meta.AddRange(new byte[16]); // script id
-        meta.AddRange(new byte[16]);  // old type hash
-
-        if (EnableTypeTree)
+        if (Version >= 13)
         {
-            // Type tree blob: single "Base" node using a local string buffer.
-            byte[] stringBuffer = Encoding.ASCII.GetBytes("Base\0");
-            WriteI32Le(meta, 1);                 // node count
-            WriteI32Le(meta, stringBuffer.Length);
-            WriteU16Le(meta, 1);                 // node version
-            meta.Add(0);                         // level
-            meta.Add(0);                         // type flags
-            WriteU32Le(meta, 0);                 // type string offset -> "Base"
-            WriteU32Le(meta, 0);                 // name string offset -> "Base"
-            WriteI32Le(meta, -1);                // byte size
-            WriteI32Le(meta, 0);                 // index
-            WriteI32Le(meta, 0);                 // meta flag
-            if (Version >= 19)
-                WriteU64Le(meta, 0);             // ref type hash
-            meta.AddRange(stringBuffer);
+            if ((Version < 16 && ClassId < 0) || (Version >= 16 && ClassId == 114))
+                meta.AddRange(new byte[16]); // script id
+            meta.AddRange(new byte[16]);     // old type hash
+        }
+
+        if (EnableTypeTree || Version < 13)
+        {
+            if (Version < 12)
+            {
+                // Pre-blob type tree: one recursive node, strings written inline.
+                WriteCString(meta, "Base");   // type
+                WriteCString(meta, "Base");   // name
+                WriteI32Le(meta, -1);         // byte size
+                WriteI32Le(meta, 0);          // index
+                WriteI32Le(meta, 0);          // is array
+                WriteI32Le(meta, 1);          // node version
+                WriteI32Le(meta, 0);          // meta flag
+                WriteI32Le(meta, 0);          // child count
+            }
+            else
+            {
+                // Type tree blob: single "Base" node using a local string buffer.
+                byte[] stringBuffer = Encoding.ASCII.GetBytes("Base\0");
+                WriteI32Le(meta, 1);                 // node count
+                WriteI32Le(meta, stringBuffer.Length);
+                WriteU16Le(meta, 1);                 // node version
+                meta.Add(0);                         // level
+                meta.Add(0);                         // type flags
+                WriteU32Le(meta, 0);                 // type string offset -> "Base"
+                WriteU32Le(meta, 0);                 // name string offset -> "Base"
+                WriteI32Le(meta, -1);                // byte size
+                WriteI32Le(meta, 0);                 // index
+                WriteI32Le(meta, 0);                 // meta flag
+                if (Version >= 19)
+                    WriteU64Le(meta, 0);             // ref type hash
+                meta.AddRange(stringBuffer);
+            }
 
             if (Version >= 21)
             {
@@ -57,9 +76,18 @@ public sealed class SerializedFileBuilder
             }
         }
 
+        if (Version < 14)
+            WriteI32Le(meta, 0);      // wide path ids disabled
         WriteI32Le(meta, 1);          // object count
-        AlignLe(meta);
-        WriteI64Le(meta, 100);        // path id
+        if (Version >= 14)
+        {
+            AlignLe(meta);
+            WriteI64Le(meta, 100);    // path id
+        }
+        else
+        {
+            WriteI32Le(meta, 100);    // path id (32-bit, unaligned)
+        }
         if (Version >= 22)
             WriteI64Le(meta, 0);      // byte start (relative to data offset)
         else
@@ -67,11 +95,13 @@ public sealed class SerializedFileBuilder
         WriteU32Le(meta, 4);          // byte size
         WriteI32Le(meta, 0);          // type id
         if (Version < 16)
-        {
             WriteU16Le(meta, (ushort)ClassId); // class id (pre-16 objects reference type by class id)
+        if (Version < 11)
+            WriteU16Le(meta, 0);      // is destroyed
+        else if (Version < 17)
             WriteI16Le(meta, 0);      // script type index
+        if (Version is 15 or 16)
             meta.Add(0);              // stripped
-        }
 
         // Header (big-endian). dataOffset points right after the metadata region.
         var header = new List<byte>();

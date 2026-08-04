@@ -44,10 +44,8 @@ in view.
   because barricades do not exist here yet — their prefabs carry the same climbing volume on the same
   layer, so they come for free once they do. Neither does the climb/swim transition, for the same reason:
   there is no swimming stance to move between.
-- **Old road bundles**: maps built before Unity 2018 (Alpha Valley, Washington, Yukon, and many workshop
-  maps) keep `Environment/Roads.unity3d` in a SerializedFile version this reader does not decode yet, so
-  their roads fall back to the procedural asphalt/dirt material. Terrain layers are unaffected: those come
-  from the master bundle.
+- **NPC characters**: Russia places 40 of them (`Bundles/NPCs/Characters`), and nothing reads that asset
+  family yet, so each one stands there as a placeholder box instead of a dressed character.
 
 ## Requirements
 

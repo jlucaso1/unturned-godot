@@ -1,15 +1,15 @@
 {
-  "estimatedGeometryBytes": 23713464,
+  "estimatedGeometryBytes": 23868120,
   "meshInstances": 16,
-  "multiMeshInstances": 2019,
-  "multiMeshTotalInstances": 676967,
-  "nodes": 45,
-  "objectsWithMesh": 6022,
+  "multiMeshInstances": 2020,
+  "multiMeshTotalInstances": 676968,
+  "nodes": 43,
+  "objectsWithMesh": 6023,
   "placedObjects": 6023,
   "tileCount": 16,
   "uniqueMaterials": 306,
-  "uniqueMeshes": 623,
-  "uploadedIndices": 2012850,
-  "uploadedTriangles": 670950,
-  "uploadedVertices": 652586
+  "uniqueMeshes": 624,
+  "uploadedIndices": 2017104,
+  "uploadedTriangles": 672368,
+  "uploadedVertices": 658321
 }

@@ -72,11 +72,43 @@ public class SerializedFileTests
     }
 
     [Fact]
+    public void ParsesVersion9File()
+    {
+        // The Unity 4.x per-map bundle format (Alpha Valley's Roads.unity3d): no enableTypeTree flag, no
+        // type hashes, the recursive type tree, and object entries packed with 32-bit unaligned path ids.
+        SerializedFile file = SerializedFile.Read(new SerializedFileBuilder { Version = 9, ClassId = 28 }.Build());
+
+        SerializedObject obj = Assert.Single(file.Objects);
+        Assert.Equal(28, obj.ClassId); // Texture2D
+        Assert.Equal(100, obj.PathId);
+        Assert.Equal("Base", Assert.Single(obj.TypeTree).Type);
+        Assert.Equal(1, file.ReaderFor(obj).ReadByte()); // payload {1,2,3,4} lands at the data offset
+    }
+
+    [Fact]
+    public void ParsesVersion17File()
+    {
+        // The 2017-era per-map bundle (Germany's Roads.unity3d): the script type index moved onto the
+        // type, and nothing follows the object entry's type index.
+        SerializedFile file = SerializedFile.Read(new SerializedFileBuilder { Version = 17, ClassId = 28 }.Build());
+
+        SerializedObject obj = Assert.Single(file.Objects);
+        Assert.Equal(28, obj.ClassId);
+        Assert.Equal(100, obj.PathId);
+        Assert.Equal("Base", Assert.Single(obj.TypeTree).Type);
+        Assert.Equal(1, file.ReaderFor(obj).ReadByte());
+    }
+
+    [Fact]
     public void UnsupportedVersion_Throws()
     {
-        // metadataSize, fileSize, version(=20, big-endian), dataOffset.
-        byte[] bytes = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0, 0 };
-        Assert.Throws<NotSupportedException>(() => SerializedFile.Read(bytes));
+        // Below 9 the endianess byte is not in the header, so the whole parse would be off; and a garbage
+        // version is how a file that is not a SerializedFile at all (a .resource entry) shows up.
+        // metadataSize, fileSize, version, dataOffset — all big-endian.
+        Assert.Throws<NotSupportedException>(
+            () => SerializedFile.Read(new byte[] { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0 }));
+        Assert.Throws<NotSupportedException>(
+            () => SerializedFile.Read(new byte[] { 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0 }));
     }
 
     [Fact]

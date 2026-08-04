@@ -38,51 +38,18 @@ public static class TerrainTextures
 
     private static void ReadInto(Dictionary<string, ImageTexture> result, byte[] data)
     {
-        IReadOnlyDictionary<string, byte[]> files = UnityRawBundle.IsRaw(data)
-            ? UnityRawBundle.Read(data).Files
-            : UnityBundle.Read(data).Files;
-
-        byte[]? sfBytes = null;
-        foreach (KeyValuePair<string, byte[]> f in files)
-            if (!f.Key.EndsWith(".resS", StringComparison.Ordinal)
-                && !f.Key.EndsWith(".resource", StringComparison.Ordinal))
-            {
-                sfBytes = f.Value;
-            }
-
-        if (sfBytes == null)
+        MapBundle? bundle = MapBundle.Read(data);
+        if (bundle == null)
             return;
 
-        SerializedFile file = SerializedFile.Read(sfBytes);
-        foreach (SerializedObject o in file.Objects)
+        foreach (SerializedObject o in bundle.Objects)
         {
-            if (o.ClassId != 28) // Texture2D
+            if (!bundle.TryReadTexture(o, out UnityTexture tex, out byte[] pixels) || tex.Name.Length == 0)
                 continue;
 
-            UnityTexture tex = UnityTexture.Read(TypeTreeReader.Read(o.TypeTree, file.ReaderFor(o)));
-            byte[]? pixels = tex.GetPixels(name => ResolveStream(files, name));
-            if (pixels == null || pixels.Length == 0 || tex.Name.Length == 0)
-                continue;
-
-            ImageTexture? image = ModelLibrary.BuildTexture(
-                CachedTexture.From(tex, pixels));
+            ImageTexture? image = ModelLibrary.BuildTexture(CachedTexture.From(tex, pixels));
             if (image != null)
                 result[tex.Name] = image;
         }
-    }
-
-    // UnityFS textures point at a stream file by path; inside a map bundle that entry sits next to the
-    // SerializedFile, so match on the file name alone.
-    private static byte[]? ResolveStream(IReadOnlyDictionary<string, byte[]> files, string streamPath)
-    {
-        if (files.TryGetValue(streamPath, out byte[]? exact))
-            return exact;
-
-        string name = Path.GetFileName(streamPath);
-        foreach (KeyValuePair<string, byte[]> f in files)
-            if (Path.GetFileName(f.Key).Equals(name, StringComparison.OrdinalIgnoreCase))
-                return f.Value;
-
-        return null;
     }
 }

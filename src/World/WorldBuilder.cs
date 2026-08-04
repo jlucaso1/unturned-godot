@@ -163,15 +163,15 @@ public static class WorldBuilder
         // Trees are Unturned "resources" placed via a separate file; render them alongside objects so
         // the map isn't bare. They share the object transform, asset db and mesh pipeline.
         List<PlacedObject> objects = LevelObjects.Load(level.ObjectsDat);
+        // The trees join them below, once the asset database can tell a pre-GUID one's RESOURCE id from
+        // the object that shares its number (see LegacyPlacements).
         List<PlacedTree> trees = LevelTrees.Load(System.IO.Path.Combine(level.Path, "Terrain", "Trees.dat"));
-        foreach (PlacedTree t in trees)
-            objects.Add(new PlacedObject(t.Position, t.EulerDegrees, t.Scale, 0, t.Guid));
 
         // Scan the object/tree asset DB on a worker thread: on the warm path db is only consumed after the
         // main-thread ModelLibrary.Load below (for fallback-box coloring), so the scan overlaps that load and
         // is effectively free. The cold extraction branch resolves it explicitly before use.
         var dbTask = System.Threading.Tasks.Task.Run(() => ContentExtraction.ScanAssets(sources));
-        Log.Print($"[unturned-godot] Placed objects: {objects.Count} (incl. {trees.Count} trees)");
+        Log.Print($"[unturned-godot] Placed objects: {objects.Count + trees.Count} (incl. {trees.Count} trees)");
 
         string cacheDir = ProjectSettings.GlobalizePath("user://model_cache");
         string textureCacheDir = ProjectSettings.GlobalizePath("user://texture_cache");
@@ -205,6 +205,14 @@ public static class WorldBuilder
         // plan and the same batching — only the scene root is its own.
         List<PlacedObject> vehicles = VehicleSpawnPlan.Load(level, sources, dbTask.Result);
         Log.Print($"[unturned-godot] Vehicles: {vehicles.Count} spawned");
+
+        // A pre-GUID map names its objects and trees by legacy id; the needed set below is keyed on GUIDs,
+        // so those placements borrow theirs from the asset database first — and the trees join the list
+        // here, resolved through the resource namespace rather than the object one.
+        int legacy = LegacyPlacements.ResolveGuids(objects, dbTask.Result)
+            + LegacyPlacements.AppendTrees(trees, objects, dbTask.Result);
+        if (legacy > 0)
+            Log.Print($"[unturned-godot] Legacy placements resolved by id: {legacy}");
 
         var neededGuids = new HashSet<Guid>();
         foreach (PlacedObject o in objects)
