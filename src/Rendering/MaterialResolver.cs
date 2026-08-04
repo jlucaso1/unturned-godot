@@ -118,7 +118,7 @@ public sealed class MaterialResolver
         foreach (string path in SafeFileTree.EnumerateFiles(assetsDir, "*.asset"))
         {
             MaterialPalette? palette;
-            try { palette = MaterialPalette.Read(DatParser.Parse(File.ReadAllText(path))); }
+            try { palette = MaterialPalette.Read(DatParser.Parse(TextFile.ReadAllText(path))); }
             catch (IOException) { continue; }
             catch (UnauthorizedAccessException) { continue; }
             if (palette != null && palette.MaterialPaths.Count > 0)

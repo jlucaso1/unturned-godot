@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using UnturnedGodot.Dat;
+using UnturnedGodot.Data;
 
 namespace UnturnedGodot.Assets;
 
@@ -127,7 +128,7 @@ public sealed class PhysicsMaterialBank
             foreach (string file in Directory.EnumerateFiles(root, "*.asset", SearchOption.AllDirectories))
             {
                 DatDictionary parsed;
-                try { parsed = DatParser.Parse(File.ReadAllText(file)); }
+                try { parsed = DatParser.Parse(TextFile.ReadAllText(file)); }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }
                 if (TryParseFile(parsed, out var asset))
                 {

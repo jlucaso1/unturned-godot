@@ -17,7 +17,7 @@ public static class LevelHierarchy
         if (!File.Exists(hierarchyPath))
             return result;
 
-        List<string> tokens = Tokenize(File.ReadAllText(hierarchyPath));
+        List<string> tokens = Tokenize(TextFile.ReadAllText(hierarchyPath));
         for (int i = 0; i < tokens.Count; i++)
         {
             if (tokens[i] != "\"Coord\"" || i + 1 >= tokens.Count || tokens[i + 1] != "{")

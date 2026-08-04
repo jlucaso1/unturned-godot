@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using Godot;
+using UnturnedGodot.Data;
 using UnturnedGodot.Unity;
 
 namespace UnturnedGodot;
@@ -44,7 +45,7 @@ public static class TerrainLayerCache
 
         try
         {
-            return File.ReadAllText(StampPathFor(material, directory)) == expected;
+            return TextFile.ReadAllText(StampPathFor(material, directory)) == expected;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {

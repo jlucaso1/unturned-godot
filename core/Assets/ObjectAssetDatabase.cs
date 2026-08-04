@@ -133,7 +133,7 @@ public sealed class ObjectAssetDatabase
         var files = new List<string>();
         foreach (string pattern in searchPatterns)
             files.AddRange(Directory.EnumerateFiles(root, pattern, SearchOption.AllDirectories));
-        return ScanFiles(files, File.ReadAllText);
+        return ScanFiles(files, TextFile.ReadAllText);
     }
 
     internal static ObjectAssetDatabase ScanFiles(IReadOnlyList<string> files, Func<string, string> readText)
@@ -176,6 +176,6 @@ public sealed class ObjectAssetDatabase
         string english = Path.Combine(directory, "English.dat");
         if (!File.Exists(english))
             return null;
-        return LegacyData.Parse(File.ReadAllText(english)).GetString("Name");
+        return LegacyData.Parse(TextFile.ReadAllText(english)).GetString("Name");
     }
 }
