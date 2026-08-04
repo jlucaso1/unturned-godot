@@ -118,24 +118,35 @@ Some objects are decoded again by a later pass, and the suite prices those separ
 
 | decoded more than once | one decode | per load | extra beyond the rows above | applies to |
 |---|---:|---:|---:|---|
-| AssetBundle `m_Container` | 91 ms / 51.5 MiB | 2–3x | **91–181 ms / 51.5–102.9 MiB** | every load |
+| AssetBundle `m_Container` | 90 ms / 51.5 MiB | 2–4x | **90–271 ms / 51.5–154.4 MiB** | every load |
+| Mesh | 82 ms / 145.1 MiB | 2x | ≤ 82 ms / 145.1 MiB | cold mesh cache, placed meshes |
 | GameObject | 30 ms / 42.8 MiB | 2x | ≤ 30 ms / 42.8 MiB | mesh-bearing prefabs only |
 | Shader | 20 ms / 29.5 MiB | 2x | ≤ 20 ms / 29.5 MiB | shaders a resolved material names |
 | SkinnedMeshRenderer | 0.6 ms / 0.7 MiB | 2x | ≤ 1 ms / 0.7 MiB | parts clearing mesh+anchor checks |
 
+**This table is a lower bound on repeated decode work, not a total.** It is a hand-maintained mirror of
+what several `src/` passes happen to do, much of it behind conditions the harness cannot observe — which
+map is loaded, which caches are warm, which env flags are set. Successive review rounds found six such
+sites; there is no reason to believe a seventh look would find none. Individual entries bound their own
+cost from *above* (`≤`), while the list as a whole bounds the total from *below*. Re-derive it against the
+code before trusting any figure here.
+
 Only the decodes *beyond the first* are additional, since the rows above already contain one of each.
 
-The container's count is a **range**, not a constant: `PrefabGraph.ReadContainer` and
-`BundleTextures.Locate` always walk it, but `AudioExtractor.Plan` makes a third only when the pass was
-given an audio request — `ObjectStreamer.PlanAudio` wants nothing under `FREECAM`/`STEP_PROBE` or once the
-audio cache is warm. Those two flags are exactly the modes the benchmarks run in, so **a measured load
-sees the low end and an ordinary cold session the high one**, which is worth knowing before quoting either.
+The container's count is a **range**, not a constant. `PrefabGraph.ReadContainer` and
+`BundleTextures.Locate` always walk it; `AudioExtractor.Plan` adds a third only when the pass was given an
+audio request (`ObjectStreamer.PlanAudio` wants nothing under `FREECAM`/`STEP_PROBE` or once the audio
+cache is warm), and `CharacterModel.ExtractInlineTexture` a fourth on a cold face cache — against *this*
+bundle, since the path it resolves is `assets/coremasterbundle/items/faces/...`. Those two env flags are
+exactly the modes the benchmarks run in, so **a measured load sees the low end and an ordinary cold
+session more**, which is worth knowing before quoting either.
 
-The other three apply to a subset the suite cannot identify — which objects a given map's placements
-reach — so they are priced over the whole class, the widest that subset could be, and marked `≤`. Each is
-a separate oversight: `MeshRendererMaterials` is a static that cannot see `AnchorOf`'s GameObject cache,
-and `BlendOf`/`CullOf` go through the same `ShaderOf` helper with *separate* caches (`_shaderBlends`,
-`_shaderCulls`), so the first material naming a shader decodes it once for each.
+The other four apply to a subset the suite cannot identify — which objects a given map's placements reach,
+and whether the mesh cache is cold — so they are priced over the whole class, the widest that subset could
+be, and marked `≤`. Each is a separate oversight: `ReadStreamedVertices` decodes a mesh for its StreamRef
+and `BuildLevel` decodes it again for the geometry; `MeshRendererMaterials` is a static that cannot see
+`AnchorOf`'s GameObject cache; and `BlendOf`/`CullOf` go through the same `ShaderOf` helper with *separate*
+caches (`_shaderBlends`, `_shaderCulls`), so the first material naming a shader decodes it once for each.
 
 Materials have no fixed multiplicity to quote at all — `MaterialResolver.Resolve` decodes the material on
 every call with no cache, and it is called per submesh, so the count belongs to the map's placements.
@@ -147,10 +158,10 @@ the clock moves.
 — is a single object that costs ~99 ms and 51.5 MiB to decode, and every pass that needs to resolve a name
 decodes the whole thing from scratch. Five independent scans of it exist in the port
 (`PrefabGraph.ReadContainer`, `BundleTextures.Locate`, `AudioExtractor.Plan`, `RoadsBuilder`,
-`CharacterModel`); the first two run against the core masterbundle on every cold load and the third
-whenever audio is wanted. One decode is already in the scanned row, so the **extra** is ~91–181 ms and
-~52–103 MiB re-deriving something the load already had. Compare it against the whole scanned row: 42,010
-objects cost 216 ms, and re-reading this one object once or twice costs a comparable amount. That is the
+`CharacterModel`); four of those hit *this* bundle — two on every cold load, one when audio is wanted and
+one on a cold face cache. A decode is already in the scanned row, so the **extra** is ~90–271 ms and
+~52–154 MiB re-deriving something the load already had. Compare it against the whole scanned row: 42,010
+objects cost 216 ms, and re-reading this one object can cost more than all of them. That is the
 cheapest real win in this whole area, and the only reason it is not in this PR is that the fix lives in
 `src/` — decode the container once and hand it around — which is another lane's call.
 

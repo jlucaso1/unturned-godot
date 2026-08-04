@@ -64,48 +64,60 @@ suite skips cleanly when its input is missing, so it runs on any machine with so
 Measured with `PerfHarness -- lzma` and `-- bundle` on a 4-vCPU container, against the game's own
 `core_linux.masterbundle` (110.9 MiB on disk, 1,371.9 MiB decompressed, one LZMA block):
 
-Shares are of the **15.03 s** these rows total taking the container's low end, so they sum to 100%. The
-container's second extra decode (audio) adds 0.09 s to every figure it appears in; at that high end the
-total is 15.12 s and the LZMA share 95.5% rather than 96.1%.
+The pass splits in two, because the audio node and one container decode only happen when audio is wanted
+— `ObjectStreamer.PlanAudio` returns nothing under `FREECAM`/`STEP_PROBE` or once the audio cache is warm,
+and `ModelExtractor.ReadSerializedNode` then never plans `.resource` ranges at all. Those two flags are
+exactly the modes the benchmarks run in, so **a measured load never pays the bottom block**:
 
-| | bytes | time | share |
+| every load | bytes | time | share of 12.92 s |
 |---|---:|---:|---:|
-| LZMA, SerializedFile node | 170.9 MiB | 4.60 s | 30.6% |
-| LZMA, `.resS` texture node | 1,180.2 MiB | 7.73 s | 51.4% |
-| LZMA, `.resource` audio node | 20.8 MiB | 2.11 s | 14.0% |
+| LZMA, SerializedFile node | 170.9 MiB | 4.60 s | 35.6% |
+| LZMA, `.resS` texture node | 1,180.2 MiB | 7.73 s | 59.8% |
 | `SerializedFile.Read` | 103,549 objects | 0.01 s | 0.1% |
-| `TypeTreeReader.Read`, classes every load scans, once each | 42,010 objects | 0.22 s | 1.5% |
+| `TypeTreeReader.Read`, classes every load scans, once each | 42,010 objects | 0.22 s | 1.7% |
 | `TypeTreeReader.Read`, partly scanned (a fixed share is unavoidable) | 33,688 objects | 0.06 s | 0.4% |
-| re-decoding the AssetBundle container (1 *extra* pass, 2 with audio) | 1 object | 0.09 s | 0.6% |
-| `TypeTreeReader.Read`, classes a map places (a bound) | 17,051 objects | 0.21 s | 1.4% |
+| re-decoding the AssetBundle container (1 *extra* pass) | 1 object | 0.09 s | 0.7% |
+| `TypeTreeReader.Read`, classes a map places (a bound) | 17,051 objects | 0.21 s | 1.6% |
 
-**The pass is LZMA-bound and nothing else is close.** The three LZMA rows are 14.44 s of that 15.03 s —
-**96.1%**, or 95.5% at the container's high end. The object table is free, and the TypeTree reader — the
-obvious-looking target, and the only part of this that is the port's own code — is **1.5%** for what every
-load unconditionally scans, 1.9% adding the partly-scanned row, and 3.9% counting the container repeat and
-everything a map could place. Eliminating it entirely would take well under a second off a ~15 s pass.
-Work aimed at cold load time should go at *what is decoded and when* (`ress`, deferral, caching) rather
-than at how fast the port turns already-decoded bytes into values.
+| only when audio is wanted | bytes | time |
+|---|---:|---:|
+| LZMA, `.resource` audio node | 20.8 MiB | 2.11 s |
+| a second *extra* container decode (`AudioExtractor.Plan`) | 1 object | 0.09 s |
+
+**The pass is LZMA-bound and nothing else is close.** The two always-run LZMA rows are 12.33 s of that
+12.92 s — **95.4%** — and adding the audio block moves the total to 15.12 s and the LZMA share to 95.5%.
+The object table is free, and the TypeTree reader — the obvious-looking target, and the only part of this
+that is the port's own code — is **1.7%** for what every load unconditionally scans, 2.1% adding the
+partly-scanned row, and 4.4% counting the container repeat and everything a map could place. Eliminating
+it entirely would take well under a second off a ~13–15 s pass. Work aimed at cold load time should go at
+*what is decoded and when* (`ress`, deferral, caching) rather than at how fast the port turns
+already-decoded bytes into values.
 
 The one exception, and the cheapest win in the area, is the AssetBundle container. `m_Container` is a
-single object costing ~0.09 s and 51.5 MiB to decode, and `PrefabGraph.ReadContainer`,
-`BundleTextures.Locate` and `AudioExtractor.Plan` each decode it from scratch. The first two run on every
-cold load; the third only when audio is wanted, which `ObjectStreamer.PlanAudio` declines under
-`FREECAM`/`STEP_PROBE` or once the audio cache is warm — so a *measured* load pays two decodes and an
-ordinary session three. One is already counted in the row above, so the **extra** is ~0.09–0.18 s and
-~52–103 MiB re-deriving a table the load already built, which is what decoding it once and passing it
-around would save. For scale, decoding all 42,010 unconditionally-scanned objects once costs 0.22 s. That
-fix is a `src/` change rather than a parser one, which is why it is recorded here rather than made in
-`core/`.
+single object costing ~0.09 s and 51.5 MiB to decode, and **four** places decode it from scratch against
+this bundle: `PrefabGraph.ReadContainer` and `BundleTextures.Locate` on every cold load,
+`AudioExtractor.Plan` when audio is wanted, and `CharacterModel.ExtractInlineTexture` on a cold face cache
+(it looks up `assets/coremasterbundle/items/faces/...`, so it is this bundle and not the character's own).
+So the multiplicity runs 2–4. One decode is already counted in the row above, leaving an **extra** of
+~0.09–0.27 s and ~52–155 MiB re-deriving a table the load already built, which is what decoding it once
+and passing it around would save. For scale, decoding all 42,010 unconditionally-scanned objects once
+costs 0.22 s. That fix is a `src/` change rather than a parser one, which is why it is recorded here
+rather than made in `core/`.
 
-Three smaller repeats sit behind it, each a separate oversight and each bounded above rather than exact,
+Four smaller repeats sit behind it, each a separate oversight and each bounded above rather than exact,
 since only the objects a map's placements reach take both paths: a GameObject is decoded by `AnchorOf`
 (which caches it) and again by `MeshRendererMaterials` (a static that cannot see that cache), ≤0.03 s; a
 Shader is decoded once for blend and once for culling because `BlendOf` and `CullOf` use *separate*
 caches behind the same `ShaderOf` helper, ≤0.02 s; and a SkinnedMeshRenderer is decoded by the mesh-part
-sweep and again for its materials, ≤0.001 s. `PerfHarness -- bundle` prices all four and marks which are
-exact. Materials are re-decoded per submesh with no cache at all, which has no fixed multiplicity to
-quote.
+sweep and again for its materials, ≤0.001 s. A placed Mesh is also decoded twice on a cold mesh cache,
+once by `ReadStreamedVertices` for its StreamRef and again by `BuildLevel` for the geometry.
+
+**That list is a lower bound, not a total.** It is a hand-maintained mirror of what several `src/` passes
+happen to do, much of it behind conditions the harness cannot observe; successive review rounds have found
+six such sites and there is no reason to think the next look would find none. `PerfHarness -- bundle`
+prices what is listed and marks which figures are exact, but treat repeated decode work as *at least* this
+much. Materials are re-decoded per submesh with no cache at all, which has no fixed multiplicity to quote
+even in principle.
 
 Two specifics worth carrying. The decode rate is not one number: it varies 15x between the three nodes
 and tracks how compressible each one is, so a rate sampled in one node cannot price a deferral in

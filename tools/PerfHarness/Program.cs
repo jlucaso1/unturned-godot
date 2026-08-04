@@ -621,23 +621,36 @@ public static class Program
     // decode everything exactly once, so they already contain the first decode of each of these; only the
     // decodes beyond the first are additional, which is what the "extra" column reports.
     //
+    // THIS LIST IS NOT EXHAUSTIVE, and cannot be. It is a hand-maintained mirror of what several passes in
+    // `src/` happen to do, many of them behind conditions the suite cannot see (which map is loaded, which
+    // caches are warm, which env flags are set). Six rounds of review found six sites; there is no reason
+    // to believe the seventh does not exist. Read the table as a demonstrated LOWER BOUND on repeated
+    // decode work, never as its total, and re-derive it against the code before trusting any figure here.
+    //
     // `EveryObject` says whether the multiplicity applies to every object of the class in the file or only
-    // to the subset a particular pass reaches. Where it is false the extra is an UPPER BOUND, because the
-    // suite has no way to know which objects a given map's placements actually reach — pricing it over the
-    // whole class is the widest that subset could be. Each entry names its sites so the count can be
-    // checked against the code rather than trusted.
+    // to the subset a particular pass reaches. Where it is false the extra is an UPPER BOUND for that
+    // entry, because the suite has no way to know which objects a given map's placements actually reach —
+    // pricing it over the whole class is the widest that subset could be. So entries bound their own cost
+    // from above while the table as a whole bounds the total from below. Each entry names its sites so the
+    // count can be checked against the code rather than trusted.
     private static readonly (int ClassId, int MinDecodes, int MaxDecodes, bool EveryObject, string Where)[]
         RepeatDecoded =
     {
         // PrefabGraph.ReadContainer and BundleTextures.Locate always walk m_Container by decoding the whole
-        // AssetBundle object again. AudioExtractor.Plan makes a third, but only when the pass was given an
-        // audio request: ModelExtractor.ReadSerializedNode skips it when `audio` is null, and
-        // ObjectStreamer.PlanAudio wants nothing under FREECAM/STEP_PROBE or once the audio cache is warm.
-        // Those two flags are exactly the modes the benchmarks run in, so a measured load sees the low end
-        // and an ordinary cold session the high one. RoadsBuilder and CharacterModel scan a container too,
-        // but their own bundle rather than this one, so they are not counted.
-        (AssetBundleClassId, 2, 3, true,
-            "PrefabGraph.ReadContainer + BundleTextures.Locate (+ AudioExtractor.Plan when audio is wanted)"),
+        // AssetBundle object again. Two more sites are conditional: AudioExtractor.Plan runs only when the
+        // pass was given an audio request (ModelExtractor.ReadSerializedNode skips it when `audio` is null,
+        // and ObjectStreamer.PlanAudio wants nothing under FREECAM/STEP_PROBE or once the audio cache is
+        // warm), and CharacterModel.ExtractInlineTexture walks it on a cold face cache — against THIS
+        // bundle, since the path it looks up is assets/coremasterbundle/items/faces/... RoadsBuilder scans
+        // a container too, but its own map's bundle, so it is not counted.
+        (AssetBundleClassId, 2, 4, true,
+            "PrefabGraph.ReadContainer + BundleTextures.Locate (+ AudioExtractor.Plan when audio is "
+            + "wanted, + CharacterModel.ExtractInlineTexture on a cold face cache)"),
+
+        // ReadStreamedVertices decodes each placed mesh to read its StreamRef, then BuildLevel decodes the
+        // same mesh again for the geometry. Only on a cold mesh cache, and only for meshes a placement
+        // reaches, so this is bounded twice over.
+        (43, 2, 2, false, "ModelExtractor.ReadStreamedVertices + BuildLevel (cold mesh cache only)"),
 
         // MapObjectKeysToMeshes decodes each skinned renderer in its class-id sweep, then
         // MeshRendererMaterials reaches the same component from its GameObject and decodes it again — but
@@ -682,7 +695,8 @@ public static class Program
 
             if (!header)
             {
-                Console.WriteLine("  decoded more than once per load (the rows above count only the first):");
+                Console.WriteLine("  decoded more than once per load (the rows above count only the first;"
+                    + " this list is a LOWER BOUND, not a total — see the comment on RepeatDecoded):");
                 header = true;
             }
 
