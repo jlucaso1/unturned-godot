@@ -570,18 +570,17 @@ public sealed partial class ZombieSystem
         }
 
         float vertical = MathF.Abs(target.Position.Y - zombie.Position.Y);
-        bool? visionBlocked = null;
-        bool IsVisionBlocked()
-        {
-            if (visionBlocked.HasValue)
-                return visionBlocked.Value;
-            visionBlocked = VisionBlocked?.Invoke(
-                zombie.Position + (Vector3.Up * ZombieBody.EyeHeight), target.Position) == true;
-            return visionBlocked.Value;
-        }
+        bool canAttack = sqrHorizontal < zombie.AttackRangeSquared
+            && vertical < zombie.VerticalAttackRange;
+        // Preserve the old lazy raycast: open-ground hunters beyond two metres need no visibility answer
+        // unless they are recovering from collision. A plain local keeps the one-answer-per-tick behavior
+        // without allocating the capturing local-function display class for every hunter every tick.
+        bool needsVision = canAttack || sqrHorizontal <= 4f
+            || (zombie.RouteEscapingCollision && VisionBlocked != null);
+        bool visionBlocked = needsVision && VisionBlocked?.Invoke(
+            zombie.Position + (Vector3.Up * ZombieBody.EyeHeight), target.Position) == true;
 
-        if (sqrHorizontal < zombie.AttackRangeSquared && vertical < zombie.VerticalAttackRange
-            && !IsVisionBlocked())
+        if (canAttack && !visionBlocked)
         {
             zombie.State = EZombieState.Attack;
             if (zombie.SinceSwing > SwingInterval && zombie.PendingHit < 0f)
@@ -607,7 +606,7 @@ public sealed partial class ZombieSystem
         Vector3 directDirection = default;
         if (sqrHorizontal > 4f)
         {
-            if (zombie.RouteEscapingCollision && VisionBlocked != null && !IsVisionBlocked())
+            if (zombie.RouteEscapingCollision && VisionBlocked != null && !visionBlocked)
             {
                 zombie.RouteEscapingCollision = false;
                 zombie.EscapeRouteHasProgress = false;
@@ -638,7 +637,7 @@ public sealed partial class ZombieSystem
             // the wall. It then invalidates the executable route every 0.75 s for "not moving" and
             // adopts it again forever. When vision geometry proves the target is occluded, keep the
             // route's steering until the body reaches an actual line of sight.
-            bool blocked = IsVisionBlocked();
+            bool blocked = visionBlocked;
             canTurn = blocked;
             if (!blocked)
             {

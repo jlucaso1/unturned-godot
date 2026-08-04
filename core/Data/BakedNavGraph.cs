@@ -156,6 +156,18 @@ public sealed class BakedNavGraph
         }
     }
 
+    // Test seam for the sparse inferred-portal storage. Ordinary indexed adjacency must never allocate
+    // a validation slot, even when the graph has a live collision probe.
+    internal int PortalValidationSlots
+    {
+        get
+        {
+            int count = 0;
+            foreach (FlagGraph flag in _flags) count += flag.PortalValidationSlots;
+            return count;
+        }
+    }
+
     public long BuildScratchBytes
     {
         get
@@ -257,7 +269,10 @@ public sealed class BakedNavGraph
         private readonly Vector3[] _centres;
         private readonly int[] _edgeStart;
         private readonly Connection[] _edges;
-        private readonly bool[] _stitched;
+        // -1 for ordinary adjacency; otherwise the compact slot shared by every per-radius validation
+        // array. Inferred stitches are sparse (4.8% of PEI border edges), so sizing those arrays by every
+        // directed connection retained tens of megabytes of entries that could never be read on large maps.
+        private readonly int[] _stitchedPortal;
         private readonly int[] _portalProbeState;
         private readonly PortalSpan[] _normalPortalSpans;
         private readonly PortalSpan[] _megaPortalSpans;
@@ -741,7 +756,9 @@ public sealed class BakedNavGraph
         }
 
         public int ConnectionCount => _edges.Length;
-        public long AdjacencyBytes => ((long)_edges.Length * 13) + ((long)_edgeStart.Length * sizeof(int));
+        public long AdjacencyBytes => ((long)_edges.Length * (4 * sizeof(int)))
+            + ((long)_edgeStart.Length * sizeof(int));
+        public int PortalValidationSlots => _portalProbeState.Length;
         public long ScratchBytes { get; }
 
         public FlagGraph(NavFlag source, IReadOnlySet<int>? skip, PortalValidator? portalValidator)
@@ -857,21 +874,24 @@ public sealed class BakedNavGraph
             for (int triangle = 0; triangle < count; triangle++)
                 _edgeStart[triangle + 1] += _edgeStart[triangle];
             _edges = new Connection[directed.Length];
-            _stitched = new bool[directed.Length];
+            _stitchedPortal = new int[directed.Length];
+            Array.Fill(_stitchedPortal, -1);
+            int stitchedPortals = 0;
             for (int i = 0; i < directed.Length; i++)
             {
                 _edges[i] = directed[i].Edge;
-                _stitched[i] = directed[i].Stitched;
+                if (directed[i].Stitched)
+                    _stitchedPortal[i] = stitchedPortals++;
             }
-            _portalProbeState = portalValidator == null ? Array.Empty<int>() : new int[directed.Length];
+            _portalProbeState = portalValidator == null ? Array.Empty<int>() : new int[stitchedPortals];
             _normalPortalSpans = portalValidator == null
-                ? Array.Empty<PortalSpan>() : new PortalSpan[directed.Length];
+                ? Array.Empty<PortalSpan>() : new PortalSpan[stitchedPortals];
             _megaPortalSpans = portalValidator == null
-                ? Array.Empty<PortalSpan>() : new PortalSpan[directed.Length];
+                ? Array.Empty<PortalSpan>() : new PortalSpan[stitchedPortals];
             _normalPortalProgress = portalValidator == null
-                ? Array.Empty<PortalValidation?>() : new PortalValidation?[directed.Length];
+                ? Array.Empty<PortalValidation?>() : new PortalValidation?[stitchedPortals];
             _megaPortalProgress = portalValidator == null
-                ? Array.Empty<PortalValidation?>() : new PortalValidation?[directed.Length];
+                ? Array.Empty<PortalValidation?>() : new PortalValidation?[stitchedPortals];
             _portalBorderState = portalValidator == null
                 ? Array.Empty<byte>() : new byte[source.Vertices.Length];
             _borderVertex = new bool[source.Vertices.Length];
@@ -941,22 +961,34 @@ public sealed class BakedNavGraph
             float minZ, int[] cellStart, int[] cellItems, PortalValidator? portalValidator)
         {
             Source = source; _centres = centres; _edgeStart = edgeStart; _edges = edges; _enabled = enabled;
-            _stitched = stitched; _portalValidator = portalValidator;
-            _portalProbeState = portalValidator == null ? Array.Empty<int>() : new int[edges.Length];
+            _stitchedPortal = CompactStitchedPortals(stitched, out int stitchedPortals);
+            _portalValidator = portalValidator;
+            _portalProbeState = portalValidator == null ? Array.Empty<int>() : new int[stitchedPortals];
             _normalPortalSpans = portalValidator == null
-                ? Array.Empty<PortalSpan>() : new PortalSpan[edges.Length];
+                ? Array.Empty<PortalSpan>() : new PortalSpan[stitchedPortals];
             _megaPortalSpans = portalValidator == null
-                ? Array.Empty<PortalSpan>() : new PortalSpan[edges.Length];
+                ? Array.Empty<PortalSpan>() : new PortalSpan[stitchedPortals];
             _normalPortalProgress = portalValidator == null
-                ? Array.Empty<PortalValidation?>() : new PortalValidation?[edges.Length];
+                ? Array.Empty<PortalValidation?>() : new PortalValidation?[stitchedPortals];
             _megaPortalProgress = portalValidator == null
-                ? Array.Empty<PortalValidation?>() : new PortalValidation?[edges.Length];
+                ? Array.Empty<PortalValidation?>() : new PortalValidation?[stitchedPortals];
             _portalBorderState = portalValidator == null
                 ? Array.Empty<byte>() : new byte[source.Vertices.Length];
             _columns = columns; _rows = rows; _cellSize = cellSize; _minX = minX; _minZ = minZ;
             _cellStart = cellStart; _cellItems = cellItems; ScratchBytes = 0;
             _borderVertex = new bool[source.Vertices.Length];
             RecomputeBorderVertices();
+        }
+
+        private static int[] CompactStitchedPortals(ReadOnlySpan<bool> stitched, out int count)
+        {
+            var result = new int[stitched.Length];
+            Array.Fill(result, -1);
+            count = 0;
+            for (int i = 0; i < stitched.Length; i++)
+                if (stitched[i])
+                    result[i] = count++;
+            return result;
         }
 
         public void Write(BinaryWriter writer)
@@ -971,7 +1003,7 @@ public sealed class BakedNavGraph
             {
                 Connection edge = _edges[i];
                 writer.Write(edge.To); writer.Write(edge.VertexA); writer.Write(edge.VertexB);
-                writer.Write(_stitched[i]);
+                writer.Write(_stitchedPortal[i] >= 0);
             }
             writer.Write(_columns); writer.Write(_rows); writer.Write(_cellSize); writer.Write(_minX); writer.Write(_minZ);
             WriteInts(writer, _cellStart); WriteInts(writer, _cellItems);
@@ -1385,8 +1417,8 @@ public sealed class BakedNavGraph
                     {
                         Connection edge = _edges[edgeAt];
                         if (!_enabled[edge.To]
-                            || ValidateStitchedPortal(current, edgeAt, radius, ref portalProbeBudget,
-                                out _) != PortalVerdict.Open)
+                            || ValidateStitchedPortal(current, edgeAt, radius, ref portalProbeBudget)
+                                != PortalVerdict.Open)
                             continue;
                         float candidate = currentCost + _centres[current].DistanceTo(_centres[edge.To]);
                         if (candidate >= workspace.GetCost(edge.To))
@@ -1488,13 +1520,24 @@ public sealed class BakedNavGraph
         // opening is deferred as closed for that query and resumes on the next one. That keeps pathfinding
         // inside the authoritative tick bounded even on a long/unreachable route across many cold seams.
         private PortalVerdict ValidateStitchedPortal(int triangle, int edgeAt, float radius,
+            ref int probeBudget)
+        {
+            // This is the hot A* call: ordinary indexed edges have no physical validation and the caller
+            // discards their span, so do not read either endpoint or construct a PortalSpan for them.
+            if (_portalValidator == null || _stitchedPortal[edgeAt] < 0)
+                return PortalVerdict.Open;
+            return ValidateStitchedPortal(triangle, edgeAt, radius, ref probeBudget, out _);
+        }
+
+        private PortalVerdict ValidateStitchedPortal(int triangle, int edgeAt, float radius,
             ref int probeBudget, out PortalSpan span)
         {
             Connection edge = _edges[edgeAt];
             span = new PortalSpan(Source.Vertices[edge.VertexA], Source.Vertices[edge.VertexB],
                 IncludesA: true, IncludesB: true);
             PortalValidator? validator = _portalValidator;
-            if (validator == null || !_stitched[edgeAt])
+            int portalAt = _stitchedPortal[edgeAt];
+            if (validator == null || portalAt < 0)
                 return PortalVerdict.Open;
 
             int testedBit;
@@ -1530,27 +1573,27 @@ public sealed class BakedNavGraph
                     ? PortalVerdict.Open : PortalVerdict.Blocked;
             }
 
-            int cached = Volatile.Read(ref _portalProbeState[edgeAt]);
+            int cached = Volatile.Read(ref _portalProbeState[portalAt]);
             if ((cached & testedBit) != 0)
             {
                 if ((cached & blockedBit) != 0)
                     return PortalVerdict.Blocked;
-                span = spans[edgeAt];
+                span = spans[portalAt];
                 return PortalVerdict.Open;
             }
 
             lock (validator.Gate)
             {
-                cached = Volatile.Read(ref _portalProbeState[edgeAt]);
+                cached = Volatile.Read(ref _portalProbeState[portalAt]);
                 if ((cached & testedBit) != 0)
                 {
                     if ((cached & blockedBit) != 0)
                         return PortalVerdict.Blocked;
-                    span = spans[edgeAt];
+                    span = spans[portalAt];
                     return PortalVerdict.Open;
                 }
 
-                PortalValidation validation = progress[edgeAt]
+                PortalValidation validation = progress[portalAt]
                     ??= CreatePortalValidation(triangle, edge, radius);
                 while (validation.Next < validation.Samples && probeBudget > 0)
                 {
@@ -1568,18 +1611,18 @@ public sealed class BakedNavGraph
                 if (!blocked)
                 {
                     span = validation.Span();
-                    spans[edgeAt] = span;
+                    spans[portalAt] = span;
                 }
                 if (validation.FirstBlocked)
                     _portalBorderState[edge.VertexA] |= borderBit;
                 if (validation.LastBlocked)
                     _portalBorderState[edge.VertexB] |= borderBit;
-                progress[edgeAt] = null;
+                progress[portalAt] = null;
 
-                int state = Volatile.Read(ref _portalProbeState[edgeAt]) | testedBit;
+                int state = Volatile.Read(ref _portalProbeState[portalAt]) | testedBit;
                 if (blocked)
                     state |= blockedBit;
-                Volatile.Write(ref _portalProbeState[edgeAt], state);
+                Volatile.Write(ref _portalProbeState[portalAt], state);
                 return blocked ? PortalVerdict.Blocked : PortalVerdict.Open;
             }
         }

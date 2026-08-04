@@ -653,6 +653,14 @@ public class ZombieSystemTests
 
         // Acquire the player while visible. The wall then closes the vision ray, which is the exact
         // state of a zombie already hunting a player pressed against the opposite face of a wall.
+        system.MoveResolver = (from, to, radius) =>
+        {
+            // Thin wall across z=0.5, ending at x=-2.5. A direct push at the player is clamped;
+            // the nav route first turns away from the wall and then goes around its left end.
+            if (from.Z < 0.5f && to.Z >= 0.5f && from.X > -2.5f)
+                return new Vector3(to.X, to.Y, 0.49f);
+            return to;
+        };
         system.VisionBlocked = (_, _) => false;
         system.Tick(new[] { player }, 0.1f);
         Assert.Equal(EZombieState.Chase, zombie.State);
@@ -666,14 +674,6 @@ public class ZombieSystemTests
             return true;
         };
         system.VisionBlocked = (_, _) => true;
-        system.MoveResolver = (from, to, radius) =>
-        {
-            // Thin wall across z=0.5, ending at x=-2.5. A direct push at the player is clamped;
-            // the nav route first turns away from the wall and then goes around its left end.
-            if (from.Z < 0.5f && to.Z >= 0.5f && from.X > -2.5f)
-                return new Vector3(to.X, to.Y, 0.49f);
-            return to;
-        };
 
         float leftmost = zombie.Position.X;
         for (int i = 0; i < 30; i++)
@@ -1555,6 +1555,23 @@ public class ZombieSystemTests
         float length = ZombieSystem.EffectiveRouteLengthFrom(position, route, 1, destination);
 
         Assert.Equal(10f, length, 3); // 0 -> 4 -> the real destination, not 0 -> 4 -> (9, 1.5)
+    }
+
+    [Fact]
+    public void IncompleteRouteLength_KeepsItsOwnEndpointOutsideTheDirectApproachRange()
+    {
+        Vector3 position = Vector3.Zero;
+        var route = new List<Vector3>
+        {
+            position,
+            new Vector3(4f, 0f, 0f),
+            new Vector3(4f, 0f, 5f),
+        };
+        Vector3 destination = new(10f, 0f, 0f);
+
+        float length = ZombieSystem.EffectiveRouteLengthFrom(position, route, 1, destination);
+
+        Assert.Equal(9f, length, 3); // 0 -> 4 -> (4, 5), not 0 -> 4 -> the destination
     }
 
     // Two ways round the same obstacle, of near-equal cost, and the body standing where the choice

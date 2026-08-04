@@ -39,7 +39,7 @@ public class BakedNavGraphTests
     public void ConnectedTrianglesProducePortalPath()
     {
         BakedNavGraph graph = BakedNavGraph.Build(new[] { Strip(4) });
-        Assert.Equal((14, 218L), graph.AdjacencyStorage);
+        Assert.Equal((14, 260L), graph.AdjacencyStorage);
         // 912 before the T-junction broad phase was counted into this. The rise is the grid, its
         // buckets, the border list and the pair set — transient, freed when Build returns, and
         // deliberately included so the figure the perf harness prints is not an understatement of what
@@ -223,7 +223,10 @@ public class BakedNavGraphTests
     {
         using var directory = new TempDir();
         NavFlag flag = Strip(1);
-        string path = directory.Write("graph.csr", new byte[] { 1, 2, 3 });
+        using var blob = new MemoryStream();
+        BakedNavGraph.Build(new[] { flag }).Write(blob, "topology-v1");
+        string path = directory.Write("graph.csr", blob.ToArray());
+        Assert.True(BakedNavGraph.TryReadFile(path, "topology-v1", new[] { flag }, out _));
 
         // This is the production failure mode from the review: another process temporarily has the CSR
         // open without sharing. Reconciliation must treat it as a miss and rebuild, otherwise one lock
@@ -814,7 +817,10 @@ public class BakedNavGraphTests
     {
         NavFlag flag = TJunction();
         using var cache = new MemoryStream();
-        BakedNavGraph.Build(new[] { flag }).Write(cache, "stitched-v1");
+        BakedNavGraph built = BakedNavGraph.Build(new[] { flag }, portalProbe: (_, to, _) => to);
+        Assert.Equal(4, built.PortalValidationSlots); // two inferred joins, each traversable both ways
+        Assert.True(built.PortalValidationSlots < built.AdjacencyStorage.Connections);
+        built.Write(cache, "stitched-v1");
 
         int probes = 0;
         Assert.True(BakedNavGraph.TryRead(new MemoryStream(cache.ToArray()), "stitched-v1",
@@ -823,10 +829,12 @@ public class BakedNavGraphTests
                 probes++;
                 return from;
             }));
+        BakedNavGraph loadedGraph = Assert.IsType<BakedNavGraph>(loaded);
+        Assert.Equal(built.PortalValidationSlots, loadedGraph.PortalValidationSlots);
 
         var path = new List<Vector3>();
         Vector3 target = new(3.5f, 0, 1f);
-        Assert.True(loaded!.TryPath(new Vector3(0.5f, 0, 1f), target, path));
+        Assert.True(loadedGraph.TryPath(new Vector3(0.5f, 0, 1f), target, path));
         Assert.NotEqual(target, path[^1]);
         Assert.True(probes > 0);
     }
