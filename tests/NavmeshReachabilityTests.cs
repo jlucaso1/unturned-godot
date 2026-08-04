@@ -125,6 +125,41 @@ public class NavmeshReachabilityTests
     }
 
     [Fact]
+    public void AContinuousAuthoredSlope_IsNotMistakenForSuccessiveSteps()
+    {
+        // Real baked faces are not all small or level. PEI contains broad triangles whose authored
+        // surface rises gradually across several metres. Comparing the absolute highest ray hit on one
+        // face to its neighbour folds that gradual rise into the body's step height and carves a false
+        // hole, even when collision follows the authored plane exactly.
+        var vertices = new List<Vector3>();
+        var triangles = new List<int>();
+        for (int row = 0; row <= 2; row++)
+        {
+            float z = row * 10f;
+            float y = row;
+            vertices.Add(new Vector3(-1f, y, z));
+            vertices.Add(new Vector3(1f, y, z));
+        }
+        for (int row = 0; row < 2; row++)
+        {
+            int a = row * 2, b = a + 1, c = a + 2, d = a + 3;
+            triangles.AddRange(new[] { a, b, c, b, d, c });
+        }
+        var flag = new NavFlag
+        {
+            Vertices = vertices.ToArray(),
+            Triangles = triangles.ToArray(),
+            Center = new Vector3(0f, 1f, 10f),
+            Size = new Vector3(4f, 4f, 22f),
+        };
+
+        HashSet<int> drop = NavmeshReachability.Unreachable(flag, 0.5f,
+            (Vector3 point, out float y) => { y = point.Y; return true; });
+
+        Assert.Empty(drop);
+    }
+
+    [Fact]
     public void WindowFacesAreRemoved_AndPlannerUsesTheOpenDoorCorridor()
     {
         // Two rooms separated by a raised collision band. The baked ground mesh incorrectly spans the

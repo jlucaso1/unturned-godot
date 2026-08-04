@@ -21,7 +21,9 @@ public static class NavReconcileCache
     // and map placements are otherwise unchanged.
     // 5: the fingerprint also carries each selected asset's effective collision layer. Fence category
     // metadata can change while its collider cache stays byte-for-byte identical.
-    public const int AlgorithmVersion = 5;
+    // 6: sampled ground is measured relative to the authored face at each probe, rather than comparing
+    // absolute heights between broad neighbours. Version 5 can contain false holes on continuous slopes.
+    public const int AlgorithmVersion = 6;
 
     public static string Fingerprint(string levelDir, string colliderCacheDir)
         => Fingerprint(levelDir, colliderCacheDir, selectedColliders: null);

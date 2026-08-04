@@ -264,9 +264,9 @@ public sealed class ZombieNavigation
     //
     // So make the graph agree with the world instead of patching the symptom in the brain. Each face is
     // sampled at several points (the baked triangles are large enough that one can span an opening AND
-    // the sill beside it, so the centre alone lies) and the HIGHEST surface under it wins. A face whose
-    // ground sits more than a step above the lowest neighbour it shares an edge with cannot be reached
-    // from there, so it is not a route. Kerbs and stair treads, well under the step, are untouched.
+    // the sill beside it, so the centre alone lies). The highest clearance above the authored plane at
+    // those exact points wins. A face whose real surface rises more than one step above that plane is
+    // not a route; continuous slopes, kerbs and stair treads remain untouched.
     //
     // MUST run after the object colliders are in the physics space. Called earlier it measures bare
     // terrain, which silently deletes the wrong tenth of the navmesh — see the ObjectStreamer.Finished
@@ -502,8 +502,9 @@ public sealed class ZombieNavigation
             // machine, and taking them one at a time keeps only one flag's surfaces being written at once.
             NavmeshSurfaceSampling.FlagSurfaces sampled =
                 NavmeshSurfaceSampling.Sample(flag, field, stepOffset, AppShutdown.Token);
-            HashSet<int> confirm = NavmeshReachability.NeedsConfirmation(flag, stepOffset, sampled.Surface,
-                sampled.Known, sampled.Slack, sampled.Uncertain, ConfirmationMargin);
+            HashSet<int> confirm = NavmeshReachability.NeedsConfirmation(flag, stepOffset,
+                sampled.Clearance, sampled.Known, sampled.Slack, sampled.Uncertain,
+                ConfirmationMargin);
             plans.Add(new FlagPlan(sampled, confirm));
         }
         return plans;
@@ -564,12 +565,12 @@ public sealed class ZombieNavigation
     {
         int count = flag.Triangles.Length / 3;
         NavmeshSurfaceSampling.FlagSurfaces sampled = plan.Sampled;
-        float[] surface = sampled.Surface;
+        float[] clearance = sampled.Clearance;
         bool[] known = sampled.Known;
         HashSet<int> confirm = _auditing ? AllTriangles(count) : plan.Confirm;
 
 
-        float[] before = _auditing ? (float[])surface.Clone() : System.Array.Empty<float>();
+        float[] before = _auditing ? (float[])clearance.Clone() : System.Array.Empty<float>();
         bool[] knownBefore = _auditing ? (bool[])known.Clone() : System.Array.Empty<bool>();
 
         _probeTally.CpuSamples += sampled.Samples;
@@ -577,22 +578,19 @@ public sealed class ZombieNavigation
         _probeTally.Triangles += count;
         _probeTally.Confirmed += plan.Confirm.Count;
 
-        // Confirm, then look again, until nothing droppable is left resting on a height the server did not
-        // measure. One pass is not enough: replacing a face's surface changes what its NEIGHBOURS compare
-        // against, so a face that needed no confirming before the pass can be droppable after it — and
-        // dropping it would use its own, still unmeasured, height. Rounds after the first are small (the
-        // planned set already contains everything droppable by the sampled surfaces), and the loop ends
-        // because the verified set only ever grows.
+        // Confirm, then enforce the invariant that nothing droppable rests on a clearance the server did
+        // not measure. Clearances are face-local, so a confirmation cannot change a neighbour's verdict;
+        // retaining the loop keeps that invariant explicit and shared with the audit replay.
         var phase = Stopwatch.StartNew();
         var verified = new HashSet<int>();
         HashSet<int> round = confirm;
         while (round.Count > 0)
         {
-            if (!await ProbeOnServerAsync(owner, space, ray, flag, stepOffset, round, surface, known,
+            if (!await ProbeOnServerAsync(owner, space, ray, flag, stepOffset, round, clearance, known,
                     frameBudgetMs))
                 return null;
             verified.UnionWith(round);
-            round = NavmeshReachability.UnverifiedDrops(flag, stepOffset, surface, known, verified);
+            round = NavmeshReachability.UnverifiedDrops(flag, stepOffset, clearance, known, verified);
             _probeTally.Reconfirmed += round.Count;
         }
         _probeTally.ServerMs += phase.Elapsed.TotalMilliseconds;
@@ -601,10 +599,10 @@ public sealed class ZombieNavigation
         // later rounds cannot be observed here. ReportAudit replays them itself, against the server
         // answers it now has for every face, so what it compares is the state a normal run would publish.
         if (_auditing)
-            ReportAudit(flag, before, knownBefore, surface, known, sampled, plan.Confirm, stepOffset);
+            ReportAudit(flag, before, knownBefore, clearance, known, sampled, plan.Confirm, stepOffset);
 
         phase.Restart();
-        HashSet<int> unreachable = NavmeshReachability.Unreachable(flag, stepOffset, surface, known);
+        HashSet<int> unreachable = NavmeshReachability.Unreachable(flag, stepOffset, clearance, known);
         _probeTally.VerdictMs += phase.Elapsed.TotalMilliseconds;
         return _disposed || AppShutdown.IsShuttingDown ? null : unreachable;
     }
@@ -625,22 +623,22 @@ public sealed class ZombieNavigation
     // it claims that wherever they might differ enough to change a verdict, the server is asked. So the
     // number to watch is the last one: faces the two probes disagreed about that a normal run would NOT
     // have sent to the server. Those, and only those, are places where this could decide differently.
-    private void ReportAudit(NavFlag flag, float[] cpuSurface, bool[] cpuKnown, float[] serverSurface,
-        bool[] serverKnown, NavmeshSurfaceSampling.FlagSurfaces sampled, HashSet<int> wouldConfirm,
-        float stepOffset)
+    private void ReportAudit(NavFlag flag, float[] cpuClearance, bool[] cpuKnown,
+        float[] serverClearance, bool[] serverKnown, NavmeshSurfaceSampling.FlagSurfaces sampled,
+        HashSet<int> wouldConfirm, float stepOffset)
     {
         // What a normal run would actually have had in hand: the CPU sampling everywhere, with the server's
         // answer where the confirmation pass asked for it. Comparing the verdict THAT reaches against the
         // verdict a full server probe reaches is the only comparison that decides whether this pass changes
-        // the game — a surface differing where the difference cannot move a face across the step threshold
+        // the game — a clearance differing where the difference cannot move a face across the step threshold
         // is a difference in a number nobody reads.
         //
         // Including the rounds after the planned set, replayed here against the server's own answers. The
-        // real pass keeps confirming until nothing droppable rests on an unmeasured height, and an audit
+        // real pass keeps confirming until nothing droppable rests on an unmeasured clearance, and an audit
         // that stopped at the planned set would warn about a state no normal run ever publishes.
-        int count = serverSurface.Length;
+        int count = serverClearance.Length;
         float margin = ConfirmationMargin; // an environment read and a parse; not once per face
-        var hybridSurface = (float[])cpuSurface.Clone();
+        var hybridClearance = (float[])cpuClearance.Clone();
         var hybridKnown = (bool[])cpuKnown.Clone();
         var replayed = new HashSet<int>();
         HashSet<int> round = wouldConfirm;
@@ -648,16 +646,16 @@ public sealed class ZombieNavigation
         {
             foreach (int t in round)
             {
-                hybridSurface[t] = serverSurface[t];
+                hybridClearance[t] = serverClearance[t];
                 hybridKnown[t] = serverKnown[t];
             }
             replayed.UnionWith(round);
-            round = NavmeshReachability.UnverifiedDrops(flag, stepOffset, hybridSurface, hybridKnown,
+            round = NavmeshReachability.UnverifiedDrops(flag, stepOffset, hybridClearance, hybridKnown,
                 replayed);
         }
-        HashSet<int> hybridDrop = NavmeshReachability.Unreachable(flag, stepOffset, hybridSurface,
+        HashSet<int> hybridDrop = NavmeshReachability.Unreachable(flag, stepOffset, hybridClearance,
             hybridKnown);
-        HashSet<int> serverDrop = NavmeshReachability.Unreachable(flag, stepOffset, serverSurface,
+        HashSet<int> serverDrop = NavmeshReachability.Unreachable(flag, stepOffset, serverClearance,
             serverKnown);
         int verdictDifferences = 0;
         foreach (int t in hybridDrop)
@@ -689,7 +687,7 @@ public sealed class ZombieNavigation
             }
             else
             {
-                float delta = MathF.Abs(cpuSurface[t] - serverSurface[t]);
+                float delta = MathF.Abs(cpuClearance[t] - serverClearance[t]);
                 differs = delta > margin + sampled.Slack[t];
                 if (differs && delta > worst)
                 {
@@ -709,9 +707,9 @@ public sealed class ZombieNavigation
             return;
         string report = $"[nav] probe audit: {disagreements}/{count} faces disagree "
             + $"({missed} the CPU field missed, {invented} it invented, {unescalated} a normal run would "
-            + $"not have confirmed); worst height gap {worst:0.###} m at face {worstTriangle}; "
+            + $"not have confirmed); worst clearance gap {worst:0.###} m at face {worstTriangle}; "
             + $"{verdictDifferences} verdict difference(s) against {serverDrop.Count} server-dropped faces";
-        // A measured height that differs is expected — two collision implementations, one margin. A face
+        // A measured clearance that differs is expected — two collision implementations, one margin. A face
         // that would be KEPT here and dropped by the server, or the reverse, is not, and only that earns
         // the warning channel.
         if (verdictDifferences > 0)
@@ -724,7 +722,7 @@ public sealed class ZombieNavigation
     // cooperative budget the whole scan used to run under.
     private async Task<bool> ProbeOnServerAsync(Node owner, PhysicsDirectSpaceState3D space,
         PhysicsRayQueryParameters3D ray, NavFlag flag, float stepOffset, HashSet<int> triangles,
-        float[] surface, bool[] known, double frameBudgetMs)
+        float[] clearance, bool[] known, double frameBudgetMs)
     {
         // DirectSpaceState queries are only valid from a physics notification when Godot runs physics on
         // a separate thread, so explicitly enter one rather than relying on where the last await resumed.
@@ -742,7 +740,7 @@ public sealed class ZombieNavigation
             Vector3 a = flag.Vertices[flag.Triangles[triangle * 3]];
             Vector3 b = flag.Vertices[flag.Triangles[(triangle * 3) + 1]];
             Vector3 c = flag.Vertices[flag.Triangles[(triangle * 3) + 2]];
-            float highest = float.MinValue;
+            float highestClearance = float.MinValue;
             foreach (Vector3 point in NavmeshReachability.SamplePoints(a, b, c))
             {
                 // Look down from above the highest thing the agent could step onto, and stop below
@@ -760,7 +758,7 @@ public sealed class ZombieNavigation
                         ground = ((Vector3)hit["position"]).Y;
                 _probeTally.ServerSamples++;
                 if (ground != float.MinValue)
-                    highest = MathF.Max(highest, ground);
+                    highestClearance = MathF.Max(highestClearance, ground - point.Y);
 
                 // A triangle has seven probes. Checking only after all seven let one triangle
                 // overrun the nominal 0.25 ms large-map budget by 2-7x. Yield between probes so
@@ -777,8 +775,8 @@ public sealed class ZombieNavigation
                     benchmarkStarted = Benchmark.RuntimeCounters.Start();
                 }
             }
-            surface[triangle] = highest == float.MinValue ? 0f : highest;
-            known[triangle] = highest != float.MinValue;
+            clearance[triangle] = highestClearance == float.MinValue ? 0f : highestClearance;
+            known[triangle] = highestClearance != float.MinValue;
         }
         Benchmark.RuntimeCounters.Record(Benchmark.RuntimeCounters.Counter.NavigationReconcile,
             benchmarkStarted);
@@ -792,16 +790,16 @@ public sealed class ZombieNavigation
         double frameBudgetMs)
     {
         int count = flag.Triangles.Length / 3;
-        var surface = new float[count];
+        var clearance = new float[count];
         var known = new bool[count];
         _probeTally.Triangles += count;
         _probeTally.Confirmed += count;
-        if (!await ProbeOnServerAsync(owner, space, ray, flag, stepOffset, AllTriangles(count), surface,
+        if (!await ProbeOnServerAsync(owner, space, ray, flag, stepOffset, AllTriangles(count), clearance,
                 known, frameBudgetMs))
             return null;
 
         HashSet<int> unreachable = await Task.Run(
-            () => NavmeshReachability.Unreachable(flag, stepOffset, surface, known));
+            () => NavmeshReachability.Unreachable(flag, stepOffset, clearance, known));
         return _disposed || AppShutdown.IsShuttingDown ? null : unreachable;
     }
 

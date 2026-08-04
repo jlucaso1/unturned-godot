@@ -1743,6 +1743,44 @@ public class ZombieSystemTests
         Assert.True(turned < 360f, $"turned {turned:F0} degrees to close {closed:F2} m");
     }
 
+    [Fact]
+    public void AStationaryRushTarget_DoesNotLookStaleWhenTheZombieTurns()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        var player = Player(1, new Vector3(0f, 5f, 10f),
+            UnturnedGodot.Player.EPlayerStance.Sprint);
+        zombie.Position = new Vector3(0f, 5f, 0f);
+        zombie.Yaw = 0f;
+        zombie.State = EZombieState.Chase;
+        zombie.TargetPlayer = 1;
+        zombie.Path = EZombiePath.Rush;
+
+        // The incumbent was built when the one-metre Rush offset lay on the near side of the player.
+        // The body has since turned around, so today's offset lies on the far side: those two synthetic
+        // destinations are just over 2 m apart even though the player has not moved at all.
+        var incumbentCorner = new Vector3(-5f, 5f, 5f);
+        zombie.PathPoints.Add(zombie.Position);
+        zombie.PathPoints.Add(incumbentCorner);
+        zombie.PathPoints.Add(new Vector3(0.2f, 5f, 9f));
+        zombie.CurrentWaypointIndex = 1;
+        zombie.RepathTimer = -1f;
+
+        var replacementCorner = new Vector3(5f, 5f, 5f);
+        system.PathQuery = (from, to, path, radius) =>
+        {
+            path.Add(from);
+            path.Add(replacementCorner);
+            path.Add(to);
+            return true;
+        };
+        system.MoveResolver = (from, _, _) => from;
+
+        system.Tick(new[] { player }, ImpassableDt);
+
+        Assert.Contains(incumbentCorner, zombie.PathPoints);
+        Assert.DoesNotContain(replacementCorner, zombie.PathPoints);
+    }
+
     // The tie-break above lets a nearly-finished incumbent refuse a much longer replacement. On its
     // own that could let a stale route hold the body forever. It does not, and this pins why: the
     // follower still aims at the destination, into the wall, so it keeps delivering nothing against a

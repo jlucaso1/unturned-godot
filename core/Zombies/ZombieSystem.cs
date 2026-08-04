@@ -169,6 +169,7 @@ public sealed partial class ZombieSystem
     public const float SlowdownDistance = 0.6f;         // slowdownDistance (component default)
     public const float TurningSpeed = 5f;               // turningSpeed (Quaternion.Slerp damping)
     public const float MinMoveScale = 0.05f;            // minMoveScale
+    public const float ApproachPathOffset = 1f;         // Zombie.tick LEFT/RIGHT/RUSH spread
     // The A* Pathfinding Project computes paths on a time budget per frame (AstarPath.maxFrameTime),
     // queueing the rest — a horde alerted by the same detect pass never recalculates in one burst.
     // Same shape here: 8 per 0.08 s tick (100/s) sustains the official 0.5 s repath cadence for ~50
@@ -544,7 +545,8 @@ public sealed partial class ZombieSystem
                 break;
 
             case EZombieState.Return:
-                Move(zombie, zombie.LeaveTo, canTurn: true, default, dt);
+                Move(zombie, zombie.LeaveTo, zombie.LeaveTo, approachOffset: 0f,
+                    canTurn: true, default, dt);
                 if (HorizontalDistanceSquared(zombie.Position, zombie.LeaveTo) <= ArriveDistanceSquared)
                     zombie.State = EZombieState.Idle; // stop() — the zombie settles where it is
                 break;
@@ -657,9 +659,9 @@ public sealed partial class ZombieSystem
                 var right = new Vector3(forward.Z, 0f, -forward.X);
                 destination += zombie.Path switch
                 {
-                    EZombiePath.Left => -right,
-                    EZombiePath.Right => right,
-                    _ => -forward, // RUSH
+                    EZombiePath.Left => -right * ApproachPathOffset,
+                    EZombiePath.Right => right * ApproachPathOffset,
+                    _ => -forward * ApproachPathOffset, // RUSH
                 };
             }
         }
@@ -680,7 +682,7 @@ public sealed partial class ZombieSystem
                 directDirection = target.Position - zombie.Position;
             }
         }
-        Move(zombie, destination, canTurn, directDirection, dt);
+        Move(zombie, destination, target.Position, ApproachPathOffset, canTurn, directDirection, dt);
     }
 
     // LegacyAIPathNoRedist.move(), ported: repath on the cadence (a FAILED query keeps a route that
@@ -688,8 +690,8 @@ public sealed partial class ZombieSystem
     // CalculateVelocity + RotateTowards and step through the physics. With no route at all the
     // zombie stands (path == null in the original); the straight-line seek only exists for maps
     // without a navmesh, where the original also falls back to its NonPathfinding component.
-    private void Move(ZombieInstance zombie, Vector3 destination, bool canTurn,
-        Vector3 directDirection, float dt)
+    private void Move(ZombieInstance zombie, Vector3 destination, Vector3 routeAnchor,
+        float approachOffset, bool canTurn, Vector3 directDirection, float dt)
     {
         ZombiePathQuery? pathQuery = PathQuery;
         if (!_pathReadyThisTick || pathQuery == null)
@@ -758,16 +760,18 @@ public sealed partial class ZombieSystem
                 // incumbent stands. Anything genuinely better still wins, and
                 // an incumbent that stops delivering motion is still thrown out by the blocked-route
                 // timeout — this only stops a coin-flip from costing a turn every half second.
-                // `oldError <= 4f` is what stops this becoming stickiness: the incumbent may only refuse
-                // a replacement while it still ARRIVES at the target as it now stands. A route whose
-                // endpoint the target has walked away from is stale, scores as incomplete, and is
-                // replaced as it always was — otherwise a body chasing a moving mark would keep walking
-                // to where the mark used to be.
+                // RouteEndpointStillServes is what stops this becoming stickiness: the incumbent may
+                // only refuse a replacement while it still arrives at the target as it now stands. Judge
+                // that against the REAL target, not the one-metre LEFT/RIGHT/RUSH formation point. The
+                // latter rotates with the zombie's own yaw, so comparing endpoints to it made an unmoving
+                // player look stale every time the body turned and reintroduced the two-route loop.
                 // A route that has physically moved after collision invalidated its predecessor is not a
                 // near-tie: it is a proven escape. Merely being the first answer after the timeout proves
                 // nothing — it can be the same blocked shortcut, and must not veto a later detour before
                 // it delivers forward motion.
-                bool keepsWalking = complete && oldError <= 4f
+                bool incumbentStillServes = zombie.PathPoints.Count > 0
+                    && RouteEndpointStillServes(zombie.PathPoints[^1], routeAnchor, approachOffset);
+                bool keepsWalking = complete && incumbentStillServes
                     && (zombie.RouteEscapingCollision
                         ? zombie.EscapeRouteHasProgress && !zombie.PathIsPartial
                         : KeepsWalkingTheCurrentRoute(zombie, _scratchPath, destination));
@@ -855,6 +859,20 @@ public sealed partial class ZombieSystem
         float offered = EffectiveRouteLengthFrom(zombie.Position, replacement,
             replacement.Count > 1 ? 1 : 0, destination);
         return offered + RouteTieBand >= remaining;
+    }
+
+    // A successful query may finish up to 2 m from its requested endpoint. Chase endpoints are requested
+    // another metre to the side/short of the actual player for horde formation, so an incumbent can be
+    // at most 3 m away horizontally and still be the complete route built for this same stationary
+    // target. Vertical tolerance stays at the query's 2 m: broadening it with the formation radius would
+    // let a route on the storey below veto the real stairs route.
+    private static bool RouteEndpointStillServes(Vector3 endpoint, Vector3 anchor,
+        float approachOffset)
+    {
+        const float completionRadius = 2f;
+        float horizontal = completionRadius + MathF.Max(0f, approachOffset);
+        return HorizontalDistanceSquared(endpoint, anchor) <= horizontal * horizontal
+            && MathF.Abs(endpoint.Y - anchor.Y) <= completionRadius;
     }
 
     // The ground still to cover, measured exactly as the follower walks it. On a complete route whose

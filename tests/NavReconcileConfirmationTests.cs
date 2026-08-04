@@ -91,10 +91,41 @@ public class NavReconcileConfirmationTests
         NavmeshSurfaceSampling.FlagSurfaces sampled =
             NavmeshSurfaceSampling.Sample(flag, field, StepOffset);
         HashSet<int> fromField =
-            NavmeshReachability.Unreachable(flag, StepOffset, sampled.Surface, sampled.Known);
+            NavmeshReachability.Unreachable(flag, StepOffset, sampled.Clearance, sampled.Known);
 
         Assert.NotEmpty(reference);
         Assert.Equal(reference, fromField);
+    }
+
+    [Fact]
+    public void SamplingAContinuousSlopeReportsClearanceNotWorldHeight()
+    {
+        var flag = new NavFlag
+        {
+            Vertices = new[]
+            {
+                new Vector3(-1f, 0f, 0f), new Vector3(1f, 0f, 0f),
+                new Vector3(-1f, 1f, 10f), new Vector3(1f, 1f, 10f),
+                new Vector3(-1f, 2f, 20f), new Vector3(1f, 2f, 20f),
+            },
+            Triangles = new[] { 0, 1, 2, 1, 3, 2, 2, 3, 4, 3, 5, 4 },
+            Center = new Vector3(0f, 1f, 10f),
+            Size = new Vector3(4f, 4f, 22f),
+        };
+        var faces = new Vector3[flag.Triangles.Length];
+        for (int i = 0; i < faces.Length; i++)
+            faces[i] = flag.Vertices[flag.Triangles[i]];
+        var builder = new CollisionFieldBuilder();
+        int slope = builder.AddMeshShape(faces);
+        builder.AddInstance(slope, Transform3D.Identity);
+
+        NavmeshSurfaceSampling.FlagSurfaces sampled =
+            NavmeshSurfaceSampling.Sample(flag, builder.Build(), StepOffset);
+
+        Assert.All(sampled.Known, Assert.True);
+        Assert.All(sampled.Clearance, value => Assert.InRange(value, -0.0001f, 0.0001f));
+        Assert.Empty(NavmeshReachability.Unreachable(flag, StepOffset, sampled.Clearance,
+            sampled.Known));
     }
 
     [Fact]
@@ -117,7 +148,8 @@ public class NavReconcileConfirmationTests
         NavmeshSurfaceSampling.FlagSurfaces sampled =
             NavmeshSurfaceSampling.Sample(flag, SillWorld(10), StepOffset);
 
-        HashSet<int> confirm = NavmeshReachability.NeedsConfirmation(flag, StepOffset, sampled.Surface,
+        HashSet<int> confirm = NavmeshReachability.NeedsConfirmation(flag, StepOffset,
+            sampled.Clearance,
             sampled.Known, sampled.Slack, sampled.Uncertain, margin: 0.05f);
 
         int faces = flag.Triangles.Length / 3;
@@ -194,10 +226,10 @@ public class NavReconcileConfirmationTests
     }
 
     [Fact]
-    public void ANeighboursSlackCountsToo()
+    public void ANeighboursSlackCannotChangeAFaceLocalClearance()
     {
-        // A face is judged against its neighbours' surfaces as much as its own, so uncertainty in a
-        // neighbour is uncertainty in this face's verdict.
+        // Each face is judged against its own authored plane. Uncertainty in a neighbour cannot turn a
+        // walkable clearance into a step and needlessly send this face to the server.
         NavFlag flag = FlatGrid(4);
         int faces = flag.Triangles.Length / 3;
         var surface = new float[faces];
@@ -211,8 +243,8 @@ public class NavReconcileConfirmationTests
         for (int t = 1; t < faces; t++)
             slack[t] = 0.3f;
 
-        Assert.Contains(0, NavmeshReachability.NeedsConfirmation(flag, StepOffset, surface, known, slack,
-            uncertain, margin: 0.05f));
+        Assert.DoesNotContain(0, NavmeshReachability.NeedsConfirmation(flag, StepOffset, surface, known,
+            slack, uncertain, margin: 0.05f));
     }
 
     [Fact]
@@ -245,7 +277,8 @@ public class NavReconcileConfirmationTests
 
         NavmeshSurfaceSampling.FlagSurfaces sampled =
             NavmeshSurfaceSampling.Sample(flag, field, StepOffset);
-        HashSet<int> confirm = NavmeshReachability.NeedsConfirmation(flag, StepOffset, sampled.Surface,
+        HashSet<int> confirm = NavmeshReachability.NeedsConfirmation(flag, StepOffset,
+            sampled.Clearance,
             sampled.Known, sampled.Slack, sampled.Uncertain, margin: 0.05f);
 
         int faces = flag.Triangles.Length / 3;
@@ -291,12 +324,10 @@ public class NavReconcileConfirmationTests
     }
 
     [Fact]
-    public void AFaceThatOnlyBecomesDroppableAfterConfirmationIsCaught()
+    public void ConfirmingOneFaceCannotMakeANeighbourDroppable()
     {
-        // Confirming a face changes what its NEIGHBOURS are measured against. Two faces sampled at the
-        // same height need no confirming — neither is near the threshold relative to the other — but if
-        // the server then puts one of them on the ground, the other is suddenly a step and a bit above it
-        // and would be dropped on a height nobody measured. UnverifiedDrops is what names it.
+        // Clearances are relative to each face's own authored plane. Replacing one CPU answer with the
+        // server's answer therefore cannot manufacture a step on adjacent, otherwise unchanged faces.
         NavFlag flag = FlatGrid(4);
         int faces = flag.Triangles.Length / 3;
         var surface = new float[faces];
@@ -309,27 +340,23 @@ public class NavReconcileConfirmationTests
             slack, uncertain, margin: 0.05f);
         Assert.Empty(planned); // nothing near the threshold, nothing droppable: nothing to settle
 
-        // The server measures face 1 (flagged for some other reason) and finds the ground well below.
+        // The server measures face 1 (flagged for some other reason) and finds the ground well below its
+        // authored plane. That does not alter any other face's clearance.
         var verified = new HashSet<int> { 1 };
         surface[1] = -0.54f;
 
         HashSet<int> again = NavmeshReachability.UnverifiedDrops(flag, StepOffset, surface, known,
             verified);
 
-        // Face 1's neighbours now stand 0.54 m over it — past the 0.5 m step — on their own unmeasured
-        // heights, so they have to be measured before that verdict stands.
-        Assert.NotEmpty(again);
-        foreach (int t in NavmeshReachability.Unreachable(flag, StepOffset, surface, known))
-            Assert.True(again.Contains(t) || verified.Contains(t),
-                $"face {t} would be dropped without anyone having measured it");
+        Assert.Empty(again);
+        Assert.Empty(NavmeshReachability.Unreachable(flag, StepOffset, surface, known));
     }
 
     [Fact]
     public void NoDropSurvivesOnAnUnmeasuredHeight()
     {
         // The loop's invariant, stated directly: keep confirming what UnverifiedDrops names until it
-        // names nothing, and every dropped face rests on measured ground — its own, and the neighbour it
-        // was measured against.
+        // names nothing, and every dropped face rests on its own measured clearance.
         NavFlag flag = FlatGrid(6);
         int faces = flag.Triangles.Length / 3;
         var sampled = new float[faces];
@@ -375,22 +402,23 @@ public class NavReconcileConfirmationTests
 
         NavmeshSurfaceSampling.FlagSurfaces sampled =
             NavmeshSurfaceSampling.Sample(flag, field, StepOffset);
-        HashSet<int> confirm = NavmeshReachability.NeedsConfirmation(flag, StepOffset, sampled.Surface,
+        HashSet<int> confirm = NavmeshReachability.NeedsConfirmation(flag, StepOffset,
+            sampled.Clearance,
             sampled.Known, sampled.Slack, sampled.Uncertain, margin: 0.05f);
 
-        float[] surface = sampled.Surface;
+        float[] surface = sampled.Clearance;
         bool[] known = sampled.Known;
         foreach (int t in confirm)
         {
             Vector3 a = flag.Vertices[flag.Triangles[t * 3]];
             Vector3 b = flag.Vertices[flag.Triangles[(t * 3) + 1]];
             Vector3 c = flag.Vertices[flag.Triangles[(t * 3) + 2]];
-            float highest = float.MinValue;
+            float highestClearance = float.MinValue;
             foreach (Vector3 point in NavmeshReachability.SamplePoints(a, b, c))
-                if (truth(point, out float y) && y > highest)
-                    highest = y;
-            known[t] = highest != float.MinValue;
-            surface[t] = known[t] ? highest : 0f;
+                if (truth(point, out float y))
+                    highestClearance = MathF.Max(highestClearance, y - point.Y);
+            known[t] = highestClearance != float.MinValue;
+            surface[t] = known[t] ? highestClearance : 0f;
         }
 
         Assert.Equal(NavmeshReachability.Unreachable(flag, StepOffset, truth),

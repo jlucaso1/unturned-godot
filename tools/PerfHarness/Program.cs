@@ -335,21 +335,21 @@ public static class Program
         {
             for (int i = 0; i < flags.Count; i++)
                 GC.KeepAlive(NavmeshReachability.NeedsConfirmation(flags[i], StepOffset,
-                    sampledFlags[i].Surface, sampledFlags[i].Known, sampledFlags[i].Slack,
+                    sampledFlags[i].Clearance, sampledFlags[i].Known, sampledFlags[i].Slack,
                     sampledFlags[i].Uncertain, margin: 0.05f));
         }, warmup: 1, iters: 5);
         Bench("Unreachable (all flags)", () =>
         {
             for (int i = 0; i < flags.Count; i++)
                 GC.KeepAlive(NavmeshReachability.Unreachable(flags[i], StepOffset,
-                    sampledFlags[i].Surface, sampledFlags[i].Known));
+                    sampledFlags[i].Clearance, sampledFlags[i].Known));
         }, warmup: 1, iters: 5);
 
         int confirm = 0, uncertain = 0, unknown = 0;
         for (int i = 0; i < flags.Count; i++)
         {
             NavmeshSurfaceSampling.FlagSurfaces sampled = sampledFlags[i];
-            confirm += NavmeshReachability.NeedsConfirmation(flags[i], StepOffset, sampled.Surface,
+            confirm += NavmeshReachability.NeedsConfirmation(flags[i], StepOffset, sampled.Clearance,
                 sampled.Known, sampled.Slack, sampled.Uncertain, margin: 0.05f).Count;
             uncertain += sampled.UncertainSamples;
             for (int t = 0; t < sampled.Known.Length; t++)
