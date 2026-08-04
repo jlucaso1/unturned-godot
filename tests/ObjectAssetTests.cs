@@ -1,6 +1,8 @@
 using System;
+using System.IO;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Dat;
+using UnturnedGodot.Tests.Helpers;
 using Xunit;
 
 namespace UnturnedGodot.Tests;
@@ -47,6 +49,85 @@ public class ObjectAssetTests
             "GUID 2e698a7b85e94c019b3f91ec8796a961\nType Medium\nID 1\nBundle_Override_Path /Objects/Medium/Furniture/Grave_0\n");
         Assert.True(ObjectAsset.TryParse(root, null, out var asset));
         Assert.Equal("/Objects/Medium/Furniture/Grave_0", asset.BundleOverridePath);
+    }
+
+    [Theory]
+    [InlineData("/Bundles/Objects/Medium/Fences/Fence_Wood_0", true)]
+    [InlineData("C:\\Game\\Bundles\\Objects\\Medium\\Fences\\Fence_Metal_0", true)]
+    [InlineData("/Bundles/Objects/Medium/Furniture/Grave_0", false)]
+    [InlineData("/Workshop/Objects/Medium/Benches/Fences_Are_Nearby", false)]
+    public void MediumFenceDirectories_DecideWhetherZombiesCollide(string directory, bool blocks)
+    {
+        DatDictionary root = DatParser.Parse(
+            "GUID 40921a1a3cd742f69cc25cc25b856572\nType Medium\nID 2\n");
+        Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset? asset));
+        asset.Directory = directory;
+
+        uint layer = ObjectCollisionPolicy.PhysicsLayer(asset);
+
+        Assert.Equal(blocks, (layer & CollisionLayers.World) != 0);
+        Assert.NotEqual(0u, layer & CollisionLayers.MediumFurniture);
+        Assert.NotEqual(0u, layer & CollisionLayers.VisionBlocker);
+    }
+
+    [Fact]
+    public void MediumFenceBundleOverridesAlsoBlockZombies()
+    {
+        DatDictionary root = DatParser.Parse(
+            "GUID 40921a1a3cd742f69cc25cc25b856572\nType Medium\nID 2\n" +
+            "Bundle_Override_Path /Objects/Medium/Fences/Fence_Wood_0\n");
+        Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset? asset));
+        asset.Directory = "/Workshop/Objects/Medium/Holiday/Fence_Wood_Snow";
+
+        uint layer = ObjectCollisionPolicy.PhysicsLayer(asset);
+
+        Assert.NotEqual(0u, layer & CollisionLayers.World);
+    }
+
+    [Fact]
+    public void NonFenceBundleOverridesRemainPassableToZombies()
+    {
+        DatDictionary root = DatParser.Parse(
+            "GUID 2e698a7b85e94c019b3f91ec8796a961\nType Medium\nID 1\n" +
+            "Bundle_Override_Path /Objects/Medium/Furniture/Grave_0\n");
+        Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset? asset));
+        asset.Directory = "/Workshop/Objects/Medium/Holiday/Grave_Snow";
+
+        Assert.Equal(CollisionLayers.MediumFurniture | CollisionLayers.VisionBlocker,
+            ObjectCollisionPolicy.PhysicsLayer(asset));
+    }
+
+    [Theory]
+    [InlineData("Resource", CollisionLayers.World)]
+    [InlineData("Large", CollisionLayers.World | CollisionLayers.VisionBlocker)]
+    [InlineData("Small", 0u)]
+    public void NonMediumObjectTypesKeepTheirExistingCollisionPolicy(string type, uint expectedLayer)
+    {
+        DatDictionary root = DatParser.Parse(
+            $"GUID 2e698a7b85e94c019b3f91ec8796a961\nType {type}\nID 1\n");
+        Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset? asset));
+
+        Assert.Equal(expectedLayer, ObjectCollisionPolicy.PhysicsLayer(asset));
+    }
+
+    [Fact]
+    public void CollisionPolicyRejectsANullAsset()
+    {
+        Assert.Throws<ArgumentNullException>(() => ObjectCollisionPolicy.PhysicsLayer(null!));
+    }
+
+    [RealDataFact]
+    public void PeiWoodFenceAsset_IsPublishedAsAWorldBarrier()
+    {
+        string directory = Path.Combine(GameData.Install!, "Bundles", "Objects", "Medium",
+            "Fences", "Fence_Wood_0");
+        ObjectAssetDatabase db = ObjectAssetDatabase.ScanDirectory(directory);
+
+        ObjectAsset? fence = db.Resolve(new Guid("40921a1a-3cd7-42f6-9cc2-5cc25b856572"), 2);
+
+        Assert.NotNull(fence);
+        Assert.Equal(EObjectType.Medium, fence!.Type);
+        Assert.NotEqual(0u, ObjectCollisionPolicy.PhysicsLayer(fence) & CollisionLayers.World);
     }
 
     [Fact]
@@ -131,5 +212,45 @@ public class ObjectAssetTests
         Assert.True(ObjectAsset.TryParse(root, null, out ObjectAsset? asset));
         Assert.Equal(EObjectType.Vehicle, asset.Type);
         Assert.Equal((ushort)58, asset.Id);
+    }
+
+    [Fact]
+    public void ParsesDecalSize()
+    {
+        // A Decal ships no prefab: its .dat's Decal_X/Decal_Y are the metres its texture covers, and
+        // without them there is nothing to draw the decal.png on.
+        Assert.True(ObjectAsset.TryParse(
+            DatParser.Parse("GUID 982a81b1d5bc4c179a689b3b08caa15a\nType Decal\nID 729\n"
+                + "Decal_X 3\nDecal_Y 4.5\n"), null, out ObjectAsset? decal));
+
+        Assert.Equal(EObjectType.Decal, decal.Type);
+        Assert.Equal(3f, decal.DecalX);
+        Assert.Equal(4.5f, decal.DecalY);
+    }
+
+    [Fact]
+    public void ParsesTheBareDecalAlphaFlag()
+    {
+        // Test_Auto_Decal_Alpha declares it with no value at all, which is how Unturned writes a boolean
+        // it reads by presence. Its texture fades rather than clips.
+        Assert.True(ObjectAsset.TryParse(
+            DatParser.Parse("GUID f0a76ecfb0684da48bba7c5f5e5a0830\nType Decal\n"
+                + "Decal_X 6\nDecal_Y 3\nDecal_Alpha\n"), null, out ObjectAsset? blended));
+        Assert.True(blended.DecalBlends);
+
+        Assert.True(ObjectAsset.TryParse(
+            DatParser.Parse("GUID 982a81b1d5bc4c179a689b3b08caa15a\nType Decal\nDecal_X 3\nDecal_Y 3\n"),
+            null, out ObjectAsset? clipped));
+        Assert.False(clipped.DecalBlends);
+    }
+
+    [Fact]
+    public void DecalSize_IsZeroForEverythingElse()
+    {
+        Assert.True(ObjectAsset.TryParse(
+            DatParser.Parse($"GUID {System.Guid.NewGuid():N}\nType Large\n"), null, out ObjectAsset? large));
+
+        Assert.Equal(0f, large.DecalX);
+        Assert.Equal(0f, large.DecalY);
     }
 }

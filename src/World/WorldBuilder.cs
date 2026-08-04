@@ -34,6 +34,85 @@ public static class WorldBuilder
     // the uncullled path available for visual/performance A/B checks.
     private static bool OccludersEnabled => EnvFlag.IsOn(OS.GetEnvironment("TERRAIN_OCCLUDERS"), whenUnset: true);
 
+    // Dedicated authority needs static object collision but none of the render/texture products. This
+    // follows the same source ownership, asset metadata, extraction and ObjectsBuilder policy as the
+    // interactive world, then asks ObjectsBuilder to realise only bodies and ladder volumes.
+    public static Node3D BuildObjectCollision(string unturnedPath, LevelInfo level,
+        out IReadOnlySet<Guid> selectedGuids, CollisionFieldBuilder? navigationField = null)
+    {
+        IReadOnlyList<ContentSource> sources = ContentSource.Discover(unturnedPath);
+        List<PlacedObject> objects = LevelObjects.Load(level.ObjectsDat);
+        List<PlacedTree> trees = LevelTrees.Load(System.IO.Path.Combine(level.Path,
+            "Terrain", "Trees.dat"));
+
+        ObjectAssetDatabase db = ContentExtraction.ScanAssets(sources);
+        int legacy = LegacyPlacements.ResolveGuids(objects, db)
+            + LegacyPlacements.AppendTrees(trees, objects, db);
+        if (legacy > 0)
+            Log.Print($"[server] Legacy placements resolved by id: {legacy}");
+        HashSet<Guid> needed = db.ResolvePlacementGuids(objects);
+        selectedGuids = needed;
+
+        string cacheDir = ProjectSettings.GlobalizePath("user://model_cache");
+        string textureCacheDir = ProjectSettings.GlobalizePath("user://texture_cache");
+        var noFoliage = new Dictionary<Guid, FoliageAsset.Owned>();
+        List<ContentExtraction.BundlePlan> plans = ContentExtraction.Plan(sources, cacheDir,
+            textureCacheDir, needed, db, noFoliage);
+        foreach (ContentExtraction.BundlePlan plan in plans)
+        {
+            if (plan.Missing.Count == 0)
+                continue;
+            try
+            {
+                ModelExtractor.ExtractMeshes(plan.Source, plan.Needed, cacheDir, db, plan.Foliage);
+            }
+            catch (Exception e)
+            {
+                Log.PrintErr($"[server] {plan.Source.Name} collision extraction failed "
+                    + $"({e.GetType().Name}: {e.Message}); affected assets have no body this run");
+            }
+        }
+
+        Dictionary<Guid, List<CachedCollider>> colliders = ColliderLibrary.Load(cacheDir, needed);
+        Node3D root = ObjectsBuilder.Build(objects, db,
+            new Dictionary<Guid, ArrayMesh>(), colliders, out _,
+            navigationField: navigationField, label: "DedicatedObjects", renderGeometry: false);
+        Log.Print($"[server] authoritative object collision: {colliders.Count}/{needed.Count} asset types");
+        return root;
+    }
+
+    // HeightfieldMoveSolver keeps players/zombies on grade, but it cannot answer a 3D ray or stop a
+    // capsule at a cliff. Publish the same cheap heightmap shapes as the interactive player path so a
+    // dedicated attack cannot pass through terrain and its movement world is not object-only.
+    public static Node3D BuildTerrainCollision(IReadOnlyList<HeightmapTile> tiles,
+        CollisionFieldBuilder? navigationField = null)
+    {
+        var root = new Node3D { Name = "DedicatedTerrainCollision" };
+        const int res = Landscape.HEIGHTMAP_RESOLUTION;
+        foreach (HeightmapTile tile in tiles)
+        {
+            float[] data = tile.RawSamples != null
+                ? TerrainHeightfield.MapData(tile.RawSamples)
+                : TerrainHeightfield.MapData(tile.Heights);
+            Transform3D placement = TerrainHeightfield.CollisionTransform(tile.CoordX, tile.CoordY);
+            var body = new StaticBody3D { Name = $"Terrain_{tile.CoordX}_{tile.CoordY}" };
+            body.AddChild(new CollisionShape3D
+            {
+                Shape = new HeightMapShape3D
+                {
+                    MapWidth = res,
+                    MapDepth = res,
+                    MapData = data,
+                },
+                Transform = placement,
+            });
+            root.AddChild(body);
+            navigationField?.AddHeightfield(placement, res, res, data);
+        }
+        Log.Print($"[server] authoritative terrain collision: {tiles.Count} heightfield bodies");
+        return root;
+    }
+
     public static WorldBuildResult Build(string unturnedPath, string mapName)
     {
         var level = new LevelInfo(MapCatalog.ResolvePath(unturnedPath, mapName));
@@ -203,25 +282,24 @@ public static class WorldBuilder
         // The vehicles the map starts with, rolled from its own tables. A spawned vehicle is a GUID and a
         // transform like any other placement, so its mesh joins the same needed set, the same extraction
         // plan and the same batching — only the scene root is its own.
-        List<PlacedObject> vehicles = VehicleSpawnPlan.Load(level, sources, dbTask.Result);
+        ObjectAssetDatabase db = dbTask.Result;
+        List<PlacedObject> vehicles = VehicleSpawnPlan.Load(level, sources, db);
         Log.Print($"[unturned-godot] Vehicles: {vehicles.Count} spawned");
 
         // A pre-GUID map names its objects and trees by legacy id; the needed set below is keyed on GUIDs,
         // so those placements borrow theirs from the asset database first — and the trees join the list
         // here, resolved through the resource namespace rather than the object one.
-        int legacy = LegacyPlacements.ResolveGuids(objects, dbTask.Result)
-            + LegacyPlacements.AppendTrees(trees, objects, dbTask.Result);
+        int legacy = LegacyPlacements.ResolveGuids(objects, db)
+            + LegacyPlacements.AppendTrees(trees, objects, db);
         if (legacy > 0)
             Log.Print($"[unturned-godot] Legacy placements resolved by id: {legacy}");
 
         // NPCs leave the list before the needed set is built, not after: they resolve to the player rig
         // rather than to an extracted mesh, so a GUID left in here is one the extraction plan chases on
         // every load and ObjectsBuilder then draws as a box (see NpcPlacements).
-        List<PlacedObject> npcs = NpcPlacements.Partition(objects, dbTask.Result);
+        List<PlacedObject> npcs = NpcPlacements.Partition(objects, db);
 
-        var neededGuids = new HashSet<Guid>();
-        foreach (PlacedObject o in objects)
-            neededGuids.Add(o.Guid);
+        HashSet<Guid> neededGuids = db.ResolvePlacementGuids(objects);
         foreach (PlacedObject v in vehicles)
             neededGuids.Add(v.Guid);
         foreach (Guid g in foliageAssets.Keys) // resolved foliage types only (see ObjectStreamer)
@@ -232,7 +310,7 @@ public static class WorldBuilder
         // streams the two phases separately via ObjectStreamer. Extraction is driven by what THIS map is
         // missing from the (map-agnostic, GUID-keyed) cache, not by whether the cache has any files at all.
         System.Collections.Generic.List<ContentExtraction.BundlePlan> plans = ContentExtraction.Plan(
-            sources, cacheDir, textureCacheDir, neededGuids, dbTask.Result, foliageAssets);
+            sources, cacheDir, textureCacheDir, neededGuids, db, foliageAssets);
         foreach (string report in ContentExtraction.PendingReports(plans))
             Log.Print(report);
         foreach (ContentExtraction.BundlePlan plan in plans)
@@ -245,7 +323,7 @@ public static class WorldBuilder
             try
             {
                 int extracted = ModelExtractor.ExtractMeshes(plan.Source, plan.Needed, cacheDir,
-                    dbTask.Result, plan.Foliage);
+                    db, plan.Foliage);
                 ModelExtractor.ExtractTextures(plan.Source.BundlePath, plan.Source.CacheTag, cacheDir,
                     textureCacheDir);
                 Log.Print($"[unturned-godot] Extracted {extracted} meshes from {plan.Source.Name}");
@@ -264,7 +342,6 @@ public static class WorldBuilder
         var meshLibrary = ModelLibrary.Load(cacheDir, registry, neededGuids, sharedMaterials: materials);
         var colliderLibrary = ColliderLibrary.Load(cacheDir, neededGuids);
 
-        ObjectAssetDatabase db = dbTask.Result; // the scan ran concurrently with ModelLibrary.Load above
         int withMesh = 0;
         // The prefabs' authored lower levels, so this path renders the same as the streamed one: a
         // benchmark or screenshot taken here must submit the geometry a real session submits.

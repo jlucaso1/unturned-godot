@@ -17,6 +17,18 @@ public sealed class ReproScenarioOptions
     // Answer whatever the recording does not cover from the dump's collision slice.
     public bool UseGeometry { get; init; } = true;
 
+    // Recompute ROUTES over the dump's navmesh while still serving the recorded move, ground and
+    // vision answers. A local dump slice can disagree with the live full-map graph about routing;
+    // turning the whole oracle off to see that also changes the physics under the body, so the two
+    // effects cannot be told apart. This isolates the one that matters: "is the ROUTE the problem?"
+    public bool RecomputePaths { get; init; }
+
+    // Re-run the current navmesh/collision reconciliation over the geometry slice before rebuilding
+    // routes, including lazy physical validation of indexed portals. Dumps carry the face exclusions
+    // the recorded session used; this option answers the different question needed after changing that
+    // algorithm: what would THIS build exclude here?
+    public bool ReconcilePaths { get; init; }
+
     // The generator a replay rolls from when the dump could not carry the session's own state.
     public ulong RandomSeed { get; init; }
 
@@ -40,9 +52,11 @@ public sealed class ReproScenario
     private readonly Dictionary<int, ZombieInstance> _byId = new();
     private readonly ReproHeightSampler? _heights;
     private readonly ZombiePathQuery? _pathQuery;
+    private readonly BakedNavGraph? _pathGraph;
     private readonly bool _routesAreSliced;
     private readonly float _navmeshRadius;
     private readonly Vector3 _navmeshCentre;
+    private bool _replayingTick;
 
     public ZombieSystem System { get; }
 
@@ -68,12 +82,11 @@ public sealed class ReproScenario
     // reproduced: a tail simulated past the recording is expected to ask questions nobody recorded.
     public int UnansweredInWindow { get; private set; }
 
-    // Routes recomputed rather than replayed, called out separately because they are the one world
-    // answer a replay cannot reproduce faithfully: a map inside Godot's polygon budget paths through
-    // the engine's NavigationServer, and a replay has no engine, so it paths over the baked graph.
-    // The two agree most of the time and then disagree about which side of a building to pass, after
-    // which the trajectories have nothing left to say to each other. A run with this above zero is
-    // answering "does the body still hit the same walls", not "does this build still do it".
+    // Routes recomputed rather than replayed, called out separately because a dump normally carries a
+    // local navmesh slice rather than the full reconciled graph. The two can disagree about which side
+    // of a building to pass, after which the trajectories have nothing left to say to each other. A run
+    // with this above zero answers "does the body still hit the same walls", not "does this build still
+    // follow the session's exact route".
     public int RoutesRecomputed { get; private set; }
 
     public ReproScenario(ReproDump dump, ReproScenarioOptions? options = null)
@@ -101,15 +114,19 @@ public sealed class ReproScenario
 
         // Only install what the session actually had. A world delegate that exists where the original
         // had none is not a more complete replay, it is a different simulation: ZombieSystem branches
-        // on each of these being null. A dedicated server runs with a pathfinder and no physics, and a
-        // replay of one of its dumps has to run the same way or every step it takes is a different
-        // step. Dumps written before the seams were recorded fall back to "install what can answer".
+        // on each of these being null. Older dedicated-server dumps had a pathfinder and no physics, and
+        // replaying one still has to preserve that historical seam. Dumps written before seams were
+        // recorded fall back to "install what can answer".
         ReproWorldSeams seams = _section.Seams
             ?? new ReproWorldSeams
             {
                 MoveResolver = true,
                 GroundSnap = true,
                 VisionBlocked = true,
+                // PhysicalLineBlocked was added together with explicit seam metadata. A legacy dump
+                // cannot have recorded answers for a delegate that did not exist yet; VisionBlocked
+                // remains its historical attack/recovery fallback.
+                PhysicalLineBlocked = false,
                 PathQuery = flags != null,
             };
         if (Oracle != null || Collision != null)
@@ -120,19 +137,32 @@ public sealed class ReproScenario
                 System.GroundSnap = ResolveGround;
             if (seams.VisionBlocked)
                 System.VisionBlocked = ResolveVision;
+            if (seams.PhysicalLineBlocked)
+                System.PhysicalLineBlocked = ResolvePhysical;
         }
         if (flags != null && seams.PathQuery)
         {
             // Without a pathfinder handed in, the dump's own navmesh slice becomes one. It routes
             // correctly around the incident and nowhere else, which is the trade a self-contained
             // bug report makes; pass the real map's flags (or a pathfinder) to lift it.
-            _pathQuery = _options.PathQuery ?? BuildGraph(flags, dump.World, _options.NavFlags == null);
+            if (_options.PathQuery != null)
+                _pathQuery = _options.PathQuery;
+            else
+            {
+                _pathGraph = BuildGraph(flags, dump.World, _options.NavFlags == null);
+                _pathQuery = _pathGraph.TryPath;
+                System.NavmeshProject = _pathGraph.TryProject;
+                System.NavmeshSupportsSegment = _pathGraph.SupportsLocalSegment;
+            }
             // Whether that graph covers the whole map or only what the dump sliced out. A slice can
             // only answer near the incident, and a route asked for beyond it comes back "no route"
             // from a graph that simply has no triangles there — which is not the same claim.
             _routesAreSliced = _options.PathQuery == null && _options.NavFlags == null;
             System.PathQuery = ResolvePath;
-            System.PathReady = () => Oracle?.Ready() ?? true;
+            // Recomputing routes means the recorded readiness does not apply either: a recording that
+            // says the map was not answering yet would drop the follower onto its direct fallback and
+            // the recomputed routes would never be asked for.
+            System.PathReady = () => _options.RecomputePaths || (Oracle?.Ready() ?? true);
         }
         foreach (ZombieInstance zombie in System.Zombies)
             _byId[zombie.Id] = zombie;
@@ -168,7 +198,7 @@ public sealed class ReproScenario
     // numbered differently from the slice, and applying the slice's indices to it would take out faces
     // chosen at random — a worse lie than not applying them at all. A dump from before this was
     // recorded carries none, and behaves as it always did.
-    private static ZombiePathQuery BuildGraph(IReadOnlyList<NavFlag> flags, ReproWorldData world,
+    private BakedNavGraph BuildGraph(IReadOnlyList<NavFlag> flags, ReproWorldData world,
         bool flagsAreTheDumps)
     {
         // Excluded at BUILD time, the way the session's own graph was built, rather than disabled
@@ -186,13 +216,73 @@ public sealed class ReproScenario
                 if (off is { Length: > 0 })
                     exclusions[flags[i]] = new HashSet<int>(off);
             }
-        return BakedNavGraph.Build(flags, exclusions.Count > 0 ? exclusions : null).TryPath;
+        if (_options.ReconcilePaths && Collision != null)
+            foreach (NavFlag flag in flags)
+            {
+                HashSet<int> current = NavmeshReachability.Unreachable(flag,
+                    Player.PlayerConfig.StepOffset, ProbeNavSurface);
+                if (!exclusions.TryGetValue(flag, out HashSet<int>? reconciled))
+                    reconciled = new HashSet<int>();
+                int faces = flag.Triangles.Length / 3;
+                for (int triangle = 0; triangle < faces; triangle++)
+                {
+                    // A current verdict replaces the recorded one only when every sample that can
+                    // influence it lies inside the captured collision slice. Outside it, absence of
+                    // geometry is unknown rather than proof that the old exclusion was wrong.
+                    if (!NavFaceCovered(flag, triangle))
+                        continue;
+                    reconciled.Remove(triangle);
+                    if (current.Contains(triangle))
+                        reconciled.Add(triangle);
+                }
+                if (reconciled.Count > 0)
+                    exclusions[flag] = reconciled;
+                else
+                    exclusions.Remove(flag);
+            }
+        BakedNavPortalProbe? portalProbe = Collision == null
+            ? null
+            : ResolvePortal;
+        return BakedNavGraph.Build(flags, exclusions.Count > 0 ? exclusions : null,
+            portalProbe, validateIndexedPortals: _options.ReconcilePaths);
+    }
+
+    private bool ProbeNavSurface(Vector3 point, out float y) =>
+        Collision!.ProbeNavSurface(point, Player.PlayerConfig.StepOffset, out y);
+
+    private bool NavFaceCovered(NavFlag flag, int triangle)
+    {
+        Vector3 a = flag.Vertices[flag.Triangles[triangle * 3]];
+        Vector3 b = flag.Vertices[flag.Triangles[(triangle * 3) + 1]];
+        Vector3 c = flag.Vertices[flag.Triangles[(triangle * 3) + 2]];
+        foreach (Vector3 point in NavmeshReachability.SamplePoints(a, b, c))
+            if (!Collision!.CoversNavSurface(point, Player.PlayerConfig.StepOffset))
+                return false;
+        return true;
+    }
+
+    private Vector3 ResolvePortal(Vector3 from, Vector3 to, float radius)
+    {
+        // A stitched portal is validated by sweeping the same capsule as ordinary movement. The dump's
+        // triangle soup says "open" outside its capture circle only because nothing was recorded there;
+        // book that as unanswered before allowing the graph to consume the provisional result.
+        float reach = radius + ZombieBody.CapsuleTop;
+        Recompute(Collision!.Covers(from, reach) && Collision.Covers(to, reach));
+        return Collision.Resolve(from, to, radius);
     }
 
     public void Step()
     {
         Oracle?.SeekTick(Tick);
-        System.Tick(PlayersAt(Tick), DtAt(Tick));
+        _replayingTick = true;
+        try
+        {
+            System.Tick(PlayersAt(Tick), DtAt(Tick));
+        }
+        finally
+        {
+            _replayingTick = false;
+        }
         Tick++;
     }
 
@@ -324,6 +414,19 @@ public sealed class ReproScenario
         return false;
     }
 
+    private bool ResolvePhysical(Vector3 from, Vector3 to)
+    {
+        if (Oracle != null && Oracle.TryVision(from, to, out bool blocked))
+            return blocked;
+        if (Collision != null)
+        {
+            Recompute(Collision.Covers(from) && Collision.Covers(to));
+            return Collision.PhysicalLineBlocked(from, to);
+        }
+        Unanswered();
+        return false;
+    }
+
     private bool WithinNavmeshSlice(Vector3 point)
     {
         if (float.IsPositiveInfinity(_navmeshRadius))
@@ -348,7 +451,8 @@ public sealed class ReproScenario
 
     private bool ResolvePath(Vector3 from, Vector3 to, List<Vector3> path, float radius)
     {
-        if (Oracle != null && Oracle.TryPath(from, to, radius, path, out bool found))
+        if (Oracle != null && !_options.RecomputePaths
+            && Oracle.TryPath(from, to, radius, path, out bool found))
             return found;
         // Installed only alongside a pathfinder, so there is always one to fall through to. Whether it
         // can actually answer is another matter: the dump's own slice has triangles near the incident
@@ -367,7 +471,7 @@ public sealed class ReproScenario
     private void Unanswered()
     {
         UnansweredQueries++;
-        if (Tick < WindowTicks)
+        if (_replayingTick && Tick < WindowTicks)
             UnansweredInWindow++;
     }
 
@@ -492,8 +596,8 @@ public sealed class ReproReplayReport
             .Append('\n');
         if (RoutesRecomputed > 0)
             text.Append("  routes           ").Append(RoutesRecomputed)
-                .Append(" recomputed over the baked graph rather than replayed; the live map may have "
-                    + "used the engine's pathfinder, so a divergence here is expected\n");
+                .Append(" recomputed over the available baked graph rather than replayed; a local dump "
+                    + "slice can differ from the live full-map graph, so divergence is expected\n");
         text.Append("  verdict          ").Append(ReproducesRecording
             ? "reproduces the recording"
             : "diverges from the recording (expected if the code under replay changed)").Append('\n');

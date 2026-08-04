@@ -184,8 +184,9 @@ public partial class MapPreviewDock : VBoxContainer
             + "where zombies may spawn. Magenta reaching well past the coloured surface is spawn "
             + "ground with no navmesh under it.", grid);
         _navXray = AddCheck("X-ray", false,
-            "Draw the surface and rim through everything, so a navmesh inside a building can be read "
-            + "from outside it.", grid);
+            "Draw the surface and rim through everything. Use the red rim — not an area hidden only "
+            + "with X-ray off — to identify a real topological hole; X-ray also reveals separate "
+            + "floors below terrain and inside buildings.", grid);
         foreach (CheckBox box in new[] { _navRim, _navBeacons, _navBounds, _navXray })
             box.Toggled += _ => ApplyNavigationOptions();
 
@@ -200,9 +201,9 @@ public partial class MapPreviewDock : VBoxContainer
             Value = NavigationPreview.Options.Default.Lift,
             Suffix = "m",
             SizeFlagsHorizontal = SizeFlags.ExpandFill,
-            TooltipText = "How far above the world to float the overlay. The baked mesh sits ON the "
-                + "ground it describes, so without a little lift the two z-fight and the surface "
-                + "shimmers as you move.",
+            TooltipText = "How far above the world to float the overlay. Recast approximates ground "
+                + "and can sit below realised sidewalks or terrain; lift avoids those surfaces hiding "
+                + "valid navmesh without making the overlay visible through walls like X-ray.",
         };
         _navLift.ValueChanged += _ => ApplyNavigationOptions();
         lift.AddChild(_navLift);
@@ -616,9 +617,17 @@ public partial class MapPreviewDock : VBoxContainer
 
         // The map folder is quoted: several official maps have a space in the name ("Alpha Valley"), which
         // would otherwise split into a second word and silently load the default map instead.
+        bool hasNavigation = EditorInterface.Singleton.GetEditedSceneRoot() is { } root
+            && NavigationPreview.Find(root) != null;
+        string navigation = hasNavigation
+            ? $"NAV_PREVIEW=1 NAV_XRAY={(_navXray.ButtonPressed ? 1 : 0)} "
+              + $"NAV_LIFT={F((float)_navLift.Value)} NAV_RIM={(_navRim.ButtonPressed ? 1 : 0)} "
+              + $"NAV_BEACONS={(_navBeacons.ButtonPressed ? 1 : 0)} "
+              + $"NAV_BOUNDS={(_navBounds.ButtonPressed ? 1 : 0)} "
+            : "";
         string text = commandLine
-            ? $"SCREENSHOT_PATH=/tmp/shot.png MAP=\"{Selected?.FolderName ?? "PEI"}\" " +
-              $"SHOT_CAM={shotCam} \"$GODOT\" --audio-driver Dummy"
+            ? navigation + $"SCREENSHOT_PATH=/tmp/shot.png MAP=\"{Selected?.FolderName ?? "PEI"}\" "
+              + $"SHOT_CAM={shotCam} \"$GODOT\" --audio-driver Dummy"
             : $"SHOT_CAM={shotCam}";
 
         DisplayServer.ClipboardSet(text);

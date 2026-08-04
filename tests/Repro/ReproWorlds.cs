@@ -139,13 +139,14 @@ public static class ReproWorlds
         List<NavFlag> flags = new() { FlatField() };
         var collision = new ReproCollisionWorld(
             ReproTriangles.From(geometry.Build(Vector3.Zero, 512f))!);
-        var graph = BakedNavGraph.Build(flags);
+        var graph = BakedNavGraph.Build(flags, portalProbe: collision.Resolve);
         var system = new ZombieSystem(new[] { new ZombieTable { Name = "Test", Damage = 5 } },
             new[] { Bound() }, FlatGround, flags)
         {
             MoveResolver = collision.Resolve,
             GroundSnap = collision.GroundSnap,
             VisionBlocked = collision.VisionBlocked,
+            PhysicalLineBlocked = collision.PhysicalLineBlocked,
             PathQuery = graph.TryPath,
             PathReady = () => true,
         };

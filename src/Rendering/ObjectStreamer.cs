@@ -426,9 +426,7 @@ public partial class ObjectStreamer : Node
         // to an extracted mesh, so counting them would keep every load looking cold (see NpcPlacements).
         _npcs = NpcPlacements.Partition(_objects, _db);
 
-        _neededGuids = new HashSet<Guid>();
-        foreach (PlacedObject o in _objects)
-            _neededGuids.Add(o.Guid);
+        _neededGuids = _db.ResolvePlacementGuids(_objects);
         foreach (PlacedObject v in _vehicles)
             _neededGuids.Add(v.Guid);
         // Only the foliage types that actually resolved to an asset: an unresolved GUID has nothing to

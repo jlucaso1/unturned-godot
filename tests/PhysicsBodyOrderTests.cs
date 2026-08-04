@@ -144,18 +144,21 @@ public class PhysicsBodyOrderTests
     }
 
     [Fact]
-    public void LargeNavigationGraph_IsBuiltOffTheMainThreadAfterReconciliation()
+    public void NavigationGraph_IsBuiltOffTheMainThreadAfterReconciliation()
     {
         if (FindRepositoryFile(Path.Combine("src", "Net", "ZombieNavigation.cs")) is not { } path)
             return;
 
         string source = File.ReadAllText(path);
         Assert.Contains("await Task.Run(() =>", source);
-        Assert.Contains("BakedNavGraph.Build(_flags, _unreachable)", source);
+        Assert.Contains("BakedNavGraph.Build(_flags, _unreachable, _portalProbe,", source);
+        Assert.Contains("validateIndexedPortals: true", source);
         Assert.Contains("await PublishAsync(fingerprint, cachePath + \".csr\")", source);
         Assert.Contains("await PublishAsync(fingerprint, cachePath == null ? null : cachePath + \".csr\")", source);
-        Assert.Contains("BakedNavGraph.TryRead", source);
+        Assert.Contains("BakedNavGraph.TryReadFile", source);
         Assert.Contains("built.Write(output, fingerprint)", source);
+        Assert.Contains("bool found = _bakedGraph?.TryPath", source);
+        Assert.DoesNotContain("NavigationServer3D", source);
     }
 
     [Fact]
@@ -172,6 +175,124 @@ public class PhysicsBodyOrderTests
 
         Assert.True(loop >= 0 && physicsFrame > loop && ray > physicsFrame,
             "every per-flag ray batch must enter a physics notification after worker/file awaits");
+    }
+
+    [Fact]
+    public void DedicatedZombiesUseTheSameAuthoritativePhysicsWorldAsHostedZombies()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Net", "DedicatedServer.cs")) is not { } serverPath
+            || FindRepositoryFile(Path.Combine("src", "Net", "NetworkManager.cs")) is not { } hostPath
+            || FindRepositoryFile(Path.Combine("src", "Net", "ZombiePhysics.cs")) is not { } physicsPath)
+            return;
+
+        string server = File.ReadAllText(serverPath);
+        string host = File.ReadAllText(hostPath);
+        string physics = File.ReadAllText(physicsPath);
+        Assert.Contains("BuildTerrainCollision(tiles, navigationField)", server);
+        Assert.Contains("BuildObjectCollision(unturnedPath, level,", server);
+        Assert.Contains("ZombiePhysics.Attach(zombies", server);
+        Assert.Contains("ZombiePhysics.Attach(zombies", host);
+        Assert.Contains("ZombieNavigation.Build(zombies.Navmesh, zombies.MoveResolver, level.Path)", server);
+        Assert.Contains("PruneAgainstCollisionAsync(", server);
+        Assert.Contains("PlayerConfig.StepOffset, selected, field", server);
+        Assert.Contains("CollisionLayers.World | CollisionLayers.VisionBlocker", physics);
+        Assert.Contains("physicalRay.To = to", physics);
+        Assert.Contains("using Godot.Collections.Dictionary seen = space.IntersectRay(visionRay)", physics);
+        Assert.Contains("using Godot.Collections.Dictionary blocked = space.IntersectRay(physicalRay)", physics);
+        Assert.Contains("using Godot.Collections.Dictionary support = space.IntersectRay(stepDown)", physics);
+        Assert.Contains("using Godot.Collections.Dictionary rest = space.GetRestInfo(query)", physics);
+        Assert.Contains("using Godot.Collections.Dictionary hit = space.IntersectRay(snapRay)", physics);
+        Assert.DoesNotContain("return space.IntersectRay", physics);
+    }
+
+    // Godot's CastMotion deliberately does not recover a shape that starts in contact. A zombie that
+    // finished one tick tangent to a 20 cm fence could therefore get a clear cast for the next diagonal
+    // tick and put its destination inside the fence. At 5.5 m/s the 80 ms motion is shorter than the
+    // fence plus the capsule diameter, so destination overlap is both necessary and sufficient to stop
+    // this thin-barrier tunnel. This ordering is a live-physics contract, like the body-attach rule above.
+    [Fact]
+    public void ZombieCapsuleChecksTheDestinationBeforeAcceptingAClearCast()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Net", "ZombiePhysics.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        int cast = source.IndexOf("float[] cast = space.CastMotion(query)", StringComparison.Ordinal);
+        int destination = source.IndexOf("endpointRest = space.GetRestInfo(query)", cast,
+            StringComparison.Ordinal);
+        int accept = source.IndexOf("at += motion", cast, StringComparison.Ordinal);
+        int unsafeContact = source.IndexOf("cast[1]", destination, StringComparison.Ordinal);
+        int initialOverlap = source.IndexOf(
+            "TryOverlapCorrection(space, query, motion, out Vector3 initialCorrection)",
+            StringComparison.Ordinal);
+
+        Assert.True(cast >= 0 && destination > cast && accept > destination,
+            "a clear sweep may be accepted only after its destination capsule is proven unoccupied");
+        Assert.True(initialOverlap >= 0 && initialOverlap < cast,
+            "a long clear sweep may be accepted only after its starting overlap is recovered");
+        Assert.True(unsafeContact > accept,
+            "the slide normal must be queried at the first unsafe point, not the last safe point");
+        Assert.Contains("float safeFraction = destinationOccupied ? 0f : cast[0]", source);
+        Assert.Contains("stepDestinationOccupied", source);
+    }
+
+    [Fact]
+    public void LegacyObjectIdsAreNormalizedBeforeEveryGuidKeyedWorldBuild()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "World", "WorldBuilder.cs")) is not { } worldPath
+            || FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs"))
+                is not { } streamerPath)
+            return;
+
+        string world = File.ReadAllText(worldPath);
+        string streamer = File.ReadAllText(streamerPath);
+        Assert.Equal(2, CountOccurrences(world, "ResolvePlacementGuids(objects)"));
+        Assert.Contains("_db.ResolvePlacementGuids(_objects)", streamer);
+    }
+
+    [Fact]
+    public void HuntProbeAdvancesInsidePhysicsNotifications()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Net", "NetworkManager.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        int probe = source.IndexOf("if (OS.GetEnvironment(\"HUNT_PROBE\")", StringComparison.Ordinal);
+        int frame = source.IndexOf("await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame)", probe,
+            StringComparison.Ordinal);
+        int tick = source.IndexOf("probe.Tick(views", probe, StringComparison.Ordinal);
+        Assert.True(probe >= 0 && frame > probe && tick > frame,
+            "the end-to-end probe must not issue DirectSpaceState queries from a timer callback");
+        Assert.Contains("NavmeshProject = zombies.NavmeshProject", source[probe..]);
+        Assert.Contains("NavmeshSupportsSegment = zombies.NavmeshSupportsSegment", source[probe..]);
+    }
+
+    [Fact]
+    public void ReproMapHandlesLegacyFacesAndRendersEveryPlayer()
+    {
+        if (FindRepositoryFile(Path.Combine("tools", "ReproHarness", "ReproMapSvg.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        Assert.Contains("flag.DisabledFaces ?? Array.Empty<int>()", source);
+        Assert.Contains("flag.DisabledFaces?.Length ?? 0", source);
+        Assert.Contains("foreach (ReproPlayerSample player in players)", source);
+        Assert.DoesNotContain("Players[0]", source);
+    }
+
+    [Fact]
+    public void PathProbeQueriesInsideAPhysicsNotification()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Net", "NetworkManager.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path);
+        int probe = source.IndexOf("if (OS.GetEnvironment(\"PATH_PROBE\")", StringComparison.Ordinal);
+        int frame = source.IndexOf("await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame)", probe,
+            StringComparison.Ordinal);
+        int query = source.IndexOf("zombies.PathQuery!(from, to", probe, StringComparison.Ordinal);
+        Assert.True(probe >= 0 && frame > probe && query > frame,
+            "the path probe must not validate stitched portals from a timer callback");
     }
 
     [Fact]
@@ -553,6 +674,15 @@ public class PhysicsBodyOrderTests
         Assert.Contains("Dictionary<(List<CachedCollider>, int), int>", builder);
         Assert.Contains("pool.Primitives.TryGetValue", builder);
         Assert.Contains("pool.Meshes.TryGetValue", builder);
+    }
+
+    [Fact]
+    public void ObjectBodiesUseTheTestedFenceCollisionPolicy()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs")) is not { } path)
+            return;
+        string source = File.ReadAllText(path);
+        Assert.Contains("ObjectCollisionPolicy.PhysicsLayer(asset!)", source);
     }
 
     [Fact]

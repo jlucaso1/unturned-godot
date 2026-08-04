@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Godot;
+using UnturnedGodot.Data;
 using UnturnedGodot.Zombies;
 
 namespace UnturnedGodot.Repro;
@@ -11,13 +12,14 @@ namespace UnturnedGodot.Repro;
 //
 // It models the host's resolver rather than approximating it — the same capsule (ZombieBody), the same
 // four-pass collide-and-slide, the same step-up attempt on first contact, the same ground and vision
-// probes and the same layer masks. What it cannot model is the engine's depenetration of a body that
-// starts inside geometry; there it stops at the surface, which is also what a single CastMotion does.
+// probes and the same layer masks. Initial-overlap recovery uses the captured triangle contacts rather
+// than Godot's solver, but follows the same conservative rule: escape away from the requested barrier.
 public sealed class ReproCollisionWorld
 {
     // How the sweep finds first contact: walk the motion in coarse samples until one overlaps, then
-    // bisect that interval. 16 samples over one tick's 0.44 m step is 2.8 cm of coarse resolution, and
-    // 10 bisections take the answer under a tenth of a millimetre.
+    // bisect that interval. 16 samples over one tick's 0.44 m step is 2.8 cm of coarse resolution.
+    // Navigation also sends multi-metre clearance probes, so their sample count grows with distance;
+    // keeping spacing below half the capsule radius prevents a thin fence from fitting between samples.
     private const int SweepSamples = 16;
     private const int SweepRefinements = 10;
 
@@ -70,6 +72,42 @@ public sealed class ReproCollisionWorld
 
     public int TriangleCount => _triangles.TriangleCount;
 
+    // The same short downward column reconciliation asks of the live physics world. Keeping it here
+    // lets a dump verify a changed reconciliation algorithm against its captured geometry instead of
+    // silently restoring the old session's disabled-face list.
+    public bool ProbeNavSurface(Vector3 point, float stepOffset, out float y)
+    {
+        float top = NavmeshSurfaceSampling.TopOf(point, stepOffset);
+        float bottom = NavmeshSurfaceSampling.BottomOf(point);
+        if (!CoversNavSurface(point, stepOffset))
+        {
+            y = 0f;
+            return false;
+        }
+
+        Vector3 from = new(point.X, top, point.Z);
+        Vector3 to = new(point.X, bottom, point.Z);
+        if (Raycast(from, to, CollisionLayers.World, out float fraction, out _))
+        {
+            y = Mathf.Lerp(top, bottom, fraction);
+            return true;
+        }
+        if (_ground != null && _ground.Sample(point.X, point.Z, out y)
+            && y >= bottom && y <= top)
+            return true;
+        y = 0f;
+        return false;
+    }
+
+    // Coverage is separate from a probe answer: inside the captured slice, finding no surface is real
+    // evidence; outside it, the same empty result merely means the dump did not record that column.
+    public bool CoversNavSurface(Vector3 point, float stepOffset)
+    {
+        float top = NavmeshSurfaceSampling.TopOf(point, stepOffset);
+        float bottom = NavmeshSurfaceSampling.BottomOf(point);
+        return Covers(point, MathF.Max(top - point.Y, point.Y - bottom));
+    }
+
     // Which collider the last Resolve stopped against, by name. The reason a dump records owner names
     // at all: "stuck against Street_Light" is a bug report, "stuck at (-613, 35, -65)" is a coordinate.
     public string LastBlocker { get; private set; } = "";
@@ -79,8 +117,22 @@ public sealed class ReproCollisionWorld
     public Vector3 Resolve(Vector3 from, Vector3 to, float radius)
     {
         LastBlocker = "";
-        Vector3 at = from;
-        Vector3 motion = to - from;
+        Vector3 requestedMotion = to - from;
+        Vector3 at = RecoverInitialOverlap(from, radius, requestedMotion);
+        // Depenetration changes the start, not the requested destination. Keeping the original motion
+        // would translate the endpoint by the correction and disagree with Godot's live resolver.
+        Vector3 motion = to - at;
+        float initialHorizontalSquared = (motion.X * motion.X) + (motion.Z * motion.Z);
+        if (initialHorizontalSquared > ZombieBody.MaxStepMotion * ZombieBody.MaxStepMotion)
+        {
+            // Long calls are clearance probes from navigation, never one simulation step. Sliding and
+            // step-up are delivery behaviours that only make sense over the body's real tick distance;
+            // applying them to a whole route leg can climb or teleport over the obstruction being tested.
+            float time = Sweep(at, motion, radius, CollisionLayers.World, out _, out int triangle);
+            if (time < 1f)
+                LastBlocker = _triangles.OwnerOf(triangle);
+            return at + (motion * time);
+        }
         for (int pass = 0; pass < ZombieBody.MaxSlides; pass++)
         {
             if (motion.LengthSquared() < 1e-8f)
@@ -94,7 +146,9 @@ public sealed class ReproCollisionWorld
             // The CharacterController's step pass, attempted once on first contact exactly like the
             // host's: retry the sweep raised by the step offset, and only accept it when there is
             // ground under the destination within the climb, or a body would float over gaps.
-            if (pass == 0)
+            float horizontalMotionSquared = (motion.X * motion.X) + (motion.Z * motion.Z);
+            if (pass == 0
+                && horizontalMotionSquared <= ZombieBody.MaxStepMotion * ZombieBody.MaxStepMotion)
             {
                 var lift = new Vector3(0f, Player.PlayerConfig.StepOffset, 0f);
                 if (Sweep(at + lift, motion, radius, CollisionLayers.World, out _, out _) >= 1f
@@ -109,6 +163,42 @@ public sealed class ReproCollisionWorld
             Vector3 remaining = motion * (1f - time);
             motion = remaining - (normal * remaining.Dot(normal));
             at = safe;
+        }
+        return at;
+    }
+
+    // CastMotion deliberately ignores shapes already intersecting at the start. Without a recovery
+    // pass, a capsule pushed a few centimetres into a counter gets an occupied destination on every
+    // possible move and remains frozen forever. Move it only by the measured penetration depth and
+    // bias an ambiguous triangle normal against the requested motion, so overlap recovery cannot be
+    // used as a shortcut through the barrier the zombie was trying to cross.
+    private Vector3 RecoverInitialOverlap(Vector3 at, float radius, Vector3 requestedMotion)
+    {
+        float half = MathF.Max(0f, (ZombieBody.CapsuleHeight / 2f) - radius);
+        Vector3 centerOffset = new(0f, ZombieBody.CapsuleCenter, 0f);
+        float radiusSquared = radius * radius;
+        for (int pass = 0; pass < ZombieBody.MaxSlides; pass++)
+        {
+            float padding = radius + half + 0.01f;
+            _triangles.Gather(at.X - padding, at.Z - padding,
+                at.X + padding, at.Z + padding, _candidates);
+            if (!Overlaps(at + centerOffset, half, radiusSquared, CollisionLayers.World,
+                    out Vector3 normal, out int triangle, out float distanceSquared))
+                break;
+            LastBlocker = _triangles.OwnerOf(triangle);
+            if (normal.LengthSquared() < 1e-10f)
+                normal = _triangles.NormalOf(triangle);
+            if (normal.LengthSquared() < 1e-10f)
+                break;
+            normal = normal.Normalized();
+            Vector3 flatNormal = normal with { Y = 0f };
+            Vector3 flatMotion = requestedMotion with { Y = 0f };
+            if (flatNormal.Dot(flatMotion) > 0f)
+                normal = -normal;
+            float depth = radius - MathF.Sqrt(MathF.Max(0f, distanceSquared));
+            if (depth <= 0f)
+                break;
+            at += normal * (depth + 0.001f);
         }
         return at;
     }
@@ -130,6 +220,11 @@ public sealed class ReproCollisionWorld
         Vector3 end = from + ((to - from) * ZombieBody.VisionRayFraction);
         return Raycast(from, end, CollisionLayers.VisionBlocker, out _, out _);
     }
+
+    // Attacks and collision recovery are authority checks, not AlertTool perception: include every solid
+    // movement layer and inspect the endpoint instead of dropping the last five percent.
+    public bool PhysicalLineBlocked(Vector3 from, Vector3 to) =>
+        Raycast(from, to, CollisionLayers.World | CollisionLayers.VisionBlocker, out _, out _);
 
     private bool GroundBetween(Vector3 from, Vector3 to, out float y)
     {
@@ -192,11 +287,14 @@ public sealed class ReproCollisionWorld
             return 1f;
 
         float radiusSquared = radius * radius;
+        int samples = Math.Max(SweepSamples,
+            (int)MathF.Ceiling(motion.Length() / MathF.Max(0.05f, radius * 0.5f)));
         float blocked = -1f;
-        for (int sample = 1; sample <= SweepSamples; sample++)
+        for (int sample = 1; sample <= samples; sample++)
         {
-            float time = sample / (float)SweepSamples;
-            if (!Overlaps(at + (motion * time) + center, half, radiusSquared, mask, out _, out _))
+            float time = sample / (float)samples;
+            if (!Overlaps(at + (motion * time) + center, half, radiusSquared, mask,
+                    out _, out _, out _))
                 continue;
             blocked = time;
             break;
@@ -204,20 +302,21 @@ public sealed class ReproCollisionWorld
         if (blocked < 0f)
             return 1f;
 
-        float free = blocked - (1f / SweepSamples);
+        float free = blocked - (1f / samples);
         if (free < 0f)
             free = 0f;
         for (int i = 0; i < SweepRefinements; i++)
         {
             float middle = (free + blocked) * 0.5f;
-            if (Overlaps(at + (motion * middle) + center, half, radiusSquared, mask, out _, out _))
+            if (Overlaps(at + (motion * middle) + center, half, radiusSquared, mask,
+                    out _, out _, out _))
                 blocked = middle;
             else
                 free = middle;
         }
         // The normal is read at the blocked position, where the contact actually is.
         Overlaps(at + (motion * blocked) + center, half, radiusSquared, mask, out normal,
-            out hitTriangle);
+            out hitTriangle, out _);
         if (normal.LengthSquared() < 1e-10f)
             normal = hitTriangle >= 0 ? _triangles.NormalOf(hitTriangle) : Vector3.Up;
         else
@@ -226,10 +325,11 @@ public sealed class ReproCollisionWorld
     }
 
     private bool Overlaps(Vector3 center, float half, float radiusSquared, uint mask,
-        out Vector3 normal, out int hitTriangle)
+        out Vector3 normal, out int hitTriangle, out float distanceSquared)
     {
         normal = Vector3.Zero;
         hitTriangle = -1;
+        distanceSquared = float.MaxValue;
         Vector3 p0 = center - new Vector3(0f, half, 0f);
         Vector3 p1 = center + new Vector3(0f, half, 0f);
         float deepest = float.MaxValue;
@@ -241,6 +341,7 @@ public sealed class ReproCollisionWorld
             if (distance >= radiusSquared || distance >= deepest)
                 continue;
             deepest = distance;
+            distanceSquared = distance;
             normal = direction;
             hitTriangle = triangle;
         }

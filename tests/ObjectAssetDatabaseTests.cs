@@ -1,7 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using Godot;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Dat;
+using UnturnedGodot.Data;
 using UnturnedGodot.Tests.Helpers;
 using Xunit;
 
@@ -103,6 +106,38 @@ public class ObjectAssetDatabaseTests
         Assert.Equal(20, db.Resolve(Guid.NewGuid(), 20)!.Id);                    // guid miss -> id fallback
         Assert.Equal(20, db.Resolve(Guid.Empty, 20)!.Id);                        // no guid -> id
         Assert.Null(db.Resolve(Guid.NewGuid(), 0));                              // nothing to resolve
+    }
+
+    [Fact]
+    public void ResolvePlacementGuids_NormalizesLegacyIdsBeforeGuidKeyedBuilds()
+    {
+        var db = new ObjectAssetDatabase();
+        ObjectAsset legacy = Make("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 20, "Large");
+        db.Add(legacy);
+        var position = new Vector3(1f, 2f, 3f);
+        var euler = new Vector3(0f, 90f, 0f);
+        var scale = new Vector3(2f, 2f, 2f);
+        Guid staleGuid = Guid.NewGuid();
+        Guid unresolvedGuid = Guid.NewGuid();
+        var placements = new List<PlacedObject>
+        {
+            new(position, euler, scale, 20, Guid.Empty),
+            new(Vector3.One, Vector3.Zero, Vector3.One, 20, staleGuid),
+            new(Vector3.Zero, Vector3.Zero, Vector3.One, 999, Guid.Empty),
+            new(Vector3.Zero, Vector3.Zero, Vector3.One, 999, unresolvedGuid),
+        };
+
+        HashSet<Guid> needed = db.ResolvePlacementGuids(placements);
+
+        Assert.Equal(legacy.Guid, placements[0].Guid);
+        Assert.Equal(20, placements[0].Id);
+        Assert.Equal(position, placements[0].Position);
+        Assert.Equal(euler, placements[0].EulerDegrees);
+        Assert.Equal(scale, placements[0].Scale);
+        Assert.Equal(legacy.Guid, placements[1].Guid); // stale GUID uses Resolve's documented id fallback
+        Assert.Equal(Guid.Empty, placements[2].Guid);
+        Assert.Equal(unresolvedGuid, placements[3].Guid);
+        Assert.Equal(new HashSet<Guid> { legacy.Guid, unresolvedGuid }, needed);
     }
 
     [Fact]
