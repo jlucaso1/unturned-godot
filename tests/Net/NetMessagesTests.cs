@@ -178,33 +178,47 @@ public class NetMessagesTests
     }
 
     [Theory]
-    [InlineData(EAttackInputFlags.None, EAttackInputFlags.None)]
-    [InlineData(EAttackInputFlags.Start, EAttackInputFlags.None)]
-    [InlineData(EAttackInputFlags.None, EAttackInputFlags.Start)]
-    [InlineData(EAttackInputFlags.Stop, EAttackInputFlags.Stop)]
-    [InlineData(EAttackInputFlags.Start | EAttackInputFlags.Stop, EAttackInputFlags.Start)]
-    public void Input_RoundTripsAttackFlags(EAttackInputFlags primary, EAttackInputFlags secondary)
+    [InlineData(0, EPlayerPunch.Left)]
+    [InlineData(127, EPlayerPunch.Right)]
+    [InlineData(64, EPlayerPunch.Left)]
+    public void Input_RoundTripsASwing(byte sequence, EPlayerPunch fist)
     {
-        // Both with and without a trusted position: the flags ride in the shared flags byte, above the
-        // bit that says whether the position follows.
+        // Both with and without a trusted position: the swing byte is gated by its own flag bit and is
+        // written before the position, so the two optional tails must not read each other's bytes.
         var bare = new InputCommand(9, 0, 0, false, false, 1, 2,
             UnturnedGodot.Player.EPlayerStance.Stand, grounded: true,
-            attackPrimary: primary, attackSecondary: secondary);
+            hasSwing: true, swingSequence: sequence, swingFist: fist);
         InputCommand readBare = NetMessages.ReadInput(NetMessages.WriteInput(bare));
-        Assert.Equal(primary, readBare.AttackPrimary);
-        Assert.Equal(secondary, readBare.AttackSecondary);
+        Assert.True(readBare.HasSwing);
+        Assert.Equal(sequence, readBare.SwingSequence);
+        Assert.Equal(fist, readBare.SwingFist);
 
         var placed = new InputCommand(9, 0, 0, true, true, 1, 2,
             UnturnedGodot.Player.EPlayerStance.Stand, new Vector3(1, 2, 3), grounded: false,
-            attackPrimary: primary, attackSecondary: secondary);
+            hasSwing: true, swingSequence: sequence, swingFist: fist);
         InputCommand readPlaced = NetMessages.ReadInput(NetMessages.WriteInput(placed));
-        Assert.Equal(primary, readPlaced.AttackPrimary);
-        Assert.Equal(secondary, readPlaced.AttackSecondary);
+        Assert.True(readPlaced.HasSwing);
+        Assert.Equal(sequence, readPlaced.SwingSequence);
+        Assert.Equal(fist, readPlaced.SwingFist);
         Assert.True(readPlaced.HasPosition);
         Assert.Equal(new Vector3(1, 2, 3), readPlaced.Position);
         Assert.True(readPlaced.Jump);
         Assert.True(readPlaced.Sprint);
         Assert.False(readPlaced.Grounded);
+    }
+
+    // The overwhelming majority of input frames carry no swing, and must not pay a byte for one.
+    [Fact]
+    public void Input_WithoutASwing_DoesNotGrow()
+    {
+        var idle = new InputCommand(9, 0, 0, false, false, 1, 2,
+            UnturnedGodot.Player.EPlayerStance.Stand, grounded: true);
+        var swinging = new InputCommand(9, 0, 0, false, false, 1, 2,
+            UnturnedGodot.Player.EPlayerStance.Stand, grounded: true,
+            hasSwing: true, swingSequence: 3);
+
+        Assert.Equal(NetMessages.WriteInput(idle).Length + 1, NetMessages.WriteInput(swinging).Length);
+        Assert.False(NetMessages.ReadInput(NetMessages.WriteInput(idle)).HasSwing);
     }
 
     [Fact]

@@ -23,20 +23,24 @@ public class PunchReplicationTests
     private static ServerSimulation FlatSim() => new(new HeightfieldMoveSolver(FlatGround));
 
     private uint _frame;
+    private byte _swing;
 
-    private InputCommand Attack(EPlayerStance stance = EPlayerStance.Stand) =>
+    // A frame announcing a NEW swing: a fresh number is what makes it one.
+    private InputCommand Attack(EPlayerStance stance = EPlayerStance.Stand,
+        EPlayerPunch fist = EPlayerPunch.Left) =>
         new(_frame++, 0, 0, jump: false, sprint: false, yaw: 0, pitch: 90, stance, grounded: true,
-            attackPrimary: EAttackInputFlags.Start);
+            hasSwing: true, swingSequence: ++_swing, swingFist: fist);
+
+    // A frame announcing the swing already announced — what a retransmission looks like on the wire.
+    private InputCommand RepeatSwing(EPlayerStance stance = EPlayerStance.Stand) =>
+        new(_frame++, 0, 0, jump: false, sprint: false, yaw: 0, pitch: 90, stance, grounded: true,
+            hasSwing: true, swingSequence: _swing, swingFist: EPlayerPunch.Left);
 
     private InputCommand Idle(EPlayerStance stance = EPlayerStance.Stand) =>
         new(_frame++, 0, 0, jump: false, sprint: false, yaw: 0, pitch: 90, stance, grounded: true);
 
-    private static InputCommand AttackAt(uint frame) =>
-        new(frame, 0, 0, jump: false, sprint: false, yaw: 0, pitch: 90, EPlayerStance.Stand,
-            grounded: true, attackPrimary: EAttackInputFlags.Start);
-
     [Fact]
-    public void Server_TurnsAnAttackInputIntoAGesture()
+    public void Server_TurnsASwingIntoAGesture()
     {
         ServerSimulation sim = FlatSim();
         sim.AddPlayer(1, Spawn);
@@ -47,6 +51,18 @@ public class PunchReplicationTests
         PlayerGestureEvent gesture = Assert.Single(sim.Gestures);
         Assert.Equal(1, gesture.PlayerId);
         Assert.Equal(EPlayerGesture.PunchLeft, gesture.Gesture);
+    }
+
+    [Fact]
+    public void Server_CarriesTheFistTheOwnerThrew()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+        sim.QueueInput(1, Attack(fist: EPlayerPunch.Right));
+
+        sim.Step();
+
+        Assert.Equal(EPlayerGesture.PunchRight, Assert.Single(sim.Gestures).Gesture);
     }
 
     [Fact]
@@ -65,8 +81,62 @@ public class PunchReplicationTests
         Assert.Empty(sim.Gestures);
     }
 
+    // The point of the number. Every copy of one swing carries it, so the server answers the swing once
+    // however many of its frames survive the trip.
     [Fact]
-    public void Server_HoldsTheCooldownAcrossTicks()
+    public void Server_AnswersOneSwingOnce_HoweverManyCopiesArrive()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        sim.QueueInput(1, Attack());
+        sim.QueueInput(1, RepeatSwing());
+        sim.QueueInput(1, RepeatSwing());
+
+        int swings = 0;
+        for (int i = 0; i < 4; i++)
+        {
+            sim.Step();
+            swings += sim.Gestures.Count;
+        }
+
+        Assert.Equal(1, swings);
+    }
+
+    // And the other half of it: which copy arrives does not matter, so losing the first costs nothing.
+    [Fact]
+    public void Server_PlaysASwingWhoseFirstFrameWasLost()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        _ = Attack();                  // thrown, and its datagram never arrives
+        sim.QueueInput(1, RepeatSwing()); // only the retransmission does
+
+        sim.Step();
+
+        Assert.Equal(EPlayerGesture.PunchLeft, Assert.Single(sim.Gestures).Gesture);
+    }
+
+    // A repeat outliving the frame it was thrown on is exactly why the stance is not re-judged here: the
+    // swing was legal when it happened, and the client's stance is the client's word either way.
+    [Fact]
+    public void Server_DoesNotRejudgeARepeatAgainstALaterStance()
+    {
+        ServerSimulation sim = FlatSim();
+        sim.AddPlayer(1, Spawn);
+
+        _ = Attack();                                   // thrown standing; datagram lost
+        sim.QueueInput(1, RepeatSwing(EPlayerStance.Prone)); // arrives after the player dropped prone
+
+        sim.Step();
+
+        Assert.Single(sim.Gestures);
+    }
+
+    // The cooldown is the server's, on the server's clock, and no number the client writes moves it.
+    [Fact]
+    public void Server_HoldsTheCooldownOnItsOwnClock()
     {
         ServerSimulation sim = FlatSim();
         sim.AddPlayer(1, Spawn);
@@ -83,33 +153,47 @@ public class PunchReplicationTests
         Assert.Equal(2, swings);
     }
 
+    // The frame numbers are the client's to write, so they must buy nothing. Claiming a full cooldown
+    // passed between consecutive datagrams used to pay out a swing on every one of them.
     [Fact]
-    public void Server_RefusesToPunchProne()
+    public void Server_DoesNotBelieveAFabricatedFrameRate()
     {
         ServerSimulation sim = FlatSim();
         sim.AddPlayer(1, Spawn);
-        sim.QueueInput(1, Attack(EPlayerStance.Prone));
-        sim.Step();
-        Assert.Empty(sim.Gestures);
 
-        // And the refusal costs nothing: standing up swings on the very next tick.
-        sim.QueueInput(1, Attack());
-        sim.Step();
-        Assert.Single(sim.Gestures);
+        int swings = 0;
+        for (uint i = 0; i < 30; i++)
+        {
+            uint frame = i * (PlayerEquipment.PunchCooldownTicks + 1);
+            sim.QueueInput(1, new InputCommand(frame, 0, 0, jump: false, sprint: false, yaw: 0, pitch: 90,
+                EPlayerStance.Stand, grounded: true, hasSwing: true, swingSequence: (byte)(i + 1)));
+            sim.Step();
+            swings += sim.Gestures.Count;
+        }
+
+        // Thirty ticks of real time is five cooldowns' worth of swings, whatever the frames claimed.
+        Assert.InRange(swings, 4, 6);
     }
 
-    // The stance gate reads the stance this tick resolved to, not the one the player was in before it.
+    // A swing is answered where it arrives, so the buffer that drops whole stale INPUTS cannot drop it.
     [Fact]
-    public void Server_JudgesTheStanceTheTickEndedIn()
+    public void Server_KeepsASwingTheJitterBufferHadToDrop()
     {
         ServerSimulation sim = FlatSim();
         sim.AddPlayer(1, Spawn);
-        sim.QueueInput(1, Idle()); // stands
-        sim.Step();
 
-        sim.QueueInput(1, Attack(EPlayerStance.Prone)); // goes prone and clicks on the same frame
-        sim.Step();
-        Assert.Empty(sim.Gestures);
+        sim.QueueInput(1, Attack()); // this frame will fall off the stale end unplayed
+        for (int i = 0; i < ServerSimulation.MaxQueuedInputs; i++)
+            sim.QueueInput(1, Idle());
+
+        int swings = 0;
+        for (int i = 0; i < ServerSimulation.MaxQueuedInputs; i++)
+        {
+            sim.Step();
+            swings += sim.Gestures.Count;
+        }
+
+        Assert.Equal(1, swings);
     }
 
     [Fact]
@@ -126,189 +210,26 @@ public class PunchReplicationTests
         Assert.Equal(2, sim.Gestures.Count); // one player's swing may not put another's on cooldown
     }
 
-    // The cooldown is measured in the client's frames, not in server ticks, and the two do not advance
-    // together: a tick with nothing to dequeue still ticks. Counting server ticks would make the rule
-    // depend on how many datagrams survived the trip.
+    // A stall drops the ticks the server could not make up, but not the seconds that passed. A player who
+    // waited out a real cooldown through one must not be refused for it.
     [Fact]
-    public void Server_MeasuresTheCooldownInTheClientsFrames()
+    public void Server_CountsTheSecondsAStallAte()
     {
         ServerSimulation sim = FlatSim();
         sim.AddPlayer(1, Spawn);
 
-        // Two clicks six of the player's frames apart — outside the cooldown, so both swing on the
-        // thrower's screen. Every idle frame between them is lost in flight, so the server hears nothing
-        // for those six ticks and plays synthesized idle input through them.
-        sim.QueueInput(1, AttackAt(0));
-        sim.Step();
-        Assert.Single(sim.Gestures);
-
-        int starved = 0;
-        for (int i = 0; i < 5; i++)
-        {
-            sim.Step();
-            starved += sim.Gestures.Count;
-        }
-        Assert.Equal(0, starved);
-
-        sim.QueueInput(1, AttackAt(6));
-        sim.Step();
-
-        // Counting how many inputs the server got to play would refuse this one — it played two — and the
-        // punch the thrower already animated would reach nobody. Counting the client's six frames agrees
-        // with them.
-        Assert.Single(sim.Gestures);
-    }
-
-    // The client writes the counter the cooldown is measured in, so on its own it is a number a modified
-    // client simply inflates: claim six frames passed every tick and every click looks a full cooldown
-    // apart. The ceiling rises at the rate a real client produces frames, so a counter running faster
-    // than that stops being believed.
-    [Fact]
-    public void Server_DoesNotBelieveAFabricatedFrameRate()
-    {
-        ServerSimulation sim = FlatSim();
-        sim.AddPlayer(1, Spawn);
-
-        int swings = 0;
-        // Thirty ticks of a client claiming a full cooldown's worth of frames on every one of them.
-        for (uint i = 0; i < 30; i++)
-        {
-            sim.QueueInput(1, AttackAt(i * (PlayerEquipment.PunchCooldownTicks + 1)));
-            sim.Step();
-            swings += sim.Gestures.Count;
-        }
-
-        // Real time bounds it: thirty ticks is thirty frames, which is five cooldowns' worth of swings,
-        // plus what the jitter allowance lets through once. Believing the claim would have paid out all
-        // thirty.
-        Assert.InRange(swings, 1, 10);
-    }
-
-    // The other direction: server ticks piling up must not buy a swing the client's own clock refuses.
-    [Fact]
-    public void Server_StarvedTicksDoNotAgeTheCooldown()
-    {
-        ServerSimulation sim = FlatSim();
-        sim.AddPlayer(1, Spawn);
-
-        sim.QueueInput(1, AttackAt(10));
-        sim.Step();
-        Assert.Single(sim.Gestures);
-
-        for (int i = 0; i < 20; i++)
-            sim.Step();
-
-        sim.QueueInput(1, AttackAt(11)); // one client frame later, however long the server waited
-        sim.Step();
-        Assert.Empty(sim.Gestures);
-    }
-
-    // The jitter buffer drops whole stale inputs when a client bursts past its ceiling. Movement fields
-    // survive that because a later frame restates them; an attack EDGE does not, and the discarded frame
-    // was the only carrier of that swing.
-    [Fact]
-    public void Server_KeepsAnAttackEdgeTheJitterBufferHadToDrop()
-    {
-        ServerSimulation sim = FlatSim();
-        sim.AddPlayer(1, Spawn);
-
-        sim.QueueInput(1, Attack()); // this is the one that will fall off the stale end
-        for (int i = 0; i < ServerSimulation.MaxQueuedInputs; i++)
-            sim.QueueInput(1, Idle());
-
-        // The punch frame is gone from the queue, but its edge is not lost.
-        int swings = 0;
-        for (int i = 0; i < ServerSimulation.MaxQueuedInputs; i++)
-        {
-            sim.Step();
-            swings += sim.Gestures.Count;
-        }
-
-        Assert.Equal(1, swings);
-    }
-
-    [Fact]
-    public void Server_ARescuedEdgeStillSwingsOnlyOnce()
-    {
-        ServerSimulation sim = FlatSim();
-        sim.AddPlayer(1, Spawn);
         sim.QueueInput(1, Attack());
-        for (int i = 0; i < ServerSimulation.MaxQueuedInputs; i++)
-            sim.QueueInput(1, Idle());
+        sim.Step();
+        Assert.Single(sim.Gestures);
 
-        int swings = 0;
-        for (int i = 0; i < 12; i++)
-        {
-            sim.Step();
-            swings += sim.Gestures.Count;
-        }
+        // One tick's worth of loop, but a full cooldown of wall clock — what a stall the server could
+        // not catch up on looks like from in here. Counting ticks would say almost no time had passed.
+        sim.Step(now: ServerSimulation.TickRate + ServerSimulation.PunchCooldownSeconds);
 
-        // Carried forward, not carried forever: the edge is consumed by the first tick that plays it.
-        Assert.Equal(1, swings);
-    }
-
-    // A rescued edge is judged in the frame it arrived on, not in the one it happens to be announced
-    // beside. Attaching the bare edge to a later frame would let that frame's stance answer the press.
-    [Fact]
-    public void Server_JudgesARescuedEdgeInItsOwnFramesStance()
-    {
-        ServerSimulation sim = FlatSim();
-        sim.AddPlayer(1, Spawn);
-
-        sim.QueueInput(1, Attack()); // thrown standing, and about to fall off the stale end
-        for (int i = 0; i < ServerSimulation.MaxQueuedInputs; i++)
-            sim.QueueInput(1, Idle(EPlayerStance.Prone)); // and the player drops prone right after
-
-        int swings = 0;
-        for (int i = 0; i < ServerSimulation.MaxQueuedInputs; i++)
-        {
-            sim.Step();
-            swings += sim.Gestures.Count;
-        }
-
-        // The swing was legal when it was thrown, so it still is. Going prone afterwards does not
-        // retract a punch already in flight.
-        Assert.Equal(1, swings);
-    }
-
-    [Fact]
-    public void Server_ARescuedEdgeThrownProneStaysRefused()
-    {
-        ServerSimulation sim = FlatSim();
-        sim.AddPlayer(1, Spawn);
-
-        sim.QueueInput(1, Attack(EPlayerStance.Prone)); // refused where it was thrown
-        for (int i = 0; i < ServerSimulation.MaxQueuedInputs; i++)
-            sim.QueueInput(1, Idle()); // and standing up afterwards must not resurrect it
-
-        for (int i = 0; i < ServerSimulation.MaxQueuedInputs; i++)
-        {
-            sim.Step();
-            Assert.Empty(sim.Gestures);
-        }
-    }
-
-    // A tick that resolves both an owed swing and one of its own announces ONE, and it is the newer.
-    // Two events under the same tick number would look like a retransmission of each other on arrival.
-    [Fact]
-    public void Server_AnnouncesOneSwingPerTick_AndItIsTheNewest()
-    {
-        ServerSimulation sim = FlatSim();
-        sim.AddPlayer(1, Spawn);
-
-        // A left at frame 0 falls off the stale end and is owed; a right at frame 6 — legal, a full
-        // cooldown later — is the oldest frame left, so this one tick resolves both.
-        sim.QueueInput(1, AttackAt(0));
-        sim.QueueInput(1, new InputCommand(6, 0, 0, jump: false, sprint: false, yaw: 0, pitch: 90,
-            EPlayerStance.Stand, grounded: true, attackSecondary: EAttackInputFlags.Start));
-        for (uint f = 7; f <= 9; f++)
-            sim.QueueInput(1, new InputCommand(f, 0, 0, jump: false, sprint: false, yaw: 0, pitch: 90,
-                EPlayerStance.Stand, grounded: true));
-
+        sim.QueueInput(1, Attack());
         sim.Step();
 
-        PlayerGestureEvent only = Assert.Single(sim.Gestures);
-        Assert.Equal(EPlayerGesture.PunchRight, only.Gesture);
+        Assert.Single(sim.Gestures);
     }
 
     // Reliable delivery retransmits but does not order, so a lost early gesture can be re-sent late

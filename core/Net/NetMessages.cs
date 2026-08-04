@@ -109,15 +109,26 @@ public readonly struct InputCommand
     public readonly bool HasPosition;
     public readonly Vector3 Position;
 
-    // What the attack buttons did on this frame, replicated so the server decides the swing rather than
-    // trusting the client's word for it. Edges, not held state: see EAttackInputFlags.
-    public readonly EAttackInputFlags AttackPrimary;
-    public readonly EAttackInputFlags AttackSecondary;
+    // The swing this frame announces, if any: which fist, and the number the OWNER gave it when its own
+    // hands accepted it.
+    //
+    // An IDENTITY rather than a button edge, and that distinction is the whole design. Input is
+    // unreliable, so a frame carrying a swing is repeated (PlayerController.AttackEdgeRepeats) — and a
+    // repeated EDGE is indistinguishable from a second press. The server then judges it again, against
+    // whatever stance and whatever moment the repeat happened to land in: punch standing, go prone, lose
+    // the first datagram, and the repeat is refused for a stance the swing was never thrown in. Every
+    // copy of one swing carries one number instead, so the server recognises the repeats as the swing it
+    // has already answered and answers nothing twice.
+    public readonly bool HasSwing;
+
+    // Wraps, and is only ever compared for EQUALITY against the last swing played — never ordered. Seven
+    // bits is far more than the two frames a repeat spans.
+    public readonly byte SwingSequence;
+    public readonly EPlayerPunch SwingFist;
 
     public InputCommand(uint frame, sbyte inputX, sbyte inputY, bool jump, bool sprint, byte yaw, byte pitch,
         EPlayerStance stance = EPlayerStance.Stand, bool grounded = true,
-        EAttackInputFlags attackPrimary = EAttackInputFlags.None,
-        EAttackInputFlags attackSecondary = EAttackInputFlags.None)
+        bool hasSwing = false, byte swingSequence = 0, EPlayerPunch swingFist = EPlayerPunch.Left)
     {
         Frame = frame;
         InputX = inputX;
@@ -130,16 +141,16 @@ public readonly struct InputCommand
         Grounded = grounded;
         HasPosition = false;
         Position = Vector3.Zero;
-        AttackPrimary = attackPrimary;
-        AttackSecondary = attackSecondary;
+        HasSwing = hasSwing;
+        SwingSequence = swingSequence;
+        SwingFist = swingFist;
     }
 
     public InputCommand(uint frame, sbyte inputX, sbyte inputY, bool jump, bool sprint, byte yaw, byte pitch,
         EPlayerStance stance, Vector3 position, bool grounded = true,
-        EAttackInputFlags attackPrimary = EAttackInputFlags.None,
-        EAttackInputFlags attackSecondary = EAttackInputFlags.None)
-        : this(frame, inputX, inputY, jump, sprint, yaw, pitch, stance, grounded, attackPrimary,
-            attackSecondary)
+        bool hasSwing = false, byte swingSequence = 0, EPlayerPunch swingFist = EPlayerPunch.Left)
+        : this(frame, inputX, inputY, jump, sprint, yaw, pitch, stance, grounded, hasSwing, swingSequence,
+            swingFist)
     {
         HasPosition = true;
         Position = position;
@@ -409,14 +420,16 @@ public static class NetMessages
         w.Write(input.Frame);
         w.Write(input.InputX);
         w.Write(input.InputY);
-        // The two attack fields are two bits each (None/Start/Stop), which is what lets them ride in the
-        // existing flags byte rather than widening every input datagram by another byte.
+        // A swing is announced by a flag bit and paid for by one extra byte, the same shape the trusted
+        // position already uses: the frames that carry one are a handful per session, and every other
+        // input frame stays exactly the width it was.
         w.Write((byte)((input.Jump ? 1 : 0) | (input.Sprint ? 2 : 0) | (input.HasPosition ? 4 : 0)
-            | (input.Grounded ? 8 : 0)
-            | (((byte)input.AttackPrimary & 3) << 4) | (((byte)input.AttackSecondary & 3) << 6)));
+            | (input.Grounded ? 8 : 0) | (input.HasSwing ? 16 : 0)));
         w.Write(input.Yaw);
         w.Write(input.Pitch);
         w.Write((byte)input.Stance);
+        if (input.HasSwing)
+            w.Write((byte)(((input.SwingSequence & 0x7F) << 1) | (input.SwingFist == EPlayerPunch.Right ? 1 : 0)));
         if (input.HasPosition)
         {
             w.Write(input.Position.X);
@@ -439,14 +452,21 @@ public static class NetMessages
         bool jump = (flags & 1) != 0;
         bool sprint = (flags & 2) != 0;
         bool grounded = (flags & 8) != 0;
-        var primary = (EAttackInputFlags)((flags >> 4) & 3);
-        var secondary = (EAttackInputFlags)((flags >> 6) & 3);
+        bool hasSwing = (flags & 16) != 0;
+        byte swingSequence = 0;
+        EPlayerPunch swingFist = EPlayerPunch.Left;
+        if (hasSwing)
+        {
+            byte swing = r.ReadByte();
+            swingSequence = (byte)(swing >> 1);
+            swingFist = (swing & 1) != 0 ? EPlayerPunch.Right : EPlayerPunch.Left;
+        }
         if ((flags & 4) == 0)
-            return new InputCommand(frame, x, y, jump, sprint, yaw, pitch, stance, grounded, primary,
-                secondary);
+            return new InputCommand(frame, x, y, jump, sprint, yaw, pitch, stance, grounded, hasSwing,
+                swingSequence, swingFist);
         var position = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
-        return new InputCommand(frame, x, y, jump, sprint, yaw, pitch, stance, position, grounded, primary,
-            secondary);
+        return new InputCommand(frame, x, y, jump, sprint, yaw, pitch, stance, position, grounded, hasSwing,
+            swingSequence, swingFist);
     }
 
     // A one-shot hand animation somebody else performed. Reliable and event-shaped rather than a bit in

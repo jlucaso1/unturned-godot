@@ -110,11 +110,13 @@ public sealed class ServerSimulation
     // player by that many ticks — permanently, since the backlog never drains at matched rates.
     public const int MaxQueuedInputs = 4; // 0.32 s of absorbed jitter
 
-    // How far a client's frame counter may legitimately run ahead of the server's own count of its ticks
-    // before the difference stops being jitter and starts being a claim. Comfortably wider than the
-    // jitter buffer above, because a burst that arrives inside one tick is ordinary; what it bounds is
-    // the counter's long-run RATE, which is what a fabricated one has to break to be worth anything.
-    public const uint FrameJitterAllowance = 12; // ~1 s at PlayerInput.RATE
+    // The least wall-clock time the server will let pass between one player's swings. The same rule as
+    // PlayerEquipment's cooldown, measured the only way a server can measure anything it means to
+    // enforce: on its own clock. Not in ticks, because a stall drops the ones it could not make up
+    // (NetServer.MaxCatchUpTicks) while the player kept swinging through the real seconds; and not in the
+    // client's frame numbers, because the client writes those.
+    public static readonly double PunchCooldownSeconds =
+        (Player.PlayerEquipment.PunchCooldownTicks + 1) * TickRate;
 
     private sealed class Entry
     {
@@ -122,31 +124,23 @@ public sealed class ServerSimulation
         public readonly Queue<InputCommand> Inputs = new();
         public InputCommand LastInput;
 
-        // The authoritative copy of this player's hand state. The owner predicts its own swing so the
-        // animation starts on the frame the button went down, but what everybody ELSE sees comes from
-        // here — same rule, same cooldown, run on the server's tick.
-        public readonly Player.PlayerEquipment Equipment = new();
+        // The swing this player is owed on their next tick, and the identity of the last one accepted.
+        //
+        // The server does not re-decide a swing. It cannot usefully: the stance the punch gate reads is
+        // the client's own word (ApplyTrustedPosition takes it verbatim), so re-running that gate here
+        // buys nothing against a modified client and costs correctness against an honest one — a repeat
+        // that outlives the frame it was thrown on would be judged in a stance the swing never happened
+        // in. What the server owes the session is the part a client cannot be trusted with: that a player
+        // cannot swing faster than the rule allows, and that one swing is shown once. The identity
+        // answers the second, the clock answers the first.
+        public EPlayerGesture PendingGesture;
+        public bool HasSwung;
+        public byte LastSwingSequence;
 
-        // The swing a dropped input frame turned out to be owed, waiting for a tick to announce it on.
-        // The DECISION is carried rather than the raw edge: it was made in that frame's own stance and
-        // frame number, which are the only context in which it is the right answer. See the trim in
-        // QueueInput.
-        public EPlayerGesture CarriedGesture;
-
-        // The highest frame number this client is allowed to be believed about. The punch cooldown is
-        // measured in the client's own frame counter, which is the only clock both ends can agree on
-        // through packet loss — but the client WRITES that counter, so on its own it is a number a
-        // modified client inflates: send 0, 6, 12, 18 on consecutive datagrams and every one of them
-        // looks like a full cooldown apart. This is the ceiling that stops it. It rises by one frame per
-        // server tick, which is the rate a real client produces them at, so a counter running faster than
-        // real time is simply not believed past this. It also never sits more than the jitter allowance
-        // above what the client has actually sent, so idling does not bank credit for a later burst.
-        public bool HasFrameCeiling;
-        public uint FrameCeiling;
-
-        // Never trust a frame beyond the ceiling. Wrap-safe, like every other comparison on this counter.
-        public uint Believable(uint frame) =>
-            unchecked((int)(frame - FrameCeiling)) > 0 ? FrameCeiling : frame;
+        // Before the first swing there is no previous one to be too soon after, and the clock starts at
+        // zero — so this cannot start there too, or a session's opening punch would be refused for
+        // arriving less than a cooldown after a swing that never happened.
+        public double LastSwingAt = double.NegativeInfinity;
 
         // Trusted-position bookkeeping: the budget rate-limits CONSECUTIVE client claims, so it needs the
         // last claim we accepted and when. Before any claim exists there is nothing to rate-limit against —
@@ -290,6 +284,14 @@ public sealed class ServerSimulation
         entry.LastReceivedFrame = input.Frame;
         entry.Inputs.Enqueue(input);
 
+        // A swing is answered HERE, as it arrives, and never from the queue below. What the rate limit
+        // measures is real elapsed time, and the queue is precisely where real time stops being legible:
+        // an input can wait several ticks in it, be trimmed off it unplayed, or arrive in a burst beside
+        // the frames around it. Answering on arrival also means the trim can no longer swallow a punch,
+        // so nothing has to be carried past it.
+        if (input.HasSwing)
+            AcceptSwing(entry, input);
+
         // The loop plays one frame per tick, so a client that sends faster than the server ticks builds
         // a backlog that never drains — and a backlog is time: the avatar everyone else sees keeps
         // replaying inputs from seconds ago, further behind after every burst, on top of a queue that
@@ -298,27 +300,25 @@ public sealed class ServerSimulation
         // Bursts are ordinary — the client drains its send timer once per frame, so any hitch is
         // followed by a flurry — and a hostile client can simply send as fast as it likes.
         while (entry.Inputs.Count > MaxQueuedInputs)
-        {
-            // Movement survives a dropped frame because a later one restates it — an attack edge does
-            // not. Simulate reads the frame a button went DOWN, so the discarded frame was the only
-            // carrier of that swing, and losing it means a punch only its own thrower ever saw.
-            //
-            // So the frame is JUDGED here rather than having its edge handed to a later one. An edge is
-            // only meaningful beside the stance and frame number it arrived with: attach it to a later
-            // frame and the gate reads that frame's stance and the cooldown measures from its number,
-            // so the same press can be answered differently from how the owner answered it. Judging it
-            // now uses exactly what Step would have used — the client-claimed stance Step also assigns
-            // — and only the verdict travels. Frames reach Simulate in order either way: the trim and
-            // the tick loop both take the oldest first, and QueueInput admits none that is not newer.
-            InputCommand stale = entry.Inputs.Dequeue();
-            EPlayerGesture owed = entry.Equipment.Simulate(entry.Believable(stale.Frame),
-                stale.AttackPrimary, stale.AttackSecondary,
-                new HandState { Stance = stale.Stance });
-            // A burst deep enough to trim two legal swings at once overwrites rather than queues: they
-            // would both be owed to the same tick, which can announce one. See Step.
-            if (owed != EPlayerGesture.None)
-                entry.CarriedGesture = owed;
-        }
+            entry.Inputs.Dequeue();
+    }
+
+    // One swing, judged once. Repeats of it carry the same number and are recognised as the swing already
+    // answered, so losing the first datagram costs nothing and receiving all of them costs nothing either.
+    private void AcceptSwing(Entry entry, in InputCommand input)
+    {
+        if (entry.HasSwung && input.SwingSequence == entry.LastSwingSequence)
+            return; // a repeat of the swing we already answered
+
+        // Equality, not order: the number wraps, and a client whose swings were lost outright leaves gaps
+        // in it. What matters is only that a NEW number is a new swing.
+        entry.HasSwung = true;
+        entry.LastSwingSequence = input.SwingSequence;
+
+        if (_clock - entry.LastSwingAt < PunchCooldownSeconds)
+            return; // faster than the rule allows, whatever the client says its frame numbers were
+        entry.LastSwingAt = _clock;
+        entry.PendingGesture = Player.PlayerGestures.For(input.SwingFist);
     }
 
     // Advances one 0.08 s step on the nominal clock: each call is one tick of simulated time. What the
@@ -340,12 +340,9 @@ public sealed class ServerSimulation
             // The STANCE carries over too: silence means we did not hear from this player, not that they
             // stood up. Defaulting it snapped a prone or crouched player upright on every late or lost
             // frame — a flicker at 12.5 Hz that the whole session sees, hitbox included.
-            // The FRAME carries over as well, and for the same reason: silence is not the client's clock
-            // advancing. A starved tick must not age the attack cooldown that is measured in that clock.
             bool starved = !entry.Inputs.TryDequeue(out InputCommand queued);
             InputCommand input = starved
-                ? new InputCommand(entry.LastInput.Frame, 0, 0, false, false,
-                    entry.LastInput.Yaw, entry.LastInput.Pitch,
+                ? new InputCommand(0, 0, 0, false, false, entry.LastInput.Yaw, entry.LastInput.Pitch,
                     entry.State.Stance, entry.State.Grounded)
                 : queued;
             entry.LastInput = input;
@@ -359,20 +356,6 @@ public sealed class ServerSimulation
             entry.HoldMovementUntilInput = holdRestoredMovement;
             bool restoredMoving = entry.State.Moving;
 
-            // Move the ceiling before anything reads a frame off this input. One frame of credit per
-            // tick; a client that is behind does not accumulate more than the jitter allowance of it.
-            if (!entry.HasFrameCeiling)
-            {
-                entry.FrameCeiling = input.Frame;
-                entry.HasFrameCeiling = true;
-            }
-            else
-            {
-                entry.FrameCeiling++;
-                if (unchecked((int)(entry.FrameCeiling - input.Frame)) > FrameJitterAllowance)
-                    entry.FrameCeiling = unchecked(input.Frame + FrameJitterAllowance);
-            }
-
             if (input.HasPosition)
                 ApplyTrustedPosition(entry, input);
             else
@@ -380,35 +363,15 @@ public sealed class ServerSimulation
             if (holdRestoredMovement)
                 entry.State.Moving = restoredMoving;
 
-            // After the move, so the stance the gate reads is this tick's: a player who went prone on the
-            // same frame they clicked must not get the punch the pre-move stance would have allowed.
-            //
-            // The cooldown is measured in the CLIENT's frame number, not this server's tick. Both are
-            // 12.5 Hz counters, but they do not advance together: input is unreliable, and a tick with
-            // nothing to dequeue still ticks. Two clicks a comfortable six client frames apart can be
-            // consumed two server ticks apart when the idle frames between them were dropped, and this
-            // copy of the rule would then refuse a swing the thrower already animated — the exact desync
-            // running the same rule on both ends is meant to prevent. The frame is the client's own
-            // count of its clicks, so the two copies measure the same quantity. QueueInput has already
-            // rejected anything not strictly newer than the last frame seen, so it only ever moves
-            // forward here. An edge rescued from a trimmed frame is played on a later one and dates the
-            // cooldown from that, which delays the NEXT swing slightly rather than letting one through.
-            EPlayerGesture gesture = entry.Equipment.Simulate(entry.Believable(input.Frame),
-                input.AttackPrimary, input.AttackSecondary,
-                new HandState { Stance = entry.State.Stance });
-
-            // At most one gesture per player per tick, and the NEWEST when a tick resolves more than one
-            // — this tick's own swing ahead of any a dropped frame left owed. An avatar cannot throw two
-            // punches inside one 0.08 s tick, so only one of them can ever be shown; the client holds a
-            // single pending swing for that reason and keeps the newest of a burst. Announcing both
-            // would put two events on the wire under the same tick number, where the second reads as a
-            // retransmission of the first and is refused — the newer swing lost to say the older one
-            // twice. This is also why the carry is one slot rather than a queue: anything a second slot
-            // could hold is, by construction, older than what is already going out.
-            EPlayerGesture announced = gesture != EPlayerGesture.None ? gesture : entry.CarriedGesture;
-            entry.CarriedGesture = EPlayerGesture.None;
-            if (announced != EPlayerGesture.None)
-                _gestures.Add(new PlayerGestureEvent(id, announced));
+            // Whatever swing arrived since the last tick goes out on this one. At most one per player per
+            // tick, because an avatar cannot throw two punches inside 0.08 s and a client holds a single
+            // pending swing on that basis — two events under the same tick number would read as a
+            // retransmission of each other anyway.
+            if (entry.PendingGesture != EPlayerGesture.None)
+            {
+                _gestures.Add(new PlayerGestureEvent(id, entry.PendingGesture));
+                entry.PendingGesture = EPlayerGesture.None;
+            }
 
             states.Add(new PlayerSnapshotState(id, entry.State.Position,
                 NetAngles.QuantizePitch(entry.State.Pitch), NetAngles.QuantizeYaw(entry.State.Yaw),

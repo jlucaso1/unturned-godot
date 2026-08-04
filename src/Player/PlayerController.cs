@@ -61,20 +61,18 @@ public partial class PlayerController : CharacterBody3D
     private double _tickTimer;
     private EAttackInputFlags _primaryPending;
     private EAttackInputFlags _secondaryPending;
-    private int _primaryRepeats;
-    private int _secondaryRepeats;
+
+    // The swing being announced, and how many more frames it is announced on. One number per accepted
+    // swing, repeated verbatim: that is what lets the server tell a retransmission from a second punch.
+    private byte _swingSequence;
+    private EPlayerPunch _swingFist;
+    private int _swingRepeats;
 
     // How many input frames a thrown swing is announced on. Input datagrams are unreliable, so a single
     // dropped one would eat the swing for everyone else while the thrower saw their own — the one desync
-    // a locally-predicted action can produce. Repeating is safe by construction rather than by care: the
-    // server runs the same PlayerEquipment, whose cooldown swallows the repeats, so a swing that arrives
-    // twice still punches once. Kept well inside that cooldown for the same reason.
-    //
-    // The residual, since it is worth naming: if the first frame is lost and a repeat is what lands, the
-    // server dates its cooldown from that later frame and the two ends' baselines part by up to
-    // AttackEdgeRepeats - 1 frames. A click on the exact tick the cooldown expires can then be judged
-    // differently by the two. Closing that needs a stable identity per swing on the wire rather than a
-    // repeated edge, which is more protocol than an animation-only punch earns.
+    // a locally-predicted action can produce. Repeating is safe because every copy carries the same
+    // number: the server answers the first it receives and recognises the rest as that same swing, so
+    // which of them survives the trip changes nothing about what anyone sees.
     private const int AttackEdgeRepeats = 2;
 
     private EPlayerStance _stance = EPlayerStance.Stand;
@@ -244,27 +242,27 @@ public partial class PlayerController : CharacterBody3D
         {
             _tickTimer -= UnturnedGodot.Net.ServerSimulation.TickRate;
             _tick++;
-            // The hands run on the fresh press, once. What goes on the wire afterwards is the SWING they
-            // threw, repeated for a few frames; see AttackEdgeRepeats.
+            // The hands run on the fresh press, once. What goes on the wire afterwards is the swing they
+            // threw, announced under a number of its own for a few frames; see AttackEdgeRepeats.
             EAttackInputFlags primary = _primaryPending;
             EAttackInputFlags secondary = _secondaryPending;
             _primaryPending = EAttackInputFlags.None;
             _secondaryPending = EAttackInputFlags.None;
 
             EPlayerGesture gesture = SimulateHands(primary, secondary);
-            if (gesture == EPlayerGesture.PunchLeft)
-                _primaryRepeats = AttackEdgeRepeats;
-            else if (gesture == EPlayerGesture.PunchRight)
-                _secondaryRepeats = AttackEdgeRepeats;
+            if (gesture is EPlayerGesture.PunchLeft or EPlayerGesture.PunchRight)
+            {
+                // A new number is what makes this a new swing to everyone downstream. It is minted only
+                // when the hands ACCEPTED one, so a press the cooldown or the prone gate refused never
+                // reaches the wire at all.
+                _swingSequence = (byte)((_swingSequence + 1) & 0x7F);
+                _swingFist = gesture == EPlayerGesture.PunchRight ? EPlayerPunch.Right : EPlayerPunch.Left;
+                _swingRepeats = AttackEdgeRepeats;
+            }
 
-            // Only an accepted swing is retransmitted. Repeating the PRESS instead would re-offer a
-            // refusal: a click the cooldown or the prone gate turned down arrives again next tick as a
-            // fresh Start edge, and by then the cooldown may have expired or the player stood up, so a
-            // punch lands with no second click behind it.
-            EAttackInputFlags sendPrimary = EAttackInputFlags.None;
-            EAttackInputFlags sendSecondary = EAttackInputFlags.None;
-            if (_primaryRepeats > 0) { sendPrimary = EAttackInputFlags.Start; _primaryRepeats--; }
-            if (_secondaryRepeats > 0) { sendSecondary = EAttackInputFlags.Start; _secondaryRepeats--; }
+            bool sendSwing = _swingRepeats > 0;
+            if (sendSwing)
+                _swingRepeats--;
 
             if (Net != null)
             {
@@ -277,7 +275,7 @@ public partial class PlayerController : CharacterBody3D
                     (sbyte)input.X, (sbyte)input.Y, jumpHeld, wantSprint,
                     UnturnedGodot.Net.NetAngles.QuantizeYaw(RotationDegrees.Y),
                     UnturnedGodot.Net.NetAngles.QuantizePitch(_pitch + 90f),
-                    _stance, GlobalPosition, isOnFloor, sendPrimary, sendSecondary));
+                    _stance, GlobalPosition, isOnFloor, sendSwing, _swingSequence, _swingFist));
             }
         }
 
