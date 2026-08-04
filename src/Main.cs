@@ -844,9 +844,6 @@ public partial class Main : Node3D
                 && System.Enum.TryParse(stanceName, ignoreCase: true, out Player.EPlayerStance stance)
                     ? stance
                     : Player.EPlayerStance.Stand,
-            // The prefab's own ViewmodelCamera transform on the Skull bone: where the game frames its
-            // first-person arms from, rather than a number tuned by eye here.
-            ViewmodelEye = rigs.Eye,
         };
         (player.Footsteps, _movementAudioFactory) = BuildMovementAudio(unturnedPath);
         player.Sounds = _oneShotAudio; // BuildMovementAudio created the pool; gestures share it

@@ -117,12 +117,12 @@ public static class CharacterModel
     // (the caller then falls back to the placeholder figure).
     public static Node3D? Build(string unturnedPath) => BuildEntity(unturnedPath, PlayerEntity);
 
-    // The player's rigs, and where the first-person eye sits on them.
-    //
-    // `Eye` is the prefab's own ViewmodelCamera transform, local to the Skull bone — the FRAME
-    // PlayerAnimator renders the arms from, rotation included. It travels with the rigs because it is a
-    // property of the authored character, not of the controller that draws it.
-    public readonly record struct PlayerRigs(Node3D? Body, Node3D? Viewmodel, Transform3D Eye);
+    // The player's two rigs. There is deliberately no first-person EYE transform here: Unturned's
+    // ViewmodelCamera is a child of firstSkeleton/Spine/Skull — the VIEWMODEL skeleton's skull, not the
+    // body's — so its authored offset only means anything on the rig it was authored against. When the
+    // body rig stands in for the arms (see ViewmodelFromBody), there is no authored answer to compose
+    // with, and inventing one is how the arms end up at ninety degrees to the view.
+    public readonly record struct PlayerRigs(Node3D? Body, Node3D? Viewmodel);
 
     // Both rigs from ONE read of resources.assets: the third-person body, and the first-person arms
     // rigged into the prefab's Viewmodel subtree with the same clips, so a swing plays identically from
@@ -167,70 +167,15 @@ public static class CharacterModel
                 + $"({e.GetType().Name}: {e.Message}); falling back to the body rig for first person.");
         }
 
-        Transform3D eye = FindViewmodelCamera(source);
         if (viewmodel is CharacterSkeleton arms)
-            return new PlayerRigs(body, arms, eye);
+            return new PlayerRigs(body, arms);
 
         // The import produced something, but not a rig — a static bind-pose mesh, which cannot be posed
         // and so would hang in front of the camera in one frozen attitude. It is a Node nothing owns and
         // nothing else will free, so it is freed here rather than left to the collector that does not
         // exist for Godot objects.
         viewmodel?.Free();
-        return new PlayerRigs(body, ViewmodelFromBody(body), eye);
-    }
-
-    // PlayerAnimator's ViewmodelCamera, as a local TRANSFORM on the Skull bone it hangs off.
-    //
-    // This is the whole of how Unturned's first person is framed, and it is authored data rather than a
-    // constant: the arms and the weapon are rendered by a SECOND camera parented to
-    // firstSkeleton/Spine/Skull/ViewmodelCamera, so the eye that sees them is pinned to the head bone and
-    // turns with it through every frame of every animation. Reading the prefab's own transform for it is
-    // what makes this port's first person 1:1 with the game's, instead of a number tuned by eye.
-    //
-    // The ROTATION matters as much as the position, which is why this is a transform and not an offset:
-    // see PlayerController.PlaceViewmodelEye.
-    //
-    // The Viewmodel subtree is present even when its MESH cannot be decoded (Model_0's skin weights live
-    // in the compressed stream), so this is available whichever rig ends up being drawn. Identity when
-    // the prefab has no such transform, which puts the eye on the skull joint itself.
-    private static Transform3D FindViewmodelCamera(in AssetSource source)
-    {
-        SerializedFile file = source.File;
-        Dictionary<long, SerializedObject> byId = source.ById;
-        const int classGameObject = 1;
-
-        foreach (SerializedObject o in file.Objects)
-        {
-            if (o.ClassId != classGameObject)
-                continue;
-            Dictionary<string, object> go;
-            try { go = Read(file, byId, o.PathId); }
-            catch { continue; }
-            if ((string)go["m_Name"] != "ViewmodelCamera")
-                continue;
-
-            long transformId = TransformOf(file, byId, o.PathId);
-            if (transformId == 0)
-                continue;
-            Dictionary<string, object> transform = Read(file, byId, transformId);
-
-            // Its parent has to be the Skull, and the whole chain has to belong to the player's
-            // Viewmodel subtree — a mod or another prefab may well carry the same name.
-            long father = Id(transform["m_Father"]);
-            if (father == 0
-                || (string)Read(file, byId, Id(Read(file, byId, father)["m_GameObject"]))["m_Name"] != "Skull")
-                continue;
-            (string root, bool inViewmodel) =
-                Ancestry(file, byId, Id(transform["m_GameObject"]), ViewmodelSubtree);
-            if (root != PlayerEntity.Root || !inViewmodel)
-                continue;
-
-            Transform3D eye = LocalTransformOf(transform);
-            Log.Print($"[unturned-godot] Character: first-person eye at the prefab's own ViewmodelCamera "
-                + $"({eye.Origin.X:0.###}, {eye.Origin.Y:0.###}, {eye.Origin.Z:0.###}) from the Skull.");
-            return eye;
-        }
-        return Transform3D.Identity;
+        return new PlayerRigs(body, ViewmodelFromBody(body));
     }
 
     // First person without the prefab's own arms rig.
@@ -242,10 +187,10 @@ public static class CharacterModel
     // missing RIG.
     //
     // The body rig is skinnable (Model_1 decodes), carries the same Punch_Left/Punch_Right clips, and is
-    // the same character — Unturned's first-person view IS the character seen from inside its own head,
-    // which is why looking down there shows you your own legs. So a clone of it stands in: PlayerController
-    // parents it to the camera with the rig's own Skull bone landing on the eye, so what is drawn is the
-    // part of the body a head sees. Cheap, because Clone shares the mesh, the skin and the decoded clips.
+    // the same character, so a clone of it stands in. It is a STAND-IN and not the real thing: the game
+    // draws purpose-built arms here, and the framing that goes with them (ViewmodelCamera) is authored
+    // against that rig's skeleton, so it cannot be borrowed. Until Model_0 decodes, first person shows
+    // the body from inside its own head rather than the arms the game would draw.
     private static CharacterSkeleton? ViewmodelFromBody(Node3D? body)
     {
         CharacterSkeleton? clone = Clone(body);
