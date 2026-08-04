@@ -12,6 +12,20 @@ namespace UnturnedGodot.Tests.Zombies;
 public class ZombieNetMessagesTests
 {
     [Fact]
+    public void ClientMovementAnimationUsesTheOriginalOneCentimetrePerAxisThreshold()
+    {
+        Vector3 rendered = new(10f, 20f, 30f);
+
+        Assert.False(ZombieClientMotion.IsMoving(rendered, rendered));
+        Assert.False(ZombieClientMotion.IsMoving(
+            rendered + new Vector3(0.009f, -0.009f, 0.009f), rendered));
+        Assert.True(ZombieClientMotion.IsMoving(
+            rendered + new Vector3(0.02f, 0f, 0f), rendered));
+        Assert.True(ZombieClientMotion.IsMoving(
+            rendered + new Vector3(0f, 0f, -0.02f), rendered));
+    }
+
+    [Fact]
     public void ZombieList_RoundTrips()
     {
         var chunk = new List<ZombieListing>
