@@ -153,10 +153,10 @@ public sealed class ServerSimulation
     {
         _players[id] = new Entry
         {
-            // Stance is spelled out because default(EPlayerStance) is 0, which is not one of them —
-            // the enum starts at Sprint = 2, mirroring the game's own numbering. A player who joins and
-            // says nothing is standing, and until the stance carried across starved ticks that invalid
-            // 0 was hidden by the filler input defaulting to Stand.
+            // Stance is spelled out because default(EPlayerStance) is 0, which is Climb — the enum
+            // mirrors the game's own numbering. A player who joins and says nothing is standing, not
+            // hanging off a ladder that does not exist, and until the stance carried across starved
+            // ticks that default was hidden by the filler input defaulting to Stand.
             State = new PlayerMoveState
             {
                 Position = spawnPosition,

@@ -11,10 +11,20 @@ public static class PlayerStanceMachine
     public static bool NeedsCrouchClearance(EPlayerStance current, bool wantCrouch)
         => wantCrouch && current == EPlayerStance.Prone;
 
+    // While on a ladder the crouch and prone intents are cleared outright (PlayerStance.Update), so a
+    // toggle pressed mid-climb does not drop the player into a crouch the moment they step off the top.
+    public static bool ClearsStanceIntents(EPlayerStance stance) => stance == EPlayerStance.Climb;
+
     public static EPlayerStance Resolve(
         EPlayerStance current, bool wantCrouch, bool wantProne, bool wantSprint,
         bool isMoving, bool hasStamina, bool canStand, bool canCrouch)
     {
+        // A climber's stance is the ladder's to decide (PlayerLadder.Resolve); the whole crouch/prone/
+        // sprint block sits behind `stance != CLIMB` in the game. Leaving a ladder is a dismount, which
+        // hands back a stander before this is ever asked.
+        if (current == EPlayerStance.Climb)
+            return EPlayerStance.Climb;
+
         if (wantCrouch)
         {
             // Dropping from stand always fits; raising from prone to crouch needs the crouch headroom.

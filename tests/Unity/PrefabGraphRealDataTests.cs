@@ -94,6 +94,50 @@ public class PrefabGraphRealDataTests
             Assert.False(entry.Value.Count == 0, $"{entry.Key} resolved to no parts at all");
     }
 
+    // The two ladder objects the game ships. Each has exactly two colliders: the mesh the player walks
+    // into, and the climbing volume on Unity's LADDER layer — which is a trigger there, so building it as
+    // solid geometry (which is what happened before the layer was read) put an invisible 15 cm slab in
+    // front of every ladder in the world.
+    [RealDataTheory(RequiresMasterBundle = true)]
+    [InlineData("objects/medium/furniture/ladder_wood_0")]
+    [InlineData("objects/medium/furniture/ladder_metal_0")]
+    public void RealPrefabs_MarkALaddersClimbingVolumeAndNothingElse(string key)
+    {
+        PrefabGraph graph = GameData.Prefabs;
+
+        List<ColliderPart> colliders = graph.CollidersByKey[key];
+        Assert.Equal(2, colliders.Count);
+
+        ColliderPart volume = Assert.Single(colliders.FindAll(c => UnityLayers.IsLadder(c.Layer)));
+        Assert.Equal(EColliderKind.Box, volume.Kind);
+        Assert.Equal(UnityLayers.Ladder, volume.Layer);
+        // Authored lying along its own Z: 1.15 m of rung, 15 cm thick, 6.75 m of climb.
+        Assert.Equal(6.75f, volume.Size.Z, 2);
+        Assert.True(volume.Size.Y < volume.Size.X, "the volume's thin axis is the one it faces along");
+
+        ColliderPart solid = Assert.Single(colliders.FindAll(c => !UnityLayers.IsLadder(c.Layer)));
+        Assert.Equal(EColliderKind.Mesh, solid.Kind);
+    }
+
+    // Nothing else in the shipped content claims to be a ladder, and every collider that does sits on a
+    // GameObject called "Ladder": the layer and the tag agree, which is what lets the layer stand in for
+    // the tag a built AssetBundle does not carry.
+    [RealDataFact(RequiresMasterBundle = true)]
+    public void RealPrefabs_PutNoOrdinaryColliderOnTheLadderLayer()
+    {
+        PrefabGraph graph = GameData.Prefabs;
+
+        var ladderKeys = new List<string>();
+        foreach (KeyValuePair<string, List<ColliderPart>> entry in graph.CollidersByKey)
+            if (entry.Value.Exists(c => UnityLayers.IsLadder(c.Layer)))
+                ladderKeys.Add(entry.Key);
+
+        ladderKeys.Sort(System.StringComparer.Ordinal);
+        Assert.Equal(
+            new[] { "objects/medium/furniture/ladder_metal_0", "objects/medium/furniture/ladder_wood_0" },
+            ladderKeys);
+    }
+
     // The Tutorial map's one building: a single unlevelled part with both its submesh materials, which is
     // what the fallback has to keep whole.
     [RealDataFact(RequiresMasterBundle = true)]

@@ -23,6 +23,12 @@ public static class FootstepConfig
     // No footsteps while prone, and prone landings are silent too (PlayLandAudioClip early-out).
     public static bool IsSilentStance(EPlayerStance stance) => stance == EPlayerStance.Prone;
 
+    // The surface a stance is heard on regardless of what is under the player, or null to resolve the
+    // ground normally. PlayerMovement.checkGround hardcodes one case: "2021-11-16: why does climbing use
+    // tile? Sigh." A climber is nowhere near the ground anyway — the ladder's rungs are what they are on.
+    public static string? MaterialOverrideFor(EPlayerStance stance) =>
+        stance == EPlayerStance.Climb ? "Tile" : null;
+
     public static float VolumeFor(EPlayerStance stance, bool landing)
     {
         float volume = landing ? LandVolume : FootstepVolume;

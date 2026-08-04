@@ -48,6 +48,32 @@ public class ColliderCacheTests
         Assert.Equal(new[] { 0, 1, 2 }, read[3].Indices);
     }
 
+    // A ladder's climbing volume travels with the colliders and must survive the round trip on any kind:
+    // it is what decides, at load, whether a box becomes solid geometry or a body the climb probe finds.
+    [Fact]
+    public void RoundTrips_TheLadderFlag()
+    {
+        var colliders = new List<CachedCollider>
+        {
+            CachedCollider.Box(Pose, Vector3.Zero, new Vector3(1.15f, 0.15f, 6.75f), isLadder: true),
+            CachedCollider.Box(Pose, Vector3.Zero, Vector3.One),
+            CachedCollider.Sphere(Pose, Vector3.Zero, 1f, isLadder: true),
+            CachedCollider.Capsule(Pose, Vector3.Zero, 0.5f, 2f, 1, isLadder: true),
+            CachedCollider.Mesh(Pose, new[] { Vector3.Zero }, new[] { 0 }, isLadder: true),
+        };
+
+        using var ms = new MemoryStream();
+        ColliderCache.Write(ms, colliders);
+        ms.Position = 0;
+        List<CachedCollider> read = ColliderCache.Read(ms);
+
+        Assert.Equal(new[] { true, false, true, true, true },
+            read.ConvertAll(c => c.IsLadder).ToArray());
+        // The rest of the collider still reads back around the new flag.
+        Assert.Equal(new Vector3(1.15f, 0.15f, 6.75f), read[0].Size);
+        Assert.Equal(2f, read[3].Height);
+    }
+
     [Fact]
     public void RoundTrips_EmptyList()
     {
@@ -84,6 +110,21 @@ public class ColliderCacheTests
         legacy.Position = 0;
 
         Assert.Throws<InvalidDataException>(() => ColliderCache.Read(legacy));
+    }
+
+    // The previous format ("UGCL") carried no per-collider flags byte, so reading one of its files with
+    // this reader would take the first collider's transform a byte early and misparse everything after
+    // it. The magic doubles as the version: an old file has to read as stale and be extracted again.
+    [Fact]
+    public void ACacheFromThePreviousFormatIsStaleRatherThanMisparsed()
+    {
+        byte[] bytes = OneSphere();
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes, 0x4C434755); // "UGCL"
+
+        using var dir = new Helpers.TempDir();
+        Assert.False(ColliderCache.IsCurrent(dir.Write("old.collider", bytes)));
+        using var ms = new MemoryStream(bytes);
+        Assert.Throws<InvalidDataException>(() => ColliderCache.Read(ms));
     }
 
     [Fact]
@@ -178,8 +219,9 @@ public class ColliderCacheTests
         });
         byte[] bytes = ms.ToArray();
 
-        // header(8) + count(4) + kind(1) + transform(48) = 61; vertex count, then 3 vertices, then indices.
-        int offset = vertices ? 61 : 61 + 4 + (3 * 12);
+        // header(8) + count(4) + kind(1) + flags(1) + transform(48) = 62; vertex count, then 3 vertices,
+        // then indices.
+        int offset = vertices ? 62 : 62 + 4 + (3 * 12);
         System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(offset), int.MaxValue);
 
         using var corrupt = new MemoryStream(bytes);

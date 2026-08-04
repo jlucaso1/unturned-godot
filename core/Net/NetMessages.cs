@@ -164,8 +164,8 @@ public sealed class PlayerListing
     public byte Pitch;
     public byte Yaw;
 
-    // Spelled out because default(EPlayerStance) is 0 and the enum starts at Sprint = 2 (the game's own
-    // numbering): a listing nobody filled in must read as a standing player, not as no stance at all.
+    // Spelled out because default(EPlayerStance) is 0, which is Climb in the game's own numbering: a
+    // listing nobody filled in must read as a standing player, not as one clinging to a ladder.
     public EPlayerStance Stance = EPlayerStance.Stand;
 }
 
@@ -173,7 +173,9 @@ public sealed class PlayerListing
 public static class NetMessages
 {
     // Bump whenever a message layout changes; the server refuses mismatched clients at the handshake.
-    public const byte ProtocolVersion = 7;
+    // Version 8 does not move a byte: it adds the value 0 (Climb) to the stance a build can send, which
+    // an older peer would read as a stance it has no state for. Refusing the mix is the cheap answer.
+    public const byte ProtocolVersion = 8;
 
     // Two level names denote the same world. The name on the wire is the map's FOLDER name — the one
     // identity that survives the trip between two machines (paths and workshop ids do not) — and it

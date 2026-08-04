@@ -388,6 +388,31 @@ public partial class Main : Node3D
         Vector3 position;
         float yaw = 0f;
 
+        // SPAWN_AT=x,y,z[,yaw] starts the player at a chosen spot in Godot world space, so a scripted run
+        // can stand in front of something specific — a ladder, a building, a bad surface — instead of at
+        // whatever spawnpoint the map picked. Terrain snapping is skipped: the point is to be exactly here.
+        if (OS.GetEnvironment("SPAWN_AT") is { Length: > 0 } at)
+        {
+            string[] parts = at.Split(',');
+            if (parts.Length >= 3
+                && float.TryParse(parts[0], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out float x)
+                && float.TryParse(parts[1], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out float y)
+                && float.TryParse(parts[2], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out float z))
+            {
+                float spawnYaw = parts.Length >= 4
+                    && float.TryParse(parts[3], System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out float parsedYaw)
+                    ? parsedYaw
+                    : 0f;
+                Log.Print($"[unturned-godot] SPAWN_AT: starting at ({x}, {y}, {z}) yaw {spawnYaw}");
+                return (new Vector3(x, y, z), spawnYaw);
+            }
+            Log.Print($"[unturned-godot] SPAWN_AT=\"{at}\" is not \"x,y,z[,yaw]\"; ignoring it.");
+        }
+
         if (LevelPlayers.Choose(LevelPlayers.Load(mapDir)) is { } spawn)
         {
             position = spawn.Position;

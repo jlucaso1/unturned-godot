@@ -104,6 +104,7 @@ public static class ObjectsBuilder
         InstancedStaticBodies? collisionOwner = EnvFlag.IsOn(OS.GetEnvironment("UG_NODE_PHYSICS"), whenUnset: false)
             ? null : new InstancedStaticBodies { Name = label + "Bodies" };
         int collisionBodyCount = 0;
+        var ladders = new LadderVolumes { Name = label + "Ladders" };
         MultiMeshRidRenderer? render = EnvFlag.IsOn(OS.GetEnvironment("UG_NODE_MULTIMESH"), whenUnset: false)
             ? null : new MultiMeshRidRenderer { Name = label + "Batches" };
         var collisionShapes = new CollisionShapePool(navigationField);
@@ -168,18 +169,34 @@ public static class ObjectsBuilder
             // LARGE/MEDIUM bodies also carry the vision-blocker layer bit: RayMasks.BLOCK_VISION is
             // exactly LARGE | MEDIUM, so zombie alert rays must see these and nothing else.
             EObjectType? type = colliderLibrary.ContainsKey(guid) ? db.Resolve(guid, 0)?.Type : null;
-            if (colliderLibrary.TryGetValue(guid, out List<CachedCollider>? colliders)
-                && type is EObjectType.Large or EObjectType.Medium or EObjectType.Resource)
+            if (colliderLibrary.TryGetValue(guid, out List<CachedCollider>? colliders))
             {
-                uint layer = type switch
+                // Ladders first, and deliberately outside the type gate below: what Unturned strips from a
+                // purely visual object is the collider on its ROOT, and a ladder's climbing volume hangs
+                // off a child. BuildCollision skips these, so a ladder is climbable and never solid.
+                BuildLadderVolumes(ladders, colliders, transforms);
+
+                if (type is EObjectType.Large or EObjectType.Medium or EObjectType.Resource)
                 {
-                    EObjectType.Resource => 1u,
-                    EObjectType.Medium => MediumFurnitureLayer | VisionBlockerLayer,
-                    _ => 1u | VisionBlockerLayer, // LARGE: full world collision
-                };
-                BuildCollision(collision, collisionOwner, ref collisionBodyCount, guid, colliders,
-                    transforms, layer, collisionShapes);
+                    uint layer = type switch
+                    {
+                        EObjectType.Resource => 1u,
+                        EObjectType.Medium => MediumFurnitureLayer | VisionBlockerLayer,
+                        _ => 1u | VisionBlockerLayer, // LARGE: full world collision
+                    };
+                    BuildCollision(collision, collisionOwner, ref collisionBodyCount, guid, colliders,
+                        transforms, layer, collisionShapes);
+                }
             }
+        }
+        if (ladders.Count > 0)
+        {
+            Log.Print($"[unturned-godot] {label} ladders: {ladders.Count} climbable volumes");
+            collision.AddChild(ladders);
+        }
+        else
+        {
+            ladders.Free(); // never entered the tree, so nothing else will
         }
         if (CollisionChunkMetres > 0f && collisionBodyCount > 0)
             Log.Print($"[unturned-godot] {label} collision bodies: {collisionBodyCount} "
@@ -451,6 +468,35 @@ public static class ObjectsBuilder
         }
     }
 
+    // One body per placed ladder volume, carrying the frame the climb rules read back. Kept out of the
+    // batched bodies above on purpose: those share one body per GUID (or per cell), and a ray hit on one
+    // of them cannot say WHICH ladder it met, which is the only thing this build is for.
+    // Each volume gets its own shape rather than a pooled one: they are a handful of boxes, and the pool's
+    // sharing exists to keep thousands of identical props from each holding their own.
+    private static void BuildLadderVolumes(LadderVolumes owner, List<CachedCollider> colliders,
+        List<Transform3D> instances)
+    {
+        foreach (CachedCollider c in colliders)
+        {
+            if (!c.IsLadder || c.Kind == EColliderKind.Mesh)
+                continue; // every ladder volume in the shipped content is a box
+
+            foreach (Transform3D instance in instances)
+            {
+                Transform3D world = instance * PrimitiveLocal(c);
+                if (IsDegenerate(world.Basis))
+                    continue;
+                Shape3D? shape = BuildPrimitiveShape(c, world.Basis.Scale);
+                if (shape == null)
+                    continue;
+                // The frame is the collider's GameObject transform — WITHOUT its centre offset, which
+                // belongs to the shape and not to the ladder's own position and facing.
+                owner.Add(shape, world.Orthonormalized(),
+                    (instance * UnityMath.ReflectZ(c.LocalToRoot)).Orthonormalized());
+            }
+        }
+    }
+
     private static void BuildCollision(Node3D root, InstancedStaticBodies? owner, ref int bodyCount,
         Guid guid, List<CachedCollider> colliders,
         List<Transform3D> instances, uint collisionLayer, CollisionShapePool pool)
@@ -460,6 +506,8 @@ public static class ObjectsBuilder
         for (int colliderIndex = 0; colliderIndex < colliders.Count; colliderIndex++)
         {
             CachedCollider c = colliders[colliderIndex];
+            if (c.IsLadder)
+                continue; // a climbing volume, built by BuildLadderVolumes; never solid
             if (c.Kind == EColliderKind.Mesh)
                 meshes.Add((c, colliderIndex));
             else if (c.Kind is EColliderKind.Box or EColliderKind.Sphere or EColliderKind.Capsule)

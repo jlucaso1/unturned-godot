@@ -26,6 +26,7 @@ public sealed class PlayerSettings
     public Key Prone { get; init; } = Key.Z;
     public Key Sprint { get; init; } = Key.Shift;
     public Key Perspective { get; init; } = Key.H;
+    public Key Interact { get; init; } = Key.F;
 
     public static PlayerSettings Default { get; } = new();
 }

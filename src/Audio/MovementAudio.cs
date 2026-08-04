@@ -51,9 +51,15 @@ public sealed class MovementAudio
 
     private void Play(string key, EPlayerStance stance, bool landing, Vector3 position)
     {
-        if (!_splat.TryGetDominantMaterial(position.X, -position.Z, out Guid materialGuid))
-            return;
-        string? materialName = _landscape.PhysicsNameOf(materialGuid);
+        // A stance can name its own surface: checkGround hardcodes "Tile" for a climbing player, who is
+        // hearing a ladder's rungs rather than whatever happens to be on the ground far below them.
+        string? materialName = FootstepConfig.MaterialOverrideFor(stance);
+        if (materialName == null)
+        {
+            if (!_splat.TryGetDominantMaterial(position.X, -position.Z, out Guid materialGuid))
+                return;
+            materialName = _landscape.PhysicsNameOf(materialGuid);
+        }
         if (materialName == null)
             return;
         // The asset that DEFINED the key decides which bundle the audio came from, which is not always

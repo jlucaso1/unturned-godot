@@ -21,7 +21,7 @@ and checked byte-for-byte against the game's own data, using
 | **Foliage** | `Foliage.blob` grass, flowers and pebbles as chunked MultiMeshes (~667k instances on PEI, 7.2M on Germany) |
 | **Roads / water** | Bezier splines lofted through the port of `Road.buildMesh`, real road textures; sea plane from the map's lighting |
 | **Lighting** | Day/night cycle driven by the map's `Lighting.dat` keyframes: sun, ambient, fog, ported skybox (sun disc, stars, moon phases, clouds) |
-| **Player** | Port of `PlayerMovement`/`PlayerLook`/`PlayerStance` with the game's own constants; real character model, skeleton and animations; first/third person |
+| **Player** | Port of `PlayerMovement`/`PlayerLook`/`PlayerStance` with the game's own constants; real character model, skeleton and animations; first/third person; ladders — walk into one or look at it and interact, both through the game's own climb rules |
 | **Audio** | Footsteps/landings resolved through the terrain splat like `PhysicsTool.GetTerrainMaterialName`, clips extracted from the master bundle's FSB5 banks |
 | **Zombies** | Spawn tables, navigation bounds and the pre-baked navmeshes; detection, hunting and the `Zombie.cs` animation set |
 | **Vehicles** | The map's own `Spawns/Vehicles.dat` rolled through its spawn tables and redirectors, as many as the level's size allows, each drawn from its real `Vehicle.prefab`. Parked scenery for now: no driving, physics or damage |
@@ -87,7 +87,8 @@ That takes a few minutes once; later runs start from the cache, and picking a ma
 never extracted streams in just those.
 
 **Controls** (Unturned's own defaults, from `PlayerSettings`): `WASD` move, mouse look, `Space` jump,
-`Shift` sprint, `X` crouch, `Z` prone, `H` (or `F5`) toggle first/third person, `Esc` pause. In free-camera
+`Shift` sprint, `X` crouch, `Z` prone, `F` climb the ladder you are looking at (walking into one climbs it
+too), `H` (or `F5`) toggle first/third person, `Esc` pause. In free-camera
 mode: `WASD` + `Q`/`E` down/up, `Shift` to boost. `F3` toggles the performance HUD, and `F7` writes a
 bug-repro dump — the last few seconds of the simulation, replayable headless or back inside the game
 (see [docs/REPRO.md](docs/REPRO.md)).
