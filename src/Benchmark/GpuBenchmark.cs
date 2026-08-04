@@ -203,6 +203,7 @@ public static class GpuBenchmark
                 metrics["foliage.emergencyVisibleLoads"] = foliage.EmergencyVisibleLoads;
                 metrics["foliage.emergencyVisible.totalMs"] = foliage.EmergencyVisibleTotalMs;
                 metrics["foliage.emergencyVisible.maxMs"] = foliage.EmergencyVisibleMaxMs;
+                metrics["foliage.emergencyVisible.passes"] = foliage.EmergencyVisiblePasses;
                 metrics["foliage.visibleSetMisses"] = foliage.VisibleSetMisses;
                 metrics["foliage.retiredChunks"] = foliage.RetiredChunks;
                 metrics["foliage.staleResults"] = foliage.StaleResults;

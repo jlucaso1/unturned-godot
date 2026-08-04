@@ -324,7 +324,14 @@ a path (`UG_OBJECT_CHUNK_METRES`, `SCREENSHOT_PATH`, `TIME_OF_DAY`, …) are una
   blaming frame-time tails on upload bursts. `emergencyVisible.totalMs` and `emergencyVisible.maxMs`
   price that synchronous work: `emergencyVisibleLoads` says how many chunks took it, these say what the
   main thread paid for them. Both cover the whole session, so compare them across runs of the same map
-  rather than reading one number as a budget.
+  rather than reading one number as a budget. They are measured per *pass* — one plan's whole visible
+  set — because a pass is what a frame blocks for: every chunk in it is decoded and uploaded before that
+  `_Process` returns. `maxMs` is therefore the worst single stall, and `emergencyVisible.passes` is how
+  many frames paid anything at all. Read the three together, because the count of chunks does not say
+  how many frames they were spread over: on PEI (Tier 2, this container) 62 emergency loads are **one**
+  pass of 17.6–29.1 ms, not 62 frames of 0.4 ms, and the old per-chunk `maxMs` read 8.1 ms for the same
+  burst — a third of the stall that actually happened. Germany's 76 loads cost 235 ms with a per-chunk
+  `maxMs` of 46.7 ms, so a single chunk there is already several frames' worth of budget on its own.
 - `UG_FOLIAGE_PREWARM=0` restores the unwarmed spawn, where the first plan runs on the frame the player
   appears and every chunk already inside its visibility radius is decoded and uploaded synchronously
   right then. By default the streamer hands the renderer that plan while the loading screen still owns

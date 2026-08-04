@@ -59,6 +59,7 @@ public partial class FoliageStreamingRenderer : Node3D
     private long _maxDecodedBytes;
     private long _emergencyVisibleTicks;
     private long _maxEmergencyVisibleTicks;
+    private int _emergencyVisiblePasses;
     private int _truncatedAdmissions;
     private int _maxDeferredPrefetch;
     private bool _needsRefill;
@@ -85,8 +86,16 @@ public partial class FoliageStreamingRenderer : Node3D
     // What the emergency path cost the main thread. EmergencyVisibleLoads counts the chunks that had to
     // be decoded and uploaded inside _Process; these price them, because the count alone cannot say
     // whether the frame noticed. Sampled with the same clock in both tiers, including the spawn burst.
+    //
+    // Measured per pass — one plan's whole visible set — because that is what a frame blocks for.
+    // TotalMs means what it always did, the main thread's total time on this path. MaxMs is the worst
+    // single stall rather than the worst chunk inside one, which is the number a frame budget is
+    // compared against: on PEI the two read 8 ms and 21 ms for the same burst, because the burst is one
+    // frame decoding 62 chunks and not 62 frames decoding one. EmergencyVisiblePasses is how many frames
+    // paid anything at all, and is what makes those two readings distinguishable.
     public double EmergencyVisibleTotalMs => Milliseconds(_emergencyVisibleTicks);
     public double EmergencyVisibleMaxMs => Milliseconds(_maxEmergencyVisibleTicks);
+    public int EmergencyVisiblePasses => _emergencyVisiblePasses;
     // What the warm pass took off that path: the chunks it made resident before the first frame, and the
     // wall-clock it spent doing so behind the loading screen. Read them together with the emergency
     // counters — the pass is only worth its load time while it keeps those at zero through the spawn.
@@ -410,29 +419,48 @@ public partial class FoliageStreamingRenderer : Node3D
         // Correctness gate: a chunk already inside its previous renderability radius is decoded and
         // uploaded before this process frame reaches rendering. Normally prefetch makes this list empty;
         // teleports and initial spawn are the deterministic emergency path.
-        foreach (int index in plan.VisibleMissing)
+        //
+        // The whole list is one span, because one span is what the frame blocks for: every chunk here is
+        // decoded and uploaded before this _Process returns, so the pass — not the chunk — is the unit a
+        // stall is measured in. Timed in a finally: a cancelled or failed pass still spent the frame time
+        // it spent, and dropping those samples would make the total look better the more often it went
+        // wrong.
+        if (plan.VisibleMissing.Count > 0)
         {
-            if (_resident.ContainsKey(index))
-                continue;
-            _emergencyVisibleLoads++;
-            // Time it in a finally: a cancelled or failed decode still spent the frame time it spent,
-            // and dropping those samples would make the total look better the more often it went wrong.
-            long startedTicks = Stopwatch.GetTimestamp();
-            try { Upload(index, _index.DecodeChunk(index, _lifetimeCancellation.Token)); }
-            catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested) { return; }
-            catch (Exception e)
+            long passStartedTicks = Stopwatch.GetTimestamp();
+            try
             {
-                _decodeFailures++;
-                Log.PushWarning($"[foliage-stream] visible chunk {index} could not be decoded: {e.Message}");
+                foreach (int index in plan.VisibleMissing)
+                {
+                    if (_resident.ContainsKey(index))
+                        continue;
+                    _emergencyVisibleLoads++;
+                    try
+                    {
+                        Upload(index, _index.DecodeChunk(index, _lifetimeCancellation.Token));
+                    }
+                    catch (OperationCanceledException)
+                        when (_lifetimeCancellation.IsCancellationRequested)
+                    {
+                        return;
+                    }
+                    catch (Exception e)
+                    {
+                        _decodeFailures++;
+                        Log.PushWarning($"[foliage-stream] visible chunk {index} could not be decoded: "
+                            + e.Message);
+                    }
+                    if (!_resident.ContainsKey(index))
+                        _visibleSetMisses++;
+                }
             }
             finally
             {
-                long elapsed = Stopwatch.GetTimestamp() - startedTicks;
+                long elapsed = Stopwatch.GetTimestamp() - passStartedTicks;
                 _emergencyVisibleTicks += elapsed;
                 _maxEmergencyVisibleTicks = Math.Max(_maxEmergencyVisibleTicks, elapsed);
+                _emergencyVisiblePasses++;
             }
-            if (!_resident.ContainsKey(index))
-                _visibleSetMisses++;
         }
 
         foreach (int index in plan.Retire)
