@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using UnturnedGodot.Dat;
+using UnturnedGodot.Data;
 
 namespace UnturnedGodot.Assets;
 
@@ -33,7 +34,7 @@ public sealed class MasterBundleConfig
         DatDictionary root;
         try
         {
-            root = DatParser.Parse(File.ReadAllText(path));
+            root = DatParser.Parse(TextFile.ReadAllText(path));
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {

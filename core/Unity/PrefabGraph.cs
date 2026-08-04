@@ -80,6 +80,8 @@ public sealed class PrefabGraph
     private const int MeshFilterClassId = 33;
     private const int MeshRendererClassId = 23;
     private const int SkinnedMeshRendererClassId = 137;
+    private const int AnimationClassId = 111;
+    private const int AnimatorClassId = 95;
 
     public SerializedFile File { get; }
     public IReadOnlyDictionary<long, SerializedObject> ObjectsByPathId { get; }
@@ -200,9 +202,10 @@ public sealed class PrefabGraph
     }
 
     // Where one component's GameObject sits inside its prefab: the prefab's key, the pose relative to the
-    // prefab root, the name of the GameObject the component is on, and whether that prefab is a vehicle.
+    // prefab root, the name of the GameObject the component is on, whether that prefab is a vehicle, and
+    // whether an Animation/Animator anywhere between the component and the prefab root drives this subtree.
     private readonly record struct Anchor(string Key, Transform3D LocalToRoot, string PartName,
-        bool IsVehicle);
+        bool IsVehicle, bool Animated);
 
     // The walk from a component's GameObject up to its prefab root. Shared by the mesh and collider passes
     // so both answer the hidden-state question the same way.
@@ -215,7 +218,7 @@ public sealed class PrefabGraph
         private readonly Dictionary<long, long> _transformFather;
         private readonly Dictionary<long, long> _transformGo;
         private readonly Dictionary<long, Transform3D> _localById;
-        private readonly Dictionary<long, (string Name, int Layer)> _goCache = new();
+        private readonly Dictionary<long, (string Name, int Layer, bool Animated)> _goCache = new();
 
         public PrefabWalk(SerializedFile file, Dictionary<long, SerializedObject> objects,
             Dictionary<long, string> pathByRootGo, Dictionary<long, long> goToTransform,
@@ -237,22 +240,46 @@ public sealed class PrefabGraph
         // TypeTree pass as the name so a collider's layer costs no extra decode.
         public int LayerOf(long goId) => GameObjectOf(goId).Layer;
 
-        private (string Name, int Layer) GameObjectOf(long goId)
+        private (string Name, int Layer, bool Animated) GameObjectOf(long goId)
         {
-            if (_goCache.TryGetValue(goId, out (string Name, int Layer) cached))
+            if (_goCache.TryGetValue(goId, out (string Name, int Layer, bool Animated) cached))
                 return cached;
             if (_objects.TryGetValue(goId, out SerializedObject? go))
             {
                 Dictionary<string, object> fields = TypeTreeReader.Read(go.TypeTree, _file.ReaderFor(go));
                 cached = ((string)fields["m_Name"],
-                    fields.TryGetValue("m_Layer", out object? layer) ? Convert.ToInt32(layer) : 0);
+                    fields.TryGetValue("m_Layer", out object? layer) ? Convert.ToInt32(layer) : 0,
+                    CarriesAnimation(fields));
             }
             else
             {
-                cached = (string.Empty, 0);
+                cached = (string.Empty, 0, false);
             }
             _goCache[goId] = cached;
             return cached;
+        }
+
+        // Whether this GameObject holds the component that poses a skeleton: Unturned's animated props
+        // ("Close"/"Open" on a cabinet, a door, a container) hang one Animation off the prefab's "Root".
+        private bool CarriesAnimation(Dictionary<string, object> gameObject)
+        {
+            if (!gameObject.TryGetValue("m_Component", out object? components)
+                || components is not List<object> list)
+            {
+                return false;
+            }
+
+            foreach (object component in list)
+            {
+                long compId = PathId(
+                    (Dictionary<string, object>)((Dictionary<string, object>)component)["component"]);
+                if (_objects.TryGetValue(compId, out SerializedObject? comp)
+                    && comp.ClassId is AnimationClassId or AnimatorClassId)
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         // Null when the GameObject is not part of a prefab this reader instantiates, or when the chain up
@@ -266,13 +293,16 @@ public sealed class PrefabGraph
             // Walk up to the prefab root, composing each level's local pose (but not the root's, which is
             // where the world placement goes).
             Transform3D localToRoot = Transform3D.Identity;
+            bool animated = false;
             long cur = tId;
             while (_transformFather.TryGetValue(cur, out long father) && father != 0)
             {
-                if (_transformGo.TryGetValue(cur, out long ownerGo)
-                    && PrefabParts.IsHiddenState(NameOf(ownerGo)))
+                if (_transformGo.TryGetValue(cur, out long ownerGo))
                 {
-                    return null;
+                    (string name, _, bool carriesAnimation) = GameObjectOf(ownerGo);
+                    if (PrefabParts.IsHiddenState(name))
+                        return null;
+                    animated |= carriesAnimation;
                 }
                 if (_localById.TryGetValue(cur, out Transform3D local))
                     localToRoot = local * localToRoot;
@@ -284,9 +314,10 @@ public sealed class PrefabGraph
             {
                 return null;
             }
+            animated |= GameObjectOf(rootGo).Animated;
 
             return new Anchor(PrefabKey(path), localToRoot, NameOf(goId),
-                path.EndsWith("/" + VehiclePrefabFile, StringComparison.Ordinal));
+                path.EndsWith("/" + VehiclePrefabFile, StringComparison.Ordinal), animated);
         }
     }
 
@@ -317,15 +348,49 @@ public sealed class PrefabGraph
             if (walk.AnchorOf(goId) is not { } anchor)
                 continue;
 
+            Transform3D localToRoot = o.ClassId == SkinnedMeshRendererClassId
+                ? SkinnedLocalToRoot(mf, anchor.LocalToRoot, anchor.Animated)
+                : anchor.LocalToRoot;
+
             parts.Add(anchor.Key, anchor.PartName, anchor.IsVehicle,
-                new MeshPart(meshId, MeshRendererMaterials(file, objectsByPathId, goId),
-                    anchor.LocalToRoot));
+                new MeshPart(meshId, MeshRendererMaterials(file, objectsByPathId, goId), localToRoot));
         }
 
         (Dictionary<string, List<MeshPart>> baseLevel, Dictionary<string, List<MeshPart>> lower) =
             parts.Resolve();
         lod1ByKey = lower;
         return baseLevel;
+    }
+
+    // Where a SkinnedMeshRenderer's mesh actually renders, relative to its prefab root.
+    //
+    // A skinned mesh does not have to sit where its GameObject does: Unity poses those vertices from the
+    // bones alone — vertex = bone.localToWorld * bindpose * v — and never reads the renderer's own
+    // transform. That is why the bone can live in a different subtree entirely: the glass in Cooler_0 is a
+    // SkinnedMeshRenderer under "Root" whose only bone is "Hinge" under "Skeleton".
+    //
+    // Two things follow, and the shipped bundle needs both:
+    //
+    //  * With an Animation driving the skeleton, the bone poses the prefab was saved with are not the ones
+    //    it renders at — that component is there precisely to overwrite them, and every one of these props
+    //    carries a "Close"/"Open" pair whose resting state is the closed one. What draws on a level that
+    //    has just loaded is the bind pose, and the bind pose is the space the vertices are already in.
+    //    Composing the GameObject chain instead took the +90 degrees about X that "Root" carries and
+    //    applied it to geometry that was already in the prefab's own frame: the display cases' glass, the
+    //    counters' doors and the ovens' hobs all came out lying flat and thrown clear of the body they
+    //    belong to. Measured over the whole core bundle, every one of the 39 animated skinned parts sits
+    //    inside its prefab's static body at the bind pose and outside it under the GameObject chain.
+    //  * With nothing driving it, the bones stay where the prefab put them and the renderer's own chain is
+    //    the right answer after all — which is what the two vehicles that skin their tracks (the Tank's
+    //    and the Explorer's) need. Forcing those to the prefab root threw the tracks 4 units off the hull.
+    //
+    // A renderer with no bones at all cannot be posed by a skeleton either, so it keeps its chain too.
+    internal static Transform3D SkinnedLocalToRoot(Dictionary<string, object> renderer,
+        Transform3D localToRoot, bool animated)
+    {
+        bool hasBones = renderer.TryGetValue("m_Bones", out object? bones)
+            && bones is List<object> { Count: > 0 };
+        return hasBones && animated ? Transform3D.Identity : localToRoot;
     }
 
     // Each prefab's collision colliders, keyed like PartsByKey. Colliders on the server-only navmesh ("Nav")

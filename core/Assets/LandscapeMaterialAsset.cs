@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using UnturnedGodot.Dat;
+using UnturnedGodot.Data;
 
 namespace UnturnedGodot.Assets;
 
@@ -82,7 +83,7 @@ public sealed class LandscapeMaterialAsset
                 DatDictionary parsed;
                 try
                 {
-                    parsed = DatParser.Parse(File.ReadAllText(file));
+                    parsed = DatParser.Parse(TextFile.ReadAllText(file));
                 }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException)
                 {

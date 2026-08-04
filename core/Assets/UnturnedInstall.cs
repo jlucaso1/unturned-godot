@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
+using UnturnedGodot.Data;
 
 namespace UnturnedGodot.Assets;
 
@@ -253,7 +254,7 @@ public static class UnturnedInstall
     {
         try
         {
-            return File.Exists(path) ? File.ReadAllText(path) : null;
+            return File.Exists(path) ? TextFile.ReadAllText(path) : null;
         }
         catch (IOException)
         {
