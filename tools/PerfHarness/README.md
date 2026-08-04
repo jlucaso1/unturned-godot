@@ -136,11 +136,14 @@ Some objects are decoded again by a later pass, and the suite prices those separ
 | Shader | 20 ms / 29.5 MiB | 2x | ≤ 20 ms / 29.5 MiB | shaders a resolved material names |
 | SkinnedMeshRenderer | 0.6 ms / 0.7 MiB | 2x | ≤ 1 ms / 0.7 MiB | parts clearing mesh+anchor checks |
 
-Repeats are not confined to single objects, either: on a cold face cache `CharacterModel.LoadFace` goes
-through `ModelExtractor.ReadMasterbundleFile`, which re-reads the bundle and decodes the **whole**
-SerializedFile node again — ~4.6 s — to fetch one small inline texture the streamer's own pass had already
-decoded. That dwarfs every per-object repeat here and is recorded in `docs/PROFILING.md` rather than in
-this table, which prices objects rather than passes.
+Repeats are not confined to single objects, either — and that is where the real cost is. **Three separate
+helpers open the bundle by themselves and re-decode it from the front**, each gated by its own cache,
+because none of them can see the decode the streamer already did: `ReadAudioNodes` (cold audio, no pass
+running — the whole blob, ~14.4 s), `ReadMasterbundleFile` (cold face cache — the SerializedFile node,
+~4.6 s) and `ReadClassTypeTrees` (cold `user://type_trees.cache` — the SerializedFile node again, ~4.6 s,
+and this one runs on **every** load in every tier, since `SetupEnvironment` calls it before the FREECAM
+branch). Together they dwarf every per-object repeat in this table, which prices objects rather than
+passes; `docs/PROFILING.md` has them with the per-cache totals.
 
 **This table is a lower bound on repeated decode work, not a total.** It is a hand-maintained mirror of
 what several `src/` passes happen to do, much of it behind conditions the harness cannot observe — which

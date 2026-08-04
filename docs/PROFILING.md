@@ -64,7 +64,7 @@ suite skips cleanly when its input is missing, so it runs on any machine with so
 Measured with `PerfHarness -- lzma` and `-- bundle` on a 4-vCPU container, against the game's own
 `core_linux.masterbundle` (110.9 MiB on disk, 1,371.9 MiB decompressed, one LZMA block):
 
-**No part of this is unconditional.** Three caches gate three blocks of work, independently, and a load
+**No part of this is unconditional.** Four caches gate four blocks of work, independently, and a load
 whose caches are all warm touches the masterbundle *not at all* — `ObjectStreamer.Prepare` computes
 `_cold` from what the map's placements are missing and returns before `StartStreaming` when nothing is
 owed. Read the block for each cold cache and add them up; the combinations are tabulated below.
@@ -135,37 +135,52 @@ standalone, never incremental:
 | `SerializedFile.Read` again | 103,549 objects | 0.01 s |
 | a third *extra* container decode (`CharacterModel.ExtractInlineTexture`) | 1 object | 0.09 s |
 
+**Block D — a cold type-tree cache**, gated by `user://type_trees.cache` and its stamp (the bundle's
+mtime XOR its length). This one is **not tied to the player**: `SetupEnvironment` runs on every load in
+both entry paths, before the FREECAM branch, and calls `SkyboxAssets.Load` →
+`ModelExtractor.ReadClassTypeTrees`, which on a miss reads the bundle and decodes the SerializedFile node
+to recover the per-class type trees. `CharacterModel.Open` calls the same helper and finds the cache warm.
+
+| when the type-tree cache is cold | bytes | time |
+|---|---:|---:|
+| LZMA, the SerializedFile node **again** (`ReadClassTypeTrees`) | 170.9 MiB | 4.60 s |
+| `SerializedFile.Read` again | 103,549 objects | 0.01 s |
+
+So Block D is **4.61 s that every load pays on a fresh `user://`, in every tier, whether or not a player
+spawns** — the only masterbundle work here that no flag can skip.
+
 Adding the blocks up. Ranges span Block A's three ceilings, so a session's *upper* bound is the figure to
-quote when you want "what a first load can cost"; the warm row is exact because it runs no masterbundle
-code at all, and the standalone rows are narrow because they have no truncation to take:
+quote when you want "what a first load can cost"; the standalone blocks are narrow because they have no
+truncation to take. **D is additive to every row**, so it is given as its own column rather than doubling
+the table:
 
-| session | blocks | total | LZMA share |
+| session | blocks | without D | with a cold type-tree cache |
 |---|---|---:|---:|
-| everything warm | — | **0 s** | — |
-| first load, audio + face warm | A | 4.92–12.90 s | 93.5–95.6% |
-| first load, cold audio | A+B | 14.85–15.10 s | 95.6–97.2% |
-| first load, cold face | A+C | 9.62–17.60 s | 95.6–96.2% |
-| first load, everything cold | A+B+C | **19.55–19.80 s** | 96.2–97.4% |
-| warm objects, cold face only | C | 4.70 s | 97.9% |
-| warm objects, cold audio only | B (standalone) | ~14.5 s | 99.3% |
-| warm objects, cold audio + face | B+C | ~19.2 s | 99.0% |
+| everything warm | — | **0 s** | 4.61 s |
+| first load, audio + face warm | A | 4.92–12.90 s | 9.53–17.51 s |
+| first load, cold audio | A+B | 14.85–15.10 s | 19.46–19.71 s |
+| first load, cold face | A+C | 9.62–17.60 s | 14.23–22.21 s |
+| first load, everything cold | A+B+C | 19.55–19.80 s | **24.16–24.41 s** |
+| warm objects, cold face only | C | 4.70 s | 9.31 s |
+| warm objects, cold audio only | B (standalone) | ~14.5 s | ~19.1 s |
+| warm objects, cold audio + face | B+C | ~19.2 s | ~23.8 s |
 
-Note how the ranges *narrow* the moment audio is wanted: the same condition that adds 2.20 s also pins
-`.resS` to its full 1,180.2 MiB, so A+B is far more predictable than A alone. The last row is worth
-staring at from the other direction: **clearing two small caches costs almost exactly what a full cold
-load costs**, without a single mesh being extracted, because both fallbacks re-decompress from the front.
+LZMA's share stays between **93.5% and 99.8%** across every cell — the one conclusion no ceiling can move,
+because truncating the `.resS` read removes time from the numerator and denominator together.
 
-Whatever the cache state, **LZMA is never below 93% of it** — that is the one conclusion here that no
-ceiling can move, because truncating the `.resS` read removes time from the numerator and denominator
-together.
+Two things to notice. The ranges *narrow* the moment audio is wanted: the same condition that adds 2.20 s
+also pins `.resS` to its full 1,180.2 MiB, so A+B is far more predictable than A alone. And **the warm row
+is only 0 s once four caches are warm, not three** — a fresh `user://` pays 4.61 s before anything else
+happens.
 
-**Which of those a benchmark measures depends on the tier, not on a blanket rule.** `FREECAM` and
-`STEP_PROBE` spawn no player, so they skip Blocks B and C entirely. Tier 3
-(`UG_RUNTIME_BENCH_SECS=12 SOLO=1`) sets neither flag and *does* spawn a player, so on a fresh `user://`
-it pays all three — **~19.8 s on the first run and ~0 s of masterbundle work on the next, for identical
-code**, since the repeat run populates every cache and `Prepare` then returns before streaming. That swing
-is the whole measurement, not a fraction of it. Warm the caches once and confirm a second run is cheap
-before comparing anything; a benchmark that straddles the transition is measuring `user://`, not code.
+**Which of those a benchmark measures depends on the tier, but D is not optional.** `FREECAM` and
+`STEP_PROBE` spawn no player, so they skip Blocks B and C — but they still run `SetupEnvironment`, so on a
+fresh `user://` even a free-cam screenshot pays Block D's 4.61 s. Tier 3
+(`UG_RUNTIME_BENCH_SECS=12 SOLO=1`) sets neither flag and *does* spawn a player, so it pays all four:
+**~24.4 s on the first run against ~0 s on the next, for identical code**, once every cache is populated
+and `Prepare` returns before streaming. That swing is larger than the whole measurement. Warm the caches
+once and confirm a second run is cheap before comparing anything; a benchmark that straddles the
+transition is measuring `user://`, not code.
 
 **The cold face path deserves its own note**: `CharacterModel.LoadFace` falls through to
 `ModelExtractor.ReadMasterbundleFile`, which re-reads the bundle from disk and decodes the whole
@@ -173,8 +188,22 @@ SerializedFile node a second time — 4.7 s, of the same order as Block A itself
 small inline face texture. Everything it needs was already decoded minutes earlier by the streamer's own
 pass. That is the largest single piece of avoidable work this measurement found, and like the container
 repeats the fix is a `src/` change: hand the already-decoded `SerializedFile` to the face loader instead
-of letting it start over. The same shape produces Block B's standalone case, and the same fix applies:
-neither fallback needs its own pass over the blob when one has already run.
+of letting it start over.
+
+**The same shape appears three times**, which is what makes it the finding rather than a one-off. Blocks
+B, C and D are each a helper that opens the bundle by itself and re-decodes from the front, because none
+of them can see the decode the streamer already did:
+
+| block | entry point | re-decodes |
+|---|---|---|
+| B (standalone) | `AudioExtractor.ReadAudioNodes` | the whole blob, discarding 1,180.2 MiB of `.resS` |
+| C | `ModelExtractor.ReadMasterbundleFile` | the SerializedFile node |
+| D | `ModelExtractor.ReadClassTypeTrees` | the SerializedFile node |
+
+Three helpers, three independent caches, one shared cause. On a fresh `user://` they add **~23.8 s
+between them** — more than Block A's ceiling — to produce a face texture, a set of audio clips and a type
+table the pass had the bytes for. The fix is the same in all three: hand the decoded `SerializedFile`
+around instead of starting over.
 
 **Every block is LZMA-bound and nothing else is close**, as the share column above shows: 93.5% at the
 narrowest, and higher everywhere else.
@@ -182,7 +211,7 @@ The object table is free, and the TypeTree reader — the obvious-looking target
 that is the port's own code — is **0.22 s** of unconditional sweep, at most 0.06 s more from the
 partly-scanned row and 0.19 s from everything a map could place. Against Block A that is 1.7% at the
 ceiling and 4.5% at the floor, where there is far less LZMA to be dwarfed by. Eliminating
-it entirely would take well under a second off a 5–20 s load. Work aimed at cold load time should go at
+it entirely would take well under a second off a 5–24 s load. Work aimed at cold load time should go at
 *what is decoded and when* (`ress`, deferral, caching) rather than at how fast the port turns
 already-decoded bytes into values — and the two exceptions below are both of exactly that kind: decoding
 something a second time rather than decoding it slowly.
