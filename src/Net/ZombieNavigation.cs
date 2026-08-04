@@ -368,6 +368,13 @@ public sealed class ZombieNavigation
     private readonly Dictionary<int, IReadOnlySet<int>> _disabledByFlag = new();
     private bool _reconciled;
 
+    // Only kept when a capture could ask for it. This doubles the rejected-face storage while
+    // reconciliation runs and then holds the copy for the lifetime of the navigation — and
+    // ReleaseReconciliationState exists precisely because that set reaches hundreds of thousands of
+    // entries on a large map. With REPRO=0 no ReproService is created and nothing can ever read it.
+    private static readonly bool CaptureEnabled =
+        EnvFlag.IsOn(OS.GetEnvironment("REPRO"), whenUnset: true);
+
     // Snapshot one flag's disabled set at the moment it is decided, keyed by position in _flags.
     //
     // An EMPTY set removes rather than skips. A partial cache is loaded into here and then, if partial
@@ -376,6 +383,8 @@ public sealed class ZombieNavigation
     // faces the live graph actually has. Last writer wins is the only rule that holds here.
     private void RememberDisabled(NavFlag flag, HashSet<int> unreachable)
     {
+        if (!CaptureEnabled)
+            return;
         for (int i = 0; i < _flags.Count; i++)
             if (ReferenceEquals(_flags[i], flag))
             {
@@ -497,8 +506,8 @@ public sealed class ZombieNavigation
                         {
                             if (!_useBakedGraph)
                                 await PublishProgressGraphAsync();
-                            _reconciled = true;
                             await PublishAsync(fingerprint, cachePath + ".csr");
+                            _reconciled = true;
                             Log.Print($"[nav] collision reconciliation cache hit ({fingerprint[..12]})");
                             ReleaseReconciliationState();
                             return;
@@ -602,8 +611,8 @@ public sealed class ZombieNavigation
                 QueueCheckpoint(cachePath, fingerprint, triangleCounts);
         }
 
-        _reconciled = true;
         await PublishAsync(fingerprint, cachePath == null ? null : cachePath + ".csr");
+        _reconciled = true;
         if (cachePath != null && fingerprint != null)
             QueueCheckpoint(cachePath, fingerprint, triangleCounts);
         try
