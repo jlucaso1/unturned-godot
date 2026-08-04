@@ -741,13 +741,20 @@ public sealed partial class ZombieSystem
     // property of the geometry, not of the body asking. A sprinter and a crawler standing on the same
     // spot get the same two routes and should make the same choice.
     //
-    // The window is deliberately one-sided. An incumbent with nothing left to walk does beat every
-    // replacement on length, which reads like a hole — a target that steps out of reach leaves an
-    // endpoint still inside the completeness radius, so `oldError` keeps the veto armed while the way
-    // that arrives has become the long way round. It is not a hole, because a body parked on a route
-    // it has walked out delivers no motion, and BlockedRouteTimeout invalidates a route that stops
-    // delivering motion. Measured on that geometry: the route is thrown out 0.75 s after the body
-    // stops, and the way round is taken. Adding a second escape here would be an untestable one.
+    // The window is one-sided, and an incumbent with nothing left to walk therefore beats every
+    // replacement on length. That reads like a hole and is not reachable, for a reason worth writing
+    // down because it is not obvious and it is load-bearing. Two radii decide it, and they do not
+    // overlap: this veto only arms while the incumbent's endpoint is within 2 m of the destination
+    // (`oldError <= 4f`), while CalculateTargetPoint aims at the DESTINATION instead of the route's
+    // end as soon as that end is within 4 m of it. Every route this veto can protect is therefore
+    // already being walked straight through its own endpoint to the destination, so the body never
+    // stops on one and `remaining` never goes to zero while the veto is armed.
+    //
+    // Do not close it here without moving one of those radii first. Guarding on TargetReached looks
+    // right, tests green, and is dead code — the state it names cannot occur while the veto holds.
+    // (BlockedRouteTimeout would not catch it either, if it did occur: a finished route requests no
+    // movement, and zero delivered out of zero requested counts as success, so the counter resets
+    // every tick. That is the escape hatch this comment used to claim, and it does not exist.)
     //
     // Closing it by widening the window instead — refusing an incumbent much SHORTER than the offer —
     // reads as the same fix and is not: it fires on every route in its final metres, which is every
@@ -759,7 +766,18 @@ public sealed partial class ZombieSystem
             return false;
         float remaining = RouteLengthFrom(zombie.Position, zombie.PathPoints,
             zombie.CurrentWaypointIndex);
-        float offered = RouteLengthFrom(zombie.Position, replacement, 0);
+        // From the second waypoint, because the first is not a place the body goes. The query is made
+        // from the position SNAPPED onto the mesh, so a body pushed off it by collision gets a route
+        // beginning several metres away, and the follower does not walk there and back — CalculateVelocity
+        // joins the route at index 1 and uses index 0 only as the segment origin to aim along. Billing
+        // those two legs overstates the offer by the snap distance.
+        //
+        // This one is reasoned from the follower's own indexing rather than from a repro: no test here
+        // makes it change an outcome, because the veto turns out to be far harder to hold than it
+        // looks — the destination is offset a metre perpendicular to the body's own yaw, so it swings
+        // as the body turns and `oldError` leaves the arming radius on its own. Measuring the offer
+        // the way it is actually walked is right regardless of whether today's thresholds notice.
+        float offered = RouteLengthFrom(zombie.Position, replacement, replacement.Count > 1 ? 1 : 0);
         return offered + RouteTieBand >= remaining;
     }
 

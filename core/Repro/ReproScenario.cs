@@ -17,6 +17,13 @@ public sealed class ReproScenarioOptions
     // Answer whatever the recording does not cover from the dump's collision slice.
     public bool UseGeometry { get; init; } = true;
 
+    // Recompute ROUTES over the dump's navmesh while still serving the recorded move, ground and
+    // vision answers. A session and a replay can disagree about routing alone — the live map may have
+    // used the engine's pathfinder where the replay has only the baked graph — and turning the whole
+    // oracle off to see that also changes the physics under the body, so the two effects cannot be
+    // told apart. This isolates the one that matters when the question is "is the ROUTE the problem".
+    public bool RecomputePaths { get; init; }
+
     // The generator a replay rolls from when the dump could not carry the session's own state.
     public ulong RandomSeed { get; init; }
 
@@ -348,7 +355,8 @@ public sealed class ReproScenario
 
     private bool ResolvePath(Vector3 from, Vector3 to, List<Vector3> path, float radius)
     {
-        if (Oracle != null && Oracle.TryPath(from, to, radius, path, out bool found))
+        if (Oracle != null && !_options.RecomputePaths
+            && Oracle.TryPath(from, to, radius, path, out bool found))
             return found;
         // Installed only alongside a pathfinder, so there is always one to fall through to. Whether it
         // can actually answer is another matter: the dump's own slice has triangles near the incident

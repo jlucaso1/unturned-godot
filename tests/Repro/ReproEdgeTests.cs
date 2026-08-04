@@ -48,6 +48,56 @@ public class ReproEdgeTests
         Assert.Null(bare.System.VisionBlocked);
     }
 
+    // A session and a replay can disagree about ROUTING alone: the live map may have answered from the
+    // engine's pathfinder where the replay has only the baked graph. Turning the whole oracle off to
+    // see that also changes the ground and collision under the body, so the two causes cannot be told
+    // apart afterwards. RecomputePaths drops the recorded routes and keeps everything else.
+    [Fact]
+    public void RecomputingPathsDropsTheRecordedRoutesAndKeepsTheRest()
+    {
+        // One recorded answer: a route from (0,0,0) to (10,0,0) that detours through (0,0,9). Nothing
+        // a pathfinder over open ground would ever return, so which source answered is unambiguous.
+        var oracle = new ReproOracleData();
+        oracle.Path.AddRange(new[]
+        {
+            0f, 1f,          // tick, zombie
+            0f, 0f, 0f,      // from
+            10f, 0f, 0f,     // to
+            BakedNavGraph.AgentRadius,
+            1f,              // found
+            0f, 2f,          // first point, count
+        });
+        oracle.PathPoints.AddRange(new[] { 0f, 0f, 9f, 10f, 0f, 0f });
+
+        var dump = new ReproDump
+        {
+            World = new ReproWorldData { HasNavmesh = true, Bounds = { Box() } },
+            Zombies = new ReproZombieSection
+            {
+                Oracle = oracle,
+                Frames = { new ReproFrame { Dt = 0.08f } },
+            },
+        };
+
+        var recorded = new List<Vector3>();
+        Assert.True(new ReproScenario(dump).System.PathQuery!(
+            new Vector3(0, 0, 0), new Vector3(10, 0, 0), recorded, BakedNavGraph.AgentRadius));
+        Assert.Equal(new Vector3(0, 0, 9), recorded[0]); // the session's own answer, detour and all
+
+        var fresh = new List<Vector3>();
+        var scenario = new ReproScenario(dump, new ReproScenarioOptions
+        {
+            RecomputePaths = true,
+            NavFlags = new[] { ReproWorlds.FlatField() },
+        });
+        scenario.System.PathQuery!(new Vector3(0, 0, 0), new Vector3(10, 0, 0), fresh,
+            BakedNavGraph.AgentRadius);
+        Assert.DoesNotContain(new Vector3(0, 0, 9), fresh); // recomputed: the detour is not repeated
+
+        // And the rest of the oracle is untouched — this is a routing switch, not `--no-oracle`.
+        Assert.NotNull(scenario.Oracle);
+    }
+
     // Handing the replay the real map's navmesh (or someone else's pathfinder) is what lifts it out of
     // the dump's local slice.
     [Fact]

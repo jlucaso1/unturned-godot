@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using Godot;
 using UnturnedGodot.Data;
 using UnturnedGodot.Repro;
 using UnturnedGodot.Zombies;
@@ -11,6 +12,8 @@ namespace UnturnedGodot.ReproHarness;
 //
 //   dotnet run -c Release --project tools/ReproHarness -- info    dump.json
 //   dotnet run -c Release --project tools/ReproHarness -- replay  dump.json [--ticks 200] [--level DIR]
+//                                                                       [--trace ZOMBIEID]
+//                                                                       [--recompute-paths]
 //   dotnet run -c Release --project tools/ReproHarness -- verify  dump.json
 //   dotnet run -c Release --project tools/ReproHarness -- pretty   dump.json [out.json]
 //
@@ -113,12 +116,20 @@ public static class Program
         {
             UseRecordedAnswers = !Has(args, "--no-oracle"),
             UseGeometry = !Has(args, "--no-geometry"),
+            RecomputePaths = Has(args, "--recompute-paths"),
             NavFlags = LoadNavmesh(level),
         };
 
         var scenario = new ReproScenario(dump, options);
         Console.WriteLine($"world: {scenario.Collision?.TriangleCount ?? 0} collision triangles, "
             + $"{(options.NavFlags != null ? "full map navmesh" : "the dump's navmesh slice")}");
+
+        // `--trace ID` prints one line per tick for a single body. The summary says a zombie walked
+        // 19 m to gain 1.5, which names the symptom and nothing else; the route it was handed each
+        // tick, and where along it the body had got to, is what says why.
+        if (Option(args, "--trace") is { } traced)
+            return Trace(scenario, ushort.Parse(traced), extra);
+
         ReproReplayReport report = scenario.Run(extra);
         Console.Write(report.Describe());
 
@@ -135,6 +146,47 @@ public static class Program
             return 1;
         }
         Console.WriteLine("this build reproduces the recording");
+        return 0;
+    }
+
+    private static int Trace(ReproScenario scenario, ushort id, int extra)
+    {
+        ZombieInstance? zombie = null;
+        foreach (ZombieInstance candidate in scenario.System.Zombies)
+            if (candidate.Id == id)
+                zombie = candidate;
+        if (zombie == null)
+        {
+            Console.Error.WriteLine($"no zombie {id} in this dump");
+            return 1;
+        }
+
+        Console.WriteLine("tick  position                 yaw     state   route  wp  blocked  step");
+        Vector3 previous = zombie.Position;
+        string lastShape = "";
+        for (int i = 0; i < scenario.WindowTicks + Math.Max(0, extra); i++)
+        {
+            scenario.Step();
+            float step = new Vector2(zombie.Position.X - previous.X,
+                zombie.Position.Z - previous.Z).Length();
+            previous = zombie.Position;
+            Console.WriteLine($"{scenario.Tick,4}  "
+                + $"({zombie.Position.X,8:F2},{zombie.Position.Z,8:F2})  "
+                + $"{zombie.Yaw,7:F1}  {zombie.State,-7} "
+                + $"{zombie.PathPoints.Count,4}{(zombie.PathIsPartial ? "p" : " ")} "
+                + $"{zombie.CurrentWaypointIndex,3}  {zombie.BlockedRouteTime,6:F2}  {step,5:F3}");
+
+            // The waypoints only when they change. A body that turns because it was handed a
+            // differently shaped route looks exactly like a body that turned for its own reasons,
+            // until you can see the two routes side by side.
+            string shape = string.Join(" ", zombie.PathPoints.ConvertAll(
+                w => $"({w.X:F1},{w.Z:F1})"));
+            if (shape != lastShape)
+            {
+                Console.WriteLine($"      route: {shape}");
+                lastShape = shape;
+            }
+        }
         return 0;
     }
 
