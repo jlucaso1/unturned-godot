@@ -49,7 +49,14 @@ public static class MeshCache
     // own rules and cannot be told apart from one that simply had nothing streamed or mirrored — a mesh
     // missing its wheels looks exactly like a prefab that never had any. Bumping is what re-extracts them;
     // without it, every install with a warm cache keeps the wheel-less meshes indefinitely.
-    private const uint Magic = 0x434D4755;
+    //
+    // "UGMD": extraction no longer reads a prefab's hidden alternate states (Dead/Ragdoll) as geometry, so
+    // the objects that were caching their wreck — or their debris on top of themselves — now cache the live
+    // model, and the ragdoll colliders that came with them are gone. Nothing about the FORMAT changed here,
+    // but an entry written by the old rules is indistinguishable from a correct one, and completeness is
+    // decided per GUID: bumping is what makes an install with a warm cache extract those meshes again
+    // instead of drawing the wreck forever.
+    private const uint Magic = 0x444D4755;
 
     // A prefab's authored lower level is cached beside its mesh as "<guid>.lod1.mesh". The suffix still
     // ends in ".mesh" so a directory scan finds both levels; callers that want only the base level filter
