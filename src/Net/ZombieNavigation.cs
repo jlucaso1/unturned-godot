@@ -359,9 +359,14 @@ public sealed class ZombieNavigation
     // where only a fresh build can stitch a seam a removed face just exposed. A mid-reconciliation dump
     // that carried these would therefore replay over connections the session did not have. Carrying
     // none instead makes it behave exactly like a dump from before this field existed.
-    public IReadOnlyDictionary<int, IReadOnlySet<int>> DisabledFaces => _reconciled
-        ? _disabledByFlag
-        : Empty;
+    // Reconciliation finished AND the graph it produced is the one answering queries. On a small map
+    // PublishAsync only hands the mesh to the NavigationServer and returns; the map goes on
+    // synchronizing for seconds afterwards, and Query keeps using _progressGraph until it is ready —
+    // which is the same EnsureReady the IsReady property asks. Derived from that rather than tracked
+    // separately, because a second flag is a second thing that can be true at the wrong moment, and
+    // this gate has now been wrong at three different moments for exactly that reason.
+    public IReadOnlyDictionary<int, IReadOnlySet<int>> DisabledFaces =>
+        _reconciled && (_useBakedGraph || EnsureReady()) ? _disabledByFlag : Empty;
 
     private static readonly Dictionary<int, IReadOnlySet<int>> Empty = new();
 
