@@ -353,9 +353,20 @@ public sealed class ZombieNavigation
     // Held separately from _unreachable because that is working state: it is cleared when
     // reconciliation finishes, including on a cache hit, which is nearly always before anyone captures
     // anything. This is the part that has to outlive it.
-    public IReadOnlyDictionary<int, IReadOnlySet<int>> DisabledFaces => _disabledByFlag;
+    // Empty until the final graph is published, and that is not caution — it is the only honest answer
+    // while reconciliation runs. The live graph is being built ONCE and then Disabled face by face; a
+    // replay applies what it is given as build-time exclusions, and the two differ at T-junctions,
+    // where only a fresh build can stitch a seam a removed face just exposed. A mid-reconciliation dump
+    // that carried these would therefore replay over connections the session did not have. Carrying
+    // none instead makes it behave exactly like a dump from before this field existed.
+    public IReadOnlyDictionary<int, IReadOnlySet<int>> DisabledFaces => _reconciled
+        ? _disabledByFlag
+        : Empty;
+
+    private static readonly Dictionary<int, IReadOnlySet<int>> Empty = new();
 
     private readonly Dictionary<int, IReadOnlySet<int>> _disabledByFlag = new();
+    private bool _reconciled;
 
     // Snapshot one flag's disabled set at the moment it is decided, keyed by position in _flags.
     //
@@ -486,6 +497,7 @@ public sealed class ZombieNavigation
                         {
                             if (!_useBakedGraph)
                                 await PublishProgressGraphAsync();
+                            _reconciled = true;
                             await PublishAsync(fingerprint, cachePath + ".csr");
                             Log.Print($"[nav] collision reconciliation cache hit ({fingerprint[..12]})");
                             ReleaseReconciliationState();
@@ -494,7 +506,13 @@ public sealed class ZombieNavigation
                         if (partialCheckpoints && restored > 0)
                             Log.Print($"[nav] resumed collision reconciliation: {restored}/{_flags.Count} flags cached");
                         else
+                        {
+                            // The snapshots go with it. Everything is about to be recomputed, and until
+                            // each flag gets there the live graph has none of these faces disabled —
+                            // a capture in that window would record holes that are not in it.
                             _unreachable.Clear();
+                            _disabledByFlag.Clear();
+                        }
                     }
                 }
             }
@@ -584,6 +602,7 @@ public sealed class ZombieNavigation
                 QueueCheckpoint(cachePath, fingerprint, triangleCounts);
         }
 
+        _reconciled = true;
         await PublishAsync(fingerprint, cachePath == null ? null : cachePath + ".csr");
         if (cachePath != null && fingerprint != null)
             QueueCheckpoint(cachePath, fingerprint, triangleCounts);
