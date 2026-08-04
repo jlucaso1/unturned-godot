@@ -39,16 +39,23 @@ public partial class RemotePlayersView : Node3D
     private NetClient _client = null!;
     private string _unturnedPath = "";
     private System.Func<MovementAudio>? _audioFactory;
+
+    // The shared positional voice pool, for the sounds a gesture makes. Separate from the movement audio
+    // above because a swing is not derived from replicated state the way a footstep is — it is a
+    // consequence of a replicated EVENT, played once where it happened.
+    private OneShotAudio? _oneShot;
     private readonly Dictionary<byte, Avatar> _avatars = new();
     private bool _ownsTemplate;
 
     public static RemotePlayersView Create(NetClient client, string unturnedPath,
-        System.Func<MovementAudio>? audioFactory, Node3D? localTemplate = null) => new()
+        System.Func<MovementAudio>? audioFactory, Node3D? localTemplate = null,
+        OneShotAudio? oneShot = null) => new()
         {
             Name = "RemotePlayers",
             _client = client,
             _unturnedPath = unturnedPath,
             _audioFactory = audioFactory,
+            _oneShot = oneShot,
             _template = localTemplate,
             _ownsTemplate = localTemplate == null,
         };
@@ -101,10 +108,15 @@ public partial class RemotePlayersView : Node3D
             // One-shot hand animations the server said this player performed. Taken (not peeked) so each
             // swing plays exactly once, and applied after the movement state above so it wins the frame
             // it arrives on — SetState defers to a gesture that already owns the rig.
-            if (remote.PendingGesture != EPlayerGesture.None
-                && PlayerGestures.ClipFor(remote.TakeGesture()) is { } clip)
+            if (remote.PendingGesture != EPlayerGesture.None)
             {
-                avatar.Rig?.PlayOnce(clip);
+                EPlayerGesture gesture = remote.TakeGesture();
+                if (PlayerGestures.ClipFor(gesture) is { } clip)
+                    avatar.Rig?.PlayOnce(clip);
+                // Chest height, like the zombie voices: the swing comes from the body, not its feet.
+                if (PlayerGestures.SoundFor(gesture) is { } sound)
+                    _oneShot?.Play(sound, pose.Position + Vector3.Up,
+                        PlayerGestures.PunchVolume, PlayerGestures.PunchMaxDistance);
             }
 
             avatar.Audio?.Tick(remote.Stance, remote.Moving, remote.Grounded, pose.Position, (float)delta);

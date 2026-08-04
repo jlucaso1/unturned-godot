@@ -54,6 +54,26 @@ public static class PlayerGestures
         _ => null,
     };
 
+    // The swing the game plays off both fists: Sounds/MeleeAttack_01.mp3 and _02.mp3, the two raw
+    // AudioClips sitting in the core master bundle's Sounds root. They carry no OneShotAudioDefinition,
+    // like ZombieManager's roar and groan arrays, so the extractor packages them as one synthetic
+    // definition under this name and a play picks between them at random — which is the whole of the
+    // variation the game gets out of them.
+    public const string PunchSound = "Punch";
+
+    public static string? SoundFor(EPlayerGesture gesture) => gesture switch
+    {
+        EPlayerGesture.PunchLeft or EPlayerGesture.PunchRight => PunchSound,
+        _ => null,
+    };
+
+    // Unlike FootstepConfig's numbers, these are not read off the game's own call: the clips are raw, so
+    // the envelope lives in code this port does not have. The clip SET is verified — everything below is
+    // a plain default (unity gain, no pitch shift) at a body-scale rolloff, chosen to be corrected rather
+    // than to be guessed at more elaborately.
+    public const float PunchVolume = 1f;
+    public const float PunchMaxDistance = 24f;
+
     public static EPlayerGesture For(EPlayerPunch punch) =>
         punch == EPlayerPunch.Left ? EPlayerGesture.PunchLeft : EPlayerGesture.PunchRight;
 }

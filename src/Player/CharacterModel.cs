@@ -134,6 +134,8 @@ public static class CharacterModel
             if (Open(unturnedPath) is not { } opened)
                 return (null, null);
             source = opened;
+            if (EnvFlag.IsOn(OS.GetEnvironment("UG_DUMP_PLAYER_RIG"), whenUnset: false))
+                DumpRigs(source);
             body = BuildFrom(source, PlayerEntity);
         }
         catch (System.Exception e)
@@ -261,6 +263,51 @@ public static class CharacterModel
         foreach (SerializedObject o in file.Objects)
             byId[o.PathId] = o;
         return new AssetSource(file, byId, bundlePath);
+    }
+
+    // Every skinned renderer the player prefab carries, with the chain of GameObject names above it and
+    // whether its mesh decodes with per-vertex skinning. Which of them is the first-person rig — if the
+    // prefab separates one at all — is a fact about an authored asset, and this port cannot read that
+    // asset in an environment without a client install. Rather than guess a subtree name, ask the
+    // install: UG_DUMP_PLAYER_RIG=1 prints what is actually in there.
+    private static void DumpRigs(in AssetSource source)
+    {
+        SerializedFile file = source.File;
+        Dictionary<long, SerializedObject> byId = source.ById;
+        int found = 0;
+        foreach (SerializedObject o in file.Objects)
+        {
+            if (o.ClassId != ClassSkinnedMeshRenderer)
+                continue;
+            Dictionary<string, object> smr;
+            try { smr = Read(file, byId, o.PathId); }
+            catch { continue; }
+
+            long goId = Id(smr["m_GameObject"]);
+            var chain = new List<string>();
+            long transformId = TransformOf(file, byId, goId);
+            while (transformId != 0)
+            {
+                Dictionary<string, object> t = Read(file, byId, transformId);
+                chain.Add((string)Read(file, byId, Id(t["m_GameObject"]))["m_Name"]);
+                transformId = Id(t["m_Father"]);
+            }
+            if (chain.Count == 0 || chain[^1] != PlayerEntity.Root)
+                continue;
+
+            string skinning = "no mesh";
+            if (byId.TryGetValue(Id(smr["m_Mesh"]), out SerializedObject? meshObj))
+            {
+                UnityMesh mesh = UnityMesh.Read(Read(file, byId, meshObj.PathId));
+                skinning = !mesh.Usable ? "unusable"
+                    : mesh.BoneIndices.Length == mesh.Vertices.Length * UnityMesh.BonesPerVertex
+                        && mesh.BindPoses.Count > 0 ? "skinned" : "no weights";
+            }
+            chain.Reverse();
+            Log.Print($"[rig-dump] {string.Join(" / ", chain)}  [{skinning}]");
+            found++;
+        }
+        Log.Print($"[rig-dump] {found} skinned renderer(s) under {PlayerEntity.Root}");
     }
 
     private static Node3D? BuildFrom(in AssetSource source, EntityConfig entity)

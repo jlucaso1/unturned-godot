@@ -776,6 +776,7 @@ public partial class Main : Node3D
             ViewmodelModel = rigs.Viewmodel,
         };
         (player.Footsteps, _movementAudioFactory) = BuildMovementAudio(unturnedPath);
+        player.Sounds = _oneShotAudio; // BuildMovementAudio created the pool; gestures share it
         AddChild(player);
         _dayNight?.AttachCamera(player.Camera);
 
@@ -827,7 +828,7 @@ public partial class Main : Node3D
             return;
         player.Net = network.Client;
         AddChild(RemotePlayersView.Create(network.Client, unturnedPath, _movementAudioFactory,
-            player.BodyModel));
+            player.BodyModel, _oneShotAudio));
         // The zombies view tracks the LOCAL player's nav bound (Player.PlayerMovement.updateBounds runs client-
         // side in the original too) to drop the avatars of a region it leaves.
         var navBounds = LevelNavigationData.Load(

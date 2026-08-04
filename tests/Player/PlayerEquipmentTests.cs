@@ -115,6 +115,24 @@ public class PlayerEquipmentTests
         Assert.Null(PlayerGestures.ClipFor(gesture));
     }
 
+    // Both fists swing through the same pair of clips — the game ships one MeleeAttack set, not one per
+    // hand — so the sound does not distinguish them the way the animation does.
+    [Theory]
+    [InlineData(EPlayerGesture.PunchLeft)]
+    [InlineData(EPlayerGesture.PunchRight)]
+    public void SoundFor_GivesBothFistsTheSameSwing(EPlayerGesture gesture)
+    {
+        Assert.Equal(PlayerGestures.PunchSound, PlayerGestures.SoundFor(gesture));
+    }
+
+    [Theory]
+    [InlineData(EPlayerGesture.None)]
+    [InlineData(EPlayerGesture.Wave)]
+    public void SoundFor_IsNullForAGestureWithNoSoundYet(EPlayerGesture gesture)
+    {
+        Assert.Null(PlayerGestures.SoundFor(gesture));
+    }
+
     [Fact]
     public void For_MapsEachFistToItsGesture()
     {

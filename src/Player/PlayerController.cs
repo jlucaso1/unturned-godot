@@ -31,6 +31,11 @@ public partial class PlayerController : CharacterBody3D
     // Movement audio (footsteps + landing), built by the caller with the map's terrain material data.
     public MovementAudio? Footsteps { get; set; }
 
+    // The shared positional voice pool, for the sounds a gesture makes. The owner plays its own swing
+    // straight away for the same reason it animates it straight away: the sound belongs to the frame the
+    // button went down, not to the round trip.
+    public OneShotAudio? Sounds { get; set; }
+
     // Multiplayer session, when hosting or joined: the controller forwards inputs at the 12.5 Hz cadence.
     public UnturnedGodot.Net.NetClient? Net { get; set; }
 
@@ -291,13 +296,17 @@ public partial class PlayerController : CharacterBody3D
 
         EPlayerGesture gesture = _equipment.Simulate(_tick, primary, secondary,
             new HandState { Stance = _stance });
+
+        // Chest height, matching what the other clients play for this same swing off the replicated
+        // gesture — the owner just does not wait for the round trip to hear it.
+        if (PlayerGestures.SoundFor(gesture) is { } sound)
+            Sounds?.Play(sound, GlobalPosition + Vector3.Up,
+                PlayerGestures.PunchVolume, PlayerGestures.PunchMaxDistance);
+
         if (PlayerGestures.ClipFor(gesture) is not { } clip)
             return gesture;
 
-        // Only the rig currently on screen. Both carry the same clips, so either shows the same swing —
-        // but a hidden rig stops advancing its clock (CharacterSkeleton pauses _Process off screen), and
-        // arming one would leave a stale gesture to thaw and replay the next time it is shown.
-        (_thirdPerson ? _rig : _viewmodel)?.PlayOnce(clip);
+        DrawnRig?.PlayOnce(clip);
         return gesture;
     }
 
@@ -398,11 +407,23 @@ public partial class PlayerController : CharacterBody3D
             : Vector3.Zero;
     }
 
+    // The rig the player is actually looking at, which is the only one worth animating: a hidden rig
+    // stops advancing its clock (CharacterSkeleton pauses _Process off screen), so arming one leaves a
+    // stale gesture to thaw and replay the next time it is shown. Derived from the same condition
+    // ApplyPerspective shows them by, so the two cannot drift apart.
+    private CharacterSkeleton? DrawnRig => _thirdPerson || _viewmodel == null ? _rig : _viewmodel;
+
     private void ApplyPerspective()
     {
-        _model.Visible = _thirdPerson; // hide own body in first person
+        // With a separate arms rig, first person hides the body and shows the arms. WITHOUT one, hiding
+        // the body would leave first person empty — which is what it was doing. Unturned's own first
+        // person is not an arms-only viewmodel anyway: the character is drawn from inside its own head,
+        // which is why you can look down and see your legs. So the body stays visible and the camera,
+        // already at eye height inside the head, sees it from within: the head's own faces point away
+        // and are culled, and what is left in view is the torso, arms and legs — the swing included.
+        _model.Visible = _thirdPerson || _viewmodel == null;
         if (_viewmodel != null)
-            _viewmodel.Visible = !_thirdPerson; // ...and show the arms instead
+            _viewmodel.Visible = !_thirdPerson;
         // The third-person collision ray belongs to UpdateCamera in _PhysicsProcess. _Ready and _Input
         // both call this method outside a physics notification, where separate-threaded physics can have
         // its direct space locked. The next physics tick places a newly enabled third-person camera.
