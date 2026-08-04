@@ -605,27 +605,41 @@ public static class Program
     // decode everything exactly once, so they already contain the first decode of each of these; only the
     // decodes beyond the first are additional, which is what the "extra" column reports.
     //
-    // Each entry names where the repeats are, so the count can be checked against the code rather than
-    // trusted. Both are deliberately the low end.
-    private static readonly (int ClassId, int Decodes, string Where)[] RepeatDecoded =
+    // `EveryObject` says whether the multiplicity applies to every object of the class in the file or only
+    // to the subset a particular pass reaches. Where it is false the extra is an UPPER BOUND, because the
+    // suite has no way to know which objects a given map's placements actually reach — pricing it over the
+    // whole class is the widest that subset could be. Each entry names its sites so the count can be
+    // checked against the code rather than trusted.
+    private static readonly (int ClassId, int Decodes, bool EveryObject, string Where)[] RepeatDecoded =
     {
         // PrefabGraph.ReadContainer, BundleTextures.Locate and AudioExtractor.Plan each walk m_Container
-        // by decoding the whole AssetBundle object again. RoadsBuilder and CharacterModel scan one too,
-        // but their own bundle rather than this one, so they are not counted.
-        (AssetBundleClassId, 3, "PrefabGraph.ReadContainer + BundleTextures.Locate + AudioExtractor.Plan"),
+        // by decoding the whole AssetBundle object again, on every load. RoadsBuilder and CharacterModel
+        // scan one too, but their own bundle rather than this one, so they are not counted.
+        (AssetBundleClassId, 3, true,
+            "PrefabGraph.ReadContainer + BundleTextures.Locate + AudioExtractor.Plan"),
 
-        // MapObjectKeysToMeshes decodes each skinned renderer in the mesh-part sweep, then
-        // MeshRendererMaterials reaches the same component from its GameObject and decodes it again.
-        (137, 2, "MapObjectKeysToMeshes sweep + MeshRendererMaterials"),
+        // MapObjectKeysToMeshes decodes each skinned renderer in its class-id sweep, then
+        // MeshRendererMaterials reaches the same component from its GameObject and decodes it again — but
+        // only for parts that clear the mesh and anchor checks, so this is a bound over the class.
+        (137, 2, false, "MapObjectKeysToMeshes sweep + MeshRendererMaterials"),
+
+        // AnchorOf decodes a GameObject (and caches it) for the part name, then MeshRendererMaterials
+        // decodes the same GameObject again to walk m_Component — it is a separate static and cannot see
+        // that cache. Only mesh-bearing prefab GameObjects take both paths.
+        (1, 2, false, "PrefabWalk.AnchorOf's cache + MeshRendererMaterials"),
+
+        // BlendOf and CullOf both go through ShaderOf but with SEPARATE caches (_shaderBlends,
+        // _shaderCulls), so the first material using a shader decodes it once for each. Only shaders a
+        // resolved material actually names are reached.
+        (48, 2, false, "MaterialResolver.BlendOf + CullOf (separate shader caches)"),
     };
 
     // Materials have no fixed multiplicity to report: MaterialResolver.Resolve decodes the material on
     // EVERY call and is called per submesh, so the count is the number of submeshes sharing it, which is
-    // a property of the map's placements rather than of the bundle. Named here because it is the reason
-    // the targeted row is a floor rather than a ceiling.
+    // a property of the map's placements rather than of the bundle.
     private const string TargetedRepeatNote =
-        "MaterialResolver.Resolve re-decodes a material on every submesh that uses it (no cache), so the "
-        + "targeted row above is a floor, not a bound";
+        "MaterialResolver.Resolve re-decodes a material on every submesh that uses it (no cache), with no "
+        + "fixed multiplicity to price — the count belongs to the map's placements, not the bundle";
 
     private static void RepeatDecodeTable(List<(SerializedObject Obj, SerializedFile File)> readable)
     {
@@ -638,7 +652,7 @@ public static class Program
         }
 
         bool header = false;
-        foreach ((int classId, int decodes, string where) in RepeatDecoded)
+        foreach ((int classId, int decodes, bool everyObject, string where) in RepeatDecoded)
         {
             if (!byClass.TryGetValue(classId, out List<(SerializedObject Obj, SerializedFile File)>? objects)
                 || objects.Count == 0)
@@ -660,7 +674,10 @@ public static class Program
             double median = Bench($"  {name} x{objects.Count:N0}, one decode", Pass, warmup: 1, iters: 5);
             long alloc = AllocatedBy(Pass);
             Console.WriteLine($"      {decodes} decodes per load, so {decodes - 1} extra: "
-                + $"{median * (decodes - 1):N0} ms and {Mb(alloc * (decodes - 1))} beyond the rows above");
+                + $"{median * (decodes - 1):N0} ms and {Mb(alloc * (decodes - 1))}"
+                + (everyObject
+                    ? " beyond the rows above"
+                    : " AT MOST — only the objects a placement reaches take both paths"));
             Console.WriteLine($"      {where}");
         }
 

@@ -92,6 +92,15 @@ table the load already built — which is what decoding it once and passing it a
 scale, decoding all 42,010 unconditionally-scanned objects once costs 0.21 s. That fix is a `src/` change
 rather than a parser one, which is why it is recorded here rather than made in `core/`.
 
+Three smaller repeats sit behind it, each a separate oversight and each bounded above rather than exact,
+since only the objects a map's placements reach take both paths: a GameObject is decoded by `AnchorOf`
+(which caches it) and again by `MeshRendererMaterials` (a static that cannot see that cache), ≤0.04 s; a
+Shader is decoded once for blend and once for culling because `BlendOf` and `CullOf` use *separate*
+caches behind the same `ShaderOf` helper, ≤0.03 s; and a SkinnedMeshRenderer is decoded by the mesh-part
+sweep and again for its materials, ≤0.001 s. `PerfHarness -- bundle` prices all four and marks which are
+exact. Materials are re-decoded per submesh with no cache at all, which has no fixed multiplicity to
+quote.
+
 Two specifics worth carrying. The decode rate is not one number: it varies 15x between the three nodes
 and tracks how compressible each one is, so a rate sampled in one node cannot price a deferral in
 another. And the audio `.resource` node decodes at 9.9 MiB/s against the texture node's 152.7 — 1.5% of

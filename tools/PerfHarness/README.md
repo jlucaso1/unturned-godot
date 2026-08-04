@@ -101,18 +101,30 @@ interleaved runs in one session — the range across those runs is the last colu
 | `TypeTreeReader.Read`, targeted | 50,739 | 102.7 MiB | 283 ms | 384 MiB | 248–294 ms |
 | `TypeTreeReader.Read`, every object | 103,549 | 167.9 MiB | 2,774 ms | 2,121 MiB | 2,668–2,936 ms |
 
-Every row decodes each object **exactly once**, which is a *floor* on load work rather than a bound.
+Every row decodes each object **exactly once**. For the *scanned* row that is a genuine floor — those
+classes are swept whatever the map. For the *targeted* row it is neither a floor nor a ceiling: a map
+placing a small subset decodes fewer of those 50,739 objects, while a shared material is decoded once per
+submesh using it, so the row can be wrong in either direction and its 283 ms is not unavoidable load work.
+
 Some objects are decoded again by a later pass, and the suite prices those separately:
 
-| decoded more than once | one decode | per load | extra beyond the rows above |
-|---|---:|---:|---:|
-| AssetBundle `m_Container` | 99 ms / 51.5 MiB | 3x | **197 ms / 102.9 MiB** |
-| SkinnedMeshRenderer | 0.6 ms / 0.7 MiB | 2x | 1 ms / 0.7 MiB |
+| decoded more than once | one decode | per load | extra beyond the rows above | applies to |
+|---|---:|---:|---:|---|
+| AssetBundle `m_Container` | 95 ms / 51.5 MiB | 3x | **190 ms / 102.9 MiB** | every load |
+| GameObject | 38 ms / 42.8 MiB | 2x | ≤ 38 ms / 42.8 MiB | mesh-bearing prefabs only |
+| Shader | 26 ms / 29.5 MiB | 2x | ≤ 26 ms / 29.5 MiB | shaders a resolved material names |
+| SkinnedMeshRenderer | 0.8 ms / 0.7 MiB | 2x | ≤ 1 ms / 0.7 MiB | parts clearing mesh+anchor checks |
 
 Only the decodes *beyond the first* are additional, since the rows above already contain one of each.
-Materials have no fixed multiplicity to quote — `MaterialResolver.Resolve` decodes the material on every
-call with no cache, and it is called per submesh, so the count is a property of the map's placements
-rather than of the bundle. That is why the targeted row is a floor and not a ceiling.
+Only the AssetBundle figure is exact: it is one object every load decodes three times. The rest apply to
+a subset the suite cannot identify — which objects a given map's placements reach — so they are priced
+over the whole class, which is the widest that subset could be, and marked `≤`. Each is a separate
+oversight rather than one pattern: `MeshRendererMaterials` is a static that cannot see `AnchorOf`'s
+GameObject cache, and `BlendOf`/`CullOf` go through the same `ShaderOf` helper with *separate* caches
+(`_shaderBlends`, `_shaderCulls`), so the first material naming a shader decodes it once for each.
+
+Materials have no fixed multiplicity to quote at all — `MaterialResolver.Resolve` decodes the material on
+every call with no cache, and it is called per submesh, so the count belongs to the map's placements.
 
 The allocation figures are byte-identical run to run, as they should be for a deterministic decode; only
 the clock moves.
@@ -122,7 +134,7 @@ the clock moves.
 decodes the whole thing from scratch. Five independent scans of it exist in the port
 (`PrefabGraph.ReadContainer`, `BundleTextures.Locate`, `AudioExtractor.Plan`, `RoadsBuilder`,
 `CharacterModel`); at least the first three run against the core masterbundle on a cold load. One of those
-decodes is already in the scanned row, so the **extra** is ~197 ms and ~103 MiB re-deriving something the
+decodes is already in the scanned row, so the **extra** is ~190 ms and ~103 MiB re-deriving something the
 load already had. Compare it against the whole scanned row: 42,010 objects cost 211 ms, and re-reading
 this one object twice costs almost as much again. That is the
 cheapest real win in this whole area, and the only reason it is not in this PR is that the fix lives in
