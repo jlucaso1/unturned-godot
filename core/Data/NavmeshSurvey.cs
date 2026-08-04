@@ -277,12 +277,26 @@ public sealed partial class BakedNavGraph
                     continue;
 
                 // Across, not merely alongside — the same question the router's own wall test asks, so
-                // a duplicated coplanar face cannot erase a real boundary. A stitched portal is exempt
-                // because its vertices need not belong to the neighbour at all (that is what makes it a
-                // T-junction), and the stitch already required the two faces to be on opposite sides.
-                int theirs = OppositeVertex(c.To, c.VertexA, c.VertexB);
-                if (theirs >= 0 && here * SideOfEdge(v0, v1, theirs) >= 0f)
-                    continue;
+                // a duplicated coplanar face cannot erase a real boundary.
+                //
+                // Asked ONLY of a portal that is the neighbour's own edge. A stitched portal is the
+                // OVERLAP of two edges, and its ends are ends of either one, so it routinely carries a
+                // vertex the neighbour does not have. OppositeVertex then does not report that by
+                // returning -1 — it returns the neighbour's first corner that is not in the pair, in
+                // winding order — and on a seam that corner can be the neighbour's own far endpoint,
+                // which lies ON the join and so scores side zero. Zero fails this test, the stitched
+                // connection is discarded, and a red line is drawn across open floor the router walks
+                // straight over. Rotating one triangle's indices — the same surface, written down
+                // differently — moved PEI's fixture between 7 and 9 rim segments this way.
+                //
+                // The stitch has already proved those two faces sit on opposite sides of the join
+                // (TryJoin refuses them otherwise), so there is nothing left here to check.
+                if (Owns(c.To, c.VertexA) && Owns(c.To, c.VertexB))
+                {
+                    int theirs = OppositeVertex(c.To, c.VertexA, c.VertexB);
+                    if (theirs >= 0 && here * SideOfEdge(v0, v1, theirs) >= 0f)
+                        continue;
+                }
 
                 covered.Add((MathF.Min(from, to), MathF.Max(from, to)));
             }
@@ -300,6 +314,11 @@ public sealed partial class BakedNavGraph
             Emit(a, b, open, 1f, rim);
             return true;
         }
+
+        private bool Owns(int triangle, int vertex) =>
+            Source.Triangles[triangle * 3] == vertex
+            || Source.Triangles[(triangle * 3) + 1] == vertex
+            || Source.Triangles[(triangle * 3) + 2] == vertex;
 
         // Whether a face covers no ground at all: collinear in plan, or welded onto a repeated corner.
         // Twice the signed XZ area, which is the same quantity the snap rejects a face on.

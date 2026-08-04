@@ -23,6 +23,10 @@ public partial class MapPreviewDock : VBoxContainer
     // of a second reads as live without rebuilding the label every frame.
     private const double CameraPollSeconds = 0.1;
 
+    private const string ScreenshotCommandTooltip =
+        "Copy a full headless screenshot command that reproduces this exact view. Paste it to an agent "
+        + "to have it capture what you are looking at.";
+
     private OptionButton _maps = null!;
     private Label _install = null!;
     private Label _cache = null!;
@@ -37,6 +41,7 @@ public partial class MapPreviewDock : VBoxContainer
     private CheckBox _foliage = null!;
     private CheckBox _shadows = null!;
     private Button _navigation = null!;
+    private Button _screenshotCommand = null!;
     private CheckBox _navRim = null!;
     private CheckBox _navBeacons = null!;
     private CheckBox _navBounds = null!;
@@ -101,10 +106,8 @@ public partial class MapPreviewDock : VBoxContainer
         AddButton("Copy SHOT_CAM", () => CopyCamera(commandLine: false),
             "Copy this view as SHOT_CAM=x,y,z,pitch,yaw — the same variable the screenshot path reads.",
             cameraButtons);
-        AddButton("Copy screenshot cmd", () => CopyCamera(commandLine: true),
-            "Copy a full headless screenshot command that reproduces this exact view. Paste it to an agent "
-            + "to have it capture what you are looking at.",
-            cameraButtons);
+        _screenshotCommand = AddButton("Copy screenshot cmd", () => CopyCamera(commandLine: true),
+            ScreenshotCommandTooltip, cameraButtons);
 
         _log = new RichTextLabel
         {
@@ -214,12 +217,17 @@ public partial class MapPreviewDock : VBoxContainer
 
     // Every one of these is a property write on nodes that already exist, so the overlay reacts while
     // the camera keeps moving instead of being rebuilt under it.
+    //
+    // Across every scene, not only the one in front of you: these checkboxes are the dock's state, and
+    // an overlay deliberately left standing in a background tab would otherwise keep whatever settings
+    // it was built with — so going back to that tab would show something the dock is no longer saying.
+    // There is no scene-change hook to resynchronize it later, which is exactly why it happens here.
     private void ApplyNavigationOptions()
     {
-        if (EditorInterface.Singleton.GetEditedSceneRoot() is not { } root)
-            return;
-        if (NavigationPreview.Find(root) is { } overlay)
-            NavigationPreview.Apply(overlay, NavigationOptions);
+        NavigationPreview.Options options = NavigationOptions;
+        foreach (Node scene in ScenesToSweep())
+            if (NavigationPreview.Find(scene) is { } overlay)
+                NavigationPreview.Apply(overlay, options);
     }
 
     private async void OnToggleNavigation()
@@ -630,11 +638,18 @@ public partial class MapPreviewDock : VBoxContainer
     private void SetButtonsEnabled(bool enabled)
     {
         // Building the world and warming its mesh cache both need terrain this port can read; the
-        // navmesh overlay does not, so it stays available on the maps those two cannot serve.
+        // navmesh overlay does not, so it stays available on the maps those two cannot serve. The
+        // screenshot command goes with them — it launches the game's full world path, which loads the
+        // same terrain — while plain "Copy SHOT_CAM" is just a pose and stays useful either way.
         bool terrain = Selected?.IsSupported != false;
         _preview.Disabled = !enabled || !terrain;
         _clear.Disabled = !enabled;
         _warm.Disabled = !enabled || !terrain;
+        _screenshotCommand.Disabled = !terrain;
+        _screenshotCommand.TooltipText = terrain
+            ? ScreenshotCommandTooltip
+            : "Unavailable for a map whose terrain this port cannot build — the command it copies "
+              + "launches the game's full world path. \"Copy SHOT_CAM\" still gives you the pose.";
         _refresh.Disabled = !enabled;
         _navigation.Disabled = !enabled;
         _maps.Disabled = !enabled;

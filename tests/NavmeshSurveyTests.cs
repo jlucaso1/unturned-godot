@@ -239,6 +239,47 @@ public class NavmeshSurveyTests
         Assert.Equal(2, Assert.Single(survey.Islands).TriangleCount);
     }
 
+    // The same surface, written down differently. A cyclic rotation of a triangle's indices preserves
+    // both the geometry and the winding, so every rotation has to survey identically — and it did not:
+    // a stitched portal carries the OVERLAP of two edges, so one of its ends can be a vertex the
+    // neighbour does not own, and asking that neighbour which corner is "opposite" the pair then
+    // returned its first corner in winding order instead of nothing. On a seam that corner is the far
+    // end of the join itself, lying ON the line and scoring side zero — which read as "not across",
+    // discarded the stitch, and drew a red line over open floor. Rotations differed by two segments.
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void ATJunctionSurveysTheSame_HoweverItsIndicesAreRotated(int rotation)
+    {
+        int[][] faces =
+        {
+            new[] { 0, 1, 2 }, new[] { 1, 3, 2 },  // left half, spanning x = 2 in one edge
+            new[] { 2, 4, 5 }, new[] { 4, 6, 5 },  // right half, lower
+            new[] { 4, 3, 6 }, new[] { 3, 7, 6 },  // right half, upper
+        };
+        var triangles = faces
+            .SelectMany(face => Enumerable.Range(0, 3).Select(i => face[(i + rotation) % 3]))
+            .ToArray();
+
+        NavFlagSurvey survey = SurveyOf(new NavFlag
+        {
+            Center = new Vector3(2, 0, 1),
+            Size = new Vector3(6, 10, 4),
+            Vertices = new[]
+            {
+                new Vector3(0, 0, 0), new Vector3(0, 0, 2), new Vector3(2, 0, 0), new Vector3(2, 0, 2),
+                new Vector3(2, 0, 1), new Vector3(4, 0, 0), new Vector3(4, 0, 1), new Vector3(4, 0, 2),
+            },
+            Triangles = triangles,
+        });
+
+        Assert.Equal(6, Assert.Single(survey.Islands).TriangleCount);
+        // The outline of a 4x2 rectangle at this tessellation, and nothing along the seam at x = 2.
+        Assert.Equal(7, survey.Rim.Count);
+        Assert.DoesNotContain(survey.Rim, edge => edge.A.X == 2f && edge.B.X == 2f);
+    }
+
     [Fact]
     public void RimIsTheOuterBoundary_CountedOnce()
     {
@@ -379,9 +420,18 @@ public class NavmeshSurveyTests
         // stitched seams are not walls, and the overlay must not draw them as such: the rim it reports
         // is measurably shorter than the naive count, which is the whole reason this hangs off the
         // graph rather than off NavFlag.
+        //
+        // 33 947 until the side test stopped being asked of stitched portals. Those portals carry the
+        // overlap of two edges, so an end of one can be a vertex the neighbour does not own, and the
+        // "which corner is opposite" question then answered with the neighbour's first corner in
+        // winding order — on a seam, its far endpoint, lying ON the join and scoring side zero. Zero
+        // read as "not across", the stitch was discarded, and a red line went across open floor. It
+        // was live on this map: 1 204 of the segments drawn here were that, phantom walls over ground
+        // the router walks straight over. Fewer is the right direction — a rim segment that is not a
+        // wall is the one failure this overlay exists to avoid.
         int naiveBorders = flags.Sum(NaiveBorderEdges);
         Assert.Equal(37396, naiveBorders);
-        Assert.Equal(33947, survey.Sum(s => s.Rim.Count));
+        Assert.Equal(32743, survey.Sum(s => s.Rim.Count));
 
         // Nothing dropped: reconciliation against collision is a runtime pass, and this is the map as
         // baked.
