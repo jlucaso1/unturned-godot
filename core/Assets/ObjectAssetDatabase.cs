@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using UnturnedGodot.Dat;
+using UnturnedGodot.Data;
 
 namespace UnturnedGodot.Assets;
 
@@ -32,6 +33,30 @@ public sealed class ObjectAssetDatabase
     // GUID wins for modern placements; the legacy id is the fallback for old ones.
     public ObjectAsset? Resolve(Guid guid, ushort id) =>
         guid != Guid.Empty ? ResolveByGuid(guid) ?? ResolveById(id) : ResolveById(id);
+
+    // Objects.dat versions <= 7 identify placements only by ushort id. Runtime batching and collider
+    // lookup are GUID-keyed, so resolve those legacy placements once after the asset scan and before
+    // planning extraction. A stale modern GUID also gets the same documented id fallback as Resolve.
+    // Unresolved modern GUIDs stay in the needed set for diagnostics; an unresolved id-only placement
+    // has no GUID that the bundle/cache pipeline could request.
+    public HashSet<Guid> ResolvePlacementGuids(List<PlacedObject> placements)
+    {
+        var needed = new HashSet<Guid>();
+        for (int i = 0; i < placements.Count; i++)
+        {
+            PlacedObject placed = placements[i];
+            ObjectAsset? asset = Resolve(placed.Guid, placed.Id);
+            Guid resolvedGuid = asset?.Guid ?? placed.Guid;
+            if (resolvedGuid != Guid.Empty && resolvedGuid != placed.Guid)
+            {
+                placements[i] = new PlacedObject(placed.Position, placed.EulerDegrees,
+                    placed.Scale, placed.Id, resolvedGuid);
+            }
+            if (resolvedGuid != Guid.Empty)
+                needed.Add(resolvedGuid);
+        }
+        return needed;
+    }
 
     // A vehicle by either identifier, following the redirector chain to the asset that owns the prefab.
     // A map's vehicle tables and the spawn tables reference redirectors far more often than vehicles

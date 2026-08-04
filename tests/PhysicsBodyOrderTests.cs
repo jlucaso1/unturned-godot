@@ -205,6 +205,20 @@ public class PhysicsBodyOrderTests
     }
 
     [Fact]
+    public void LegacyObjectIdsAreNormalizedBeforeEveryGuidKeyedWorldBuild()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "World", "WorldBuilder.cs")) is not { } worldPath
+            || FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs"))
+                is not { } streamerPath)
+            return;
+
+        string world = File.ReadAllText(worldPath);
+        string streamer = File.ReadAllText(streamerPath);
+        Assert.Equal(2, CountOccurrences(world, "ResolvePlacementGuids(objects)"));
+        Assert.Contains("_db.ResolvePlacementGuids(_objects)", streamer);
+    }
+
+    [Fact]
     public void HuntProbeAdvancesInsidePhysicsNotifications()
     {
         if (FindRepositoryFile(Path.Combine("src", "Net", "NetworkManager.cs")) is not { } path)

@@ -408,9 +408,7 @@ public partial class ObjectStreamer : Node
         _vehicles = VehicleSpawnPlan.Load(_level, _sources, _db);
         Log.Print($"[stream] vehicles: {_vehicles.Count} spawned");
 
-        _neededGuids = new HashSet<Guid>();
-        foreach (PlacedObject o in _objects)
-            _neededGuids.Add(o.Guid);
+        _neededGuids = _db.ResolvePlacementGuids(_objects);
         foreach (PlacedObject v in _vehicles)
             _neededGuids.Add(v.Guid);
         // Only the foliage types that actually resolved to an asset: an unresolved GUID has nothing to

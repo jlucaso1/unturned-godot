@@ -47,9 +47,7 @@ public static class WorldBuilder
             objects.Add(new PlacedObject(tree.Position, tree.EulerDegrees, tree.Scale, 0, tree.Guid));
 
         ObjectAssetDatabase db = ContentExtraction.ScanAssets(sources);
-        var needed = new HashSet<Guid>();
-        foreach (PlacedObject placed in objects)
-            needed.Add(placed.Guid);
+        HashSet<Guid> needed = db.ResolvePlacementGuids(objects);
         selectedGuids = needed;
 
         string cacheDir = ProjectSettings.GlobalizePath("user://model_cache");
@@ -281,12 +279,11 @@ public static class WorldBuilder
         // The vehicles the map starts with, rolled from its own tables. A spawned vehicle is a GUID and a
         // transform like any other placement, so its mesh joins the same needed set, the same extraction
         // plan and the same batching — only the scene root is its own.
-        List<PlacedObject> vehicles = VehicleSpawnPlan.Load(level, sources, dbTask.Result);
+        ObjectAssetDatabase db = dbTask.Result;
+        List<PlacedObject> vehicles = VehicleSpawnPlan.Load(level, sources, db);
         Log.Print($"[unturned-godot] Vehicles: {vehicles.Count} spawned");
 
-        var neededGuids = new HashSet<Guid>();
-        foreach (PlacedObject o in objects)
-            neededGuids.Add(o.Guid);
+        HashSet<Guid> neededGuids = db.ResolvePlacementGuids(objects);
         foreach (PlacedObject v in vehicles)
             neededGuids.Add(v.Guid);
         foreach (Guid g in foliageAssets.Keys) // resolved foliage types only (see ObjectStreamer)
@@ -297,7 +294,7 @@ public static class WorldBuilder
         // streams the two phases separately via ObjectStreamer. Extraction is driven by what THIS map is
         // missing from the (map-agnostic, GUID-keyed) cache, not by whether the cache has any files at all.
         System.Collections.Generic.List<ContentExtraction.BundlePlan> plans = ContentExtraction.Plan(
-            sources, cacheDir, textureCacheDir, neededGuids, dbTask.Result, foliageAssets);
+            sources, cacheDir, textureCacheDir, neededGuids, db, foliageAssets);
         foreach (string report in ContentExtraction.PendingReports(plans))
             Log.Print(report);
         foreach (ContentExtraction.BundlePlan plan in plans)
@@ -310,7 +307,7 @@ public static class WorldBuilder
             try
             {
                 int extracted = ModelExtractor.ExtractMeshes(plan.Source, plan.Needed, cacheDir,
-                    dbTask.Result, plan.Foliage);
+                    db, plan.Foliage);
                 ModelExtractor.ExtractTextures(plan.Source.BundlePath, plan.Source.CacheTag, cacheDir,
                     textureCacheDir);
                 Log.Print($"[unturned-godot] Extracted {extracted} meshes from {plan.Source.Name}");
@@ -329,7 +326,6 @@ public static class WorldBuilder
         var meshLibrary = ModelLibrary.Load(cacheDir, registry, neededGuids, sharedMaterials: materials);
         var colliderLibrary = ColliderLibrary.Load(cacheDir, neededGuids);
 
-        ObjectAssetDatabase db = dbTask.Result; // the scan ran concurrently with ModelLibrary.Load above
         int withMesh = 0;
         // The prefabs' authored lower levels, so this path renders the same as the streamed one: a
         // benchmark or screenshot taken here must submit the geometry a real session submits.

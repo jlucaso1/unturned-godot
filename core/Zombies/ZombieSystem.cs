@@ -630,7 +630,15 @@ public sealed partial class ZombieSystem
         Vector3 destination = target.Position;
         bool canTurn = true;
         Vector3 directDirection = default;
-        if (zombie.RouteEscapingCollision && hasPhysicalLine && !physicalBlocked)
+        // An eye ray only proves that eye-height geometry is clear. A sill, kerb or thin fence can sit
+        // below both endpoints while the movement capsule is still unable to take the old shortcut.
+        // Once an escape route has actually moved the body, ask the same resolver that moves it whether
+        // the complete direct segment is now executable. With no movement seam (old hosts/replays), keep
+        // the historical physical-line fallback because there is no stronger authority to consult.
+        bool escapeCleared = zombie.RouteEscapingCollision && hasPhysicalLine && !physicalBlocked
+            && (MoveResolver == null || (zombie.EscapeRouteHasProgress
+                && CapsuleCanReach(zombie, target.Position)));
+        if (escapeCleared)
         {
             zombie.RouteEscapingCollision = false;
             zombie.EscapeRouteHasProgress = false;
@@ -1188,6 +1196,12 @@ public sealed partial class ZombieSystem
         float dx = a.X - b.X;
         float dz = a.Z - b.Z;
         return (dx * dx) + (dz * dz);
+    }
+
+    private bool CapsuleCanReach(ZombieInstance zombie, Vector3 target)
+    {
+        Vector3 resolved = MoveResolver!(zombie.Position, target, zombie.Radius);
+        return HorizontalDistanceSquared(resolved, target) <= 1e-6f;
     }
 
     private static bool TryGetPlayer(IReadOnlyList<ZombiePlayerView> players, byte id, out ZombiePlayerView player)

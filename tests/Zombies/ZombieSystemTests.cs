@@ -1231,6 +1231,54 @@ public class ZombieSystemTests
     }
 
     [Fact]
+    public void CollisionRecovery_DoesNotEndWhileTheCapsuleIsStillBehindALowObstacle()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie);
+        zombie.Yaw = -90f;
+        var player = Player(1, new Vector3(10f, 5f, 0f),
+            UnturnedGodot.Player.EPlayerStance.Sprint);
+        system.VisionBlocked = (_, _) => false;
+        system.PhysicalLineBlocked = (_, _) => false; // the obstacle is below both eye points
+        system.Tick(new[] { player }, 0.1f); // acquire first
+
+        zombie.Position = new Vector3(0f, 5f, 0f);
+        zombie.PathPoints.Clear();
+        zombie.PathPoints.Add(zombie.Position);
+        zombie.PathPoints.Add(new Vector3(0f, 5f, 3f));
+        zombie.PathPoints.Add(new Vector3(10f, 5f, 3f));
+        zombie.PathPoints.Add(player.Position);
+        zombie.CurrentWaypointIndex = 1;
+        zombie.TargetReached = false;
+        zombie.PathIsPartial = false;
+        zombie.RouteEscapingCollision = true;
+        zombie.EscapeRouteHasProgress = true;
+        zombie.RepathTimer = 10f;
+        system.PathQuery = (_, _, _, _) => true; // enable the installed route follower
+
+        bool lowObstaclePresent = true;
+        system.MoveResolver = (from, to, _) => lowObstaclePresent
+            && MathF.Abs(to.Z) < 0.01f
+            && to.X > 5f
+                ? from
+                : to;
+
+        for (int tick = 0; tick < 3; tick++)
+        {
+            system.Tick(new[] { player }, 0.1f);
+            Assert.True(zombie.RouteEscapingCollision,
+                "an eye ray cannot prove that the movement capsule has cleared a low obstacle");
+        }
+        Assert.True(zombie.Position.Z > 0f,
+            $"the valid detour should continue making progress: {zombie.Position}");
+
+        lowObstaclePresent = false;
+        system.Tick(new[] { player }, 0.1f);
+
+        Assert.False(zombie.RouteEscapingCollision,
+            "recovery should end once the same capsule resolver can reach the target");
+    }
+
+    [Fact]
     public void CollisionEscape_IsNotReplacedByTheShortWallRouteOnTheNextRepath()
     {
         ZombieSystem system = SpawnOne(out ZombieInstance zombie);
