@@ -21,13 +21,16 @@ public static class NpcsBuilder
     // Builds a root holding one character per placement. `placements` is expected to be only the NPC ones
     // (see Partition); anything whose clone fails is skipped rather than boxed, because a box is what this
     // exists to stop drawing.
-    public static Node3D Build(IReadOnlyList<PlacedObject> placements, string unturnedPath,
+    // Null for a map that places none, which is every official map except Russia: an empty node in the
+    // scene is still a node, and the world a map builds should not gain one for a feature it never uses.
+    public static Node3D? Build(IReadOnlyList<PlacedObject> placements, string unturnedPath,
         out int rendered)
     {
-        var root = new Node3D { Name = "Npcs" };
         rendered = 0;
         if (placements.Count == 0)
-            return root;
+            return null;
+
+        var root = new Node3D { Name = "Npcs" };
 
         // One import for the whole map: reading the player rig out of resources.assets costs ~100 ms and
         // tens of MB of transient heap, and every NPC is the same rig underneath.

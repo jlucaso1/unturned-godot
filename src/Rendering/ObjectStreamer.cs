@@ -516,7 +516,8 @@ public partial class ObjectStreamer : Node
                 + "have an authored lower level");
         double buildMs = stage.Elapsed.TotalMilliseconds;
         stage.Restart();
-        root.AddChild(NpcsBuilder.Build(_npcs, _unturnedPath, out int npcsDrawn));
+        if (NpcsBuilder.Build(_npcs, _unturnedPath, out int npcsDrawn) is { } npcsRoot)
+            root.AddChild(npcsRoot);
         withMesh += npcsDrawn;
         AddChild(root);
         AddChild(WorldBuilder.BuildVehicles(_vehicles, _db, meshLibrary, colliderLibrary, lod1Library));
@@ -530,7 +531,7 @@ public partial class ObjectStreamer : Node
         Log.Print($"[stream] objects build {buildMs:0} ms, attach {attachMs:0} ms, "
             + $"foliage {stage.Elapsed.TotalMilliseconds:0} ms");
         _totalTextureKeys = _registry.PendingKeyCount;
-        Log.Print($"[stream] built {withMesh}/{_objects.Count} objects ({meshLibrary.Count} meshes), " +
+        Log.Print($"[stream] built {withMesh}/{_objects.Count + _npcs.Count} objects ({meshLibrary.Count} meshes), " +
             $"{_totalTextureKeys} texture keys pending");
 
         // These parsed inputs are consumed only up to here — the MultiMesh buffers now hold their own

@@ -135,7 +135,8 @@ public sealed class ContentSource
         bool hasSupportedAssets = Directory.Exists(Path.Combine(assets, "Landscapes"))
             || Directory.Exists(Path.Combine(assets, "Foliage"))
             || Directory.Exists(Path.Combine(assets, "PhysicsMaterials"))
-            || Directory.Exists(spawns);
+            || Directory.Exists(spawns)
+            || Directory.Exists(npcs);
         if (!Directory.Exists(objects) && !Directory.Exists(trees) && !Directory.Exists(vehicles)
             && !hasSupportedAssets)
         {
