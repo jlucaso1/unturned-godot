@@ -17,8 +17,9 @@ public delegate Vector3 BakedNavPortalProbe(Vector3 from, Vector3 to, float radi
 // a seam can end in the middle of the other side's edge. NavigationServer does not join those inside one
 // region, so even PEI's 42k triangles produced long false detours. Larger maps add a second failure mode:
 // Godot's global polygon merge can occupy a worker for minutes. The source is already baked, so preserve
-// its indexed and overlapping-edge adjacency directly instead of rasterizing and merging it again.
-public sealed class BakedNavGraph
+// its indexed and overlapping-edge adjacency directly instead of rasterizing and merging it again. The
+// shape read-out used by the editor's navigation overlay lives in the NavmeshSurvey partial declaration.
+public sealed partial class BakedNavGraph
 {
     private const uint CacheMagic = 0x43424755; // UGBC
     // Bump whenever the TOPOLOGY this builds changes, not just the blob's layout. The fingerprint
@@ -294,7 +295,7 @@ public sealed class BakedNavGraph
     private readonly record struct DirectedConnection(int From, Connection Edge, long Order,
         bool Stitched);
 
-    private sealed class FlagGraph
+    private sealed partial class FlagGraph
     {
         public NavFlag Source { get; }
         private readonly Vector3[] _centres;

@@ -27,10 +27,12 @@ public partial class UnturnedEditorPlugin : EditorPlugin
         if (_dock == null)
             return;
 
-        // Drop any preview still in the edited scene, so disabling the plugin does not leave hundreds of
-        // orphaned mesh nodes behind.
-        if (EditorInterface.Singleton.GetEditedSceneRoot() is { } root)
-            WorldPreview.Clear(root);
+        // Drop anything still in an open scene, so disabling the plugin does not leave hundreds of
+        // orphaned mesh nodes behind. Through the dock rather than against the edited scene root: the
+        // editor keeps every open tab alive, GetEditedSceneRoot only names the one in front of you, and
+        // the dock holds the only record of which of the others were built into. Freeing it first would
+        // strand whatever is in them — unowned nodes nothing will ever look for again.
+        _dock.ClearEverything();
 
         // Put the editor's own viewport settings back. These live in EditorSettings, which is editor-wide
         // rather than project-scoped, so leaving them tuned follows the user into every other Godot
