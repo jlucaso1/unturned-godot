@@ -44,6 +44,33 @@ fi
 # benchmark whichever map someone last picked in the menu, and write that map's report.
 export MAP="${MAP:-PEI}"
 
+# UG_BENCH_VIEWS=heavy[,other] measures the hand-picked poses in bench/views.json instead of hunting
+# for their five numbers by hand. The tier itself only knows UG_BENCH_POSES, so this resolves names to
+# that; an explicit UG_BENCH_POSES wins, since it is the more specific thing to have written.
+if [[ -n "${UG_BENCH_VIEWS:-}" && -z "${UG_BENCH_POSES:-}" ]]; then
+    UG_BENCH_POSES="$(python3 - "$repo_dir/bench/views.json" "$MAP" "$UG_BENCH_VIEWS" << 'PY'
+import json, sys
+path, map_name, wanted = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    views = json.load(open(path))
+except OSError:
+    sys.exit(f"No view registry at {path}.")
+for_map = views.get(map_name)
+if not isinstance(for_map, dict):
+    sys.exit(f"No views registered for map '{map_name}' in {path}.")
+out = []
+for name in [w.strip() for w in wanted.split(",") if w.strip()]:
+    if name not in for_map:
+        known = ", ".join(sorted(k for k in for_map if not k.startswith("_")))
+        sys.exit(f"No view '{name}' for map '{map_name}' in {path} (known: {known}).")
+    out.append(f"{name}={for_map[name]}")
+print(";".join(out))
+PY
+    )" || exit 1
+    export UG_BENCH_POSES
+    echo "[benchmark] UG_BENCH_VIEWS=$UG_BENCH_VIEWS -> UG_BENCH_POSES=$UG_BENCH_POSES"
+fi
+
 godot="${GODOT:-$("$repo_dir/scripts/install-godot.sh" --print-path)}"
 if [[ ! -x "$godot" ]]; then
     echo "No Godot at $godot. Run ./scripts/install-godot.sh, or set GODOT." >&2

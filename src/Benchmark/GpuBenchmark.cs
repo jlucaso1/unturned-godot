@@ -19,6 +19,9 @@ public static class GpuBenchmark
     private const int WarmupStableFrames = 5;
     private const int SettleFrames = 6;   // discarded after a camera jump so transition hitches stay out of the tail
     private const int MinSampleFrames = 40;
+    // Metric keys and the far-plane rule both key off this, so a hand-named pose can never collide with
+    // a derived one however it was spelled.
+    private const string NamedPosePrefix = "view_";
     private const ulong MinSampleUsec = 1_000_000; // Performance monitors refresh on a coarse interval
 
     public static async Task RunAsync(Node context, string unturnedPath, string mapName)
@@ -60,9 +63,12 @@ public static class GpuBenchmark
 
             foreach ((string name, Transform3D xform) in poses)
             {
-                // Ground poses represent gameplay and must use PlayerCamera's 4 km far plane. The broad
-                // overview poses still need the full scene range to keep their whole-map diagnostic value.
-                camera.Far = name.StartsWith("ground", StringComparison.Ordinal) ? 4000f : sceneFar;
+                // Ground poses represent gameplay and must use PlayerCamera's 4 km far plane, and so must
+                // a hand-named one, which is picked precisely because it is a view the player can stand
+                // in. The broad overview poses still need the full scene range to keep their whole-map
+                // diagnostic value.
+                camera.Far = name.StartsWith("ground", StringComparison.Ordinal)
+                    || name.StartsWith(NamedPosePrefix, StringComparison.Ordinal) ? 4000f : sceneFar;
                 camera.GlobalTransform = xform;
                 await WarmupAsync(context, tree);
 
@@ -125,8 +131,18 @@ public static class GpuBenchmark
                 // Capture the exact ground-level benchmark pose. The former bounds-centre shot could land
                 // outside the terrain on sparse maps and show no nearby shadow or foliage at all, making
                 // visually different settings produce byte-identical "validation" images.
+                //
+                // A hand-named pose wins: someone who passed UG_BENCH_POSES chose that view because it is
+                // the one that costs something, so it is also the one whose pixels have to be checked.
+                string shotPose = "ground_diag";
+                foreach ((string name, Transform3D _) in poses)
+                    if (name.StartsWith(NamedPosePrefix, StringComparison.Ordinal))
+                    {
+                        shotPose = name;
+                        break;
+                    }
                 foreach ((string name, Transform3D xform) in poses)
-                    if (name == "ground_diag")
+                    if (name == shotPose)
                     {
                         camera.Far = 4000f;
                         camera.GlobalTransform = xform;
@@ -372,7 +388,37 @@ public static class GpuBenchmark
         }
         if (EnvFlag.IsOn(OS.GetEnvironment("UG_FOLIAGE_TRAVERSAL"), whenUnset: false))
             AddFoliageTraversalPoses(poses, bounds, heights);
+        AddNamedPoses(poses);
         return poses;
+    }
+
+    // UG_BENCH_POSES="heavy=-406.89,49.58,579.35,-7.5,-17.6;street=..." measures views chosen by hand
+    // instead of derived from the scene bounds. The bounds-relative poses are what make the tier
+    // comparable across maps, but a map's expensive view is a property of what was built there, not of
+    // its bounding box: a street looking down its own length is where the draw calls are, and no
+    // fraction-of-extent pose lands on it. The five numbers are the same ones F4 copies and SHOT_CAM
+    // takes, so the pose that was measured is the pose that can be screenshotted.
+    //
+    // UG_BENCH_POSES_ONLY=1 drops the derived poses and measures only these, which is both a much
+    // shorter run and a report with nothing in it but the view under study.
+    private static void AddNamedPoses(List<(string, Transform3D)> poses)
+    {
+        string spec = OS.GetEnvironment("UG_BENCH_POSES");
+        if (!CameraPose.TryParseList(spec, out IReadOnlyList<CameraPose> named, out string error))
+            throw new ArgumentException($"UG_BENCH_POSES is malformed: {error}");
+
+        bool only = EnvFlag.IsOn(OS.GetEnvironment("UG_BENCH_POSES_ONLY"), whenUnset: false);
+        if (only)
+        {
+            // Measuring the derived poses when the caller asked for only the named ones would report a
+            // whole map's numbers under a request for one view. Nothing to fall back to, so say so.
+            if (named.Count == 0)
+                throw new ArgumentException("UG_BENCH_POSES_ONLY is set but UG_BENCH_POSES names no pose.");
+            poses.Clear();
+        }
+
+        foreach (CameraPose pose in named)
+            poses.Add(($"{NamedPosePrefix}{pose.Name}", pose.ToTransform()));
     }
 
     private static void AddFoliageTraversalPoses(List<(string, Transform3D)> poses, Aabb bounds,

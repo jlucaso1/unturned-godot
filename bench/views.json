@@ -1,0 +1,20 @@
+{
+  "_comment": [
+    "Hand-picked camera poses, per map, in the five numbers SHOT_CAM and UG_BENCH_POSES both take:",
+    "px,py,pz,pitch,yaw (position in metres, rotation in degrees).",
+    "",
+    "The GPU tier derives its own poses from the scene bounds, which is what makes it comparable across",
+    "maps; the cost of a frame, though, is a property of what was built there rather than of the bounding",
+    "box, so no fraction-of-extent pose lands on a dense street looking down its own length. These are",
+    "those views: expensive on purpose, deterministic, and the same numbers for the render measurement",
+    "and for the screenshot, so one A/B answers both 'is it faster' and 'does it look the same'.",
+    "",
+    "To add one: run the game, fly to the view (FREECAM=1), press F4, and copy the SHOT_CAM value the",
+    "log prints. Name it after what makes it expensive, not after the map.",
+    "",
+    "Used by scripts/perf-screenshots.sh --views <name> and scripts/run-benchmark.sh (UG_BENCH_VIEWS)."
+  ],
+  "California2": {
+    "heavy": "-406.89,49.58,579.35,-7.5,-17.6"
+  }
+}
