@@ -38,9 +38,18 @@ public sealed class ObjectAsset
     // Folder holding the .dat, used to match the object to its prefab path in the bundle.
     public string Directory { get; set; } = string.Empty;
 
+    // Decal only: how wide and long the projection is, in metres (the .dat's Decal_X / Decal_Y). A decal
+    // object ships no prefab at all — just a decal.png beside its .dat inside the bundle — so this and the
+    // texture are the whole of it. Zero for everything else.
+    public float DecalX { get; }
+    public float DecalY { get; }
+
     private ObjectAsset(Guid guid, ushort id, EObjectType type, string rawType, string? explicitName,
-        string? dataName, string? bundleOverridePath, Guid materialPaletteGuid, Guid redirectTargetGuid)
+        string? dataName, string? bundleOverridePath, Guid materialPaletteGuid, Guid redirectTargetGuid,
+        float decalX = 0f, float decalY = 0f)
     {
+        DecalX = decalX;
+        DecalY = decalY;
         Guid = guid;
         Id = id;
         Type = type;
@@ -75,8 +84,11 @@ public sealed class ObjectAsset
         data.TryGetGuid("Material_Palette", out Guid paletteGuid);
         data.TryGetGuid("TargetVehicle", out Guid redirectTarget);
 
+        data.TryGetSingle("Decal_X", out float decalX);
+        data.TryGetSingle("Decal_Y", out float decalY);
+
         asset = new ObjectAsset(guid, id, ClassifyType(rawType), rawType, localizedName,
-            data.GetString("Name"), overridePath, paletteGuid, redirectTarget);
+            data.GetString("Name"), overridePath, paletteGuid, redirectTarget, decalX, decalY);
         return true;
     }
 

@@ -46,6 +46,11 @@ in view.
   there is no swimming stance to move between.
 - **NPC characters**: Russia places 40 of them (`Bundles/NPCs/Characters`), and nothing reads that asset
   family yet, so each one stands there as a placeholder box instead of a dressed character.
+- **Projected decals**: the `Decal` objects a map places (graffiti, faction tags) draw their texture on a
+  flat quad at the authored transform. Unturned projects them onto whatever is underneath, so one on
+  uneven ground creases where this stays flat — every one the official maps place sits on a wall or a
+  road, where the two agree. The decal a prefab carries as a child component (the blast marks Germany
+  scatters) is a separate mechanism and is not read yet.
 
 ## Requirements
 

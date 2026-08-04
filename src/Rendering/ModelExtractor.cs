@@ -636,6 +636,9 @@ public static class ModelExtractor
         return slash >= 0 ? path[(slash + 1)..] : path;
     }
 
+    // The file every Decal asset's texture is filed under, inside its own folder in the bundle.
+    private const string DecalTextureFile = "decal.png";
+
     // The cached lower level sits beside "<guid>.mesh" under a suffix the plain-mesh scan cannot match.
     // Named in the cache layer because the dependency index has to open both levels of a GUID and cannot
     // reach into the extractor.
@@ -735,7 +738,7 @@ public static class ModelExtractor
         // the prefab-key prefix — is recovered from its directory.
         var work = new List<(ObjectAsset asset, string key)>();
         foreach (ObjectAsset a in db.All)
-            work.Add((a, PrefabKeyFor(a, source)));
+            work.Add((a, PrefabKey.For(a, source)));
 
         // The vertex buffers this file's needed prefabs keep in a .resS, read before anything is built:
         // BuildLevel drops a part whose mesh cannot be decoded, and a streamed buffer is exactly that
@@ -764,8 +767,26 @@ public static class ModelExtractor
         int extracted = 0;
         foreach ((ObjectAsset asset, string key) in work)
         {
-            if (!neededGuids.Contains(asset.Guid) || !mappedGuids.Add(asset.Guid) ||
-                !graph.PartsByKey.TryGetValue(key, out List<MeshPart>? parts))
+            if (!neededGuids.Contains(asset.Guid) || !mappedGuids.Add(asset.Guid))
+                continue;
+
+            // A decal ships no prefab at all — just a decal.png beside its .dat inside the bundle, and the
+            // size it projects at in its own .dat. Everything downstream (the texture phase, the per-GUID
+            // batching, the placement transform) already handles a mesh, so it becomes one here rather
+            // than a second pipeline: the quad its texture is drawn on. See WriteDecalQuad.
+            if (asset.Type == EObjectType.Decal)
+            {
+                if (!cached.Contains(asset.Guid)
+                    && !WriteDecalQuad(graph, bundleTag, cacheDir, asset, key, neededTextures))
+                    continue;
+
+                if (!cached.Contains(asset.Guid))
+                    extracted++;
+                producedGuids?.Add(asset.Guid);
+                continue;
+            }
+
+            if (!graph.PartsByKey.TryGetValue(key, out List<MeshPart>? parts))
                 continue;
 
             // Already cached against this bundle: leave it alone. Rebuilding it would produce the same
@@ -1142,6 +1163,53 @@ public static class ModelExtractor
         return (TextureKey.For(bundleTag, texId), color, metallic, smoothness, cull);
     }
 
+    // Writes a decal asset's mesh: one quad, DecalX by DecalY metres, lying flat in the object's own XZ
+    // plane with its decal.png stretched across it. The placement's authored rotation is what stands it up
+    // against a wall, so nothing here needs to know which way it faces.
+    //
+    // Unturned projects these onto whatever is under them, so a decal on uneven ground creases where this
+    // quad stays flat. Every one the official maps place sits on a wall or a road, where the two agree.
+    private static bool WriteDecalQuad(PrefabGraph graph, string bundleTag, string cacheDir,
+        ObjectAsset asset, string key, Dictionary<(string Tag, long Id), UnityTexture>? neededTextures)
+    {
+        if (asset.DecalX <= 0f || asset.DecalY <= 0f)
+            return false;
+
+        string texturePath = graph.AssetPrefix + key + "/" + DecalTextureFile;
+        if (!graph.ContainerByPath.TryGetValue(texturePath, out long textureId)
+            || !graph.ObjectsByPathId.TryGetValue(textureId, out SerializedObject? textureObj))
+        {
+            return false;
+        }
+
+        if (neededTextures != null && !neededTextures.ContainsKey((bundleTag, textureId)))
+        {
+            neededTextures[(bundleTag, textureId)] =
+                UnityTexture.Read(TypeTreeReader.Read(textureObj.TypeTree, graph.File.ReaderFor(textureObj)));
+        }
+
+        float halfX = asset.DecalX / 2f;
+        float halfZ = asset.DecalY / 2f;
+        var vertices = new[]
+        {
+            new Vector3(-halfX, 0f, -halfZ), new Vector3(halfX, 0f, -halfZ),
+            new Vector3(halfX, 0f, halfZ), new Vector3(-halfX, 0f, halfZ),
+        };
+        var normals = new[] { Vector3.Up, Vector3.Up, Vector3.Up, Vector3.Up };
+        var uvs = new[] { new Vector2(0f, 0f), new Vector2(1f, 0f), new Vector2(1f, 1f), new Vector2(0f, 1f) };
+
+        // Cutout, and culled on neither side: a decal texture is mostly transparent, and which way the
+        // authored rotation ends up pointing the quad is not something the asset says.
+        var submesh = new CachedSubmesh(new[] { 0, 1, 2, 0, 2, 3 }, Colors.White,
+            TextureKey.For(bundleTag, textureId), UnityMaterial.Blend.Cutout, cull: EShaderCull.TwoSided);
+
+        string path = Path.Combine(cacheDir, asset.Guid.ToString("N") + ".mesh");
+        using (var stream = File.Create(path))
+            MeshCache.Write(stream, vertices, normals, uvs, new[] { submesh });
+        File.Delete(Path.Combine(cacheDir, asset.Guid.ToString("N") + ".collider"));
+        return true;
+    }
+
     // Phase 2: decode the full bundle (now including the ~1.18 GB .resS pixel stream) and write the
     // textures referenced by the already-extracted meshes. Derives the needed set from the mesh cache, so
     // it is independent of phase 1 and resumable (skips textures already cached). Reports each written key
@@ -1264,37 +1332,4 @@ public static class ModelExtractor
             && fileNumber >= 2;
     }
 
-    // The prefab key is the asset's folder path inside the bundle, so its first segment is the name of the
-    // bundle's own asset folder — "trees" for the game, "resources" for a workshop mod that keeps its
-    // harvestables there. Deriving it from the directory keeps every layout working.
-    //
-    // An explicit override wins over all of that, whatever the category: Bundle_Override_Path is a field of
-    // Unturned's base Asset, not of ObjectAsset, and a holiday variant that reuses a base asset's prefab
-    // uses it the same way from either folder. Trees/Ornament_0_XMAS is the official one — it declares
-    // "/Trees/Ornament_0", and deriving its key from its own folder instead left the ornament on PEI,
-    // Washington and Yukon with no mesh at all.
-    private static string PrefabKeyFor(ObjectAsset asset, ContentSource source)
-    {
-        if (asset.BundleOverridePath is { Length: > 0 } overridePath)
-            return OverrideKey(overridePath);
-        if (IsUnder(asset.Directory, source.TreesDir))
-            return RootKey(source.TreesDir) + "/" + FolderKey(asset.Directory, source.TreesDir);
-        if (IsUnder(asset.Directory, source.VehiclesDir))
-            return RootKey(source.VehiclesDir) + "/" + FolderKey(asset.Directory, source.VehiclesDir);
-        return RootKey(source.ObjectsDir) + "/" + FolderKey(asset.Directory, source.ObjectsDir);
-    }
-
-    private static bool IsUnder(string directory, string root) =>
-        !Path.GetRelativePath(root, directory).StartsWith("..", StringComparison.Ordinal);
-
-    private static string FolderKey(string directory, string bundlesDir) =>
-        Path.GetRelativePath(bundlesDir, directory).Replace('\\', '/').ToLowerInvariant();
-
-    // The bundle-side name of an asset folder: Bundles/Objects -> "objects", <mod>/Resources ->
-    // "resources". This is the first segment of every prefab key built from that folder.
-    private static string RootKey(string bundlesDir) =>
-        Path.GetFileName(Path.TrimEndingDirectorySeparator(bundlesDir)).ToLowerInvariant();
-
-    private static string OverrideKey(string overridePath) =>
-        overridePath.Replace('\\', '/').Trim('/').ToLowerInvariant(); // already "objects/..."
 }
