@@ -21,6 +21,11 @@ public partial class PlayerController : CharacterBody3D
     // Set before adding to the tree to choose the initial perspective (e.g. third person for a screenshot).
     public bool StartThirdPerson { get; set; }
 
+    // The stance to boot into, for a screenshot that has to show one. Crouching and going prone tilt the
+    // spine and skull hardest, so they are where a first-person rig that does not follow the head
+    // properly shows it — which is the whole reason this is reachable without a keyboard.
+    public EPlayerStance StartStance { get; set; } = EPlayerStance.Stand;
+
     // The third-person body model; when null a simple placeholder figure is used instead.
     public Node3D? BodyModel { get; set; }
 
@@ -29,11 +34,10 @@ public partial class PlayerController : CharacterBody3D
     // shows no hands and no swing, which is what the port did before there was a fallback.
     public Node3D? ViewmodelModel { get; set; }
 
-    // Where the first-person eye sits on that rig, as a local offset from its Skull bone — the prefab's
-    // own ViewmodelCamera transform (CharacterModel.PlayerRigs.EyeOffset). Zero puts the eye on the
-    // skull joint itself, which is the neck end of the head rather than the eyes, and frames the arms
-    // too high.
-    public Vector3 ViewmodelEyeOffset { get; set; }
+    // Where the first-person eye sits on that rig, as a local transform on its Skull bone — the prefab's
+    // own ViewmodelCamera (CharacterModel.PlayerRigs.Eye). Identity puts the eye on the skull joint
+    // itself, which is the neck end of the head rather than the eyes.
+    public Transform3D ViewmodelEye { get; set; } = Transform3D.Identity;
 
     // Movement audio (footsteps + landing), built by the caller with the map's terrain material data.
     public MovementAudio? Footsteps { get; set; }
@@ -131,6 +135,8 @@ public partial class PlayerController : CharacterBody3D
     public override void _Ready()
     {
         _thirdPerson = StartThirdPerson;
+        _wantCrouch = StartStance == EPlayerStance.Crouch;
+        _wantProne = StartStance == EPlayerStance.Prone;
         _benchmarkMovement = EnvFlag.IsOn(OS.GetEnvironment("UG_RUNTIME_BENCH_MOVE"), whenUnset: false);
         _benchmarkMovementStarted = Engine.GetPhysicsFrames();
 
@@ -680,23 +686,32 @@ public partial class PlayerController : CharacterBody3D
         _camera.AddChild(rig);
     }
 
-    // Puts the rig where its own ViewmodelCamera lands on this camera.
+    // Poses the rig so that this one camera sees exactly what Unturned's viewmodel camera sees.
     //
-    // PlayerAnimator parents the Viewmodel rig to the main camera and then renders the arms from a
-    // SECOND camera sitting at firstSkeleton/Spine/Skull/ViewmodelCamera — so the eye that sees them is
-    // a child of the head bone and moves with every frame of every animation. One camera here does the
-    // same thing from the other side: instead of moving a second camera onto the bone, the rig is moved
-    // so the bone's own camera point lands on the one camera there is.
+    // PlayerAnimator parents the Viewmodel rig under the main camera and renders the arms from a SECOND
+    // camera at firstSkeleton/Spine/Skull/ViewmodelCamera. So the eye the arms are seen from is a child
+    // of the head bone: it moves AND TURNS with every frame of every animation, while the main camera —
+    // the one the world is drawn from — stays steady on the player's own look.
     //
-    // That is what stops the neck and shoulder sliding across the view during a run cycle or a swing —
-    // the head stays pinned to the eye exactly as it does in the game, and only the arms move relative
-    // to it. Done per rendered frame, because the pose it reads is written per rendered frame.
+    // With a single camera the same image is produced from the other side. Writing T for the viewmodel
+    // camera's transform in rig space (the skull's animated pose composed with the prefab's own local
+    // offset), a point g on the rig appears to that camera at T⁻¹·g — the rig's own root drops out of
+    // the arithmetic entirely. Parenting the rig to this camera and giving it the transform T⁻¹ puts
+    // every point of it at exactly T⁻¹·g. Identical image, one camera.
+    //
+    // The INVERSE, not the negated position. Taking only the translation was the bug: it kept the eye at
+    // the right point but left it looking wherever the player's head was NOT — so the view never turned
+    // with the head. The arms then sat at the wrong angle to it (visibly too high, since the skull's
+    // rest pose is pitched), and any animation that tilts the head far enough — crouching, going prone —
+    // swung the character's own skull across the frame instead of staying behind the eye.
+    //
+    // Done per rendered frame, because the pose it reads is written per rendered frame.
     private void PlaceViewmodelEye()
     {
         if (_viewmodel is not { } rig || _viewmodelSkull < 0)
             return;
-        Vector3 eye = rig.GetBoneGlobalPose(_viewmodelSkull) * ViewmodelEyeOffset;
-        rig.Position = -eye + _viewmodelNudge;
+        Transform3D eye = rig.GetBoneGlobalPose(_viewmodelSkull) * ViewmodelEye;
+        rig.Transform = eye.AffineInverse().Translated(_viewmodelNudge);
     }
 
     public override void _Process(double delta)

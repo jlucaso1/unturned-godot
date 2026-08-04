@@ -119,10 +119,10 @@ public static class CharacterModel
 
     // The player's rigs, and where the first-person eye sits on them.
     //
-    // `EyeOffset` is the prefab's own ViewmodelCamera transform, local to the Skull bone — the point
-    // PlayerAnimator renders the arms from. It travels with the rigs because it is a property of the
-    // authored character, not of the controller that draws it.
-    public readonly record struct PlayerRigs(Node3D? Body, Node3D? Viewmodel, Vector3 EyeOffset);
+    // `Eye` is the prefab's own ViewmodelCamera transform, local to the Skull bone — the FRAME
+    // PlayerAnimator renders the arms from, rotation included. It travels with the rigs because it is a
+    // property of the authored character, not of the controller that draws it.
+    public readonly record struct PlayerRigs(Node3D? Body, Node3D? Viewmodel, Transform3D Eye);
 
     // Both rigs from ONE read of resources.assets: the third-person body, and the first-person arms
     // rigged into the prefab's Viewmodel subtree with the same clips, so a swing plays identically from
@@ -167,7 +167,7 @@ public static class CharacterModel
                 + $"({e.GetType().Name}: {e.Message}); falling back to the body rig for first person.");
         }
 
-        Vector3 eye = FindViewmodelCameraOffset(source);
+        Transform3D eye = FindViewmodelCamera(source);
         if (viewmodel is CharacterSkeleton arms)
             return new PlayerRigs(body, arms, eye);
 
@@ -179,18 +179,21 @@ public static class CharacterModel
         return new PlayerRigs(body, ViewmodelFromBody(body), eye);
     }
 
-    // Where PlayerAnimator's ViewmodelCamera sits, as a local offset from the Skull bone it hangs off.
+    // PlayerAnimator's ViewmodelCamera, as a local TRANSFORM on the Skull bone it hangs off.
     //
     // This is the whole of how Unturned's first person is framed, and it is authored data rather than a
     // constant: the arms and the weapon are rendered by a SECOND camera parented to
     // firstSkeleton/Spine/Skull/ViewmodelCamera, so the eye that sees them is pinned to the head bone and
-    // moves with every animation. Reading the prefab's own transform for it is what makes the framing
-    // this port's first person 1:1 with the game's, instead of a number somebody tuned by eye.
+    // turns with it through every frame of every animation. Reading the prefab's own transform for it is
+    // what makes this port's first person 1:1 with the game's, instead of a number tuned by eye.
+    //
+    // The ROTATION matters as much as the position, which is why this is a transform and not an offset:
+    // see PlayerController.PlaceViewmodelEye.
     //
     // The Viewmodel subtree is present even when its MESH cannot be decoded (Model_0's skin weights live
-    // in the compressed stream), so this is available whichever rig ends up being drawn. Zero when the
-    // prefab has no such transform, which puts the eye on the skull joint itself.
-    private static Vector3 FindViewmodelCameraOffset(in AssetSource source)
+    // in the compressed stream), so this is available whichever rig ends up being drawn. Identity when
+    // the prefab has no such transform, which puts the eye on the skull joint itself.
+    private static Transform3D FindViewmodelCamera(in AssetSource source)
     {
         SerializedFile file = source.File;
         Dictionary<long, SerializedObject> byId = source.ById;
@@ -222,12 +225,12 @@ public static class CharacterModel
             if (root != PlayerEntity.Root || !inViewmodel)
                 continue;
 
-            Vector3 offset = LocalTransformOf(transform).Origin;
+            Transform3D eye = LocalTransformOf(transform);
             Log.Print($"[unturned-godot] Character: first-person eye at the prefab's own ViewmodelCamera "
-                + $"({offset.X:0.###}, {offset.Y:0.###}, {offset.Z:0.###}) from the Skull.");
-            return offset;
+                + $"({eye.Origin.X:0.###}, {eye.Origin.Y:0.###}, {eye.Origin.Z:0.###}) from the Skull.");
+            return eye;
         }
-        return Vector3.Zero;
+        return Transform3D.Identity;
     }
 
     // First person without the prefab's own arms rig.

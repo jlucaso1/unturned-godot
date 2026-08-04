@@ -837,9 +837,16 @@ public partial class Main : Node3D
             // no game data means the placeholder figure, no Viewmodel rig means no hands in first person.
             BodyModel = rigs.Body,
             ViewmodelModel = rigs.Viewmodel,
-            // The prefab's own ViewmodelCamera offset from the Skull bone: where the game frames its
+            // PLAYER_STANCE=Crouch|Prone: the stances that tilt the head hardest, and so the ones a
+            // first-person capture has to be able to reach without a keyboard. Set here rather than
+            // after the spawn because the controller reads it in _Ready.
+            StartStance = OS.GetEnvironment("PLAYER_STANCE") is { Length: > 0 } stanceName
+                && System.Enum.TryParse(stanceName, ignoreCase: true, out Player.EPlayerStance stance)
+                    ? stance
+                    : Player.EPlayerStance.Stand,
+            // The prefab's own ViewmodelCamera transform on the Skull bone: where the game frames its
             // first-person arms from, rather than a number tuned by eye here.
-            ViewmodelEyeOffset = rigs.EyeOffset,
+            ViewmodelEye = rigs.Eye,
         };
         (player.Footsteps, _movementAudioFactory) = BuildMovementAudio(unturnedPath);
         player.Sounds = _oneShotAudio; // BuildMovementAudio created the pool; gestures share it
