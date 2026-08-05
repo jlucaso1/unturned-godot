@@ -1,62 +1,85 @@
 namespace UnturnedGodot.Player;
 
-// Arbitrates a one-shot gesture against the looping movement state, which is what Unturned's animator
-// does implicitly: PlayerAnimator.play lays a clip over whatever updateState last chose and clears the
-// gesture, and the movement clip comes back once the overlay is done.
+// A one-shot clip laid OVER the looping movement state, which is what Unturned's animator does with a
+// gesture: `PlayerAnimator.play` calls `CharacterAnimator.play`, and every gesture clip has been put on
+// `AnimationState.layer = 1` by `mixAnimation` — usually with mixing transforms restricting it to an arm.
+// The movement clip stays on layer 0 and keeps running the whole time; `updateState` goes on pushing it
+// every frame, unaffected.
 //
-// The port needs it spelled out, because the controller pushes the movement state every tick and would
-// otherwise cut a swing off on the frame after it started. Kept here, apart from the skeleton, because
-// the rule is about time and requests rather than about bones — so it is unit-tested, and so every
-// animated character (the player today, an NPC or a zombie's non-looping reactions later) arbitrates the
-// same way.
+// So this is a second playhead, not an owner of the rig. It carries the clip, its own clock and the mask
+// of bones it is allowed to write; the skeleton samples both layers each frame and lets the masked bones
+// come from here. That the movement layer never stops is the whole point: a punch thrown while sprinting
+// swings an arm, and the legs keep sprinting.
+//
+// Kept here, apart from the skeleton, because the rule is about time and masks rather than about bone
+// transforms — so it is unit-tested, and so every animated character (the player today, an NPC's or a
+// zombie's non-looping reactions later) overlays the same way.
 public sealed class GestureOverlay
 {
-    private float _remaining;
-    private EPlayerStance _stance;
-    private bool _moving;
+    private string _clip = "";
+    private float _time;
+    private float _length;
+    private BoneMask? _mask;
 
-    // True while a gesture owns the rig.
-    public bool IsPlaying => _remaining > 0f;
+    // True while a gesture is laid over the movement state.
+    public bool IsPlaying => _clip.Length > 0;
 
-    // Starts a gesture of `length` seconds. `stance`/`moving` are where the body goes back to when it
-    // ends. Re-triggering an already-playing gesture (a second punch inside the first) keeps the
-    // ORIGINAL fallback: the state to return to is the one the movement was in before any of this, not
-    // the frozen mid-swing pose the second trigger happened to interrupt.
-    public void Begin(float length, EPlayerStance stance, bool moving)
+    // The clip being overlaid, or "" when none is.
+    public string Clip => _clip;
+
+    // How far into that clip the overlay is. It does not wrap: a gesture plays exactly once, and the
+    // sampler clamps past the last key.
+    public float Time => _time;
+
+    // Which bones the overlay may write, for the skeleton's per-frame merge. Null is the whole body.
+    public BoneMask? Mask => _mask;
+
+    // Starts `clip`, `length` seconds long, restricted to `mask` — null being Unturned's
+    // `mixAnimation(name)` with no mixing transforms, i.e. a gesture that covers the whole body.
+    //
+    // A clip with no length is refused: it would be an overlay that never ends. Re-triggering while one
+    // is already playing simply replaces it, which is what `CharacterAnimator.play` does — it stops the
+    // gesture clip it was last given before playing the new one — and is how a second punch inside the
+    // first swings again instead of being swallowed.
+    public bool Begin(string clip, float length, BoneMask? mask)
     {
-        if (length <= 0f)
-            return;
-        if (!IsPlaying)
-        {
-            _stance = stance;
-            _moving = moving;
-        }
-        _remaining = length;
+        if (length <= 0f || clip.Length == 0)
+            return false;
+        _clip = clip;
+        _length = length;
+        _mask = mask;
+        _time = 0f;
+        return true;
     }
 
-    // A movement-state request. Returns true when the caller should apply it now, false when a gesture
-    // owns the rig — in which case it is remembered and applied when the gesture ends, so a player who
-    // crouches mid-swing stands out of it into the crouch clip rather than the one they left.
-    public bool Request(EPlayerStance stance, bool moving)
+    // Advances the clock, ending the overlay once the clip has run out. Returns true on the frame it
+    // ended, and false on every other — including while nothing is playing.
+    //
+    // Nothing is handed back when it ends, unlike the arrangement this replaced: the movement layer never
+    // stopped, so there is no state to restore. The bones the mask covered simply take its pose again.
+    public bool Advance(float delta) => IsPlaying && SeekTo(_time + delta);
+
+    // Jumps the playhead to an absolute time, for the skeleton's own Seek — posing a named frame off-line
+    // rather than reaching it by playing. Returns true when that time is at or past the clip's end, which
+    // ends the gesture on exactly the rule Advance uses: a swing seeked past its length is over, and the
+    // rig should show what it would really be showing then, which is the movement layer.
+    public bool SeekTo(float time)
     {
         if (!IsPlaying)
-            return true;
-        _stance = stance;
-        _moving = moving;
-        return false;
+            return false;
+        _time = time;
+        if (_time < _length)
+            return false;
+        Cancel();
+        return true;
     }
 
-    // Advances the clock. Returns the state to restore on the frame the gesture finishes, and null on
-    // every other frame — including while nothing is playing.
-    public (EPlayerStance Stance, bool Moving)? Advance(float delta)
+    // Drops the gesture: the movement layer underneath is already correct, so there is nothing else to do.
+    public void Cancel()
     {
-        if (!IsPlaying)
-            return null;
-        _remaining -= delta;
-        return IsPlaying ? null : (_stance, _moving);
+        _clip = "";
+        _time = 0f;
+        _length = 0f;
+        _mask = null;
     }
-
-    // Drops the gesture without restoring anything: the caller is deliberately changing clip, so it
-    // already knows what should play instead.
-    public void Cancel() => _remaining = 0f;
 }

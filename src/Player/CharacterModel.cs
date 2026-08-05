@@ -28,6 +28,12 @@ public static class CharacterModel
         public required Color Skin;          // flat colour the skin UV regions are filled with
         public required int FaceIndex;       // Items/Faces/<n> overlay composited by UV
 
+        // PlayerAnimator's mixAnimation block: the gesture clips that play on layer 1 and the shoulders
+        // (and skull) whose subtrees they are restricted to. A character with none — the zombies, whose
+        // Attack_* swings ARE their movement state — animates whole-body throughout.
+        public (string Clip, bool LeftShoulder, bool RightShoulder, bool Skull)[] Mixes =
+            System.Array.Empty<(string, bool, bool, bool)>();
+
         // Which of the prefab's two skinned rigs to take. Unturned keeps the first-person arms in a
         // "Viewmodel" subtree beside the third-person body; both are rooted at the same GameObject, so
         // the subtree is the only thing that separates them.
@@ -51,6 +57,16 @@ public static class CharacterModel
         PrimaryIdle = "Idle_Stand",
         Skin = new Color(244f / 255f, 230f / 255f, 210f / 255f),
         FaceIndex = 0,
+        // PlayerAnimator, verbatim:
+        //   mixAnimation("Punch_Left",  mixLeftShoulder: true,  mixRightShoulder: false);
+        //   mixAnimation("Punch_Right", mixLeftShoulder: false, mixRightShoulder: true);
+        // Both clips are authored over all sixteen bones, legs included, so this restriction is the only
+        // thing that keeps a swing from replacing the walk cycle for its whole 0.63 s.
+        Mixes = new[]
+        {
+            ("Punch_Left", true, false, false),
+            ("Punch_Right", false, true, false),
+        },
     };
 
     // The same player, taken from the prefab's first-person arms rig. Same skin and clips: it is the same
@@ -62,6 +78,7 @@ public static class CharacterModel
         PrimaryIdle = PlayerEntity.PrimaryIdle,
         Skin = PlayerEntity.Skin,
         FaceIndex = PlayerEntity.FaceIndex,
+        Mixes = PlayerEntity.Mixes, // mixAnimation goes to firstAnimator and thirdAnimator alike
         FirstPerson = true,
     };
 
@@ -264,6 +281,10 @@ public static class CharacterModel
 
         foreach ((string name, AnimationClipData clip) in source.Clips)
             skeleton.StoreClip(name, clip);
+        // The mixing transforms travel with the copy too. A clone that loses them swings full-body: the
+        // first-person rig IS such a clone, so without this the arms punch while the legs stand still.
+        foreach ((string name, BoneMask? mask) in source.Mixes)
+            skeleton.MixAnimation(name, mask);
         // The bindings travel with the copy. The eye especially: a clone with no eye is exactly the rig
         // that gets parked in its own neck, and this clone is the one first person looks through.
         (int eyeBone, Vector3 eyeLocal) = source.Eye;
@@ -444,6 +465,10 @@ public static class CharacterModel
         body.Skeleton = body.GetPathTo(skeleton);
 
         StoreClips(file, byId, skeleton, boneByName, Id(smr["m_GameObject"]), entity);
+        // PlayerAnimator does this once, right after it has both animators; the port does it here for the
+        // same reason — a gesture must know which bones it may write before the first one is thrown.
+        foreach ((string clip, bool left, bool right, bool skull) in entity.Mixes)
+            skeleton.MixAnimation(clip, left, right, skull);
         skeleton.BindPitchBones(boneByName.GetValueOrDefault("Spine", -1), boneByName.GetValueOrDefault("Skull", -1));
         BindEye(file, byId, skeleton, boneByName, boneIds);
         skeleton.Play(entity.PrimaryIdle);

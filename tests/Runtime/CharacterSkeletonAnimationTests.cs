@@ -24,6 +24,10 @@ public class CharacterSkeletonAnimationTests : TestClass
     // Bone indices in the rig built by Rig() below.
     private const int Root = 0, Spine = 1, Skull = 2, Arm = 3;
 
+    // Bone indices in PlayerRig(), which uses the game's own bone names so the mixAnimation overload can
+    // resolve them.
+    private const int BodySpine = 0, LeftShoulder = 1, LeftArm = 2, LeftHip = 3, LeftLeg = 4;
+
     // --- bindings ------------------------------------------------------------------------------------
 
     // The bindings a Clone copies over. They are plain accessors, but a clone that loses one is the bug
@@ -274,11 +278,10 @@ public class CharacterSkeletonAnimationTests : TestClass
 
     // --- the one-shot overlay ------------------------------------------------------------------------
 
-    // A punch lays over the movement state and hands the rig back when it ends. The overlay's own rules
-    // are unit-tested in core/; what is asserted here is that the skeleton drives its clock and restores
-    // the state clip for real.
+    // A punch lays over the movement state and lets it back through when it ends. The overlay's own rules
+    // are unit-tested in core/; what is asserted here is that the skeleton drives its clock for real.
     [Test]
-    public async Task AGestureOwnsTheRigAndThenGivesItBack()
+    public async Task AGestureOverlaysTheStateAndThenEnds()
     {
         CharacterSkeleton rig = Rig();
         rig.StoreClip("Idle_Stand", Turn(1f, Root));
@@ -289,15 +292,190 @@ public class CharacterSkeletonAnimationTests : TestClass
         Assert.True(rig.PlayOnce("Punch_Right"));
         Assert.True(rig.IsPlayingOnce);
 
-        // The movement state pushed mid-swing is remembered, not applied — the swing keeps the rig.
-        Assert.False(rig.SetState(EPlayerStance.Crouch, moving: false));
-        Assert.True(rig.IsPlayingOnce);
-
         for (int i = 0; i < 12; i++)
             await NextFrame();
 
         Assert.False(rig.IsPlayingOnce);
         rig.QueueFree();
+    }
+
+    // The movement state is layer 0 and a gesture cannot take it: updateState pushes a stance change
+    // every frame whether or not something is swinging, and the clip it picks goes on running underneath.
+    [Test]
+    public async Task AStanceChangeMidSwingIsAppliedImmediately()
+    {
+        CharacterSkeleton rig = Rig();
+        rig.StoreClip("Idle_Stand", Turn(1f, Root));
+        rig.StoreClip("Idle_Crouch", Turn(1f, Spine));
+        rig.StoreClip("Punch_Right", Turn(5f, Arm)); // long enough to outlast the assertions
+        TestScene.AddChild(rig);
+        rig.SetState(EPlayerStance.Stand, moving: false);
+        rig.PlayOnce("Punch_Right");
+
+        Assert.True(rig.SetState(EPlayerStance.Crouch, moving: false));
+        Assert.True(rig.IsPlayingOnce); // and the swing is unaffected by it
+
+        for (int i = 0; i < 4; i++)
+            await NextFrame();
+
+        // Idle_Crouch is the only clip that turns the spine, so a spine off its rest is that clip running.
+        Assert.True(
+            rig.GetBonePoseRotation(Spine).AngleTo(rig.GetBoneRest(Spine).Basis.GetRotationQuaternion()) > 0.001f,
+            "the crouch clip never started: the gesture swallowed the stance change");
+
+        rig.QueueFree();
+    }
+
+    // A gesture armed before the rig is parented survives to be posed. The CHAR_GESTURE screenshot path
+    // does exactly this — PlayOnce and Seek run, THEN the rig is added to the scene — and a rig off the
+    // tree reports IsVisibleInTree false just as a hidden one does. Reading that as "stopped being drawn"
+    // threw the swing away and shot the stance instead, with PlayOnce still answering true.
+    [Test]
+    public void AGestureArmedBeforeTheRigIsParentedSurvives()
+    {
+        CharacterSkeleton rig = Rig(); // deliberately NOT added to the tree yet
+        rig.StoreClip("Idle_Stand", Turn(1f, Root));
+        rig.StoreClip("Punch_Right", Turn(1f, Arm));
+        rig.SetState(EPlayerStance.Stand, moving: false);
+
+        Assert.True(rig.PlayOnce("Punch_Right"));
+        Assert.True(rig.IsPlayingOnce);
+
+        TestScene.AddChild(rig);
+        Assert.True(rig.IsPlayingOnce, "entering the tree dropped the swing");
+
+        rig.QueueFree();
+    }
+
+    // Seek means "show the rig at time t", so it moves the gesture's playhead as well as the movement
+    // clip's. CHAR_ANIM_TIME=0.3 over a swing is a request for the swing AT 0.3 s; posing its opening
+    // frame however late the time asked for makes the screenshot path useless for reading a swing.
+    [Test]
+    public void SeekMovesTheGesturePlayheadToo()
+    {
+        CharacterSkeleton rig = PlayerRig();
+        rig.StoreClip("Idle_Stand", Still(4f, LeftArm));
+        rig.StoreClip("Punch_Left", Turn(4f, LeftArm)); // a quarter turn over four seconds
+        rig.MixAnimation("Punch_Left", mixLeftShoulder: true, mixRightShoulder: false);
+        rig.SetState(EPlayerStance.Stand, moving: false);
+        rig.PlayOnce("Punch_Left");
+
+        rig.Seek(0f);
+        Assert.True(rig.GetBonePoseRotation(LeftArm).AngleTo(Quaternion.Identity) < 0.001f,
+            "the swing did not start at its opening frame");
+
+        rig.Seek(2f); // half way: an eighth of a turn
+
+        float angle = rig.GetBonePoseRotation(LeftArm).AngleTo(Quaternion.Identity);
+        Assert.True(Mathf.Abs(angle - (Mathf.Pi * 0.25f)) < 0.02f,
+            $"the gesture stayed on its first key: the arm is {Mathf.RadToDeg(angle):0.0}° in");
+
+        // Past the clip the swing is over, and the idle underneath — which pins the arm — takes it back.
+        rig.Seek(4f);
+        Assert.False(rig.IsPlayingOnce);
+        Assert.True(rig.GetBonePoseRotation(LeftArm).AngleTo(Quaternion.Identity) < 0.001f,
+            "a swing seeked past its end still owned the arm");
+
+        rig.Free();
+    }
+
+    // --- mixing transforms -----------------------------------------------------------------------------
+
+    // The bug this arrangement exists for: Unturned's punch clips are authored over the WHOLE skeleton,
+    // legs included, so a swing played across the rig replaces the walk cycle and the legs stand still
+    // for its whole length. mixAnimation restricts it to one arm; the movement layer keeps the rest.
+    [Test]
+    public async Task AMixedGestureLeavesTheLegsOnTheMovementClip()
+    {
+        CharacterSkeleton rig = PlayerRig();
+        rig.StoreClip("Move_Run", Turn(0.2f, LeftArm, LeftLeg));   // a brisk cycle over arm and leg alike
+        rig.StoreClip("Punch_Left", Still(30f, LeftArm, LeftLeg)); // full-body, as the real clip is
+        rig.MixAnimation("Punch_Left", mixLeftShoulder: true, mixRightShoulder: false);
+        TestScene.AddChild(rig);
+
+        rig.SetState(EPlayerStance.Sprint, moving: true);
+        await NextFrame();
+        Assert.True(rig.PlayOnce("Punch_Left"));
+
+        // Watch a window of the swing rather than counting frames into it: what is being asserted is that
+        // the legs are not FROZEN, which is true at any frame rate.
+        await NextFrame();
+        Quaternion legFirst = rig.GetBonePoseRotation(LeftLeg);
+        float legMoved = 0f, armMoved = 0f;
+        for (int i = 0; i < 30; i++)
+        {
+            await NextFrame();
+            legMoved = Mathf.Max(legMoved, rig.GetBonePoseRotation(LeftLeg).AngleTo(legFirst));
+            armMoved = Mathf.Max(armMoved, rig.GetBonePoseRotation(LeftArm).AngleTo(Quaternion.Identity));
+        }
+
+        Assert.True(rig.IsPlayingOnce, "the swing ended before the window did");
+        Assert.True(legMoved > 0.05f,
+            $"the legs froze during the swing: they moved {Mathf.RadToDeg(legMoved):0.0}° in the whole window");
+        Assert.True(armMoved < 0.02f,
+            $"the swing did not reach the arm it was mixed onto: it drifted {Mathf.RadToDeg(armMoved):0.0}°");
+
+        rig.QueueFree();
+    }
+
+    // The same rig and the same clips with no mixAnimation registered: Unturned's `mixAnimation(name)`
+    // with no mixing transforms restricts nothing, so the gesture covers the whole body — which is what
+    // a gesture the port has not mapped still does.
+    [Test]
+    public async Task AnUnmixedGestureStillCoversTheWholeBody()
+    {
+        CharacterSkeleton rig = PlayerRig();
+        rig.StoreClip("Move_Run", Turn(0.2f, LeftArm, LeftLeg));
+        rig.StoreClip("Punch_Left", Still(30f, LeftArm, LeftLeg));
+        TestScene.AddChild(rig);
+
+        rig.SetState(EPlayerStance.Sprint, moving: true);
+        await NextFrame();
+        rig.PlayOnce("Punch_Left");
+
+        float legMoved = 0f;
+        for (int i = 0; i < 30; i++)
+        {
+            await NextFrame();
+            legMoved = Mathf.Max(legMoved, rig.GetBonePoseRotation(LeftLeg).AngleTo(Quaternion.Identity));
+        }
+
+        Assert.True(legMoved < 0.02f, "an unmixed gesture let the movement layer through");
+        rig.QueueFree();
+    }
+
+    // A rig that does not carry the bones a mix names contributes no mixing transform, which in Unity is
+    // no restriction at all. Silently masking EVERYTHING out instead would be a gesture that does nothing.
+    [Test]
+    public void AMixAgainstBonesTheRigDoesNotHaveRestrictsNothing()
+    {
+        CharacterSkeleton rig = Rig(); // Root/Spine/Skull/Arm: no Left_Shoulder anywhere
+
+        Assert.Null(rig.Subtrees(new[] { "Left_Shoulder", "Right_Shoulder" }));
+
+        rig.MixAnimation("Punch_Left", mixLeftShoulder: true, mixRightShoulder: true);
+        Assert.True(rig.Mixes.ContainsKey("Punch_Left"));
+        Assert.Null(rig.Mixes["Punch_Left"]);
+
+        rig.Free();
+    }
+
+    // The mask is recursive, the way AddMixingTransform(t, recursive: true) is: naming the shoulder
+    // reaches the arm and the hand under it, and stops at the other side of the body.
+    [Test]
+    public void AMixReachesTheWholeLimbUnderTheShoulder()
+    {
+        CharacterSkeleton rig = PlayerRig();
+
+        BoneMask mask = rig.Subtrees(new[] { "Left_Shoulder" })!;
+
+        Assert.True(mask.Contains(LeftShoulder));
+        Assert.True(mask.Contains(LeftArm));
+        Assert.False(mask.Contains(BodySpine));
+        Assert.False(mask.Contains(LeftHip));
+        Assert.False(mask.Contains(LeftLeg));
+
+        rig.Free();
     }
 
     // A gesture the character cannot perform is skipped rather than freezing the rig on a clip that is
@@ -523,32 +701,54 @@ public class CharacterSkeletonAnimationTests : TestClass
         return rig;
     }
 
-    // A clip that turns `bone` a quarter turn over its length.
-    private static AnimationClipData Turn(float length, int bone) => new()
+    // The player's own bone NAMES on a small rig, so mixAnimation resolves its shoulders: the left arm
+    // chain off the spine, and a leg on a hip root of its own — which is how Player_Client is built, hips
+    // and spine being separate roots rather than one skeleton root.
+    private static CharacterSkeleton PlayerRig()
+    {
+        var rig = new CharacterSkeleton { Name = "PlayerRig" };
+        foreach (string bone in new[] { "Spine", "Left_Shoulder", "Left_Arm", "Left_Hip", "Left_Leg" })
+            rig.AddBone(bone);
+        rig.SetBoneParent(LeftShoulder, BodySpine);
+        rig.SetBoneParent(LeftArm, LeftShoulder);
+        rig.SetBoneParent(LeftLeg, LeftHip);
+        rig.SetBoneRest(BodySpine, new Transform3D(Basis.Identity, Vector3.Up));
+        rig.SetBoneRest(LeftShoulder, new Transform3D(Basis.Identity, Vector3.Left * 0.2f));
+        rig.SetBoneRest(LeftArm, new Transform3D(Basis.Identity, Vector3.Down * 0.3f));
+        rig.SetBoneRest(LeftHip, new Transform3D(Basis.Identity, Vector3.Left * 0.1f));
+        rig.SetBoneRest(LeftLeg, new Transform3D(Basis.Identity, Vector3.Down * 0.4f));
+        rig.ResetBonePoses();
+        return rig;
+    }
+
+    // A clip that turns every named bone a quarter turn over its length.
+    private static AnimationClipData Turn(float length, params int[] bones) => new()
     {
         Length = length,
-        Bones = new Dictionary<int, BoneCurves>
+        Bones = Curves(bones, new BoneCurves
         {
-            [bone] = new BoneCurves
-            {
-                Rotation = new[] { (0f, Quaternion.Identity), (length, new Quaternion(Vector3.Up, Mathf.Pi * 0.5f)) },
-            },
-        },
+            Rotation = new[] { (0f, Quaternion.Identity), (length, new Quaternion(Vector3.Up, Mathf.Pi * 0.5f)) },
+        }),
     };
 
-    // A clip that pins `bone` to its rest rotation for its whole length — something to blend INTO whose
-    // pose is known exactly.
-    private static AnimationClipData Still(float length, int bone) => new()
+    // A clip that pins every named bone to its rest rotation for its whole length — something to blend
+    // INTO, or lay OVER, whose pose is known exactly.
+    private static AnimationClipData Still(float length, params int[] bones) => new()
     {
         Length = length,
-        Bones = new Dictionary<int, BoneCurves>
+        Bones = Curves(bones, new BoneCurves
         {
-            [bone] = new BoneCurves
-            {
-                Rotation = new[] { (0f, Quaternion.Identity), (length, Quaternion.Identity) },
-            },
-        },
+            Rotation = new[] { (0f, Quaternion.Identity), (length, Quaternion.Identity) },
+        }),
     };
+
+    private static Dictionary<int, BoneCurves> Curves(int[] bones, BoneCurves curves)
+    {
+        var tracks = new Dictionary<int, BoneCurves>(bones.Length);
+        foreach (int bone in bones)
+            tracks[bone] = curves;
+        return tracks;
+    }
 
     // A clip that moves and scales `bone` rather than rotating it — the two channels the game's own clips
     // exercise least, and so the two most able to break quietly.

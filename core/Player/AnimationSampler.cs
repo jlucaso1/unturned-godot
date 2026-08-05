@@ -100,6 +100,37 @@ public static class AnimationSampler
                     BlendVector(kv.Value.Scale, null, t));
     }
 
+    // Lays a gesture pose over the movement pose, for the bones its mixing transforms cover — Unity's
+    // legacy layering, where `AnimationState.layer = 1` at full weight wins over layer 0 on the transforms
+    // it is allowed to touch and leaves every other one to the layer below.
+    //
+    // Masked OUT bones are not merely un-overwritten, they are untouched: that is what keeps the legs on
+    // the walk cycle while an arm swings, and it is the whole reason a full-body punch clip can be used
+    // as an arm animation. Within a masked bone the override is per CHANNEL, because a layer only
+    // overrides the curves it actually carries: a gesture that rotates a bone without moving it lets the
+    // movement clip's position track through.
+    //
+    // `mask` is null for a gesture with no mixing transforms at all (Unturned's `mixAnimation(name)`),
+    // which covers the whole rig.
+    public static void Overlay(Dictionary<int, BonePose> under, Dictionary<int, BonePose> over,
+        BoneMask? mask, Dictionary<int, BonePose> dest)
+    {
+        dest.Clear();
+        foreach (KeyValuePair<int, BonePose> kv in under)
+            dest[kv.Key] = kv.Value;
+
+        foreach (KeyValuePair<int, BonePose> kv in over)
+        {
+            if (mask != null && !mask.Contains(kv.Key))
+                continue;
+            under.TryGetValue(kv.Key, out BonePose below);
+            dest[kv.Key] = new BonePose(kv.Key,
+                kv.Value.Rotation ?? below.Rotation,
+                kv.Value.Position ?? below.Position,
+                kv.Value.Scale ?? below.Scale);
+        }
+    }
+
     private static Quaternion? BlendRotation(Quaternion? a, Quaternion? b, float t)
     {
         if (a is { } av && b is { } bv)

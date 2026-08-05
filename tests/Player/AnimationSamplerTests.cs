@@ -144,4 +144,102 @@ public class AnimationSamplerTests
         Assert.True(blended[1].Rotation.HasValue); // only in 'from'
         Assert.True(blended[2].Rotation.HasValue); // only in 'to'
     }
+
+    // --- layering ---------------------------------------------------------------------------------
+
+    // A punch is a full-body clip restricted to one arm. The masked bones take the swing; every other one
+    // keeps the movement clip's pose, which is what lets the legs go on walking through it.
+    [Fact]
+    public void Overlay_TakesTheMaskedBonesAndLeavesTheRest()
+    {
+        Quaternion swing = new(Vector3.Up, Mathf.Pi / 2f);
+        var walk = new Dictionary<int, BonePose>
+        {
+            [1] = new(1, Quaternion.Identity, null, null), // an arm the mask covers
+            [2] = new(2, Quaternion.Identity, null, null), // a leg it does not
+        };
+        var punch = new Dictionary<int, BonePose>
+        {
+            [1] = new(1, swing, null, null),
+            [2] = new(2, swing, null, null), // authored, but masked out
+        };
+
+        var dest = new Dictionary<int, BonePose>();
+        AnimationSampler.Overlay(walk, punch, BoneMask.Subtrees(new[] { -1, -1, -1 }, new[] { 1 }), dest);
+
+        Assert.Equal(swing, dest[1].Rotation);
+        Assert.Equal(Quaternion.Identity, dest[2].Rotation);
+    }
+
+    // A layer only overrides the curves it carries: a gesture that rotates a bone without moving it lets
+    // the movement clip's position track through rather than dropping the bone back to its rest.
+    [Fact]
+    public void Overlay_FallsThroughPerChannel()
+    {
+        var under = new Dictionary<int, BonePose>
+        {
+            [1] = new(1, Quaternion.Identity, new Vector3(0, 3, 0), new Vector3(2, 2, 2)),
+        };
+        var over = new Dictionary<int, BonePose>
+        {
+            [1] = new(1, new Quaternion(Vector3.Up, 1f), null, null), // rotation only
+        };
+
+        var dest = new Dictionary<int, BonePose>();
+        AnimationSampler.Overlay(under, over, mask: null, dest);
+
+        Assert.Equal(new Quaternion(Vector3.Up, 1f), dest[1].Rotation);
+        Assert.Equal(new Vector3(0, 3, 0), dest[1].Position);
+        Assert.Equal(new Vector3(2, 2, 2), dest[1].Scale);
+    }
+
+    // No mask is Unturned's mixAnimation with no mixing transforms: the gesture covers everything.
+    [Fact]
+    public void Overlay_WithNoMaskCoversEveryBone()
+    {
+        Quaternion swing = new(Vector3.Up, Mathf.Pi / 2f);
+        var under = new Dictionary<int, BonePose> { [1] = new(1, Quaternion.Identity, null, null) };
+        var over = new Dictionary<int, BonePose> { [1] = new(1, swing, null, null) };
+
+        var dest = new Dictionary<int, BonePose>();
+        AnimationSampler.Overlay(under, over, mask: null, dest);
+
+        Assert.Equal(swing, dest[1].Rotation);
+    }
+
+    // A masked bone the movement clip says nothing about still reaches the pose — the gesture is the only
+    // thing animating it, and dropping it would leave the arm on its bind rest mid-swing.
+    //
+    // The bone the mask EXCLUDES and the layer below does not carry is the same case from the other side,
+    // and it is the one the fix turns on: the punch clips animate legs, and a rig whose movement clip is
+    // silent about a leg must not take the swing's. The other overlay tests cannot see this — their
+    // masked-out bone is in `under` too, so passing it through and skipping it look identical.
+    [Fact]
+    public void Overlay_AddsMaskedBonesTheLayerBelowDoesNotCarry()
+    {
+        var under = new Dictionary<int, BonePose> { [2] = new(2, Quaternion.Identity, null, null) };
+        var over = new Dictionary<int, BonePose>
+        {
+            [1] = new(1, new Quaternion(Vector3.Up, 1f), null, null),
+            [0] = new(0, new Quaternion(Vector3.Up, 1f), null, null), // masked out, and absent from `under`
+        };
+
+        var dest = new Dictionary<int, BonePose>();
+        AnimationSampler.Overlay(under, over, BoneMask.Subtrees(new[] { -1, -1, -1 }, new[] { 1 }), dest);
+
+        Assert.Equal(2, dest.Count);
+        Assert.Equal(new Quaternion(Vector3.Up, 1f), dest[1].Rotation);
+        Assert.False(dest.ContainsKey(0)); // a masked-out bone never reaches the pose at all
+    }
+
+    // The destination is a reused per-frame buffer, so it must be refilled rather than added to.
+    [Fact]
+    public void Overlay_ClearsTheDestinationBuffer()
+    {
+        var dest = new Dictionary<int, BonePose> { [9] = new(9, Quaternion.Identity, null, null) };
+        AnimationSampler.Overlay(new Dictionary<int, BonePose>(), new Dictionary<int, BonePose>(),
+            mask: null, dest);
+
+        Assert.Empty(dest);
+    }
 }
