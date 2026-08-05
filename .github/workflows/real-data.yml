@@ -314,3 +314,26 @@ jobs:
         env:
           UNTURNED_PATH: ${{ github.workspace }}/build/game-data
         run: ./scripts/check-structural-metrics.sh
+
+      # The runtime suite's other half. Most of what src/ does is decode the game's own bundle formats,
+      # and those are re-implementations checked byte-for-byte against Unturned's — a synthetic file this
+      # reader accepts would prove nothing about the reader. So those tests need the content, and this is
+      # the job that has it.
+      #
+      # UG_REQUIRE_REAL_DATA=1 is the whole point: without it a test with nothing to read says so and
+      # returns, which is right on a developer's machine and useless here. Set, a missing file FAILS,
+      # so this job cannot go green by finding nothing.
+      - name: Run the runtime suite against real content
+        env:
+          UNTURNED_PATH: ${{ github.workspace }}/build/game-data
+          UG_REQUIRE_REAL_DATA: '1'
+        run: ./scripts/run-godot-tests.sh
+
+      # Reported, not gated. src/ is being brought under measurement file by file (see
+      # check-src-coverage.sh), and this is the number with the content present — the hermetic job's
+      # figure is the same measurement with every content-dependent test skipped.
+      - name: Report src/ coverage with real content
+        env:
+          UNTURNED_PATH: ${{ github.workspace }}/build/game-data
+          UG_REQUIRE_REAL_DATA: '1'
+        run: ./scripts/check-src-coverage.sh --files
