@@ -342,6 +342,13 @@ jobs:
     name: src/ coverage with real content
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # Non-gating all the way up, not just on the report step. The preamble below used to be shared with
+    # the structural work, so a Steam flake or a failed Godot install took down a job that was gating
+    # something; split out, the same failure would redden the workflow over a job that gates nothing.
+    # This keeps the run's verdict where it was before the split. It does NOT paper over the report
+    # itself — that step carries its own continue-on-error, so it never reaches this and the job still
+    # shows green when only the measurement failed. What this catches is exactly the setup.
+    continue-on-error: true
 
     steps:
       - uses: actions/checkout@v7
@@ -391,6 +398,22 @@ jobs:
           path: build/game-data
           key: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-${{ github.run_id }}-${{ github.job }}
 
+      # Restore-only, and the reason is what this job lost in the split. user://model_cache and
+      # user://texture_cache are shared across every run in a job — measured after one local
+      # --with-game-run: 15 MB of models, 3.3 MB of textures — and the structural benchmark used to fill
+      # them before the coverage runs got here, so those runs read caches rather than extracting. Alone,
+      # this job's first pass extracts cold and the rest read warm. That is a change in which paths the
+      # reported figure exercises, so the cache comes along; the same key means it warms exactly when the
+      # structural job's would have.
+      #
+      # No save: the structural job is the producer for this key, and two jobs writing one key is a race
+      # over identical bytes.
+      - name: Restore the extracted asset cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.local/share/godot/app_userdata/unturned-godot
+          key: godot-userdata-${{ steps.content-key.outputs.key }}-${{ hashFiles('core/**/*.cs', 'src/Rendering/**/*.cs', 'src/World/**/*.cs') }}
+
       # check-src-coverage.sh needs a Godot binary and the Debug assembly the engine loads. It builds the
       # assembly itself, but it only ever *looks up* the binary (`install-godot.sh --print-path`) and
       # fails when it is not there — so the install runs as its own step rather than being left to a
@@ -408,9 +431,12 @@ jobs:
       #
       # continue-on-error because the sentence above is the contract: this number is reported, not gated.
       # --with-game-run adds real sessions on top of the suite, and a session that wedges or a mode that
-      # exits badly must not turn a PR red over a figure that has no floor yet. It stays on the STEP
-      # rather than moving to the job so that this job goes green exactly when it did before the split:
-      # a job-level continue-on-error would still report the job itself as failed.
+      # exits badly must not turn a PR red over a figure that has no floor yet.
+      #
+      # Kept here as well as on the job, because the two mean different things. This one absorbs a failed
+      # MEASUREMENT and leaves the job green, which is what it did before the split and is the state a
+      # reader should see when the setup was fine. The job-level one absorbs a failed SETUP, which the
+      # split newly made possible; that case is worth showing as a failed job, and does not reach here.
       - name: Report src/ coverage with real content
         continue-on-error: true
         env:
