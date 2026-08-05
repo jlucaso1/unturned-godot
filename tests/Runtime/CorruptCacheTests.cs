@@ -55,9 +55,23 @@ public class CorruptCacheTests : TestClass
 
         // The load has to finish anyway. It may re-extract, it may build fewer objects — what it may not
         // do is throw, hang, or read those bytes as geometry.
-        int selected = await Load(install, level, cache.Path);
+        await Load(install, level, cache.Path);
 
-        Assert.True(selected >= 0);
+        // FINDING, pinned rather than asserted around: the damaged entries are STILL THERE. Nothing
+        // removes them and nothing re-extracts them, so the cache stays broken — every later load finds
+        // the same truncated files, skips them again, and the map renders without those meshes for as
+        // long as the directory survives. The load surviving is the invariant that matters and is
+        // asserted above; this records that surviving is all it does.
+        //
+        // Whether a load should drop what it could not read is a production decision and is left to one.
+        // ModelLibrary already does exactly that on the path it owns (ExtractionIndex.RemoveCachedAsset),
+        // so the shape of the fix exists; it is this pass that does not reach it.
+        string[] after = Directory.GetFiles(cache.Path, "*.mesh", SearchOption.AllDirectories);
+        Assert.NotEmpty(after);
+        foreach (string mesh in after)
+            Assert.True(new FileInfo(mesh).Length <= 8,
+                $"{Path.GetFileName(mesh)} was repaired, which is better than this test expects — "
+                + "update the finding rather than deleting it");
     }
 
     // An entry whose magic is wrong entirely — a file from another format, or another program — is
@@ -80,9 +94,17 @@ public class CorruptCacheTests : TestClass
         foreach (string mesh in meshes)
             File.WriteAllBytes(mesh, new byte[] { 0xDE, 0xAD, 0xBE, 0xEF, 1, 2, 3, 4 });
 
-        int selected = await Load(install, level, cache.Path);
+        await Load(install, level, cache.Path);
 
-        Assert.True(selected >= 0);
+        // Rewritten or removed — either way, not left as the foreign-format bytes. An entry whose magic
+        // this build does not recognise is stale by definition, and stale entries that survive a load
+        // are entries the next load will skip again for ever.
+        foreach (string mesh in Directory.GetFiles(cache.Path, "*.mesh", SearchOption.AllDirectories))
+        {
+            byte[] head = File.ReadAllBytes(mesh);
+            Assert.False(head.Length == 8 && head[0] == 0xDE && head[1] == 0xAD,
+                $"{Path.GetFileName(mesh)} is still the foreign-format file the test wrote");
+        }
     }
 
     // A cache directory full of files that are not caches at all is walked past. Something else's
@@ -139,7 +161,11 @@ public class CorruptCacheTests : TestClass
         using var dir = new TempDir();
         string defDir = Path.Combine(dir.Path, "core-footstep");
         Directory.CreateDirectory(defDir);
-        WriteMarker(Path.Combine(defDir, "def.bin"));
+
+        // The marker NAMES a clip that is not there. A marker with an empty clip list never asks the
+        // library to resolve a path at all, so it cannot show what happens when one is missing — and a
+        // directory somebody cleared space in is the case this is about.
+        WriteMarker(Path.Combine(defDir, "def.bin"), "clip0.ogg");
 
         Assert.Null(new AudioDefLibrary(dir.Path).Resolve("core-footstep"));
     }
@@ -217,8 +243,11 @@ public class CorruptCacheTests : TestClass
 
         string entry = Path.Combine(ProjectSettings.GlobalizePath("user://nav_reconcile"),
             NavReconcileCache.MapKey(level.Path) + ".cache");
-        if (File.Exists(entry))
-            File.WriteAllBytes(entry, new byte[] { 0, 1, 2, 3, 4, 5, 6, 7 });
+
+        // Damaging conditionally would let a run where the first pass wrote nothing skip the damage and
+        // then verify only that an uncached pass can publish — which is another test entirely.
+        Assert.True(File.Exists(entry), "the first pass wrote no cache, so there is nothing to damage");
+        File.WriteAllBytes(entry, new byte[] { 0, 1, 2, 3, 4, 5, 6, 7 });
 
         ZombieNavigation second = Floor(level.Path);
         await second.PruneAgainstCollisionAsync(sandbox.Root, space, 0.5f,

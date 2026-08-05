@@ -247,8 +247,14 @@ public class PlayerControllerTests : TestClass
         await world.Run(40);
         world.Release(PlayerSettings.Default.Forward);
 
-        Assert.True(world.Player.Position.DistanceTo(start) > 0.5f,
-            $"the player held forward for 40 frames and moved to {world.Player.Position}");
+        // FORWARD, not merely somewhere. At the default yaw the controller's forward is -Z, so a key
+        // wired to strafe or to back would satisfy a distance check while sending the player the wrong
+        // way — and this is the test that owns that binding.
+        Vector3 moved = world.Player.Position - start;
+        Assert.True(moved.Z < -0.5f,
+            $"holding forward moved the player by {moved}, which is not forward");
+        Assert.True(MathF.Abs(moved.X) < MathF.Abs(moved.Z),
+            $"holding forward moved the player mostly sideways: {moved}");
     }
 
     // Letting go stops them. A controller that kept the last direction would have players sliding away
@@ -342,17 +348,35 @@ public class PlayerControllerTests : TestClass
 
     // A click while a menu owns the controls is not a punch. The pause menu is full of things to click
     // on, and every one of them would otherwise also swing the player's fist.
+    //
+    // Observed on the WIRE, like the swing above. Without a session there is nothing that can tell a
+    // click that was correctly ignored from one that was latched and thrown.
     [Test]
     public async Task AClickOnAMenuIsNotAPunch()
     {
         using var world = new PlayerWorld(TestScene);
         await world.Land();
+        using var session = new Loopback();
+        world.Player.Net = session.Client;
+
+        for (int i = 0; i < 40 && !session.Client.Joined; i++)
+        {
+            session.Pump();
+            await world.Run(1);
+        }
+
+        Assert.True(session.Client.Joined, "the loopback session never admitted the player");
+        int before = session.Swings;
 
         world.MenuTakesTheControls();
         world.Click();
-        await world.Run(20);
+        for (int i = 0; i < 60; i++)
+        {
+            session.Pump();
+            await world.Run(1);
+        }
 
-        Assert.True(world.Player.IsOnFloor());
+        Assert.Equal(before, session.Swings);
     }
 
     // In a session, a swing goes out on the wire. It is announced on more than one input frame, because
@@ -366,15 +390,29 @@ public class PlayerControllerTests : TestClass
         using var session = new Loopback();
         world.Player.Net = session.Client;
 
-        world.Click();
-        for (int i = 0; i < 40; i++)
+        // Let the handshake finish before swinging: an input frame sent before admission is not a swing
+        // anyone refused, it is a swing nobody was listening for.
+        for (int i = 0; i < 40 && !session.Client.Joined; i++)
         {
             session.Pump();
             await world.Run(1);
         }
 
-        // The server saw the session at all, which is what says the controller's tick reached the wire.
-        Assert.True(world.Player.IsOnFloor());
+        Assert.True(session.Client.Joined, "the loopback session never admitted the player");
+        int before = session.Swings;
+
+        world.Click();
+        for (int i = 0; i < 60 && session.Swings == before; i++)
+        {
+            session.Pump();
+            await world.Run(1);
+        }
+
+        // The SERVER saw it. Asserting the local body's floor state proved nothing about the wire — it
+        // was already true before the session was attached — and a controller that latched the click and
+        // never announced it is exactly the desync this path exists to prevent.
+        Assert.True(session.Swings > before,
+            "the click never reached the server as a swing");
     }
 
     // --- helpers -------------------------------------------------------------------------------------
@@ -411,6 +449,11 @@ public class PlayerControllerTests : TestClass
             _server.Update(_now);
             Client.Update(_now);
         }
+
+        // Swings the SERVER accepted. The controller announces one on several input frames because
+        // datagrams are unreliable, and the server recognises the repeats as the same swing — so this
+        // counts events rather than packets, which is what a second player would see.
+        public int Swings => _server.Gestures.Count;
 
         private static bool Ground(float x, float z, out float y)
         {

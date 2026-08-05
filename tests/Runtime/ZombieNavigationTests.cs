@@ -22,6 +22,23 @@ public class ZombieNavigationTests : TestClass
 {
     public ZombieNavigationTests(Node testScene) : base(testScene) { }
 
+    // DisabledFaces is only populated when captures are possible, and that is decided ONCE at type load
+    // from REPRO — the documented way to turn the recorder off. It cannot be forced on from here, so with
+    // REPRO=0 an assertion about dropped faces reads as "this pass pruned nothing" when what it means is
+    // "this build is not recording what it pruned". Those are the same empty dictionary.
+    //
+    // So every test below asserts the ROUTING effect, which is environment-independent, and asserts the
+    // face sets only where they are meaningful. The alternative — asserting the sets unconditionally —
+    // makes the suite pass or fail on the caller's environment rather than on the code.
+    private static bool FacesAreRecorded()
+    {
+        if (ZombieNavigation.RecordsDisabledFaces)
+            return true;
+
+        Log.Print("[runtime-tests] REPRO is off, so disabled faces are not recorded; asserting routing only");
+        return false;
+    }
+
     // A map with no navigation flags builds no router. Plenty of workshop maps ship none, and the session
     // has to treat that as "no zombies route here" rather than as a failure.
     [Test]
@@ -228,7 +245,20 @@ public class ZombieNavigationTests : TestClass
             stepOffset: 0.5f, new HashSet<Guid>());
 
         Assert.True(nav.IsReady, "reconciliation finished without publishing a graph");
-        Assert.NotEmpty(nav.DisabledFaces);
+
+        // The building is no longer walkable THROUGH, which is the effect the dropped faces exist to
+        // produce and the only half of this that does not depend on the recorder being on.
+        // The ground under the building is no longer part of the mesh: a zombie shoved in there cannot
+        // find its way back onto the navmesh at that spot, while open floor a few metres away still
+        // projects. This is the EFFECT the dropped faces exist to produce, and unlike the face sets it
+        // does not depend on the recorder being switched on.
+        Assert.False(nav.ProjectToSurface(new Vector3(0f, 2f, 0f), out _),
+            "the floor under the building still projects, so nothing was pruned");
+        Assert.True(nav.ProjectToSurface(new Vector3(-9f, 2f, -9f), out _),
+            "the open floor was pruned along with the building");
+
+        if (FacesAreRecorded())
+            Assert.True(TotalDropped(nav) > 0, "the building took no faces out of the graph at all");
 
         // The building's footprint went, and only it: the floor around it is 20 m across and the block
         // covers 6 of them, so a pass that dropped everything would be eating the map rather than
@@ -304,7 +334,7 @@ public class ZombieNavigationTests : TestClass
         using var level = new TempLevel();
         using var sandbox = new PhysicsSandbox(TestScene);
         sandbox.AddBox(new Vector3(0f, -0.5f, 0f), new Vector3(40f, 1f, 40f));
-        sandbox.AddBox(new Vector3(0f, 0.5f, 0f), new Vector3(6f, 1f, 6f));
+        StaticBody3D building = sandbox.AddBox(new Vector3(0f, 0.5f, 0f), new Vector3(6f, 1f, 6f));
         await sandbox.Settle();
 
         PhysicsDirectSpaceState3D space = sandbox.Root.GetWorld3D().DirectSpaceState;
@@ -313,16 +343,28 @@ public class ZombieNavigationTests : TestClass
         // The first pass probes the world and writes its verdicts.
         ZombieNavigation first = Build(level.Path);
         await first.PruneAgainstCollisionAsync(sandbox.Root, space, 0.5f, selected);
-        int droppedFirst = first.DisabledFaces.TryGetValue(0, out IReadOnlySet<int>? faces) ? faces.Count : 0;
+        SortedSet<string> fromProbing = DroppedFaces(first);
         first.Free();
 
-        // The second reads them back: same level, same colliders, same step offset.
+        Assert.True(System.IO.File.Exists(level.CacheEntry),
+            "the first pass wrote no cache, so the second has nothing to read and this proves nothing");
+        if (!FacesAreRecorded())
+            return;
+        Assert.NotEmpty(fromProbing);
+
+        // Now REMOVE the obstruction. A second pass that re-probed would find clear ground and drop
+        // nothing; only a pass that restored the cache can still report the building. That is the whole
+        // difference between reading the cache and quietly recomputing, and without it this test passes
+        // either way — the sandbox has not changed, so both roads lead to the same answer.
+        sandbox.Root.RemoveChild(building);
+        building.QueueFree();
+        await sandbox.Settle();
+
         ZombieNavigation second = Build(level.Path);
         await second.PruneAgainstCollisionAsync(sandbox.Root, space, 0.5f, selected);
 
         Assert.True(second.IsReady, "the cached run published no graph");
-        int droppedSecond = second.DisabledFaces.TryGetValue(0, out IReadOnlySet<int>? again) ? again.Count : 0;
-        Assert.Equal(droppedFirst, droppedSecond);
+        Assert.Equal(fromProbing, DroppedFaces(second));
 
         second.Free();
     }
@@ -351,22 +393,37 @@ public class ZombieNavigationTests : TestClass
         PhysicsDirectSpaceState3D space = sandbox.Root.GetWorld3D().DirectSpaceState;
         var selected = new HashSet<Guid>();
 
-        // The server-only pass, which is the answer the field has to match.
-        ZombieNavigation server = Build();
-        await server.PruneAgainstCollisionAsync(sandbox.Root, space, 0.5f, selected);
-        int droppedByServer = server.DisabledFaces.TryGetValue(0, out IReadOnlySet<int>? a) ? a.Count : 0;
-        server.Free();
+        // The server-only pass, which is the answer the field has to match. UG_NAV_CPU_PROBE=0 in the
+        // environment would send BOTH passes down the server path and make the comparison vacuous, so
+        // each pass is run under the flag it is supposed to be exercising.
+        using (new EnvFlagScope("UG_NAV_CPU_PROBE", "0"))
+        {
+            ZombieNavigation serverOnly = Build();
+            await serverOnly.PruneAgainstCollisionAsync(sandbox.Root, space, 0.5f, selected);
+            ServerVerdict = DroppedFaces(serverOnly);
+            serverOnly.Free();
+        }
 
-        // And the same pass with the field recorded alongside it.
-        ZombieNavigation field = Build();
-        await field.PruneAgainstCollisionAsync(sandbox.Root, space, 0.5f, selected, RecordedGeometry());
-        int droppedWithField = field.DisabledFaces.TryGetValue(0, out IReadOnlySet<int>? b) ? b.Count : 0;
+        using (new EnvFlagScope("UG_NAV_CPU_PROBE", "1"))
+        {
+            ZombieNavigation field = Build();
+            await field.PruneAgainstCollisionAsync(sandbox.Root, space, 0.5f, selected, RecordedGeometry());
 
-        Assert.True(field.IsReady, "the field-backed pass published no graph");
-        Assert.Equal(droppedByServer, droppedWithField);
+            Assert.True(field.IsReady, "the field-backed pass published no graph");
+            if (!FacesAreRecorded())
+                return;
+            Assert.NotEmpty(ServerVerdict);
 
-        field.Free();
+            // The same FACES, not the same count. A field that misses one obstructed triangle and drops a
+            // clear one instead matches on count while the navmesh is wrong in both directions — which is
+            // precisely the destructive mismatch this pass exists to prevent.
+            Assert.Equal(ServerVerdict, DroppedFaces(field));
+
+            field.Free();
+        }
     }
+
+    private static SortedSet<string> ServerVerdict = new(StringComparer.Ordinal);
 
     // The field is RELEASED however the pass ended. What it holds is the map's entire collision geometry,
     // recorded during the load purely so this one pass could sample it — so on a session where the pass
@@ -379,14 +436,18 @@ public class ZombieNavigationTests : TestClass
         await sandbox.Settle();
 
         CollisionFieldBuilder geometry = RecordedGeometry();
-        ZombieNavigation nav = Build();
+        Assert.True(geometry.ShapeCount > 0 && geometry.TileCount > 0,
+            "an empty builder cannot show a release, because every count is already zero");
 
+        ZombieNavigation nav = Build();
         await nav.PruneAgainstCollisionAsync(sandbox.Root,
             sandbox.Root.GetWorld3D().DirectSpaceState, 0.5f, new HashSet<Guid>(), geometry);
 
-        // Releasing twice is the observable end state: the pass already released it, and a second call
-        // has to be quiet because teardown makes one on every path out.
-        geometry.Release();
+        // Already released by the pass. Releasing it here instead would make the test pass whether or not
+        // the pass ever did, since Release is quiet on a builder that still holds everything.
+        Assert.Equal(0, geometry.ShapeCount);
+        Assert.Equal(0, geometry.InstanceCount);
+        Assert.Equal(0, geometry.TileCount);
 
         nav.Free();
     }
@@ -408,7 +469,8 @@ public class ZombieNavigationTests : TestClass
             new CollisionFieldBuilder());
 
         Assert.True(nav.IsReady);
-        Assert.NotEmpty(nav.DisabledFaces);
+        Assert.True(TotalDropped(nav) > 0,
+            "the empty field was treated as authoritative, so the block stayed walkable");
 
         nav.Free();
     }
@@ -539,6 +601,29 @@ public class ZombieNavigationTests : TestClass
         Triangles = new[] { 0, 1, 2 },
     };
 
+    // Every face the pass dropped, flattened. A dictionary entry proves only that a flag was VISITED;
+    // an entry holding an empty set is a flag whose obstruction was missed, and the two read the same to
+    // Assert.NotEmpty on the dictionary itself.
+    private static int TotalDropped(ZombieNavigation nav)
+    {
+        int total = 0;
+        foreach (KeyValuePair<int, IReadOnlySet<int>> flag in nav.DisabledFaces)
+            total += flag.Value.Count;
+        return total;
+    }
+
+    // The dropped faces themselves, per flag, so two passes can be compared by WHICH faces they removed
+    // rather than by how many. A pass that misses one obstructed triangle and removes a clear one instead
+    // matches on count while leaving the navmesh wrong in both directions.
+    private static SortedSet<string> DroppedFaces(ZombieNavigation nav)
+    {
+        var faces = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (KeyValuePair<int, IReadOnlySet<int>> flag in nav.DisabledFaces)
+            foreach (int face in flag.Value)
+                faces.Add($"{flag.Key}:{face}");
+        return faces;
+    }
+
     // An environment flag set for one test and put back afterwards: these are read once per pass, and a
     // flag left set would silently change every test that ran after it in this process.
     private sealed class EnvFlagScope : IDisposable
@@ -585,6 +670,12 @@ public class ZombieNavigationTests : TestClass
             "unturned-godot-navlevel-" + Guid.NewGuid().ToString("N"));
 
         public TempLevel() => System.IO.Directory.CreateDirectory(Path);
+
+        // Where this level's reconciliation verdicts land, so a test can tell "the cache was read" from
+        // "there was no cache to read".
+        public string CacheEntry => System.IO.Path.Combine(
+            ProjectSettings.GlobalizePath("user://nav_reconcile"),
+            Data.NavReconcileCache.MapKey(Path) + ".cache");
 
         public void Dispose()
         {

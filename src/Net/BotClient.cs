@@ -13,6 +13,11 @@ namespace UnturnedGodot;
 public partial class BotClient : Node
 {
     private NetClient? _client;
+
+    // Whether the scripted run got in. The bot reports itself through the log and the exit status, which
+    // is right for an unattended check and useless to anything watching it in-process — a test can see a
+    // bot that was constructed but not one that was admitted, and those are the two halves of a join.
+    internal bool Joined => _client is { Joined: true };
     private ServerQuery _query = null!;
     private string _botName = "Bot";
     private IClientTransport _transport = null!;

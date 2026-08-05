@@ -221,15 +221,30 @@ public class AudioExtractorTests : TestClass
             MovementAudioRequests.ZombieClipGroups);
 
         if (served == 0)
-            return; // this platform's bundle does not carry them, which is an answer rather than a failure
+        {
+            // On a platform whose bundle genuinely lacks these clips this is an answer. On a run that
+            // exists to prove the real extraction works, it is the failure the test was written for —
+            // an Extract that writes clips without completing a marker returns zero as well.
+            if (System.Environment.GetEnvironmentVariable("UG_REQUIRE_REAL_DATA") == "1")
+                Assert.Fail("the real bundle completed no audio definitions at all");
+            return;
+        }
 
-        string[] clips = Directory.GetFiles(dir.Path, "*.ogg", SearchOption.AllDirectories);
         string[] markers = Directory.GetFiles(dir.Path, "def.bin", SearchOption.AllDirectories);
-
-        Assert.NotEmpty(clips);
         Assert.NotEmpty(markers);
-        foreach (string clip in clips)
-            Assert.True(new FileInfo(clip).Length > 0, $"{clip} was written empty");
+
+        // Per DEFINITION, not across the cache. Globbing the whole directory lets one group write the
+        // only .ogg while another completes a marker with nothing beside it — and that second group is
+        // silent for the rest of the game with nothing ever looking at it again, which is precisely the
+        // failure def.bin exists to prevent.
+        foreach (string marker in markers)
+        {
+            string defDir = Path.GetDirectoryName(marker)!;
+            string[] clips = Directory.GetFiles(defDir, "*.ogg");
+            Assert.True(clips.Length > 0, $"{defDir} was marked complete with no clips in it");
+            foreach (string clip in clips)
+                Assert.True(new FileInfo(clip).Length > 0, $"{clip} was written empty");
+        }
     }
 
     // And the second run over a full cache opens nothing at all. That is the whole point of the marker:
@@ -253,8 +268,12 @@ public class AudioExtractorTests : TestClass
 
         Assert.True(AudioExtractor.IsSatisfied(request),
             "a filled cache still reported work outstanding, so every boot would decode the bundle again");
-        Assert.Equal(0, AudioExtractor.Extract(bundle, "core", new List<string>(), dir.Path,
-            MovementAudioRequests.ZombieClipGroups));
+
+        // The second run is given a path that CANNOT be opened. Handing it the same readable bundle
+        // would let a regression that touches the file before checking the cache pass unnoticed; a run
+        // that opens this one throws, and that is the point.
+        Assert.Equal(0, AudioExtractor.Extract("/nonexistent-bundle", "core", new List<string>(),
+            dir.Path, MovementAudioRequests.ZombieClipGroups));
     }
 
     // An empty cache is never satisfied — the other side of the same question, and the one that decides

@@ -128,11 +128,15 @@ public class ReproServiceTests : TestClass
 
         using var pei = new Recorder(TestScene, dir.Path, levelName: "PEI");
         await pei.Ready();
-        int before = pei.Zombies.Zombies.Count;
+        pei.Run(ticks: 20);
+
+        // Positions, not a count. Both sessions are built from the same table, bounds and seed, so a
+        // refusal that had silently restored anyway would leave the counts equal and this test green.
+        string before = Fingerprint(pei.Zombies);
 
         pei.Service.Load(path!);
 
-        Assert.Equal(before, pei.Zombies.Zombies.Count);
+        Assert.Equal(before, Fingerprint(pei.Zombies));
     }
 
     // A dump from THIS map is restored: the population it recorded replaces the one running now.
@@ -160,11 +164,19 @@ public class ReproServiceTests : TestClass
         string? path = repro.Service.Capture("test", Vector3.Zero, "a population to come back to");
         Assert.NotNull(path);
 
-        repro.Run(ticks: 20);
+        string captured = Fingerprint(repro.Zombies);
+
+        // REPLACE the population before loading. Ticking alone will not do it — an idle population with
+        // nobody to chase stands still — so a Load that did nothing at all would be indistinguishable
+        // from one that restored correctly.
+        repro.Respawn(seed: 99);
+        Assert.NotEqual(captured, Fingerprint(repro.Zombies));
+
         repro.Service.Load(path!);
 
-        // The population is the one the dump held, which is the one that was running when it was taken.
+        // Back to the window's first tick: the same population, in the same places.
         Assert.Equal(before, repro.Zombies.Zombies.Count);
+        Assert.Equal(captured, Fingerprint(repro.Zombies));
     }
 
     // A dump whose zombie records name types this map does not have is refused rather than restored. The
@@ -196,6 +208,17 @@ public class ReproServiceTests : TestClass
         Assert.Equal(before, poor.Zombies.Zombies.Count);
     }
 
+    // Who is alive and where, to the centimetre. A count alone cannot tell a restore from a no-op when
+    // both sessions were built from the same table, bounds and seed.
+    private static string Fingerprint(ZombieSystem zombies)
+    {
+        var parts = new List<string>();
+        foreach (ZombieInstance zombie in zombies.Zombies)
+            parts.Add($"{zombie.Position.X:F2},{zombie.Position.Y:F2},{zombie.Position.Z:F2}");
+        parts.Sort(StringComparer.Ordinal);
+        return string.Join("|", parts);
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
 
     // A recorder over a small hosted population, in the tree so _Ready reads its environment.
@@ -208,6 +231,8 @@ public class ReproServiceTests : TestClass
 
         public ZombieSystem Zombies { get; }
         public ReproService Service { get; }
+
+        private List<ZombieSpawnpointData> _spawns = new();
 
         public Recorder(Node testScene, string directory, string levelName = "PEI", int bounds = 1)
         {
@@ -228,11 +253,22 @@ public class ReproServiceTests : TestClass
             Zombies = new ZombieSystem(
                 new List<ZombieTable> { new() { Name = "Normal", Health = 100, Damage = 10 } },
                 regions, FlatGround);
-            var spawns = new List<ZombieSpawnpointData>();
+            _spawns = new List<ZombieSpawnpointData>();
             for (int region = 0; region < bounds; region++)
-                for (int i = 0; i < 4; i++)
-                    spawns.Add(new ZombieSpawnpointData(0, new Vector3((region * 512f) + (i * 2f), 0f, i * 2f)));
-            Zombies.Spawn(spawns, new Random(7));
+                for (int i = 0; i < 16; i++)
+                {
+                    _spawns.Add(new ZombieSpawnpointData(0,
+                        new Vector3((region * 512f) + (i * 3f), 0f, i * 3f)));
+                }
+
+            Zombies.Spawn(_spawns, new Random(7));
+
+            // REPRO=0 is the documented way to turn the recorder off, and Create honours it — read at
+            // call time, so unlike the navigation capture flag this one can be forced. Without that, a
+            // suite run from a shell that disables the recorder fails every test in this file at the
+            // assertion below instead of exercising the service.
+            _repro = new EnvScope("REPRO", "1");
+            _reproDir = new EnvScope("REPRO_DIR", directory);
 
             var host = new ZombieHost(Zombies, _server);
             ReproService? service = ReproService.Create(Zombies, _server, FlatGround, host);
@@ -241,13 +277,19 @@ public class ReproServiceTests : TestClass
             Service.LevelName = levelName;
             Service.Map = levelName;
 
-            OS.SetEnvironment("REPRO_DIR", directory);
             testScene.AddChild(Service);
         }
 
-        // _Ready reads REPRO_DIR, so nothing may capture until the node has had a frame in the tree.
+        // _Ready reads REPRO_DIR, so nothing may capture until the node has had a frame in the tree —
+        // and a PHYSICS frame at that, because Capture queries DirectSpaceState for the geometry slice
+        // and this project runs 3D physics on its own thread. Resuming on an idle frame would either log
+        // engine errors or quietly record no collision around the incident.
         public SignalAwaiter Ready() =>
-            _testScene.ToSignal(_testScene.GetTree(), SceneTree.SignalName.ProcessFrame);
+            _testScene.ToSignal(_testScene.GetTree(), SceneTree.SignalName.PhysicsFrame);
+
+        // A different population in the same world: the same spawnpoints drawn with another seed, which
+        // is what a session that has been played for a while looks like next to the one a dump holds.
+        public void Respawn(int seed) => Zombies.Spawn(_spawns, new Random(seed));
 
         // Run the session. A dump is a window of TICKS — the recorder's ring is what a capture is built
         // from — so a session that has not ticked has nothing to record, and restoring such a dump would
@@ -276,6 +318,28 @@ public class ReproServiceTests : TestClass
             _disposed = true;
             _testScene.RemoveChild(Service);
             Service.Free();
+            _reproDir?.Dispose();
+            _repro?.Dispose();
+        }
+
+        private EnvScope? _repro;
+        private EnvScope? _reproDir;
+
+        // One environment variable, set for the life of a recorder and put back afterwards. Left set,
+        // the next test in the process would run against this one's directory.
+        private sealed class EnvScope : IDisposable
+        {
+            private readonly string _name;
+            private readonly string _previous;
+
+            public EnvScope(string name, string value)
+            {
+                _name = name;
+                _previous = OS.GetEnvironment(name);
+                OS.SetEnvironment(name, value);
+            }
+
+            public void Dispose() => OS.SetEnvironment(_name, _previous);
         }
     }
 

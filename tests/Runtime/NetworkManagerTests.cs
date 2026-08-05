@@ -152,6 +152,12 @@ public class NetworkManagerTests : TestClass
         Assert.True(session.Net.IsActive);
         Assert.NotNull(session.Net.Client);
         Assert.NotNull(session.Net.Server);
+
+        // The client is ADMITTED, which is the only part of this the frame loop is responsible for.
+        // IsActive and the two fields are all assigned synchronously by StartSingleplayer, so without
+        // this a manager that stopped pumping Update entirely would still pass.
+        Assert.True(session.Net.Client!.Joined,
+            "thirty physics frames went by and the loopback client never joined, so nothing is pumping");
     }
 
     // Hosting zombies on a level that ships none is a warning, not a failure — plenty of maps have no
@@ -173,11 +179,19 @@ public class NetworkManagerTests : TestClass
     // Hosting zombies on a session that is not hosting does nothing at all. A client that joined someone
     // else's server takes this path, and a population spawned there would be a second, invisible world
     // running against the real one.
+    //
+    // The session is a real CLIENT rather than an idle manager, which is the distinction that matters: a
+    // regression gating on IsActive instead of on the server would skip an inactive manager and still
+    // host zombies on a joined client, and an idle-manager fixture cannot tell those apart.
     [Test]
     public async Task AClientDoesNotHostItsOwnZombies()
     {
         using var session = new Session(TestScene);
+        session.Net.JoinServer("127.0.0.1", FreePort(), "Player");
         await session.PhysicsFrame();
+
+        Assert.True(session.Net.IsActive, "the fixture is not a client at all");
+        Assert.False(session.Net.IsHosting);
 
         session.Net.HostZombies("/nonexistent-map");
 
@@ -196,12 +210,17 @@ public class NetworkManagerTests : TestClass
         await session.PhysicsFrame();
 
         var collision = new Data.CollisionFieldBuilder();
-        session.Net.ReconcileNavigation(new HashSet<System.Guid>(), collision);
+        int shape = collision.AddBoxShape(new Vector3(1f, 1f, 1f));
+        collision.AddInstance(shape, Transform3D.Identity);
+        Assert.True(collision.ShapeCount > 0 && collision.InstanceCount > 0);
 
-        // Nothing observable to read off the builder — release is its own end state — so what this holds
-        // is that the call returns rather than parking a pass that never runs.
+        session.Net.ReconcileNavigation(new HashSet<System.Guid>(), collision);
         await session.PhysicsFrame();
-        Assert.True(session.Net.IsActive);
+
+        // Released, which is the whole point: an empty builder would make this indistinguishable from
+        // doing nothing, because every count is already zero before the call.
+        Assert.Equal(0, collision.ShapeCount);
+        Assert.Equal(0, collision.InstanceCount);
     }
 
     // Joining is refused while a session is already running, rather than leaving the player in two at
@@ -213,10 +232,14 @@ public class NetworkManagerTests : TestClass
         session.Net.StartSingleplayer("Player");
         await session.PhysicsFrame();
 
-        NetServer? before = session.Net.Server;
-        session.Net.JoinServer("127.0.0.1", 43120, "Player");
+        NetServer? beforeServer = session.Net.Server;
+        NetClient? beforeClient = session.Net.Client;
+        session.Net.JoinServer("127.0.0.1", FreePort(), "Player");
 
-        Assert.Same(before, session.Net.Server);
+        // Both halves: replacing the CLIENT while leaving the server standing would have the local host
+        // player trying to join somebody else's world, and a server-only check cannot see that.
+        Assert.Same(beforeServer, session.Net.Server);
+        Assert.Same(beforeClient, session.Net.Client);
     }
 
     // And a join to nothing comes up as a client that is simply never answered. There is no server on
@@ -226,13 +249,17 @@ public class NetworkManagerTests : TestClass
     public async Task AJoinToNothingWaitsRatherThanRefusing()
     {
         using var session = new Session(TestScene);
-        session.Net.JoinServer("127.0.0.1", 43121, "Player");
+        session.Net.JoinServer("127.0.0.1", FreePort(), "Player");
 
         for (int i = 0; i < 10; i++)
             await session.PhysicsFrame();
 
         Assert.True(session.Net.IsActive);
         Assert.False(session.Net.IsHosting);
+
+        // And nobody answered, which is the case being sampled. Without this the test would pass just as
+        // well against a port something else happens to be listening on.
+        Assert.False(session.Net.Client!.Joined, "something answered on a port the OS said was free");
     }
 
     // --- the real map ---------------------------------------------------------------------------------
@@ -351,6 +378,14 @@ public class NetworkManagerTests : TestClass
         }
 
         public void Dispose() => OS.SetEnvironment(_name, _previous);
+    }
+
+    // A port the OS says is free. A hard-coded one turns "nobody is listening" into an assumption about
+    // the machine, and these tests depend on that being a fact.
+    private static ushort FreePort()
+    {
+        using var probe = new System.Net.Sockets.UdpClient(0, System.Net.Sockets.AddressFamily.InterNetwork);
+        return (ushort)((System.Net.IPEndPoint)probe.Client.LocalEndPoint!).Port;
     }
 
     private static bool RealMap(out string levelDir)

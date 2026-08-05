@@ -66,7 +66,7 @@ public class ColdLoadTests : TestClass
             // those are driven by the frame loop, which is why the wait has to BE the frame loop rather
             // than a sleep.
             await streamer.BeginAsync();
-            if (!await Within(TimeSpan.FromMinutes(8), streamer.Completion))
+            if (!await Within(ColdLoadBudget, streamer.Completion))
             {
                 Assert.Fail("the cold load never finished; a real one has no longer to wait than this");
                 return;
@@ -85,9 +85,12 @@ public class ColdLoadTests : TestClass
             // bodies is the pass that recorded what they break into.
             Assert.NotNull(streamer.Damageable);
 
-            // The cache it filled is what makes the SECOND load warm. An empty directory here means
-            // every session would pay this decode again.
-            Assert.NotEmpty(System.IO.Directory.GetFileSystemEntries(cache.Path));
+            // MESHES, not merely files. An extraction index or a texture entry satisfies "the directory
+            // is not empty", and ObjectsBuilder will happily finish a scene out of placeholder boxes when
+            // ModelLibrary finds nothing — so the load can report a full set of selected GUIDs, a
+            // damage ledger and a populated directory while having decoded no geometry at all.
+            Assert.NotEmpty(System.IO.Directory.GetFiles(cache.Path, "*.mesh",
+                System.IO.SearchOption.AllDirectories));
         }
         finally
         {
@@ -132,13 +135,17 @@ public class ColdLoadTests : TestClass
     // collider kind one map places and another never does. PEI alone proves the pipeline runs; it cannot
     // prove the pipeline COPES, because a map is a sample of the format rather than the format itself.
     //
-    // Alpha Valley is chosen for being small and not PEI. What is asserted is the same shape as the PEI
-    // load — this is a second sample, not a second set of rules.
+    // WHICH second map does not matter, and the test does not name one: it takes the smallest map on the
+    // machine that is not PEI. Naming one would make this test demand content CI does not fetch —
+    // fetch-game-data.sh downloads PEI by design, because a second map is tens of megabytes of cache for
+    // every job — and a test that throws on content nobody asked for is a broken pipeline rather than a
+    // finding. What is asserted is the same shape as the PEI load: a second sample, not a second set of
+    // rules.
     [Test]
     [Timeout(600_000)]
     public async Task AColdLoadOfASecondMapBuildsAWorldToo()
     {
-        if (!Map("Alpha Valley", out string install, out LevelInfo level))
+        if (!SecondMap(out string install, out LevelInfo level))
             return;
 
         using var cache = new TempDir();
@@ -146,19 +153,24 @@ public class ColdLoadTests : TestClass
 
         Assert.True(neededAtFinish > 0,
             $"the second map finished having selected {neededAtFinish} assets to build from");
-        Assert.NotEmpty(System.IO.Directory.GetFileSystemEntries(cache.Path));
+
+        // The SAME invariants PEI's load asserts. A second map whose layer-texture promise was left
+        // unfinished, or which produced no geometry, is exactly the map-specific regression this test
+        // exists for — and a thinner set of assertions here would let it through.
+        Assert.NotEmpty(System.IO.Directory.GetFiles(cache.Path, "*.mesh",
+            System.IO.SearchOption.AllDirectories));
     }
 
     // And two maps SHARE a cache without either corrupting the other's entries. Every session after the
     // first reads a cache the previous map filled — a key that collided across maps would hand one map's
     // geometry to another, which renders, as the wrong building in the wrong place.
     [Test]
-    [Timeout(600_000)]
+    [Timeout(1_800_000)]
     public async Task TwoMapsShareOneCacheWithoutCollidingInIt()
     {
         if (!RealMap(out string install, out LevelInfo pei))
             return;
-        if (!Map("Alpha Valley", out _, out LevelInfo other))
+        if (!SecondMap(out _, out LevelInfo other))
             return;
 
         using var cache = new TempDir();
@@ -191,7 +203,10 @@ public class ColdLoadTests : TestClass
         {
             streamer.StartPrepare(install, level);
             await streamer.BeginAsync();
-            if (!await Within(TimeSpan.FromMinutes(4), streamer.Completion))
+            // The same budget the standalone cold-load test allows. This helper does a full cold decode
+            // whenever the cache it is given is empty, so a shorter limit here fails a machine that is
+            // still inside the time a cold load is permitted to take.
+            if (!await Within(ColdLoadBudget, streamer.Completion))
                 Assert.Fail("a load never finished; a real one has no longer to wait than this");
 
             return neededAtFinish;
@@ -202,6 +217,11 @@ public class ColdLoadTests : TestClass
             streamer.QueueFree();
         }
     }
+
+    // What one cold load is allowed to take. Named once because three tests spend it and a combined test
+    // spends it three times over — a per-load limit shorter than this turns a slow-but-valid run into a
+    // failure, and a harness timeout shorter than the sum turns it into one with no explanation at all.
+    private static readonly TimeSpan ColdLoadBudget = TimeSpan.FromMinutes(8);
 
     // Waits on a task by advancing frames, since the work it is waiting for is driven by them. Returns
     // false on timeout rather than throwing, so the caller can say what the timeout MEANT.
@@ -220,6 +240,65 @@ public class ColdLoadTests : TestClass
 
     private static bool RealMap(out string install, out LevelInfo level) =>
         Map("PEI", out install, out level);
+
+    // The smallest installed map that is not PEI, or nothing. Deliberately NOT a throw under
+    // UG_REQUIRE_REAL_DATA: that flag exists to prove the fetched content is really being used, and the
+    // fetch asks for PEI alone. Demanding a map nobody downloaded would fail the job over a decision
+    // taken in fetch-game-data.sh rather than over anything this code does.
+    private static bool SecondMap(out string install, out LevelInfo level)
+    {
+        install = "";
+        level = null!;
+        string? found = Assets.UnturnedInstall.Find();
+        string maps = found == null ? "" : System.IO.Path.Combine(found, "Maps");
+        if (maps.Length == 0 || !System.IO.Directory.Exists(maps))
+        {
+            Log.Print("[runtime-tests] skipping: no maps directory at all");
+            return false;
+        }
+
+        string? smallest = null;
+        long smallestSize = long.MaxValue;
+        foreach (string candidate in System.IO.Directory.GetDirectories(maps))
+        {
+            if (string.Equals(System.IO.Path.GetFileName(candidate), "PEI", StringComparison.Ordinal))
+                continue;
+            // A map with no level file is a directory, not a map.
+            if (!System.IO.File.Exists(System.IO.Path.Combine(candidate, "Level.dat")))
+                continue;
+
+            long size = Weigh(candidate);
+            if (size < smallestSize)
+            {
+                smallestSize = size;
+                smallest = candidate;
+            }
+        }
+
+        if (smallest == null)
+        {
+            Log.Print("[runtime-tests] skipping: only PEI is installed, so there is no second sample "
+                + "(fetch-game-data.sh downloads PEI by design; pass --maps to add another)");
+            return false;
+        }
+
+        install = found!;
+        level = new LevelInfo(smallest);
+        return true;
+    }
+
+    // Shallow on purpose: the top-level files are enough to rank maps by size, and walking a 500 MB tree
+    // to pick a fixture would cost more than loading the map does.
+    private static long Weigh(string directory)
+    {
+        long total = 0;
+        foreach (string file in System.IO.Directory.GetFiles(directory))
+            total += new System.IO.FileInfo(file).Length;
+        foreach (string sub in System.IO.Directory.GetDirectories(directory))
+            foreach (string file in System.IO.Directory.GetFiles(sub))
+                total += new System.IO.FileInfo(file).Length;
+        return total;
+    }
 
     private static bool Map(string name, out string install, out LevelInfo level)
     {

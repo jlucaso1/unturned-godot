@@ -108,11 +108,13 @@ public class ZombiesViewTests : TestClass
         Assert.True(harness.View.GetChildCount() > 0, "nothing was drawn to begin with");
 
         harness.BreakTheSession();
-        await harness.Draw(ticks: 30);
+        await harness.Draw(ticks: 60);
 
-        // The client re-Hellos and the server re-admits it, so what this proves is that the view survived
-        // being told to forget — an id kept across the reset would have refused the resent zombies.
-        Assert.True(harness.View.GetChildCount() >= 0);
+        // The zombies COME BACK. A child count is never negative, so the old assertion held whether the
+        // view forgot the session or refused every resent zombie one by one — which is the regression it
+        // was written to catch.
+        Assert.True(harness.View.GetChildCount() > 0,
+            "the view rejoined and drew nothing, so it is still refusing the old session's ids");
     }
 
     // --- helpers -------------------------------------------------------------------------------------

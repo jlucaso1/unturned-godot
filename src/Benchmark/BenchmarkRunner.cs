@@ -156,7 +156,23 @@ public static class BenchmarkRunner
             return;
         }
 
-        BenchmarkReport? baseline = BenchmarkReport.FromJson(System.IO.File.ReadAllText(baselinePath));
+        BenchmarkReport? baseline;
+        try
+        {
+            baseline = BenchmarkReport.FromJson(System.IO.File.ReadAllText(baselinePath));
+        }
+        catch (Exception e) when (e is System.Text.Json.JsonException or System.IO.IOException
+            or UnauthorizedAccessException)
+        {
+            // A baseline is a file on a developer's disk: hand-edited, half-written, truncated by a full
+            // disk, or copied from a machine running another schema. Only a file that PARSED and meant
+            // nothing used to be handled here, so any of those took the run down — and Finish runs at the
+            // very END of a tier, after the measurement is complete. The run would pay its whole cost and
+            // then die on the file it was going to compare against.
+            Log.PrintErr($"[benchmark] Baseline file is unreadable ({e.Message}); skipping diff.");
+            return;
+        }
+
         if (baseline is null)
         {
             Log.PrintErr("[benchmark] Baseline file is unreadable; skipping diff.");

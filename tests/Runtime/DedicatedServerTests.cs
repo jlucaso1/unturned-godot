@@ -27,7 +27,7 @@ public class DedicatedServerTests : TestClass
     public async Task AMapThatIsNotThereStillYieldsAListeningServer()
     {
         DedicatedServer server = DedicatedServer.Create("/nonexistent-unturned", "NoSuchMap", "NoSuchMap",
-            Vector3.Zero, Port);
+            Vector3.Zero, FreePort());
         TestScene.AddChild(server);
         await NextFrame();
 
@@ -43,7 +43,7 @@ public class DedicatedServerTests : TestClass
     [Test]
     public async Task AnEmptyInstallPathTakesTheSameRoad()
     {
-        DedicatedServer server = DedicatedServer.Create("", "PEI", "PEI", Vector3.Zero, (ushort)(Port + 1));
+        DedicatedServer server = DedicatedServer.Create("", "PEI", "PEI", Vector3.Zero, FreePort());
         TestScene.AddChild(server);
         await NextFrame();
 
@@ -59,7 +59,7 @@ public class DedicatedServerTests : TestClass
     public async Task AnIdleServerTicksQuietly()
     {
         DedicatedServer server = DedicatedServer.Create("/nonexistent-unturned", "NoSuchMap", "NoSuchMap",
-            Vector3.Zero, (ushort)(Port + 2));
+            Vector3.Zero, FreePort());
         TestScene.AddChild(server);
 
         for (int i = 0; i < 10; i++)
@@ -73,7 +73,7 @@ public class DedicatedServerTests : TestClass
     [Test]
     public async Task LeavingClosesTheSocket()
     {
-        const ushort port = Port + 3;
+        ushort port = FreePort();
         DedicatedServer first = DedicatedServer.Create("/nonexistent-unturned", "NoSuchMap", "NoSuchMap",
             Vector3.Zero, port);
         TestScene.AddChild(first);
@@ -93,9 +93,14 @@ public class DedicatedServerTests : TestClass
 
     // --- helpers -------------------------------------------------------------------------------------
 
-    // High enough to be out of the way of anything the machine is running, and out of the range the
-    // NetworkManager tests bind for their LAN listeners.
-    private const ushort Port = 43110;
+    // A port the OS says is free, rather than one this file hopes is. Two runtime-test processes on one
+    // machine, or any unrelated listener, would otherwise fail these tests before their assertions —
+    // DedicatedServer.Create binds immediately, so an occupied port is a failure at construction.
+    private static ushort FreePort()
+    {
+        using var probe = new System.Net.Sockets.UdpClient(0, System.Net.Sockets.AddressFamily.InterNetwork);
+        return (ushort)((System.Net.IPEndPoint)probe.Client.LocalEndPoint!).Port;
+    }
 
     private void Free(DedicatedServer server)
     {

@@ -106,9 +106,9 @@ public class TerrainAndFoliageBuildTests : TestClass
         if (!RealMap(out _, out LevelInfo level))
             return;
 
-        string blob = System.IO.Path.Combine(level.Path, "Foliage.blob");
-        if (!System.IO.File.Exists(blob))
-            return; // this map ships none, which is a map's right
+        string blob = RequiredFoliage(level);
+        if (blob.Length == 0)
+            return;
 
         LevelFoliageChunks? chunks = LevelFoliageChunks.Load(blob, FoliageBuilder.RuntimeChunkTiles);
         Assert.NotNull(chunks);
@@ -134,9 +134,14 @@ public class TerrainAndFoliageBuildTests : TestClass
         if (!RealMap(out _, out LevelInfo level))
             return;
 
-        string blob = System.IO.Path.Combine(level.Path, "Foliage.blob");
-        if (!System.IO.File.Exists(blob))
+        string blob = RequiredFoliage(level);
+        if (blob.Length == 0)
             return;
+
+        // UG_NODE_MULTIMESH switches the builder to MultiMeshInstance3D wrappers for profiling, and
+        // under it this test would measure the same SceneMetrics counts while exercising the very path
+        // it is here to say is not taken.
+        using var nodeWrappers = new EnvScope("UG_NODE_MULTIMESH", "0");
 
         LevelFoliageChunks? chunks = LevelFoliageChunks.Load(blob, FoliageBuilder.RuntimeChunkTiles);
         Assert.NotNull(chunks);
@@ -155,14 +160,41 @@ public class TerrainAndFoliageBuildTests : TestClass
             Benchmark.SceneMetricsResult measured = Benchmark.SceneMetrics.Collect(new[] { (Node)root });
 
             Assert.True(measured.MultiMeshInstances > 0, "the map's foliage produced no batches at all");
-            Assert.True(measured.MultiMeshTotalInstances > measured.MultiMeshInstances,
+
+            // EVERY placement survives. "More instances than batches" is satisfied by one batch holding
+            // two blades while the rest are dropped, which is the regression that matters most here —
+            // a map that quietly loses its foliage looks like a map with less foliage.
+            long placed = 0;
+            foreach (FoliageChunk chunk in chunks!.Chunks)
+                placed += chunk.Count;
+            Assert.Equal(placed, measured.MultiMeshTotalInstances);
+
+            // And the batching is real: hundreds of thousands of instances must not come out as
+            // hundreds of thousands of batches.
+            Assert.True(measured.MultiMeshTotalInstances > measured.MultiMeshInstances * 8L,
                 $"{measured.MultiMeshTotalInstances} instances came out as "
-                + $"{measured.MultiMeshInstances} batches, which is not batching");
+                + $"{measured.MultiMeshInstances} batches, which is barely batching");
         }
         finally
         {
             root.Free();
         }
+    }
+
+    // One environment flag, set for a test and put back afterwards.
+    private sealed class EnvScope : IDisposable
+    {
+        private readonly string _name;
+        private readonly string _previous;
+
+        public EnvScope(string name, string value)
+        {
+            _name = name;
+            _previous = OS.GetEnvironment(name);
+            OS.SetEnvironment(name, value);
+        }
+
+        public void Dispose() => OS.SetEnvironment(_name, _previous);
     }
 
     // One triangle standing in for a blade. What foliage looks like is the extraction's business; what
@@ -178,6 +210,29 @@ public class TerrainAndFoliageBuildTests : TestClass
         var mesh = new ArrayMesh();
         mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
         return mesh;
+    }
+
+    // PEI's foliage blob, or a failure when real data is required.
+    //
+    // RealMap only proves the PEI directory exists, and fetch-game-data.sh verifies bundles, resources
+    // and heightmaps but NOT this blob — so an interrupted content cache reaches these tests with the
+    // directory present and the blob missing, and an early return would report the foliage walk as green
+    // without walking anything. PEI is the fixture here; if it has no foliage, the content is wrong.
+    private static string RequiredFoliage(LevelInfo level)
+    {
+        string blob = System.IO.Path.Combine(level.Path, "Foliage.blob");
+        if (System.IO.File.Exists(blob))
+            return blob;
+
+        if (System.Environment.GetEnvironmentVariable("UG_REQUIRE_REAL_DATA") == "1")
+        {
+            throw new System.IO.IOException(
+                $"UG_REQUIRE_REAL_DATA=1 but {blob} is missing; the fetched content is incomplete and "
+                + "this run exists to prove these tests execute");
+        }
+
+        Log.Print("[runtime-tests] skipping: this map ships no Foliage.blob");
+        return "";
     }
 
     // --- helpers -------------------------------------------------------------------------------------

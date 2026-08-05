@@ -71,7 +71,11 @@ public partial class Main : Node3D
             Log.PrintErr("[unturned-godot] Unturned install not found. Install it through Steam, or point "
                 + $"{UnturnedInstall.PathEnvironmentVariable} at the game directory (the one containing "
                 + "Bundles/ and Maps/).");
-            GetTree().Quit(1);
+            // QuitNow rather than the engine's own Quit, here and at every other failure exit in this
+            // file: none of them has background work to wait for, but a native SceneTree.Quit never
+            // returns to managed code, so a coverage run over any of these paths records nothing at all —
+            // and a failed JOIN is one of the modes the coverage harness drives.
+            AppShutdown.QuitNow(GetTree(), 1);
             return;
         }
 
@@ -160,7 +164,7 @@ public partial class Main : Node3D
             {
                 string reason = serverMap == null ? "was not found" : "uses an unsupported terrain format";
                 Log.PrintErr($"[server] Map '{_mapName}' {reason}; the listener was not started.");
-                GetTree().Quit(1);
+                AppShutdown.QuitNow(GetTree(), 1);
                 return;
             }
 
@@ -554,7 +558,7 @@ public partial class Main : Node3D
                 // The way back is a button, and this session has neither a display to draw it on nor an
                 // input to press it with. Reporting on screen would leave a benchmark waiting on a
                 // loading screen that can never resolve, so fail the process instead.
-                GetTree().Quit(1);
+                AppShutdown.QuitNow(GetTree(), 1);
                 return;
             }
             loading.Fail($"{e.GetType().Name}: {e.Message}", BackToMenu);
@@ -622,7 +626,7 @@ public partial class Main : Node3D
         {
             // No display to show the screen on and no input to press its button with; the same reason
             // a failed world build ends the process in this mode.
-            GetTree().Quit(1);
+            AppShutdown.QuitNow(GetTree(), 1);
             return false;
         }
         loading.Fail(message, BackToMenu, "Could not join.");
@@ -675,7 +679,7 @@ public partial class Main : Node3D
             // Same reason FailJoin quits: no display for the screen, no input for its button. A
             // benchmark would otherwise wait on an overlay nothing can ever dismiss.
             Log.PrintErr($"[net] the server refused the join: {NetworkManager.Describe(rejection)}");
-            GetTree().Quit(1);
+            AppShutdown.QuitNow(GetTree(), 1);
             return;
         }
 

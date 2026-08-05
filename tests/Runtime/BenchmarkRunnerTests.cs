@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Chickensoft.GoDotTest;
 using Godot;
 using UnturnedGodot.Benchmark;
@@ -80,10 +81,16 @@ public class BenchmarkRunnerTests : TestClass
         using var baseline = new Baseline(Report(("load.total.ms", 1000.0), ("draw.calls", 500.0)));
 
         // Slower and heavier than the baseline, which is what a regression looks like.
+        int before = Log.Tail().Count;
         BenchmarkRunner.Finish(Report(("load.total.ms", 2000.0), ("draw.calls", 800.0)),
             baseline.Key, new BaselineDiffOptions(), "");
 
         Assert.True(System.IO.File.Exists(baseline.LatestPath), "the diffing run wrote no report");
+
+        // The comparison was REPORTED. Finish writes *-latest.json before it even looks for a baseline,
+        // so the file alone would still be there if the whole diff branch were deleted — and a diff
+        // nobody printed is a diff nobody reads.
+        Assert.Contains(Said(before), line => line.Contains("load.total.ms", StringComparison.Ordinal));
     }
 
     // A metric the baseline never had is reported as new rather than as a change from zero. Every added
@@ -93,10 +100,12 @@ public class BenchmarkRunnerTests : TestClass
     {
         using var baseline = new Baseline(Report(("load.total.ms", 1000.0)));
 
+        int before = Log.Tail().Count;
         BenchmarkRunner.Finish(Report(("load.total.ms", 1000.0), ("nav.reconcile.ms", 42.0)),
             baseline.Key, new BaselineDiffOptions(), "a counter that did not exist before");
 
         Assert.True(System.IO.File.Exists(baseline.LatestPath));
+        Assert.Contains(Said(before), line => line.Contains("nav.reconcile.ms", StringComparison.Ordinal));
     }
 
     // A baseline that parses to nothing is skipped, and says so. This is the case the code guards, and
@@ -114,24 +123,21 @@ public class BenchmarkRunnerTests : TestClass
             "an unreadable baseline stopped the run from reporting at all");
     }
 
-    // But a baseline that is not JSON at all THROWS, and this pins that rather than the behaviour the
-    // code above plainly intends. Reported as a finding, not asserted around.
-    //
-    // The guard checks for a null result, which only covers a file that PARSED and meant nothing. A file
-    // that does not parse — half-written, truncated by a full disk, hand-edited — raises out of
-    // Finish instead, and Finish runs at the very end of a tier, after the measurement is done and
-    // before the report is compared. So the run pays its full cost and then dies on the file it was
-    // going to compare against, which is the most expensive possible moment to fail.
-    //
-    // Whether to widen the guard is a production decision and is left to one; the test writes the
-    // behaviour down so it cannot change silently in either direction.
+    // And a baseline that is not JSON at all is skipped on the same terms, rather than taking the run
+    // down. This used to throw, and the throw landed at the very END of a tier — after the measurement
+    // was complete — so a run paid its whole cost and then died on the file it was going to compare
+    // against. A baseline is a file on a developer's disk: hand-edited, half-written, truncated by a full
+    // disk, copied from a machine running another schema.
     [Test]
-    public void ABaselineThatIsNotJsonThrowsOutOfTheReport()
+    public void ABaselineThatIsNotJsonIsSkippedToo()
     {
         using var baseline = new Baseline("this is not a report");
 
-        Assert.ThrowsAny<Exception>(() => BenchmarkRunner.Finish(
-            Report(("load.total.ms", 1000.0)), baseline.Key, new BaselineDiffOptions(), ""));
+        BenchmarkRunner.Finish(Report(("load.total.ms", 1000.0)), baseline.Key,
+            new BaselineDiffOptions(), "");
+
+        Assert.True(System.IO.File.Exists(baseline.LatestPath),
+            "an unparseable baseline stopped the run from reporting at all");
     }
 
     // A baseline from ANOTHER machine is diffed, but its deltas are called noise. A different GPU or
@@ -208,6 +214,14 @@ public class BenchmarkRunnerTests : TestClass
     }
 
     // --- helpers -------------------------------------------------------------------------------------
+
+    // Whatever was logged since the mark. The diff has no return value — it prints — so this is the only
+    // place its conclusions are observable from.
+    private static List<string> Said(int since)
+    {
+        List<string> tail = Log.Tail();
+        return since >= tail.Count ? new List<string>() : tail.GetRange(since, tail.Count - since);
+    }
 
     private static BenchmarkReport Report(params (string Name, double Value)[] metrics)
     {

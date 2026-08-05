@@ -123,10 +123,16 @@ public class VertexStreamReaderTests : TestClass
 
         Dictionary<long, byte[]> served = VertexStreamReader.Read(bundle, requests);
 
-        Assert.NotEmpty(served);
+        // EVERY request, not "at least one". A partial drop of streamed buffers is exactly the
+        // production failure this file exists for — the wheels came back at distance and vanished up
+        // close — and a loop that only checked what happened to be present could not see it.
+        Assert.Equal(requests.Count, served.Count);
         foreach (VertexStreamReader.Request request in requests)
-            if (served.TryGetValue(request.PathId, out byte[]? bytes))
-                Assert.Equal(request.Stream.Size, bytes.Length);
+        {
+            Assert.True(served.TryGetValue(request.PathId, out byte[]? bytes),
+                $"the bundle owed mesh {request.PathId} its vertex buffer and did not serve it");
+            Assert.Equal(request.Stream.Size, bytes!.Length);
+        }
     }
 
     // --- helpers -------------------------------------------------------------------------------------

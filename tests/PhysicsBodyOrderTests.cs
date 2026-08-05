@@ -89,11 +89,16 @@ public class PhysicsBodyOrderTests
 
         // A load failure has no reachable way out without a display, so it must fail the process rather
         // than present a Back button no one can press and leave a benchmark waiting on it forever.
+        //
+        // Through AppShutdown rather than the engine: none of these failure exits has background work to
+        // wait for, but a native SceneTree.Quit never returns to managed code, so a coverage run over
+        // any of them — and a failed JOIN is one of the modes the coverage harness drives — recorded
+        // nothing at all. The nonzero code is what this guard is really about, and it is unchanged.
         int failure = source.IndexOf("loading.Fail(", StringComparison.Ordinal);
         int headlessQuit = source.LastIndexOf("if (_headlessInteractive)", failure, StringComparison.Ordinal);
         Assert.True(headlessQuit >= 0 && headlessQuit < failure,
             "the headless route must quit before the on-screen failure path");
-        Assert.Contains("GetTree().Quit(1);", source[headlessQuit..failure]);
+        Assert.Contains("AppShutdown.QuitNow(GetTree(), 1);", source[headlessQuit..failure]);
 
         string script = File.ReadAllText(scriptPath);
         int runtimeTier = script.IndexOf("    runtime)", StringComparison.Ordinal);
@@ -1605,8 +1610,12 @@ public class PhysicsBodyOrderTests
         Assert.Contains("${XDG_DATA_HOME:-$HOME/.local/share}/godot/app_userdata/unturned-godot", source);
     }
 
+    // Both tiers leave through AppShutdown now: a native SceneTree.Quit never returns to managed code,
+    // so a coverage run over either tier recorded zero lines however completely it ran. QuitNow is the
+    // no-wait door (this tier has no background work), RequestQuit the waiting one — what both must
+    // carry is the nonzero code.
     [Theory]
-    [InlineData("GpuBenchmark.cs", "tree.Quit(failed ? 1 : 0);")]
+    [InlineData("GpuBenchmark.cs", "AppShutdown.QuitNow(tree, failed ? 1 : 0);")]
     [InlineData("RuntimeBenchmark.cs", "AppShutdown.RequestQuit(tree, failed ? 1 : 0);")]
     public void WindowedBenchmarkTiersQuitNonzeroWhenNoReportWasWritten(string file, string quit)
     {
@@ -1689,9 +1698,20 @@ public class PhysicsBodyOrderTests
         int guard = source.IndexOf("if (IsShuttingDown)", capture, StringComparison.Ordinal);
         Assert.True(capture >= 0 && guard > capture);
 
-        // Read when the deferred call runs, not when it is scheduled, so a failure raised in between lands.
-        Assert.Contains("Callable.From(() => tree.Quit(ExitCode)).CallDeferred();", source);
-        Assert.Contains("tree.Quit(ExitCode);", source);
+        // Read when the deferred call runs, not when it is scheduled, so a failure raised in between
+        // lands. The deferred target is a wrapper now — coverage runs have to leave through the runtime
+        // rather than the engine, or the instrumenter's hit counts are never written — so what this holds
+        // is the DEFERRAL and that the wrapper still reads ExitCode at call time rather than capturing it.
+        Assert.Contains("CallDeferred();", source);
+        int deferred = source.IndexOf("Callable.From(() => Leave(tree)).CallDeferred();", StringComparison.Ordinal);
+        Assert.True(deferred > 0, "the quit is no longer deferred, so a failure raised in between is lost");
+
+        // Whatever the wrapper does first, the engine quit it ends with must still carry ExitCode read at
+        // that moment. A wrapper that took an exit code parameter would freeze the value at schedule time.
+        int leave = source.IndexOf("private static void Leave(SceneTree tree)", StringComparison.Ordinal);
+        Assert.True(leave > 0, "the deferred target is gone; this guard no longer describes the code");
+        Assert.Contains("tree.Quit(ExitCode);", source[leave..]);
+        Assert.Contains("System.Environment.Exit(ExitCode);", source[leave..]);
 
         // Capturing a late failure is not enough by itself: a quit the tier never asked for lands on the
         // next idle frame, sooner than the tier gets a frame to reach its finally, so no failure is ever

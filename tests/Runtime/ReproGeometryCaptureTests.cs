@@ -49,8 +49,11 @@ public class ReproGeometryCaptureTests : TestClass
         ReproGeometryData? geometry = ReproGeometryCapture.Capture(
             sandbox.Root.GetWorld3D().DirectSpaceState, Vector3.Zero, 32f, warnings);
 
-        if (geometry != null)
-            Assert.Empty(geometry.Triangles);
+        // A slice with nothing in it, NOT the absence of a slice. The dump has to be able to say "the
+        // incident happened in the open"; null would say "no collision was captured", and a reader
+        // cannot tell that from a capture that failed.
+        Assert.NotNull(geometry);
+        Assert.Empty(geometry!.Triangles);
         Assert.Empty(warnings);
     }
 
@@ -72,17 +75,25 @@ public class ReproGeometryCaptureTests : TestClass
         Assert.NotEmpty(geometry!.Triangles);
     }
 
-    // Every primitive kind the world is built from rebuilds. Boxes are the objects, spheres and capsules
-    // and cylinders are the lamp posts, barrels and fence posts, and each has its own tessellation — a
-    // kind that fell through would leave exactly those colliders missing from every dump.
+    // Every primitive kind the world is built from rebuilds — each in a world of its OWN.
+    //
+    // Captured together they cannot be told apart: the box alone fills the triangle list, and a sphere,
+    // capsule or cylinder that fell through to the unsupported path would leave the result non-empty and
+    // the test green. Those are the lamp posts, barrels and fence posts, and a dump missing exactly them
+    // is a dump of a zombie standing in an empty street.
     [Test]
-    public async Task EveryPrimitiveKindRebuilds()
+    public async Task EveryPrimitiveKindRebuildsOnItsOwn()
+    {
+        await OneShapeRebuilds(new BoxShape3D { Size = new Vector3(2f, 2f, 2f) }, "box");
+        await OneShapeRebuilds(new SphereShape3D { Radius = 1f }, "sphere");
+        await OneShapeRebuilds(new CapsuleShape3D { Radius = 0.5f, Height = 2f }, "capsule");
+        await OneShapeRebuilds(new CylinderShape3D { Radius = 0.5f, Height = 2f }, "cylinder");
+    }
+
+    private async Task OneShapeRebuilds(Shape3D shape, string what)
     {
         using var sandbox = new PhysicsSandbox(TestScene);
-        AddShape(sandbox, new BoxShape3D { Size = new Vector3(2f, 2f, 2f) }, new Vector3(-6f, 0f, 0f));
-        AddShape(sandbox, new SphereShape3D { Radius = 1f }, new Vector3(-2f, 0f, 0f));
-        AddShape(sandbox, new CapsuleShape3D { Radius = 0.5f, Height = 2f }, new Vector3(2f, 0f, 0f));
-        AddShape(sandbox, new CylinderShape3D { Radius = 0.5f, Height = 2f }, new Vector3(6f, 0f, 0f));
+        AddShape(sandbox, shape, Vector3.Zero);
         await sandbox.Settle();
         var warnings = new List<string>();
 
@@ -90,7 +101,7 @@ public class ReproGeometryCaptureTests : TestClass
             sandbox.Root.GetWorld3D().DirectSpaceState, Vector3.Zero, 32f, warnings);
 
         Assert.NotNull(geometry);
-        Assert.NotEmpty(geometry!.Triangles);
+        Assert.True(geometry!.Triangles.Length > 0, $"a {what} rebuilt into no triangles at all");
     }
 
     // The terrain rebuilds too, and it is the one that matters most: a zombie that will not cross a slope
@@ -147,8 +158,8 @@ public class ReproGeometryCaptureTests : TestClass
         ReproGeometryData? geometry = ReproGeometryCapture.Capture(
             sandbox.Root.GetWorld3D().DirectSpaceState, new Vector3(500f, 0f, 500f), 4f, warnings);
 
-        if (geometry != null)
-            Assert.Empty(geometry.Triangles);
+        Assert.NotNull(geometry);
+        Assert.Empty(geometry!.Triangles);
     }
 
     // Capturing without somewhere to put the warnings is refused at the call. They are the half of the

@@ -107,8 +107,19 @@ public class WorldBuilderTests : TestClass
             out IReadOnlySet<Guid> selected, out Damage.DamageableWorld damageable, field);
 
         Assert.NotEmpty(selected);
-        Assert.NotNull(damageable);
-        Assert.True(root.GetChildCount() > 0, "PEI built no static object collision at all");
+
+        // The recorded collision FIELD, not the node tree. ObjectsBuilder attaches its container
+        // unconditionally — so a child count is one whether the map produced colliders or none — and the
+        // bodies themselves are RIDs rather than StaticBody3D nodes, which is the whole point of the
+        // instanced path. The field is what the navmesh reconciliation probes, so it is also the thing
+        // whose emptiness would matter.
+        Assert.True(field.InstanceCount > 0 || field.ShapeCount > 0,
+            "PEI recorded no object collision at all");
+
+        // And the ledger has entries. It is always assigned, so a null check passes just as well on a
+        // server that can collide with the world but cannot damage any of it — which is the exact half
+        // of this pair that fails silently.
+        Assert.True(damageable.Count > 0, "PEI built collision bodies but nothing breakable");
 
         root.Free();
         field.Release();

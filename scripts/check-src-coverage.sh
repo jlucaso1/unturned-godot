@@ -138,7 +138,9 @@ if (( with_game_run )); then
             gpu_number=$((gpu_number + 1))
             # shellcheck disable=SC2086  # $mode is one or two deliberate assignments
             gamescope --backend headless -- \
-                env UG_COVERAGE=1 $mode \
+                env UG_COVERAGE=1 \
+                UG_HEADLESS_INTERACTIVE= SOLO= FREECAM= OPEN_LAN= JOIN= MAP= BOT_JOIN= \
+                STEP_PROBE= UG_RUNTIME_BENCH_SECS= QUIT_AFTER= $mode \
                 dotnet coverlet "$assembly" \
                     --target "$godot" \
                     --targetargs "--audio-driver Dummy --path $repo_dir" \
@@ -173,7 +175,13 @@ if (( with_game_run )); then
     # PLAYER=1 and FREECAM=1 produced three identical measurements. Capturing needs a display (the repo's
     # screenshot tooling wraps renders in gamescope), which is an infrastructure decision rather than a
     # test one.
+    # Every automation flag CLEARED, not merely unset by this line. A caller with
+    # UG_HEADLESS_INTERACTIVE=1 exported turns this into an interactive session — Main treats it as such
+    # and skips the loader branch entirely — and with no QUIT_AFTER to end it, coverlet waits on a live
+    # session that never leaves.
     env UG_COVERAGE=1 \
+        UG_HEADLESS_INTERACTIVE= SOLO= FREECAM= OPEN_LAN= OPEN_LAN_AFTER= JOIN= MAP= \
+        BOT_JOIN= STEP_PROBE= UG_RUNTIME_BENCH_SECS= QUIT_AFTER= \
     dotnet coverlet "$assembly" \
         --target "$godot" \
         --targetargs "--headless --audio-driver Dummy --path $repo_dir" \
