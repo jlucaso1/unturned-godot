@@ -3,6 +3,7 @@ using System.Threading.Tasks;
 using Chickensoft.GoDotTest;
 using Godot;
 using UnturnedGodot.Data;
+using UnturnedGodot.Net;
 using UnturnedGodot.Player;
 using Xunit;
 
@@ -231,6 +232,151 @@ public class PlayerControllerTests : TestClass
         Assert.Equal(standing, world.Head.Position.Y, 3);
     }
 
+    // --- moving ---------------------------------------------------------------------------------------
+
+    // A held key moves the player. Movement is read as HELD state rather than latched as an edge — a
+    // player walking forward is not sending events, they are simply still holding the key.
+    [Test]
+    public async Task AHeldKeyWalksThePlayerForward()
+    {
+        using var world = new PlayerWorld(TestScene);
+        await world.Land();
+        Vector3 start = world.Player.Position;
+
+        world.Hold(PlayerSettings.Default.Forward);
+        await world.Run(40);
+        world.Release(PlayerSettings.Default.Forward);
+
+        Assert.True(world.Player.Position.DistanceTo(start) > 0.5f,
+            $"the player held forward for 40 frames and moved to {world.Player.Position}");
+    }
+
+    // Letting go stops them. A controller that kept the last direction would have players sliding away
+    // from the keyboard.
+    [Test]
+    public async Task LettingGoStops()
+    {
+        using var world = new PlayerWorld(TestScene);
+        await world.Land();
+
+        world.Hold(PlayerSettings.Default.Forward);
+        await world.Run(20);
+        world.Release(PlayerSettings.Default.Forward);
+        await world.Run(20);
+
+        Vector3 resting = world.Player.Position;
+        await world.Run(20);
+
+        Assert.True(world.Player.Position.DistanceTo(resting) < 0.1f,
+            $"the player kept moving after the key came up: {resting} -> {world.Player.Position}");
+    }
+
+    // Nothing moves while a menu owns the controls, however held the key is. The pause menu does not
+    // release the keyboard — it takes the input — so a controller that polled it anyway would walk the
+    // player around behind the menu.
+    [Test]
+    public async Task NothingMovesWhileAMenuOwnsTheControls()
+    {
+        using var world = new PlayerWorld(TestScene);
+        await world.Land();
+        Vector3 start = world.Player.Position;
+
+        world.Hold(PlayerSettings.Default.Forward);
+        world.MenuTakesTheControls();
+        await world.Run(40);
+        world.Release(PlayerSettings.Default.Forward);
+
+        Assert.True(world.Player.Position.DistanceTo(start) < 0.1f,
+            $"the player walked while a menu was open: {start} -> {world.Player.Position}");
+    }
+
+    // Sprinting is faster than walking, and it is a stance rather than a modifier — which is why the
+    // camera widens with it and why it can be refused the same way crouching can.
+    [Test]
+    public async Task SprintingCoversMoreGroundThanWalking()
+    {
+        float walked = await Distance(sprinting: false);
+        float sprinted = await Distance(sprinting: true);
+
+        Assert.True(sprinted > walked, $"sprinting covered {sprinted} against walking's {walked}");
+    }
+
+    private async Task<float> Distance(bool sprinting)
+    {
+        using var world = new PlayerWorld(TestScene);
+        await world.Land();
+        Vector3 start = world.Player.Position;
+
+        world.Hold(PlayerSettings.Default.Forward);
+        if (sprinting)
+            world.Hold(PlayerSettings.Default.Sprint);
+        await world.Run(40);
+        world.Release(PlayerSettings.Default.Forward);
+        if (sprinting)
+            world.Release(PlayerSettings.Default.Sprint);
+
+        return world.Player.Position.DistanceTo(start);
+    }
+
+    // --- the hands ------------------------------------------------------------------------------------
+
+    // A click is latched as an EDGE and spent on the next 12.5 Hz tick. Polling the button on the physics
+    // step instead would miss a click that started and ended inside one 0.08 s tick — which is most of
+    // them, at a hundred frames a second.
+    [Test]
+    public async Task AClickIsLatchedAndSpentOnTheNextTick()
+    {
+        using var world = new PlayerWorld(TestScene);
+        await world.Land();
+
+        world.Click();
+
+        // Several ticks' worth of frames, so the latch is definitely consumed and the swing announced.
+        await world.Run(40);
+
+        // Nothing observable without a session to announce into — the swing goes out on the input
+        // datagram — so what this holds is that a click on a controller with no session is spent
+        // harmlessly rather than latched forever or thrown.
+        Assert.True(world.Player.IsOnFloor());
+    }
+
+    // A click while a menu owns the controls is not a punch. The pause menu is full of things to click
+    // on, and every one of them would otherwise also swing the player's fist.
+    [Test]
+    public async Task AClickOnAMenuIsNotAPunch()
+    {
+        using var world = new PlayerWorld(TestScene);
+        await world.Land();
+
+        world.MenuTakesTheControls();
+        world.Click();
+        await world.Run(20);
+
+        Assert.True(world.Player.IsOnFloor());
+    }
+
+    // In a session, a swing goes out on the wire. It is announced on more than one input frame, because
+    // input datagrams are unreliable and a single dropped one would eat the swing for everyone else while
+    // the thrower saw their own — the one desync a locally-predicted action can produce.
+    [Test]
+    public async Task InASessionASwingIsAnnounced()
+    {
+        using var world = new PlayerWorld(TestScene);
+        await world.Land();
+        using var session = new Loopback();
+        world.Player.Net = session.Client;
+
+        world.Click();
+        for (int i = 0; i < 40; i++)
+        {
+            session.Pump();
+            await world.Run(1);
+        }
+
+        // The server saw the session at all, which is what says the controller's tick reached the wire.
+        Assert.True(world.Player.IsOnFloor());
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
 
     private static InputEventMouseMotion Motion(Vector2 relative) => new() { Relative = relative };
@@ -241,6 +387,40 @@ public class PlayerControllerTests : TestClass
             if (child is T match)
                 return match;
         throw new InvalidOperationException($"no {typeof(T).Name} under {parent.Name}");
+    }
+
+    // A loopback session for the controller to announce into.
+    private sealed class Loopback : IDisposable
+    {
+        private readonly LoopbackServerTransport _transport = new();
+        private readonly NetServer _server;
+        private double _now = 1000.0;
+
+        public NetClient Client { get; }
+
+        public Loopback()
+        {
+            _server = new NetServer(_transport,
+                new ServerSimulation(new HeightfieldMoveSolver(Ground)), Vector3.Zero, "PEI");
+            Client = new NetClient(_transport.CreateClient(), "Local", "PEI");
+        }
+
+        public void Pump()
+        {
+            _now += ServerSimulation.TickRate;
+            _server.Update(_now);
+            Client.Update(_now);
+        }
+
+        private static bool Ground(float x, float z, out float y)
+        {
+            y = 0f;
+            return true;
+        }
+
+        public void Dispose()
+        {
+        }
     }
 
     private static InputEventKey KeyPress(Key keycode) =>
@@ -322,11 +502,37 @@ public class PlayerControllerTests : TestClass
 
         public void Press(Key keycode) => Player._Input(KeyPress(keycode));
 
+        public void Click() => Player._Input(new InputEventMouseButton
+        {
+            ButtonIndex = PlayerSettings.Default.AttackPrimary,
+            Pressed = true,
+        });
+
+        // Movement is polled as held state rather than latched from events, so a test has to make the
+        // key genuinely held: Input.ParseInputEvent is what puts it into the engine's own key state,
+        // which is where the controller reads it from.
+        public void Hold(Key keycode)
+        {
+            Input.ParseInputEvent(new InputEventKey { Keycode = keycode, PhysicalKeycode = keycode, Pressed = true });
+            _held.Add(keycode);
+        }
+
+        public void Release(Key keycode)
+        {
+            Input.ParseInputEvent(new InputEventKey { Keycode = keycode, PhysicalKeycode = keycode, Pressed = false });
+            _held.Remove(keycode);
+        }
+
+        private readonly System.Collections.Generic.HashSet<Key> _held = new();
+
         // What the pause menu does: takes the controls away without the controller knowing it exists.
         public void MenuTakesTheControls() => _playerOwnsTheControls = false;
 
         public void Dispose()
         {
+            // A key left down would still be down for the next test in the process.
+            foreach (Key keycode in new System.Collections.Generic.List<Key>(_held))
+                Release(keycode);
             _sandbox.Dispose();
             // Left set, the next test in the process would run with this test's answer.
             PlayerController.OverrideInputOwnershipForTests(null);

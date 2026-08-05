@@ -235,6 +235,84 @@ public class NetworkManagerTests : TestClass
         Assert.False(session.Net.IsHosting);
     }
 
+    // --- the real map ---------------------------------------------------------------------------------
+
+    // Hosting the real map's zombies: the population loads, the physics queries attach, and the baked
+    // navmesh becomes the router they path with.
+    //
+    // This is the path a solo session takes on every start, and almost none of it is reachable without
+    // real content — the zombie tables, the spawnpoints and the navmesh all come off disk together, and a
+    // fixture that supplied one without the others would exercise a shape the game never has.
+    [Test]
+    public async Task HostingTheRealMapsZombiesBringsUpAPopulation()
+    {
+        if (!RealMap(out string levelDir))
+            return;
+
+        using var session = new Session(TestScene);
+        session.Net.StartSingleplayer("Player");
+        await session.PhysicsFrame();
+
+        session.Net.HostZombies(levelDir);
+
+        // The punch host is hooked whether or not the level had zombies; that it exists here says the
+        // hosting path ran to the end rather than returning early.
+        Assert.NotNull(session.Net.PunchDamage);
+
+        for (int i = 0; i < 20; i++)
+            await session.PhysicsFrame();
+
+        Assert.True(session.Net.IsActive);
+    }
+
+    // And reconciling that map's navmesh against the world runs rather than being skipped. The pass is
+    // what makes the baked graph agree with the objects standing on it; a session that skipped it would
+    // route zombies through every building on the map.
+    [Test]
+    public async Task ReconcilingTheRealMapsNavmeshRuns()
+    {
+        if (!RealMap(out string levelDir))
+            return;
+
+        using var session = new Session(TestScene);
+        session.Net.StartSingleplayer("Player");
+        await session.PhysicsFrame();
+        session.Net.HostZombies(levelDir);
+        await session.PhysicsFrame();
+
+        session.Net.ReconcileNavigation(new HashSet<System.Guid>());
+
+        // It runs across frames on the physics thread; what matters here is that asking for it neither
+        // throws nor leaves the session wedged, since it is started from a signal that fires mid-load.
+        for (int i = 0; i < 30; i++)
+            await session.PhysicsFrame();
+
+        Assert.True(session.Net.IsActive);
+    }
+
+    private static bool RealMap(out string levelDir)
+    {
+        levelDir = "";
+        string? install = Assets.UnturnedInstall.Find();
+        string? maps = install == null ? null : System.IO.Path.Combine(install, "Maps", "PEI");
+        if (maps == null || !System.IO.Directory.Exists(maps))
+        {
+            if (System.Environment.GetEnvironmentVariable("UG_REQUIRE_REAL_DATA") == "1")
+            {
+                throw new System.IO.IOException(
+                    "UG_REQUIRE_REAL_DATA=1 but the PEI map is not present; this run exists to prove these "
+                    + "tests execute");
+            }
+
+            Log.Print("[runtime-tests] skipping: no PEI map "
+                + "(set UNTURNED_PATH or run ./scripts/fetch-game-data.sh)");
+            return false;
+        }
+
+        levelDir = maps;
+        return true;
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
 
     // A manager in the tree, configured over flat ground, freed with the test. Freeing is what closes
