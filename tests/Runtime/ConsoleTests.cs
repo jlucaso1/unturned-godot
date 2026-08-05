@@ -23,7 +23,7 @@ public class ConsoleTests : TestClass
     public ConsoleTests(Node testScene) : base(testScene) { }
 
     [Setup]
-    public void EveryVariableStartsAtItsDefault() => ConsoleOverlay.Console.Execute("reset all");
+    public void EveryVariableStartsAtItsDefault() => RenderConsole.Console.Execute("reset all");
 
     // --- the pane ------------------------------------------------------------------------------------
 
@@ -314,14 +314,14 @@ public class ConsoleTests : TestClass
         {
             ConsoleOverlay console = await Attached();
 
-            Assert.False(ConsoleOverlay.Console.Variable("terrain.enabled")!.AsBool);
+            Assert.False(RenderConsole.Console.Variable("terrain.enabled")!.AsBool);
             Assert.Contains("> terrain.enabled 0", console.Output.GetParsedText());
             Release(console);
         }
         finally
         {
             OS.SetEnvironment("UG_CONSOLE", previous);
-            ConsoleOverlay.Console.Execute("reset all");
+            RenderConsole.Console.Execute("reset all");
         }
     }
 

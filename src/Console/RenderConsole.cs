@@ -35,9 +35,43 @@ namespace UnturnedGodot;
 // notice — the value is still remembered, and ConsoleRegistry.Reapply pushes it at the next world.
 public static class RenderConsole
 {
+    private static ConsoleRegistry? Shared;
+    private static bool StartupTaken;
+
+    // Whichever node the console currently speaks through — the overlay in a normal session, the
+    // benchmark's own context node in a run that has no overlay to open. Bindings resolve the world
+    // from it, so it must be a node that is IN the tree the world was built into.
+    public static Node? Host { get; set; }
+
+    // Built once per process, so a configuration survives the menu and the next map load. See
+    // ConsoleVariable for why the values live here rather than in the nodes they drive.
+    public static ConsoleRegistry Console => Shared ??= Build(() => Host);
+
+    // UG_CONSOLE, handed to the first caller that is ready to run it and to nobody after that. Two very
+    // different sessions want it — an interactive one, where the overlay runs it as though it had been
+    // typed, and a benchmark tier, which has no overlay at all and reports through the log — and neither
+    // may run it twice.
+    public static bool TryTakeStartupLine(out string line)
+    {
+        line = OS.GetEnvironment("UG_CONSOLE");
+        if (StartupTaken || line.Length == 0)
+        {
+            line = "";
+            return false;
+        }
+        StartupTaken = true;
+        return true;
+    }
+
     public static ConsoleRegistry Build(Func<Node?> host)
     {
         var console = new ConsoleRegistry();
+        // Defaults for the viewport-backed variables are read off the viewport this session actually
+        // started with, not written down here a second time. UG_MESH_LOD_THRESHOLD is the case that
+        // proves it: Main applies it before the console exists, so a hard-coded 2 would have `list`
+        // reporting a threshold the frame is not using and `reset` moving the session to a value nobody
+        // asked for. A run with no viewport yet (the unit-test harness) falls back to the shipped values.
+        Viewport? viewport = host()?.GetViewport();
 
         console.Add(ConsoleVariable.Switch("terrain.enabled",
             "Draw the landscape tiles. Collision stays: the player still stands on ground they cannot see.",
@@ -127,34 +161,36 @@ public static class RenderConsole
         console.Add(ConsoleVariable.Number("r.scale",
             "3D resolution scale. The UI and this console stay sharp, so 0.5 answers 'am I pixel-bound' "
             + "without changing anything else about the frame.",
-            1f, 0.25f, 2f, ViewportSetting(host, (viewport, value) => viewport.Scaling3DScale = value.AsFloat)));
+            viewport?.Scaling3DScale ?? 1f, 0.25f, 2f,
+            ViewportSetting(host, (target, value) => target.Scaling3DScale = value.AsFloat)));
         console.Add(ConsoleVariable.Whole("r.msaa",
-            "3D antialiasing: 0 off, 1 2x, 2 4x, 3 8x.", 0, 0, 3,
-            ViewportSetting(host, (viewport, value) => viewport.Msaa3D = (Viewport.Msaa)value.AsInt)));
+            "3D antialiasing: 0 off, 1 2x, 2 4x, 3 8x.", (int)(viewport?.Msaa3D ?? Viewport.Msaa.Disabled),
+            0, 3, ViewportSetting(host, (target, value) => target.Msaa3D = (Viewport.Msaa)value.AsInt)));
         console.Add(ConsoleVariable.Switch("r.taa.enabled",
-            "Temporal antialiasing.", false,
-            ViewportSetting(host, (viewport, value) => viewport.UseTaa = value.AsBool)));
+            "Temporal antialiasing.", viewport?.UseTaa ?? false,
+            ViewportSetting(host, (target, value) => target.UseTaa = value.AsBool)));
         console.Add(ConsoleVariable.Switch("r.occlusion.enabled",
             "Occlusion culling against the terrain occluders. Off is the A/B control for what they buy.",
-            true, ViewportSetting(host, (viewport, value) => viewport.UseOcclusionCulling = value.AsBool)));
+            viewport?.UseOcclusionCulling ?? true,
+            ViewportSetting(host, (target, value) => target.UseOcclusionCulling = value.AsBool)));
         console.Add(ConsoleVariable.Number("r.lod.threshold",
             "Godot's automatic mesh LOD, in pixels of screen-space error. 0 disables it, which is the "
             + "only way to see what the meshoptimizer chain is worth. Matches UG_MESH_LOD_THRESHOLD.",
-            2f, 0f, 1024f,
-            ViewportSetting(host, (viewport, value) => viewport.MeshLodThreshold = value.AsFloat)));
+            viewport?.MeshLodThreshold ?? 2f, 0f, 1024f,
+            ViewportSetting(host, (target, value) => target.MeshLodThreshold = value.AsFloat)));
         console.Add(ConsoleVariable.Whole("r.shadow.atlas",
-            "Positional (point/spot) shadow atlas edge, in texels.", 1024, 128, 8192,
-            ViewportSetting(host, (viewport, value) => viewport.PositionalShadowAtlasSize = value.AsInt)));
+            "Positional (point/spot) shadow atlas edge, in texels.",
+            viewport?.PositionalShadowAtlasSize ?? 1024, 128, 8192,
+            ViewportSetting(host, (target, value) => target.PositionalShadowAtlasSize = value.AsInt)));
         console.Add(ConsoleVariable.Whole("r.debug",
             "Viewport debug draw: 0 normal, 1 unshaded, 2 lighting, 3 overdraw, 4 wireframe. Overdraw and "
             + "wireframe are how you find WHICH geometry is expensive rather than how much there is.",
-            0, 0, 4,
-            ViewportSetting(host, (viewport, value) => viewport.DebugDraw = (Viewport.DebugDrawEnum)value.AsInt)));
+            (int)(viewport?.DebugDraw ?? Viewport.DebugDrawEnum.Disabled), 0, 4,
+            ViewportSetting(host, (target, value) => target.DebugDraw = (Viewport.DebugDrawEnum)value.AsInt)));
         console.Add(ConsoleVariable.Switch("r.vsync.enabled",
             "Present in step with the display. Off is required for a frame time that means anything: with "
-            + "it on, every measurement below the refresh rate reads as the refresh rate. The default "
-            + "shown here is the shipped one; a benchmark run has already turned it off for itself.",
-            true, value =>
+            + "it on, every measurement below the refresh rate reads as the refresh rate.",
+            DisplayServer.WindowGetVsyncMode() != DisplayServer.VSyncMode.Disabled, value =>
             {
                 DisplayServer.WindowSetVsyncMode(value.AsBool
                     ? DisplayServer.VSyncMode.Enabled
@@ -164,7 +200,7 @@ public static class RenderConsole
         console.Add(ConsoleVariable.Whole("r.fps.max",
             "Frame cap; 0 is uncapped. A cap is the other way to stop a GPU-bound measurement from "
             + "being a thermal one.",
-            0, 0, 1000, value =>
+            Math.Clamp(Engine.MaxFps, 0, 1000), 0, 1000, value =>
             {
                 Engine.MaxFps = value.AsInt;
                 return null;
@@ -191,15 +227,30 @@ public static class RenderConsole
         return anchor is { } node && node.IsInsideTree() ? node.GetTree().GetFirstNodeInGroup(group) : null;
     }
 
+    // Every node in the group, not just the first. A subject is not always one node: what the objects
+    // builder DRAWS is its batch renderer plus the placeholder boxes for assets it could not extract,
+    // and hiding one of the two would leave a measurement quietly counting the other.
+    private static Godot.Collections.Array<Node> AllLocated(Func<Node?> host, string group) =>
+        host() is { } anchor && anchor.IsInsideTree()
+            ? anchor.GetTree().GetNodesInGroup(group)
+            : new Godot.Collections.Array<Node>();
+
     // Shows or hides one part of the built world. Hiding a root propagates through IsVisibleInTree, which
     // is what the RID renderers below it watch, so this reaches batches that are not nodes at all — and
     // reaches nothing that is not drawn: static bodies, ladder volumes and navigation are unaffected.
     private static ConsoleApply Visibility(Func<Node?> host, string group, string what) => value =>
     {
-        if (Located(host, group) is not Node3D node)
-            return $"No {what} is loaded right now; the value is kept and applied to the next world.";
-        node.Visible = value.AsBool;
-        return null;
+        int shown = 0;
+        foreach (Node node in AllLocated(host, group))
+        {
+            if (node is not Node3D drawn)
+                continue;
+            drawn.Visible = value.AsBool;
+            shown++;
+        }
+        return shown > 0
+            ? null
+            : $"No {what} is loaded right now; the value is kept and applied to the next world.";
     };
 
     private static ConsoleApply Category(Func<Node?> host, EObjectType category, string what) => value =>

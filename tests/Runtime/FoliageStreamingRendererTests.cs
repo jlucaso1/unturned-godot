@@ -89,7 +89,12 @@ public class FoliageStreamingRendererTests : TestClass
         using (var world = new StreamingWorld(TestScene, index, MeshPerType(index)))
         {
             world.LookFrom(index.Chunks.Count > 0 ? index.Chunks[0].Centre : Vector3.Zero);
-            await world.Run(frames: 60);
+            // Settled, not "sixty frames in": residency is still filling at that point — decodes land a
+            // batch per frame — so a baseline taken there grows on its own and the assertion below would
+            // be about the streamer's progress rather than about the range.
+            for (int frame = 0; frame < 3_000 && !world.Renderer.IsSettled; frame++)
+                await world.Run(frames: 1);
+            Assert.True(world.Renderer.IsSettled, "residency never settled, so nothing here can be read");
             int chunks = world.Renderer.ResidentChunks;
             long instances = world.Renderer.ResidentInstances;
             Assert.True(chunks > 0, "nothing was resident, so there is nothing to prove about it");

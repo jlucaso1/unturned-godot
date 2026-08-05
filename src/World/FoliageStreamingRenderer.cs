@@ -574,9 +574,13 @@ public partial class FoliageStreamingRenderer : Node3D
             ApplyVisibilityRange(resident.Instance, index);
     }
 
+    // The margin scales with the end, because Godot keeps DRAWING through it while the chunk fades: a
+    // scale that moved the end alone would leave a 32 m tail on top of a range pulled down to two, and
+    // `foliage.range 0.01` would measure a sixteenth of what it asked for. At scale 1 this is exactly
+    // the margin the world was built with.
     private void ApplyVisibilityRange(Rid instance, int index) =>
         RenderingServer.InstanceGeometrySetVisibilityRange(instance, 0f,
-            _visibilityEnds[index] * _rangeScale, 0f, FoliageBuilder.FadeMarginValue,
+            _visibilityEnds[index] * _rangeScale, 0f, FoliageBuilder.FadeMarginValue * _rangeScale,
             RenderingServer.VisibilityRangeFadeMode.Self);
 
     private void Upload(int index, FoliageChunk chunk)

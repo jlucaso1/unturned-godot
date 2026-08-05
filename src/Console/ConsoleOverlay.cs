@@ -22,14 +22,6 @@ namespace UnturnedGodot;
 // the last few hundred lines, and read them back without a terminal at all.
 public partial class ConsoleOverlay : CanvasLayer
 {
-    // The registry outlives the node, and has to. The overlay is built with the world and freed with it,
-    // while the whole point of a toggle is to carry it from one map to the next and compare — so the
-    // values live here, at process scope, and each new overlay adopts them (see ReapplySettings).
-    private static ConsoleRegistry? Shared;
-    // Whichever overlay is currently in a tree. Every binding resolves the world through this, so a
-    // command typed now reaches the world that exists now rather than one that was freed two maps ago.
-    private static ConsoleOverlay? Current;
-
     // How much scrollback is kept. Beyond this the oldest paragraphs are dropped: a session that runs for
     // hours writes tens of thousands of log lines, and a RichTextLabel keeps every one of them laid out.
     private const int MaximumParagraphs = 1000;
@@ -57,12 +49,17 @@ public partial class ConsoleOverlay : CanvasLayer
 
     internal LineEdit Prompt => _prompt;
 
-    public static ConsoleRegistry Console => Shared ??= RenderConsole.Build(() => Current);
+    // The registry outlives this node, and has to: the overlay is built with the world and freed with
+    // it, while the whole point of a toggle is to carry it from one map to the next and compare. It
+    // lives at process scope in RenderConsole, and each new overlay adopts it (see ReapplySettings).
+    public static ConsoleRegistry Console => RenderConsole.Console;
 
     public override void _Ready()
     {
         Layer = 200; // above the pause menu (20) and the performance HUD (128)
-        Current = this;
+        // Every binding resolves the world through whichever node is the host, so a command typed now
+        // reaches the world that exists now rather than one that was freed two maps ago.
+        RenderConsole.Host = this;
         BuildInterface();
 
         foreach (string line in Log.Tail())
@@ -70,9 +67,10 @@ public partial class ConsoleOverlay : CanvasLayer
         Log.LineWritten += Remember;
 
         // UG_CONSOLE="foliage.enabled 0; sun.shadows.enabled 0" configures a session before anyone can
-        // type: it is how a benchmark run, a screenshot or a bug report measures the same difference a
-        // person would have made by hand, without one being there to make it.
-        if (OS.GetEnvironment("UG_CONSOLE") is { Length: > 0 } startup)
+        // type: it is how a screenshot or a bug report measures the same difference a person would have
+        // made by hand, without one being there to make it. Taken rather than read, because a run with
+        // no overlay — the GPU benchmark tier — applies the same line from its own world build.
+        if (RenderConsole.TryTakeStartupLine(out string startup))
             Submit(startup, echo: true);
 
         // The same screenshot aid the pause menu carries (SHOW_PAUSE_MENU): a capture run never presses a
@@ -84,8 +82,8 @@ public partial class ConsoleOverlay : CanvasLayer
     public override void _ExitTree()
     {
         Log.LineWritten -= Remember;
-        if (ReferenceEquals(Current, this))
-            Current = null;
+        if (ReferenceEquals(RenderConsole.Host, this))
+            RenderConsole.Host = null;
     }
 
     // Pushes every non-default value at the world that exists now. The overlay is created with the

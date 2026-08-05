@@ -22,6 +22,11 @@ public partial class FreeCamera : Camera3D
 
     public override void _Input(InputEvent @event)
     {
+        // Same rule as _Process below, and needed here for the other half of it: a click would otherwise
+        // re-capture the mouse while the console is open, hiding the cursor over a pane you are trying
+        // to click into. See TypingElsewhere.
+        if (TypingElsewhere())
+            return;
         if (@event is InputEventMouseButton { Pressed: true })
         {
             _captured = true;
@@ -41,14 +46,16 @@ public partial class FreeCamera : Camera3D
         }
     }
 
+    // A focused text field owns the input. With the console open, WASD is somebody typing
+    // `water.enabled 0`, not somebody flying — and this camera reads the keyboard by POLLING, so marking
+    // the event handled cannot stop it the way it stops an event-driven listener. Asking the viewport who
+    // holds focus is the engine's own answer to "is this keystroke text", and it covers every future text
+    // field for free.
+    private bool TypingElsewhere() => GetViewport().GuiGetFocusOwner() is LineEdit or TextEdit;
+
     public override void _Process(double delta)
     {
-        // A focused text field owns the keyboard. With the console open, WASD is somebody typing
-        // `water.enabled 0`, not somebody flying — and this camera reads the keyboard by polling, so
-        // marking the event handled cannot stop it the way it stops an event-driven listener. Asking the
-        // viewport who has focus is the engine's own answer to "is this keystroke text", and it covers
-        // every future text field for free.
-        if (GetViewport().GuiGetFocusOwner() is LineEdit or TextEdit)
+        if (TypingElsewhere())
             return;
 
         // PHYSICAL keys, not keycodes. WASD is a shape — a cluster under the left hand — and asking for

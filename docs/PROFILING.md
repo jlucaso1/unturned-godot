@@ -93,6 +93,11 @@ the difference being one named submission rather than a build flag. Settings als
 menu and are re-applied to the next map, which is how "the same difference, on PEI and on Germany" is
 measured without restarting.
 
+Tier 2 has no console pane — nobody is at the keyboard — but it applies the line against the world it
+built and logs what each statement did. It builds its own sun and environment rather than the day/night
+cycle, so the `sun.*` and `env.*` names report that there is no lighting to reach there instead of
+silently doing nothing; everything else (`terrain`, `objects.*`, `foliage.*`, `vehicles`, `r.*`) applies.
+
 `help`, `list` and `find <text>` are the authority on what exists; README has the map of the namespaces.
 
 ## Parsers in isolation

@@ -199,6 +199,37 @@ public class ObjectsBuilderTests : TestClass
         withLod.QueueFree();
     }
 
+    // What the dev console switches off is the geometry this builder DRAWS — its batches and its
+    // placeholder boxes — and deliberately not the root they hang off. Both build paths attach the NPC
+    // root to that same root, and NPCs have a switch of their own; grouping the root would make
+    // `objects.enabled 0` take them with it and fold their cost into the objects measurement.
+    [Test]
+    public async Task TheConsoleGroupCoversWhatIsDrawnRatherThanTheRootTheNpcsShare()
+    {
+        Guid asset = Guid.NewGuid();
+        var db = new ObjectAssetDatabase();
+        db.Add(Asset(asset, "Pine"));
+        var meshes = new Dictionary<Guid, ArrayMesh> { [asset] = Triangle() };
+
+        Node3D root = ObjectsBuilder.Build(new List<PlacedObject> { Place(asset, Vector3.Zero) }, db,
+            meshes, new Dictionary<Guid, List<CachedCollider>>(), out _);
+        // Stands in for the NPC root, which both build paths attach here.
+        var npcs = new Node3D { Name = "Npcs" };
+        root.AddChild(npcs);
+        TestScene.AddChild(root);
+        await NextFrame();
+
+        Assert.False(root.IsInGroup(SceneGroups.Objects));
+        Assert.False(npcs.IsInGroup(SceneGroups.Objects));
+        Node grouped = Assert.Single(TestScene.GetTree().GetNodesInGroup(SceneGroups.Objects));
+        Assert.IsType<MultiMeshRidRenderer>(grouped);
+        // And the same node is what the per-category and shadow switches drive.
+        Assert.True(grouped.IsInGroup(SceneGroups.ObjectBatches));
+
+        root.QueueFree();
+        await NextFrame();
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
 
     private static int TotalInstances(Node parent)

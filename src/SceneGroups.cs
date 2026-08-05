@@ -13,6 +13,9 @@ namespace UnturnedGodot;
 public static class SceneGroups
 {
     public const string Terrain = "ug_terrain";
+    // What the object build DRAWS — its batch renderer and its placeholder boxes — rather than the root
+    // they hang off. Both build paths attach the NPC root to that root, and NPCs have a group of their
+    // own; a group on the root would tie the two switches together.
     public const string Objects = "ug_objects";
     // The MultiMeshRidRenderer inside the objects root — the node that owns the batches themselves, and
     // so the only one that can stop drawing one kind of object without hiding the rest.
