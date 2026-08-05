@@ -10,7 +10,6 @@ namespace UnturnedGodot;
 // whatever the pass did not cover. Building it in one place is what lets the second of those find the
 // cache already filled — two lists of definitions that disagreed would send the fallback back into a
 // second full decode of the same 1.4 GB bundle for the difference.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class MovementAudioRequests
 {
     // ZombieManager's raw clip arrays (played directly, not via OneShotAudioDefinitions): the 16 roars and
