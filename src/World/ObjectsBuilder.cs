@@ -47,6 +47,14 @@ public static class ObjectsBuilder
     // Ceiling for that coarsening walk. Past the widest map a cell holds every copy of a group, so going
     // further cannot change the partition — this only bounds the loop against degenerate coordinates.
     private const float MaxCellMetres = 65_536f;
+    // How much wider than the wider of the two footprints a merge of two batches over the same mesh may
+    // leave them. A merged batch is one culling decision where there were two, so this is what stops the
+    // merge buying draw calls with rejection. Swept on the two maps: Germany reaches its whole saving by
+    // 0.02 and holds it to 1000, while PEI submits no extra geometry up to 0.05 and 996 extra primitives
+    // at its ground pose by 0.1 — so the default sits inside both plateaus, on the side that degrades
+    // gracefully. Zero merges only batches that do not widen the batch at all; large values merge every
+    // co-located pair and are the A/B control for the constraint.
+    private static readonly float BatchMergeGrowth = EnvFloat("UG_BATCH_MERGE_GROWTH", 0.02f, 0f, 1000f);
     private static readonly bool ChunkSparseObjects = EnvBool("UG_CHUNK_SPARSE_OBJECTS", true);
     private static readonly long SparseChunkMinTriangles =
         EnvLong("UG_SPARSE_OBJECT_MIN_TRIS", 0, 0, long.MaxValue);
@@ -174,7 +182,7 @@ public static class ObjectsBuilder
                 withMesh += transforms.Count;
             }
 
-            List<MergedRenderGroup> submitted = RenderBatchGrouping.Merge(partitioned);
+            List<MergedRenderGroup> submitted = RenderBatchGrouping.Merge(partitioned, BatchMergeGrowth);
             foreach (MergedRenderGroup group in submitted)
                 renderBatches += AddLevels(root, render, levels[group.Key.Level0],
                     group.Key.Level1 == RenderMeshKey.NoLevel ? null : levels[group.Key.Level1],

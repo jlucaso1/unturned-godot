@@ -116,26 +116,37 @@ public static class GpuBenchmark
                 renderObjects, sm, poses.Count, perPose);
             AddFoliageMetrics(tree, report.Metrics, foliageSettled);
 
-            // Optional visual check: UG_SHOT=<path> saves a PNG from a low near-ground flyover — the only
-            // vantage where directional shadows (capped ~100 m from the camera) actually render, so
-            // shadow-quality changes (e.g. cascade count) can be compared side by side, not just by timing.
+            // Optional visual check: UG_SHOT=<path> saves a PNG from one of the poses that were just
+            // measured, so the frame photographed is the frame the counts describe. UG_SHOT_POSE names
+            // which (default `ground_diag`, the only vantage where directional shadows — capped ~100 m
+            // from the camera — actually render); `all` writes one PNG per pose, suffixing the path with
+            // the pose name, which is what a change that has to prove it moved no pixels anywhere wants.
+            //
+            // This is the reproducible capture. The interactive path's screenshots are not: they settle a
+            // streamed world against the wall clock, so two runs of the same build differ by a fraction of
+            // a percent of the frame and cannot tell a real difference from their own noise. Tier 2 builds
+            // the world synchronously and jumps the camera, and its captures reproduce byte for byte.
             string shotPath = System.Environment.GetEnvironmentVariable("UG_SHOT") ?? "";
             if (shotPath.Length > 0)
             {
-                // Capture the exact ground-level benchmark pose. The former bounds-centre shot could land
-                // outside the terrain on sparse maps and show no nearby shadow or foliage at all, making
-                // visually different settings produce byte-identical "validation" images.
+                string wanted = System.Environment.GetEnvironmentVariable("UG_SHOT_POSE") ?? "ground_diag";
+                bool everyPose = string.Equals(wanted, "all", StringComparison.OrdinalIgnoreCase);
                 foreach ((string name, Transform3D xform) in poses)
-                    if (name == "ground_diag")
-                    {
-                        camera.Far = 4000f;
-                        camera.GlobalTransform = xform;
+                {
+                    if (!everyPose && name != wanted)
+                        continue;
+                    // Ground poses represent gameplay and keep PlayerCamera's 4 km far plane, exactly as
+                    // they were sampled above; anything else keeps the whole-scene range.
+                    camera.Far = name.StartsWith("ground", StringComparison.Ordinal) ? 4000f : sceneFar;
+                    camera.GlobalTransform = xform;
+                    for (int i = 0; i < 20; i++)
+                        await context.ToSignal(tree, SceneTree.SignalName.ProcessFrame);
+                    string path = everyPose ? SuffixedPath(shotPath, name) : shotPath;
+                    context.GetViewport().GetTexture().GetImage().SavePng(path);
+                    Log.Print($"[benchmark] screenshot saved: {path}");
+                    if (!everyPose)
                         break;
-                    }
-                for (int i = 0; i < 20; i++)
-                    await context.ToSignal(tree, SceneTree.SignalName.ProcessFrame);
-                context.GetViewport().GetTexture().GetImage().SavePng(shotPath);
-                Log.Print($"[benchmark] screenshot saved: {shotPath}");
+                }
             }
 
             BenchmarkRunner.Finish(report, $"{mapName}-gpu", DiffOptions(),
@@ -293,6 +304,17 @@ public static class GpuBenchmark
         Mon(Performance.Monitor.PipelineCompilationsSpecialization);
 
     private static double Mon(Performance.Monitor m) => Performance.GetMonitor(m);
+
+    // "shots/PEI.png" + "tight" -> "shots/PEI-tight.png". A path with no extension keeps none, so a
+    // caller who passed a directory-style prefix still gets one file per pose rather than one file.
+    private static string SuffixedPath(string path, string pose)
+    {
+        int dot = path.LastIndexOf('.');
+        int separator = path.LastIndexOfAny(new[] { '/', '\\' });
+        return dot > separator
+            ? string.Concat(path.AsSpan(0, dot), "-", pose, path.AsSpan(dot))
+            : $"{path}-{pose}";
+    }
 
     private static float EnvFloat(string name, float fallback) =>
         float.TryParse(System.Environment.GetEnvironmentVariable(name), System.Globalization.NumberStyles.Float,

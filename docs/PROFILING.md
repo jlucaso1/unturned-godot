@@ -205,18 +205,29 @@ What a batch is keyed on is worth stating separately, because it is not what the
 on. `ObjectsBuilder` collects placements per asset GUID — collision, ladder volumes and asset policy all
 need that — but a *submission* is keyed on the pair of mesh levels it draws, so two assets that
 `ModelLibrary` handed the same deduplicated `ArrayMesh` can share one batch instead of building two over
-that one mesh. `RenderBatchGrouping` merges the partitioner's batches only where all three hold: the same
+that one mesh. `RenderBatchGrouping` merges the partitioner's batches only where all four hold: the same
 pair of levels (a shared base mesh is not enough — assets with different authored lower levels draw
-different geometry past their switch distance), overlapping placement footprints, and a merged footprint
-that still fits the cell size the partitioner chose. On PEI that takes 573 partitioned batches to 560 and
-908 render batches to 891.
+different geometry past their switch distance), overlapping placement footprints, a merged footprint that
+still fits the cell size the partitioner chose, and a merged footprint no more than
+`UG_BATCH_MERGE_GROWTH` wider than the wider of the two.
 
-The last two constraints are the whole design, and dropping them is measurably worse. Merging on the mesh
-pair alone — same mesh anywhere on the map — takes PEI's aerial poses from 709 draw calls to 683, but it
-also joins batches sitting in different parts of the island, and the ground pose goes from 623,238
-primitives to 626,052 and `ground_diag` from 692,305 to 695,057. Two batches are two culling decisions;
-one batch is one. Only merging what already sits together keeps the draw-call saving without spending
-rejection to get it.
+That last constraint is the whole design. The engine's own advice is that joined static geometry cannot be
+culled individually and that the join is usually still worth it; here it is measurable, so it does not
+have to be assumed. Sweeping the allowance on both maps:
+
+| `UG_BATCH_MERGE_GROWTH` | PEI `ground` | PEI `overhead` | Germany `ground` | Germany `tight` |
+|---|---:|---:|---:|---:|
+| 0 | −0 draws, ±0 prims | −7 draws | −3 draws, −10 prims | −1 draw |
+| **0.02 (default)** | **−6 draws, ±0 prims** | **−9 draws** | **−7 draws, −402 prims** | **−5 draws, −392 prims** |
+| 0.05 | −6 draws, ±0 prims | −9 draws | −7 draws, −402 prims | −5 draws, −392 prims |
+| 0.1 | −5 draws, **+996 prims** | −11 draws | −7 draws, −402 prims | −5 draws, −392 prims |
+| 1000 (unconstrained) | −6 draws, **+1,248 prims** | −13 draws | −7 draws, −402 prims | −5 draws, −392 prims |
+
+Germany reaches its entire saving by 0.02 and holds it however far the allowance is opened; PEI submits no
+extra geometry up to 0.05 and starts paying for the merge at 0.1. So the default sits inside both
+plateaus, on the side that degrades gracefully — and the unconstrained end, which is what "merge every
+batch that draws the same mesh" would mean, buys PEI four more draw calls at the aerial poses for 1,248
+primitives at the one that matters. Two batches are two culling decisions; one batch is one.
 
 Every boolean flag below goes through `EnvFlag`, so `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` all
 work, in any case. A value that is none of those is treated as unset and the flag keeps its default —
@@ -236,6 +247,10 @@ a path (`UG_OBJECT_CHUNK_METRES`, `SCREENSHOT_PATH`, `TIME_OF_DAY`, …) are una
   `UG_OBJECT_CHUNK_METRES=0` restores their former map-wide batch as well.
 - `UG_OBJECT_CHUNK_MIN_TRIS=<count>` partitions only groups whose total placed triangle count reaches the
   threshold.
+- `UG_BATCH_MERGE_GROWTH=<fraction>` is how much wider than the wider of the two a merge of two batches
+  over the same mesh may leave them (default 0.02). Zero merges only what does not widen the batch at all;
+  a large value merges every co-located pair and is the A/B control for the constraint. See the sweep
+  above for why the default is where it is.
 - `UG_OBJECT_CELL_MIN_TRIS=<count>` is the geometry an average cell must carry for its draw call to pay
   for itself. Groups whose cells fall short are partitioned on a coarser grid instead (doubling until
   they clear it, or until the group is a single batch). Zero gives every group the same fixed cell size,
@@ -482,6 +497,28 @@ raw texture key, and a MultiMesh submits one draw per surface whichever material
 points at. What this saves is material resources and their GPU parameter buffers, not submissions — measure
 it with the log lines above and `uniqueMaterials`, not with `runtime.drawCalls.median`.
 
+## Photographing the frame you measured
+
+`UG_SHOT=<path>` on the GPU tier writes a PNG from one of the poses it has just sampled, so the frame in
+the image is the frame the counts describe. `UG_SHOT_POSE` names which — the default is `ground_diag`, the
+only vantage where directional shadows render at all, and `all` writes one PNG per pose with the pose name
+appended to the filename. That is the capture to use when a change has to prove it moved no pixels.
+
+**The interactive screenshot path cannot prove that, and the control is how you find out.** It settles a
+streamed world against the wall clock, so two captures of the *same build* differ. Measured on an RTX 5070
+at 1600x900, same commit both sides:
+
+| View | same build, twice | with `UG_FOLIAGE_RESIDENCY=0` |
+|---|---:|---:|
+| `overview` (PEI) | 9,303 / 1,440,000 px (0.65%) | 4,124 px (0.29%) |
+| `night` (PEI) | 843 px (0.06%) | 3,504 px (0.24%) |
+| `spawn` (Germany) | 58,335 px (4.05%) | 34,661 px (2.41%) |
+
+Turning off foliage streaming removes one source and not the others, so those numbers stay far above zero.
+An A/B through that path routinely differs *less* than its own control, which means it is measuring the
+clock. Always capture a control — the same build twice — before reading any screenshot comparison; against
+the Tier 2 capture the control is 0 differing pixels, which is what makes its zero mean something.
+
 ## Where a ground frame's submissions actually go
 
 Before optimizing what is submitted, it is worth knowing which pass submits it. `UG_SHADOW=0` against
@@ -490,8 +527,8 @@ GPU-less container, shipped defaults (64 m `DirectionalShadowMaxDistance`, 2 spl
 
 | Pose | PEI draws / primitives | of which shadow pass | Germany draws / primitives | of which shadow pass |
 |---|---:|---:|---:|---:|
-| `ground` | 707 / 624,486 | 332 (47%) / 360,535 (58%) | 1,482 / 1,488,431 | 475 (32%) / 516,264 (35%) |
-| `ground_diag` | 767 / 693,691 | 378 (49%) / 365,908 (53%) | 1,340 / 1,464,999 | 525 (39%) / 542,587 (37%) |
+| `ground` | 707 / 623,238 | 330 (47%) / 359,455 (58%) | 1,395 / 1,470,135 | 475 (34%) / 516,264 (35%) |
+| `ground_diag` | 768 / 692,305 | 378 (49%) / 364,774 (53%) | 1,328 / 1,464,403 | 525 (40%) / 542,587 (37%) |
 | `overhead`, `oblique_*`, `zoom`, `tight` | — | **0** | — | **0** |
 
 The elevated poses are byte-identical with shadows off, on both maps: the cascade only reaches 64 m from

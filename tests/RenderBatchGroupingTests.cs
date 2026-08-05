@@ -161,20 +161,52 @@ public class RenderBatchGroupingTests
         Assert.Equal(RenderMeshKey.Single(1), Assert.Single(merged).Key);
     }
 
-    // A batch joins the FIRST bucket that accepts it, so a batch that overlaps two of them lands in the
-    // earlier one rather than merging the pair through itself.
+    // A merge may not widen the batch: one culling decision has to cover the same ground the two it
+    // replaced did, or the draw call it saves is paid for in geometry the frustum can no longer reject.
     [Fact]
-    public void Merge_BatchOverlappingTwoBuckets_JoinsTheFirst()
+    public void Merge_OverlappingBatchesThatWouldWidenTheBatch_StayApart()
     {
-        var far = new RenderBatch(RenderMeshKey.Single(0), Cell, new[] { At(0f), At(20f) });
-        var alsoFar = new RenderBatch(RenderMeshKey.Single(0), Cell, new[] { At(60f), At(80f) });
-        var bridging = new RenderBatch(RenderMeshKey.Single(0), Cell, new[] { At(15f), At(65f) });
-
-        List<MergedRenderGroup> merged = RenderBatchGrouping.Merge(new[] { far, alsoFar, bridging });
+        List<MergedRenderGroup> merged = RenderBatchGrouping.Merge(new[]
+        {
+            Batch(RenderMeshKey.Single(0), At(0f), At(50f)),
+            Batch(RenderMeshKey.Single(0), At(40f), At(90f)),   // union spans 90 m, the wider input 50 m
+        });
 
         Assert.Equal(2, merged.Count);
-        Assert.Equal(new[] { At(0f), At(20f), At(15f), At(65f) }, merged[0].Transforms);
-        Assert.Equal(new[] { At(60f), At(80f) }, merged[1].Transforms);
+    }
+
+    // ... and `growth` is how much of that widening is tolerated, as a fraction of the wider input.
+    [Theory]
+    [InlineData(0f, 2)]
+    [InlineData(0.05f, 2)]
+    [InlineData(0.2f, 1)]
+    public void Merge_GrowthAllowanceDecidesAMarginalPair(float growth, int expected)
+    {
+        List<MergedRenderGroup> merged = RenderBatchGrouping.Merge(
+            new[]
+            {
+                Batch(RenderMeshKey.Single(0), At(0f), At(50f)),
+                Batch(RenderMeshKey.Single(0), At(5f), At(55f)),   // union 55 m against a wider input of 50
+            },
+            growth);
+
+        Assert.Equal(expected, merged.Count);
+    }
+
+    // A batch joins the FIRST bucket that accepts it, so a batch that could extend either of two lands in
+    // the earlier one rather than merging the pair through itself.
+    [Fact]
+    public void Merge_BatchAcceptedByTwoBuckets_JoinsTheFirst()
+    {
+        var first = new RenderBatch(RenderMeshKey.Single(0), Cell, new[] { At(0f), At(50f) });
+        var second = new RenderBatch(RenderMeshKey.Single(0), Cell, new[] { At(40f), At(90f) });
+        var inside = new RenderBatch(RenderMeshKey.Single(0), Cell, new[] { At(45f), At(48f) });
+
+        List<MergedRenderGroup> merged = RenderBatchGrouping.Merge(new[] { first, second, inside });
+
+        Assert.Equal(2, merged.Count);
+        Assert.Equal(new[] { At(0f), At(50f), At(45f), At(48f) }, merged[0].Transforms);
+        Assert.Equal(new[] { At(40f), At(90f) }, merged[1].Transforms);
     }
 
     // The conservation property the whole change rests on: batching may only decide which submission

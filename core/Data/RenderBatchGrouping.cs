@@ -73,7 +73,11 @@ public static class RenderBatchGrouping
     // result depends only on the input — the structural gate compares these counts between runs.
     // Batches with no placements produce nothing: an empty MultiMesh is a render object that can never
     // draw anything.
-    public static List<MergedRenderGroup> Merge(IReadOnlyList<RenderBatch> batches)
+    //
+    // `growth` is how much wider than the wider of the two footprints their union may be, as a fraction.
+    // Zero means a merge may not widen the batch at all on either axis, which is the only setting under
+    // which the merged batch is culled exactly as often as the one it replaced.
+    public static List<MergedRenderGroup> Merge(IReadOnlyList<RenderBatch> batches, float growth = 0f)
     {
         var buckets = new List<Bucket>(batches.Count);
         var byKey = new Dictionary<RenderMeshKey, List<Bucket>>();
@@ -93,9 +97,14 @@ public static class RenderBatchGrouping
                 if (area.MinX > candidate.MaxX || area.MaxX < candidate.MinX
                     || area.MinZ > candidate.MaxZ || area.MaxZ < candidate.MinZ)
                     continue;  // footprints do not overlap
-                if (MathF.Max(candidate.MaxX, area.MaxX) - MathF.Min(candidate.MinX, area.MinX) > joint
-                    || MathF.Max(candidate.MaxZ, area.MaxZ) - MathF.Min(candidate.MinZ, area.MinZ) > joint)
+                float unionX = MathF.Max(candidate.MaxX, area.MaxX) - MathF.Min(candidate.MinX, area.MinX);
+                float unionZ = MathF.Max(candidate.MaxZ, area.MaxZ) - MathF.Min(candidate.MinZ, area.MinZ);
+                if (unionX > joint || unionZ > joint)
                     continue;  // wider than the partition promised a batch of this group would be
+                float wideX = MathF.Max(candidate.MaxX - candidate.MinX, area.MaxX - area.MinX);
+                float wideZ = MathF.Max(candidate.MaxZ - candidate.MinZ, area.MaxZ - area.MinZ);
+                if (unionX > wideX * (1f + growth) || unionZ > wideZ * (1f + growth))
+                    continue;  // the merge would widen the batch, and a wider batch is culled less often
                 target = candidate;
                 break;
             }
