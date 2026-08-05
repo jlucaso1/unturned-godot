@@ -128,6 +128,47 @@ public class ObjectStreamerTests : TestClass
         streamer.QueueFree();
     }
 
+    // A prepare over a path with no content under it settles rather than hanging, and the layer-texture
+    // promise it holds is completed either way. That promise is what the terrain build awaits: left
+    // unfinished it hung the loading screen for good, before anything could report the failure.
+    //
+    // This is the failure path deliberately, and not only because it is the interesting one. A prepare
+    // over a REAL install resolves its cache directories to user:// — the machine's own model and texture
+    // caches — so a test that drove it would write into them. Testing the success path needs those
+    // directories injectable, which is a production change worth deciding on its own.
+    [Test]
+    public async Task APrepareWithNoContentSettlesAndReleasesTheTerrain()
+    {
+        var streamer = new ObjectStreamer { Name = "ObjectStreamer" };
+        TestScene.AddChild(streamer);
+
+        streamer.StartPrepare("/nonexistent-unturned", new Data.LevelInfo("/nonexistent-unturned/Maps/None"));
+
+        ulong deadline = Time.GetTicksMsec() + 10000;
+        while (!streamer.LayerTextures.IsCompleted && Time.GetTicksMsec() < deadline)
+            await NextFrame();
+
+        Assert.True(streamer.LayerTextures.IsCompleted,
+            "the terrain build would still be waiting on this promise");
+
+        await streamer.CancelAsync();
+        streamer.QueueFree();
+    }
+
+    // And cancelling a prepare that is under way is quiet — the menu sends this the moment a player backs
+    // out, which can land while the worker is still going.
+    [Test]
+    public async Task CancellingAPrepareUnderWayIsQuiet()
+    {
+        var streamer = new ObjectStreamer { Name = "ObjectStreamer" };
+        TestScene.AddChild(streamer);
+
+        streamer.StartPrepare("/nonexistent-unturned", new Data.LevelInfo("/nonexistent-unturned/Maps/None"));
+        await streamer.CancelAsync();
+
+        streamer.QueueFree();
+    }
+
     private SignalAwaiter NextFrame() =>
         TestScene.ToSignal(TestScene.GetTree(), SceneTree.SignalName.ProcessFrame);
 }
