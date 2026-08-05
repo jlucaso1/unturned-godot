@@ -55,6 +55,28 @@ public static class LevelNavmesh
     // Int3 world-space vertices (millimetres).
     public static NavFlag? Read(string path)
     {
+        try
+        {
+            return ReadFlag(path);
+        }
+        catch (EndOfStreamException)
+        {
+            // A truncated flag is DROPPED, not kept in part — which is the opposite of what Objects.dat
+            // does with the same damage, and deliberately so. A placement before a cut is a whole
+            // placement; half a flag's triangle list is not half a navmesh, it is a navmesh with holes
+            // that correspond to nothing in the world. Zombies would path confidently through whatever
+            // the reader failed to see.
+            //
+            // Dropping it puts the map back on the road every map without a navmesh takes: zombies steer
+            // directly. That is worse than pathing and much better than pathing wrongly.
+            GD.PushWarning($"[nav] {Path.GetFileName(path)} ends mid-flag; dropping it, so this region "
+                + "steers directly instead of pathing");
+            return null;
+        }
+    }
+
+    private static NavFlag? ReadFlag(string path)
+    {
         using var river = new River(path);
         byte version = river.ReadByte();
         if (version == 0)

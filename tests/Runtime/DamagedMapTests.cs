@@ -18,14 +18,14 @@ namespace UnturnedGodot.RuntimeTests;
 // ordinary condition of user content, and a map that failed to load is a map nobody can report a problem
 // with.
 //
-// What these establish is that the readers draw a line, and where they draw it:
+// What these establish is that a file which is ABSENT and a file which is TRUNCATED both leave a level
+// that loads — and that the two kinds of damage get different answers, because they are different.
 //
-//   a file that is ABSENT is handled — the level loads without whatever it described;
-//   a file that is TRUNCATED is NOT — the reader runs off the end and the load dies.
-//
-// The second half is recorded as a finding rather than asserted around, and it is the more likely of the
-// two in practice: a map with no Objects.dat was authored that way, while a map with half an Objects.dat
-// is what a bad upload, a full disk or an interrupted download produces. See the tests that pin it.
+// A placement before a cut is a whole placement, so Objects.dat keeps what it read. Half a navmesh flag
+// is not half a navmesh: it is a navmesh with holes that correspond to nothing in the world, and zombies
+// would path confidently through whatever the reader failed to see. So a truncated flag is dropped
+// entirely, which puts that region back on the road every map without a navmesh takes — steering
+// directly, which is worse than pathing and much better than pathing wrongly.
 //
 // The damage is done to a COPY, which is the whole install as far as the catalog is concerned. Pointing
 // at the real one instead would quietly resolve the undamaged map and prove nothing. Nothing here writes
@@ -66,29 +66,39 @@ public class DamagedMapTests : TestClass
         }
     }
 
-    // A TRUNCATED objects file takes the load down, and this pins that rather than the behaviour one
-    // would want. Reported as a finding, not asserted around.
+    // A TRUNCATED objects file keeps what it could read.
     //
-    // It is the likelier damage of the two: a map with no Objects.dat was authored that way, while a map
-    // with half an Objects.dat is what a bad upload, a full disk or an interrupted download produces. The
-    // reader runs off the end of the stream and the exception leaves through WorldBuilder.Build, so the
-    // level does not load at all — where a file cut mid-record still has every placement before the cut,
-    // and the ones after it are the only thing that could not be honoured.
-    //
-    // Whether to stop at the last whole record instead is a production decision and is left to one; the
-    // test writes the behaviour down so it cannot change silently in either direction.
+    // This is the likelier damage of the two — a map with no Objects.dat was authored that way, while a
+    // map with HALF an Objects.dat is what a bad upload, a full disk or an interrupted download produces
+    // — and every placement before the cut is perfectly good. It used to take the whole level down,
+    // which turned a partial loss into a total one and hid which file was wrong behind a stack trace
+    // from wherever the reader ran out.
     [Test]
     [Timeout(300_000)]
-    public void ATruncatedObjectsFileTakesTheLoadDown()
+    public void ATruncatedObjectsFileKeepsWhatItCouldRead()
     {
         if (!Copy(out DamagedMap map))
             return;
 
         using (map)
         {
-            map.Truncate("Level/Objects.dat", 64);
+            int whole = Placements(map);
+            map.Truncate("Level/Objects.dat", 4096);
 
-            Assert.ThrowsAny<Exception>(() => WorldBuilder.Build(map.Install, map.Name));
+            WorldBuildResult world = WorldBuilder.Build(map.Install, map.Name);
+            try
+            {
+                Assert.True(world.TileCount > 0, "the terrain went with the objects");
+
+                // Fewer than the whole file held, and the level still built. Both halves matter: all of
+                // them would mean the truncation did nothing, and a throw would mean the map is gone.
+                Assert.True(world.PlacedObjectCount < whole,
+                    "cutting the file changed nothing, so the copy was not the map that built");
+            }
+            finally
+            {
+                Release(world);
+            }
         }
     }
 
@@ -143,13 +153,18 @@ public class DamagedMapTests : TestClass
         }
     }
 
-    // TRUNCATED navigation data throws out of the parse, same finding as the objects file above and on
-    // the same reasoning. It matters more here than it looks: the parse happens during INTERACTIVE
-    // loading, early, before the collision world exists — so the throw lands inside the load rather than
-    // in front of a player who could be told which file is bad.
+    // TRUNCATED navigation data yields no router, rather than one built over half-read triangles.
+    //
+    // It used to throw, and where it threw is why that mattered: this parse happens during INTERACTIVE
+    // loading, early, before the collision world exists — so the exception landed inside the load rather
+    // than in front of a player who could have been told which file was bad.
+    //
+    // Dropping the flag is the right answer rather than merely a safe one. A flag read in part describes
+    // walkable ground that is not there, and a zombie would path through it confidently; with no flag at
+    // all the region steers directly, which is what every map without a navmesh already does.
     [Test]
     [Timeout(300_000)]
-    public void TruncatedNavigationDataThrowsOutOfTheParse()
+    public void TruncatedNavigationDataYieldsNoRouter()
     {
         if (!Copy(out DamagedMap map))
             return;
@@ -164,8 +179,9 @@ public class DamagedMapTests : TestClass
                 Truncate(nav, 16);
 
             ZombieNavigation.DiscardPreloaded();
-            Assert.ThrowsAny<Exception>(() => ZombieNavigation.Preload(map.Path));
-            ZombieNavigation.DiscardPreloaded();
+            ZombieNavigation.Preload(map.Path);
+
+            Assert.Null(ZombieNavigation.TakePreloaded());
         }
     }
 
