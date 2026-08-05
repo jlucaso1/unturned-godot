@@ -237,31 +237,36 @@ public class ObjectsBuilderTests : TestClass
     [Test]
     public async Task NodeWrapperBatchesJoinTheGroupTheRidRendererWouldHave()
     {
+        Guid asset = Guid.NewGuid();
+        var db = new ObjectAssetDatabase();
+        db.Add(Asset(asset, "Pine"));
+        var meshes = new Dictionary<Guid, ArrayMesh> { [asset] = Triangle() };
+
+        // The flag is process-wide and read only while Build runs, so it is restored before this test
+        // yields a frame. Holding it across the await would leave any other builder that ran in the
+        // meantime silently in the A/B mode — which is the mode this test exists to keep honest.
+        Node3D root;
         string previous = OS.GetEnvironment("UG_NODE_MULTIMESH");
         OS.SetEnvironment("UG_NODE_MULTIMESH", "1");
         try
         {
-            Guid asset = Guid.NewGuid();
-            var db = new ObjectAssetDatabase();
-            db.Add(Asset(asset, "Pine"));
-            var meshes = new Dictionary<Guid, ArrayMesh> { [asset] = Triangle() };
-
-            Node3D root = ObjectsBuilder.Build(new List<PlacedObject> { Place(asset, Vector3.Zero) }, db,
+            root = ObjectsBuilder.Build(new List<PlacedObject> { Place(asset, Vector3.Zero) }, db,
                 meshes, new Dictionary<Guid, List<CachedCollider>>(), out _);
-            TestScene.AddChild(root);
-            await NextFrame();
-
-            Node grouped = Assert.Single(TestScene.GetTree().GetNodesInGroup(SceneGroups.Objects));
-            Assert.IsType<MultiMeshInstance3D>(grouped);
-            Assert.False(root.IsInGroup(SceneGroups.Objects));
-
-            root.QueueFree();
-            await NextFrame();
         }
         finally
         {
             OS.SetEnvironment("UG_NODE_MULTIMESH", previous);
         }
+
+        TestScene.AddChild(root);
+        await NextFrame();
+
+        Node grouped = Assert.Single(TestScene.GetTree().GetNodesInGroup(SceneGroups.Objects));
+        Assert.IsType<MultiMeshInstance3D>(grouped);
+        Assert.False(root.IsInGroup(SceneGroups.Objects));
+
+        root.QueueFree();
+        await NextFrame();
     }
 
     // --- helpers -------------------------------------------------------------------------------------
