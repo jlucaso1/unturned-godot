@@ -83,7 +83,10 @@ public partial class BotClient : Node
         if (now - _started > _lifetime)
         {
             Log.Print("[bot] done");
-            GetTree().Quit();
+            // Through AppShutdown, like every other way out: the bot has nothing running to wait for, but
+            // a native SceneTree.Quit never returns to managed code, so a coverage run over the scripted
+            // client recorded zero lines however far it got.
+            AppShutdown.QuitNow(GetTree());
             return;
         }
 

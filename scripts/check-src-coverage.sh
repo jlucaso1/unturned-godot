@@ -183,6 +183,43 @@ if (( with_game_run )); then
         || { echo "The loader run failed; coverage was not measured:" >&2; \
              tail -40 "$result_dir/loader.log" >&2; exit 1; }
 
+    # The session's other shapes. Each is an automation mode that exists because a human at a keyboard
+    # cannot be part of a verification run, and each takes a branch of the world build nothing else does:
+    # opening the port a second player joins through, attempting a join that has nowhere to land, walking
+    # a player-shaped body at a sill to answer "can the player get over that", and the scripted client
+    # that plays the other side of a multiplayer check.
+    #
+    # They are short on purpose. What is being measured is that the code runs, not what it concluded.
+    session_previous="$result_dir/loader.json"
+    session_number=0
+    while IFS= read -r mode; do
+        [[ -n "$mode" ]] || continue
+        session_number=$((session_number + 1))
+        # shellcheck disable=SC2086  # each line is a deliberate set of env assignments
+        env UG_COVERAGE=1 UG_HEADLESS_INTERACTIVE=1 $mode \
+        dotnet coverlet "$assembly" \
+            --target "$godot" \
+            --targetargs "--headless --audio-driver Dummy --path $repo_dir" \
+            --merge-with "$session_previous" \
+            --format json --output "$result_dir/mode$session_number.json" --include-test-assembly \
+            > "$result_dir/mode$session_number.log" 2>&1 || true
+        # A nonzero exit is expected from several of these and is not a measurement failure: a join that
+        # finds no server, a step probe that reports the player cannot make it, a bot whose host is not
+        # there — each is the mode DOING ITS JOB and saying so through the exit status, which is exactly
+        # why they exist. What would be a failure is no report at all, so that is what is checked.
+        if [[ ! -s "$result_dir/mode$session_number.json" ]]; then
+            echo "A session mode produced no coverage at all:" >&2
+            tail -40 "$result_dir/mode$session_number.log" >&2
+            exit 1
+        fi
+        session_previous="$result_dir/mode$session_number.json"
+    done <<'MODES'
+SOLO=1 OPEN_LAN=1 QUIT_AFTER=20
+JOIN=127.0.0.1:27099 QUIT_AFTER=20
+SOLO=1 STEP_PROBE=0,40,0>4,40,0 QUIT_AFTER=25
+BOT_JOIN=127.0.0.1:27099 BOT_SECONDS=5
+MODES
+
     # Tier 3, the runtime tier: a real session measured over a few seconds of frames, which is the only
     # caller RuntimeBenchmark has. Kept short — what is being measured here is that the code runs, not
     # what it measured.
@@ -190,7 +227,7 @@ if (( with_game_run )); then
     dotnet coverlet "$assembly" \
         --target "$godot" \
         --targetargs "--headless --audio-driver Dummy --path $repo_dir" \
-        --merge-with "$result_dir/loader.json" \
+        --merge-with "$session_previous" \
         --format cobertura --output "$report" --include-test-assembly \
         > "$result_dir/tier3.log" 2>&1 \
         || { echo "The runtime benchmark failed; coverage was not measured:" >&2; tail -40 "$result_dir/tier3.log" >&2; exit 1; }
