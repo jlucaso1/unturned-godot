@@ -327,6 +327,152 @@ public class ZombieNavigationTests : TestClass
         second.Free();
     }
 
+    // Reconciliation with the CPU FIELD, which is how a real load runs it.
+    //
+    // The physics server can answer the downward probe, but it can only do so on the physics thread, a
+    // slice of a tick at a time — hundreds of thousands of rays on a real map. So the load records the
+    // map's whole collision geometry into a field as it builds it, and the pass samples THAT off-thread
+    // instead, orders of magnitude faster.
+    //
+    // The field is a second implementation of the same geometry, and the two agree only to within a
+    // margin. That is why the field is never allowed to settle a DESTRUCTIVE verdict on its own: keeping
+    // a face leaves the baked navmesh as its authors shipped it, while dropping one removes route from
+    // the graph — and a route removed in error is the failure this whole pass exists to prevent. A zombie
+    // with nowhere to walk is worse than one shoving through a fence. So every face the field would drop
+    // is re-asked of the physics server, however far from the threshold it sits.
+    [Test]
+    public async Task TheCpuFieldAgreesWithTheServerAboutWhatToDrop()
+    {
+        using var sandbox = new PhysicsSandbox(TestScene);
+        sandbox.AddBox(new Vector3(0f, -0.5f, 0f), new Vector3(40f, 1f, 40f));
+        sandbox.AddBox(new Vector3(0f, 0.5f, 0f), new Vector3(6f, 1f, 6f));
+        await sandbox.Settle();
+
+        PhysicsDirectSpaceState3D space = sandbox.Root.GetWorld3D().DirectSpaceState;
+        var selected = new HashSet<Guid>();
+
+        // The server-only pass, which is the answer the field has to match.
+        ZombieNavigation server = Build();
+        await server.PruneAgainstCollisionAsync(sandbox.Root, space, 0.5f, selected);
+        int droppedByServer = server.DisabledFaces.TryGetValue(0, out IReadOnlySet<int>? a) ? a.Count : 0;
+        server.Free();
+
+        // And the same pass with the field recorded alongside it.
+        ZombieNavigation field = Build();
+        await field.PruneAgainstCollisionAsync(sandbox.Root, space, 0.5f, selected, RecordedGeometry());
+        int droppedWithField = field.DisabledFaces.TryGetValue(0, out IReadOnlySet<int>? b) ? b.Count : 0;
+
+        Assert.True(field.IsReady, "the field-backed pass published no graph");
+        Assert.Equal(droppedByServer, droppedWithField);
+
+        field.Free();
+    }
+
+    // The field is RELEASED however the pass ended. What it holds is the map's entire collision geometry,
+    // recorded during the load purely so this one pass could sample it — so on a session where the pass
+    // finished, hit its cache, or was cut short by a quit, nothing is ever going to ask for it again.
+    [Test]
+    public async Task TheFieldIsReleasedHoweverThePassEnded()
+    {
+        using var sandbox = new PhysicsSandbox(TestScene);
+        sandbox.AddBox(new Vector3(0f, -0.5f, 0f), new Vector3(40f, 1f, 40f));
+        await sandbox.Settle();
+
+        CollisionFieldBuilder geometry = RecordedGeometry();
+        ZombieNavigation nav = Build();
+
+        await nav.PruneAgainstCollisionAsync(sandbox.Root,
+            sandbox.Root.GetWorld3D().DirectSpaceState, 0.5f, new HashSet<Guid>(), geometry);
+
+        // Releasing twice is the observable end state: the pass already released it, and a second call
+        // has to be quiet because teardown makes one on every path out.
+        geometry.Release();
+
+        nav.Free();
+    }
+
+    // A field with no geometry in it is still a field. A map whose objects all failed to load records
+    // nothing, and the pass has to fall through to the server rather than conclude the map is empty —
+    // concluding that would drop nothing at all, which is the safe direction but for the wrong reason.
+    [Test]
+    public async Task AnEmptyFieldFallsThroughRatherThanConcludingTheMapIsEmpty()
+    {
+        using var sandbox = new PhysicsSandbox(TestScene);
+        sandbox.AddBox(new Vector3(0f, -0.5f, 0f), new Vector3(40f, 1f, 40f));
+        sandbox.AddBox(new Vector3(0f, 0.5f, 0f), new Vector3(6f, 1f, 6f));
+        await sandbox.Settle();
+
+        ZombieNavigation nav = Build();
+        await nav.PruneAgainstCollisionAsync(sandbox.Root,
+            sandbox.Root.GetWorld3D().DirectSpaceState, 0.5f, new HashSet<Guid>(),
+            new CollisionFieldBuilder());
+
+        Assert.True(nav.IsReady);
+        Assert.NotEmpty(nav.DisabledFaces);
+
+        nav.Free();
+    }
+
+    // NAV_SKIP_RECONCILE publishes the baked graph and probes nothing. It is the diagnostic that
+    // separates the cost of publishing a graph from the cost of checking it against the world, and it has
+    // to leave a USABLE graph behind — a flag that produced no router would measure a session nobody
+    // could play.
+    [Test]
+    public async Task SkippingReconciliationStillPublishesAGraph()
+    {
+        using var sandbox = new PhysicsSandbox(TestScene);
+        sandbox.AddBox(new Vector3(0f, -0.5f, 0f), new Vector3(40f, 1f, 40f));
+        sandbox.AddBox(new Vector3(0f, 0.5f, 0f), new Vector3(6f, 1f, 6f));
+        await sandbox.Settle();
+
+        using var flag = new EnvFlagScope("NAV_SKIP_RECONCILE", "1");
+        ZombieNavigation nav = Build();
+
+        await nav.PruneAgainstCollisionAsync(sandbox.Root,
+            sandbox.Root.GetWorld3D().DirectSpaceState, 0.5f, new HashSet<Guid>());
+
+        Assert.True(nav.IsReady, "the skip flag left no graph at all");
+
+        // And nothing was pruned, which is the whole meaning of the flag: the block is still walkable
+        // because nobody looked.
+        var path = new List<Vector3>();
+        Assert.True(nav.Query(new Vector3(-9f, 0f, -9f), new Vector3(9f, 0f, 9f), path, 0.4f));
+
+        nav.Free();
+    }
+
+    // The probe audit compares the field's answers against the server's rather than trusting either. It
+    // deliberately neither reads nor writes the cache: reading would return before any comparison
+    // happened, and the common run is a warm one — so an audit that honoured the cache would report
+    // nothing on exactly the runs someone would use it on.
+    [Test]
+    public async Task TheProbeAuditRunsWithoutTouchingTheCache()
+    {
+        using var level = new TempLevel();
+        using var sandbox = new PhysicsSandbox(TestScene);
+        sandbox.AddBox(new Vector3(0f, -0.5f, 0f), new Vector3(40f, 1f, 40f));
+        sandbox.AddBox(new Vector3(0f, 0.5f, 0f), new Vector3(6f, 1f, 6f));
+        await sandbox.Settle();
+
+        using var audit = new EnvFlagScope("UG_NAV_PROBE_AUDIT", "1");
+        ZombieNavigation nav = Build(level.Path);
+
+        await nav.PruneAgainstCollisionAsync(sandbox.Root,
+            sandbox.Root.GetWorld3D().DirectSpaceState, 0.5f, new HashSet<Guid>(), RecordedGeometry());
+
+        Assert.True(nav.IsReady, "the audit left no graph");
+
+        // Nothing was written under the ordinary fingerprint. An audit replaces every face with the
+        // server's own answer, so its verdicts are the OLD algorithm's — left in the cache, the next
+        // normal run would restore them instead of running the hybrid it is supposed to.
+        string entry = System.IO.Path.Combine(
+            ProjectSettings.GlobalizePath("user://nav_reconcile"),
+            Data.NavReconcileCache.MapKey(level.Path) + ".cache");
+        Assert.False(System.IO.File.Exists(entry), "the audit left its verdicts in the cache");
+
+        nav.Free();
+    }
+
     // --- the real map --------------------------------------------------------------------------------
 
     // PEI's own baked navmesh, routed over. The synthetic floor above proves the plumbing; this proves the
@@ -392,6 +538,41 @@ public class ZombieNavigationTests : TestClass
         Vertices = new[] { Vector3.Zero, Vector3.Right, Vector3.Forward },
         Triangles = new[] { 0, 1, 2 },
     };
+
+    // An environment flag set for one test and put back afterwards: these are read once per pass, and a
+    // flag left set would silently change every test that ran after it in this process.
+    private sealed class EnvFlagScope : IDisposable
+    {
+        private readonly string _name;
+        private readonly string _previous;
+
+        public EnvFlagScope(string name, string value)
+        {
+            _name = name;
+            _previous = OS.GetEnvironment(name);
+            OS.SetEnvironment(name, value);
+        }
+
+        public void Dispose() => OS.SetEnvironment(_name, _previous);
+    }
+
+    // The same ground and the same block the sandbox holds, recorded the way a load records them: the
+    // terrain as a heightfield, the object as a box instance.
+    private static CollisionFieldBuilder RecordedGeometry()
+    {
+        var field = new CollisionFieldBuilder();
+
+        // A flat 40 m tile whose surface sits at y=0, matching the sandbox's ground box.
+        const int res = 32;
+        var heights = new float[res * res];
+        field.AddHeightfield(
+            new Transform3D(Basis.Identity.Scaled(new Vector3(40f / (res - 1), 1f, 40f / (res - 1))),
+                Vector3.Zero), res, res, heights);
+
+        int box = field.AddBoxShape(new Vector3(6f, 1f, 6f));
+        field.AddInstance(box, new Transform3D(Basis.Identity, new Vector3(0f, 0.5f, 0f)));
+        return field;
+    }
 
     // A level directory of the test's own, and the reconciliation cache entry it causes to be written.
     //
