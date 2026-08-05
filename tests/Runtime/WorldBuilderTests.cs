@@ -143,6 +143,86 @@ public class WorldBuilderTests : TestClass
         root.Free();
     }
 
+    // The whole synchronous build, over the real map: terrain, objects, foliage and vehicles in one call.
+    //
+    // This is the screenshot and benchmark path — the one that has no loading screen and no streamer, so
+    // it does everything up front and hands back a finished world. It is the only caller that exercises
+    // the builders together, and the part worth holding is that the RESULT IS CONSISTENT WITH ITSELF: the
+    // counts it reports have to describe the tree it returns, because everything downstream (the
+    // benchmark's numbers, the repro dump's inventory, the loading screen's progress) reads the counts
+    // rather than walking the tree.
+    [Test]
+    [Timeout(600_000)]
+    public void TheWholeSynchronousBuildIsConsistentWithItself()
+    {
+        if (!RealMap(out string install, out _))
+            return;
+
+        WorldBuildResult world = WorldBuilder.Build(install, "PEI");
+
+        try
+        {
+            Assert.True(world.TileCount > 0, "the build produced no terrain tiles");
+            Assert.True(world.PlacedObjectCount > 0, "the build placed no objects");
+
+            // Every branch exists, because everything downstream walks the same tree whether or not a
+            // map put anything in a given one.
+            Assert.NotNull(world.Terrain);
+            Assert.NotNull(world.Objects);
+            Assert.NotNull(world.Foliage);
+            Assert.NotNull(world.Vehicles);
+            Assert.NotNull(world.Heights);
+
+            // The counts describe the tree rather than an earlier version of it.
+            Assert.True(world.ObjectsWithMesh <= world.PlacedObjectCount,
+                $"{world.ObjectsWithMesh} of {world.PlacedObjectCount} objects rendered, which is more "
+                + "than were placed");
+            Assert.True(world.UniqueMeshCount > 0, "objects rendered with no unique meshes behind them");
+
+            // And the sampler agrees with the terrain it was built beside — a build that handed back one
+            // that did not would drop every spawn, road and blade of grass to y=0.
+            Assert.True(world.Heights.TrySampleHeight(0f, 0f, out _));
+
+            // The timings are measurements rather than placeholders: the benchmark reports these, and a
+            // zero would read as a stage that did not run.
+            Assert.True(world.TerrainMs > 0.0);
+            Assert.True(world.ObjectsMs > 0.0);
+        }
+        finally
+        {
+            world.Terrain.Free();
+            world.Objects.Free();
+            world.Foliage.Free();
+            world.Vehicles.Free();
+        }
+    }
+
+    // A map name the catalog cannot resolve builds an empty world rather than throwing. The name comes
+    // from a command line or a menu, so a typo is the ordinary case and it must produce something a
+    // caller can free.
+    [Test]
+    [Timeout(300_000)]
+    public void AMapNameNothingResolvesBuildsAnEmptyWorld()
+    {
+        WorldBuildResult world = WorldBuilder.Build("/nonexistent-unturned", "NoSuchMap");
+
+        try
+        {
+            Assert.Equal(0, world.TileCount);
+            Assert.NotNull(world.Terrain);
+            Assert.NotNull(world.Objects);
+            Assert.NotNull(world.Foliage);
+            Assert.NotNull(world.Vehicles);
+        }
+        finally
+        {
+            world.Terrain.Free();
+            world.Objects.Free();
+            world.Foliage.Free();
+            world.Vehicles.Free();
+        }
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
 
     // One flat tile, at the coordinate given. Flat because what is being checked is the shape of the

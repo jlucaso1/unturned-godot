@@ -5,7 +5,6 @@ using UnturnedGodot.Net;
 
 namespace UnturnedGodot;
 
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class Main : Node3D
 {
     // The map folder under Maps/ (or a workshop item) that this run loads. The menu picks it; MAP=
@@ -192,7 +191,12 @@ public partial class Main : Node3D
             }
 
             Benchmark.BenchmarkRunner.Run(this, unturnedPath, _mapName);
-            GetTree().Quit();
+            // Through AppShutdown, like every other way out of a loaded world. Tier 1 has no background
+            // work to wait for, so this is the same instant exit it always was — but it is now the same
+            // CODE PATH, which is what lets a coverage run measure the tier at all: SceneTree.Quit never
+            // returns to managed code, so the instrumenter's hit counts were never written and the tier
+            // reported zero lines however completely it ran.
+            AppShutdown.RequestQuit(GetTree());
             return;
         }
 
@@ -266,7 +270,10 @@ public partial class Main : Node3D
             if (headless)
             {
                 Log.Print("[unturned-godot] Headless: data loaded, quitting.");
-                GetTree().Quit();
+                // QuitNow rather than the engine's own Quit: nothing is running to wait for here, but a
+                // native quit never returns to managed code, so a coverage run over this path — which is
+                // the whole screenshot and data-load family — would record nothing at all.
+                AppShutdown.QuitNow(GetTree());
                 return;
             }
 
