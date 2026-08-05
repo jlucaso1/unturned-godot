@@ -13,7 +13,6 @@ namespace UnturnedGodot;
 // Godot's physics step with the same instant-velocity/gravity/jump maths, which yields the same speeds,
 // jump arc and gravity while staying smooth. Runtime keys: H (or F5) = perspective, X = crouch, Z = prone,
 // Shift = sprint, Space = jump, Esc = release mouse.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class PlayerController : CharacterBody3D
 {
     private readonly PlayerSettings _settings = PlayerSettings.Default;
@@ -120,6 +119,20 @@ public partial class PlayerController : CharacterBody3D
     // Before then even an idle grounded player must keep integrating so newly attached geometry is seen.
     public void MarkWorldReady() => _worldReady = true;
 
+    // Whether the player owns the input, or a menu does.
+    //
+    // Production reads mouse capture, which is how the pause menu takes the controls away without the
+    // controller knowing the menu exists. A headless run cannot capture the mouse — the engine refuses
+    // without a window, and leaves the mode Visible however it is set — so read straight, every branch
+    // gated on this would be unreachable in the runtime suite: the look, the stance keys, the
+    // perspective toggle, the attack latch and the whole movement path.
+    private static System.Func<bool>? InputOwnership;
+
+    private static bool InputCaptured =>
+        InputOwnership?.Invoke() ?? Input.MouseMode == Input.MouseModeEnum.Captured;
+
+    internal static void OverrideInputOwnershipForTests(System.Func<bool>? owned) => InputOwnership = owned;
+
     // Reused physics-query objects so the per-tick stance clearance test and the per-frame third-person
     // camera sweep don't allocate fresh RefCounted query/shape/exclude objects each call.
     private CapsuleShape3D? _clearanceShape;
@@ -201,7 +214,7 @@ public partial class PlayerController : CharacterBody3D
 
     public override void _Input(InputEvent @event)
     {
-        if (@event is InputEventMouseMotion motion && Input.MouseMode == Input.MouseModeEnum.Captured)
+        if (@event is InputEventMouseMotion motion && InputCaptured)
         {
             RotateY(-Mathf.DegToRad(motion.Relative.X * _settings.MouseSensitivity)); // yaw the whole body
             float dir = _settings.InvertLook ? 1f : -1f;
@@ -212,8 +225,7 @@ public partial class PlayerController : CharacterBody3D
         // Attack input is latched as an EDGE, not sampled as held state: PlayerEquipment reacts to the
         // tick a button went down, and polling it on the physics step would miss a click that started and
         // ended inside one 0.08 s tick.
-        if (@event is InputEventMouseButton { Pressed: true } button
-            && Input.MouseMode == Input.MouseModeEnum.Captured)
+        if (@event is InputEventMouseButton { Pressed: true } button && InputCaptured)
         {
             // The repeat counter is NOT armed here: it repeats a swing, and whether this press becomes
             // one is the next tick's decision.
@@ -223,8 +235,7 @@ public partial class PlayerController : CharacterBody3D
             // than punches, and binding it to a right-hand swing now would have to be taken back.
         }
 
-        if (@event is InputEventKey { Pressed: true, Echo: false } key
-            && Input.MouseMode == Input.MouseModeEnum.Captured)
+        if (@event is InputEventKey { Pressed: true, Echo: false } key && InputCaptured)
         {
             if (key.Keycode == _settings.Perspective || key.Keycode == Key.F5) { _thirdPerson = !_thirdPerson; ApplyPerspective(); }
             else if (key.Keycode == _settings.Crouch) { _wantCrouch = !_wantCrouch; if (_wantCrouch) _wantProne = false; }
@@ -239,7 +250,7 @@ public partial class PlayerController : CharacterBody3D
         float dt = (float)delta;
 
         // Mouse released = a menu owns the input (PauseMenu): freeze movement keys; physics still runs.
-        bool inputCaptured = Input.MouseMode == Input.MouseModeEnum.Captured;
+        bool inputCaptured = InputCaptured;
         var input = _benchmarkMovement
             // Alternate forward/back every second. This keeps the player near the deterministic spawn
             // while exercising real MoveAndSlide, step-up and the 12.5 Hz loopback position stream.

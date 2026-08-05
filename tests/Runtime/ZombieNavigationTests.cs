@@ -288,6 +288,45 @@ public class ZombieNavigationTests : TestClass
         Assert.False(nav.IsReady);
     }
 
+    // Reconciliation is CACHED, and the second run reads it back rather than probing the map again.
+    //
+    // The pass is hundreds of thousands of raycasts on a real map. Paying it on every load would put
+    // that on the loading screen forever, so the verdicts are written under a fingerprint of everything
+    // that could change them — the level, the model cache, the selected colliders, the step offset and
+    // the probe settings — and a run whose fingerprint matches restores them instead.
+    //
+    // The risk the fingerprint exists to cover is the quiet one: a cache restored after the geometry
+    // changed would disable faces that no longer correspond to anything, and the map would look right
+    // while zombies refused to walk through doors that are now open.
+    [Test]
+    public async Task ReconciliationIsCachedAndTheSecondRunReadsItBack()
+    {
+        using var level = new TempLevel();
+        using var sandbox = new PhysicsSandbox(TestScene);
+        sandbox.AddBox(new Vector3(0f, -0.5f, 0f), new Vector3(40f, 1f, 40f));
+        sandbox.AddBox(new Vector3(0f, 0.5f, 0f), new Vector3(6f, 1f, 6f));
+        await sandbox.Settle();
+
+        PhysicsDirectSpaceState3D space = sandbox.Root.GetWorld3D().DirectSpaceState;
+        var selected = new HashSet<Guid>();
+
+        // The first pass probes the world and writes its verdicts.
+        ZombieNavigation first = Build(level.Path);
+        await first.PruneAgainstCollisionAsync(sandbox.Root, space, 0.5f, selected);
+        int droppedFirst = first.DisabledFaces.TryGetValue(0, out IReadOnlySet<int>? faces) ? faces.Count : 0;
+        first.Free();
+
+        // The second reads them back: same level, same colliders, same step offset.
+        ZombieNavigation second = Build(level.Path);
+        await second.PruneAgainstCollisionAsync(sandbox.Root, space, 0.5f, selected);
+
+        Assert.True(second.IsReady, "the cached run published no graph");
+        int droppedSecond = second.DisabledFaces.TryGetValue(0, out IReadOnlySet<int>? again) ? again.Count : 0;
+        Assert.Equal(droppedFirst, droppedSecond);
+
+        second.Free();
+    }
+
     // --- the real map --------------------------------------------------------------------------------
 
     // PEI's own baked navmesh, routed over. The synthetic floor above proves the plumbing; this proves the
@@ -354,6 +393,46 @@ public class ZombieNavigationTests : TestClass
         Triangles = new[] { 0, 1, 2 },
     };
 
+    // A level directory of the test's own, and the reconciliation cache entry it causes to be written.
+    //
+    // The cache lands under user:// keyed by the level's path, so a directory nobody else uses gets an
+    // entry nobody else reads — and deleting it on the way out keeps a test run from leaving verdicts
+    // behind in the cache a real session shares.
+    private sealed class TempLevel : IDisposable
+    {
+        public string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+            "unturned-godot-navlevel-" + Guid.NewGuid().ToString("N"));
+
+        public TempLevel() => System.IO.Directory.CreateDirectory(Path);
+
+        public void Dispose()
+        {
+            string entry = System.IO.Path.Combine(
+                ProjectSettings.GlobalizePath("user://nav_reconcile"),
+                Data.NavReconcileCache.MapKey(Path) + ".cache");
+            foreach (string leftover in new[] { entry, entry + ".csr", entry + ".tmp" })
+            {
+                try
+                {
+                    System.IO.File.Delete(leftover);
+                }
+                catch (System.IO.IOException)
+                {
+                    // A leftover cache entry keyed to a directory that no longer exists is harmless.
+                }
+            }
+
+            try
+            {
+                System.IO.Directory.Delete(Path, recursive: true);
+            }
+            catch (System.IO.IOException)
+            {
+                // Same.
+            }
+        }
+    }
+
     // A 20 m square of floor at y=0, tessellated into 2 m cells.
     //
     // The cell size is load-bearing rather than incidental. Reconciliation deliberately exempts BROAD
@@ -362,7 +441,7 @@ public class ZombieNavigationTests : TestClass
     // fixture made of two huge triangles is one nothing can ever be pruned out of. Real baked navmesh is
     // tessellated at roughly this scale, which is why the exemption is safe in the game and why a fixture
     // has to match it to mean anything.
-    private static ZombieNavigation Build()
+    private static ZombieNavigation Build(string? levelDir = null)
     {
         const int cells = 10;
         const float half = 10f, step = 20f / cells;
@@ -387,7 +466,8 @@ public class ZombieNavigationTests : TestClass
             Vertices = vertices,
             Triangles = triangles.ToArray(),
         };
-        return Assert.IsType<ZombieNavigation>(ZombieNavigation.Build(new List<NavFlag> { floor }));
+        return Assert.IsType<ZombieNavigation>(
+            ZombieNavigation.Build(new List<NavFlag> { floor }, null, levelDir));
     }
 
     // PEI's directory in the installed game, or nothing when the content is absent. UG_REQUIRE_REAL_DATA=1

@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using Chickensoft.GoDotTest;
 using Godot;
@@ -132,6 +133,134 @@ public class NetworkManagerTests : TestClass
         Assert.Contains(NetMessages.ProtocolVersion.ToString(), protocol);
         Assert.Contains("full", full);
         Assert.NotEmpty(unknown); // even an unrecognised reason says something
+    }
+
+    // --- a session that runs -------------------------------------------------------------------------
+
+    // A solo session ticks its server and its client every physics frame, over loopback, and keeps
+    // running. This is the loop the whole port sits on: if it stopped, nothing in the world would move
+    // and nothing would say why.
+    [Test]
+    public async Task ASoloSessionKeepsTicking()
+    {
+        using var session = new Session(TestScene);
+        session.Net.StartSingleplayer("Player");
+
+        for (int i = 0; i < 30; i++)
+            await session.PhysicsFrame();
+
+        Assert.True(session.Net.IsActive);
+        Assert.NotNull(session.Net.Client);
+        Assert.NotNull(session.Net.Server);
+    }
+
+    // Hosting zombies on a level that ships none is a warning, not a failure — plenty of maps have no
+    // zombie data — and the PUNCH host is deliberately not skipped with them. A level with no population
+    // still has trees and rubble standing on it and a player whose fists work, and the streamer hands
+    // its damage ledger to that host later regardless.
+    [Test]
+    public async Task ALevelWithNoZombiesStillGetsAPunchHost()
+    {
+        using var session = new Session(TestScene);
+        session.Net.StartSingleplayer("Player");
+        await session.PhysicsFrame();
+
+        session.Net.HostZombies("/nonexistent-map");
+
+        Assert.NotNull(session.Net.PunchDamage);
+    }
+
+    // Hosting zombies on a session that is not hosting does nothing at all. A client that joined someone
+    // else's server takes this path, and a population spawned there would be a second, invisible world
+    // running against the real one.
+    [Test]
+    public async Task AClientDoesNotHostItsOwnZombies()
+    {
+        using var session = new Session(TestScene);
+        await session.PhysicsFrame();
+
+        session.Net.HostZombies("/nonexistent-map");
+
+        Assert.Null(session.Net.PunchDamage);
+    }
+
+    // A session with no navmesh releases the collision geometry instead of holding it. That builder is
+    // the whole map's geometry, recorded during the load for one reconciliation pass — on a session that
+    // will never run one (a joined client, a map with no navmesh) it would otherwise sit in memory for
+    // the rest of the game with no consumer at all.
+    [Test]
+    public async Task ASessionThatWillNeverReconcileReleasesTheGeometry()
+    {
+        using var session = new Session(TestScene);
+        session.Net.StartSingleplayer("Player");
+        await session.PhysicsFrame();
+
+        var collision = new Data.CollisionFieldBuilder();
+        session.Net.ReconcileNavigation(new HashSet<System.Guid>(), collision);
+
+        // Nothing observable to read off the builder — release is its own end state — so what this holds
+        // is that the call returns rather than parking a pass that never runs.
+        await session.PhysicsFrame();
+        Assert.True(session.Net.IsActive);
+    }
+
+    // Joining is refused while a session is already running, rather than leaving the player in two at
+    // once. The menu can send it: a click on a server in the browser while a solo world is up.
+    [Test]
+    public async Task JoiningIsRefusedWhileASessionIsRunning()
+    {
+        using var session = new Session(TestScene);
+        session.Net.StartSingleplayer("Player");
+        await session.PhysicsFrame();
+
+        NetServer? before = session.Net.Server;
+        session.Net.JoinServer("127.0.0.1", 43120, "Player");
+
+        Assert.Same(before, session.Net.Server);
+    }
+
+    // And a join to nothing comes up as a client that is simply never answered. There is no server on
+    // that port; the session has to sit there waiting rather than refusing to start, because that is
+    // indistinguishable from a host that is slow.
+    [Test]
+    public async Task AJoinToNothingWaitsRatherThanRefusing()
+    {
+        using var session = new Session(TestScene);
+        session.Net.JoinServer("127.0.0.1", 43121, "Player");
+
+        for (int i = 0; i < 10; i++)
+            await session.PhysicsFrame();
+
+        Assert.True(session.Net.IsActive);
+        Assert.False(session.Net.IsHosting);
+    }
+
+    // --- helpers -------------------------------------------------------------------------------------
+
+    // A manager in the tree, configured over flat ground, freed with the test. Freeing is what closes
+    // its transports: a session whose sockets outlived it would hold ports for the rest of the run.
+    private sealed class Session : System.IDisposable
+    {
+        private readonly Node _testScene;
+
+        public NetworkManager Net { get; }
+
+        public Session(Node testScene)
+        {
+            _testScene = testScene;
+            Net = new NetworkManager { LevelName = "PEI" };
+            testScene.AddChild(Net);
+            Net.Configure(new HeightmapSampler(System.Array.Empty<HeightmapTile>()), Vector3.Zero);
+        }
+
+        public SignalAwaiter PhysicsFrame() =>
+            _testScene.ToSignal(_testScene.GetTree(), SceneTree.SignalName.PhysicsFrame);
+
+        public void Dispose()
+        {
+            _testScene.RemoveChild(Net);
+            Net.Free(); // _ExitTree closes both transports and frees the navigation
+        }
     }
 
     private SignalAwaiter NextFrame() =>

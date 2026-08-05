@@ -12,7 +12,6 @@ namespace UnturnedGodot;
 // Builds the map's world (terrain + objects) from an Unturned install. Extracted from Main so both the
 // normal run and the benchmark harness exercise exactly the same build path — no duplicated logic to
 // drift. Roots are returned detached; the caller decides whether to add them to the tree.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed record WorldBuildResult(
     Node3D Terrain,
     HeightmapSampler Heights,
@@ -26,7 +25,6 @@ public sealed record WorldBuildResult(
     double TerrainMs,
     double ObjectsMs);
 
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class WorldBuilder
 {
     // Conservative terrain occluders substantially reduce hidden object submission on hilly maps. Their

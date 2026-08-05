@@ -18,7 +18,6 @@ namespace UnturnedGodot;
 //
 // The textures are small (64x64) and stored inline in a bundle's SerializedFile, so a cold resolve only
 // decodes that prefix, and every texture is cached on disk by GUID afterwards.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed class TerrainLayers
 {
     private readonly Dictionary<(int X, int Y), ImageTexture[]> _byTile = new();

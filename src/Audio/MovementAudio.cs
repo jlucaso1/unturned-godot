@@ -12,7 +12,6 @@ namespace UnturnedGodot;
 // landings from the replicated simulation state, exactly as Unturned's PlayerMovement does for
 // !IsLocalPlayer channels. The ground material resolves through the terrain splat like
 // PhysicsTool.GetTerrainMaterialName, and the one-shots go through the shared positional service.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed class MovementAudio
 {
     private readonly PhysicsMaterialBank _bank;
