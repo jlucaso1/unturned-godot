@@ -17,6 +17,10 @@
 #
 # Headless: these tests build nodes and step frames, and want no window or GPU. Exit status is the suite's,
 # so this is directly usable as a CI gate.
+#
+# There is no equivalent from inside the editor, and that is not an oversight: tests/ carries a .gdignore,
+# so the editor never scans it and the scene below is not in its FileSystem dock. The engine still loads it
+# by path, which is what this script does — and it is why nothing here can end up in an export.
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

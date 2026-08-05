@@ -13,10 +13,14 @@ namespace UnturnedGodot.RuntimeTests;
 // These tests close exactly that gap and nothing else: if a test does not need a real engine, it belongs in
 // the xUnit suite, where it runs in milliseconds instead of a process launch.
 //
-// Run them with ./scripts/run-godot-tests.sh. This scene is not the project's main scene, and is only
-// reached by naming it on the command line, so the game never carries the runner. The flags are parsed by
-// GoDotTest out of OS.GetCmdlineArgs(), which is why they are passed BEFORE the engine's `--` separator,
-// unlike the game's own --benchmark (OS.GetCmdlineUserArgs()).
+// Run them with ./scripts/run-godot-tests.sh. The flags are parsed by GoDotTest out of OS.GetCmdlineArgs(),
+// which is why they are passed BEFORE the engine's `--` separator, unlike the game's own --benchmark
+// (OS.GetCmdlineUserArgs()).
+//
+// Do not go looking for RuntimeTests.tscn in the editor's FileSystem dock: tests/ carries a .gdignore, so
+// the editor never scans this directory — no import, no .uid, and nothing here can reach an export's .pck.
+// The engine still loads the scene when it is named by path on the command line, which is the only way it
+// is ever opened, so the suite runs from a checkout and in CI while the game carries none of it.
 [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class RuntimeTestRunner : Node
 {
