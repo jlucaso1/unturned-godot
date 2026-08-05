@@ -11,7 +11,6 @@ namespace UnturnedGodot;
 // the game data authors as boxes/spheres/capsules, the terrain heightfield — is tessellated into world
 // space triangles here. That happens once, when someone captures, and it is what lets the replay side
 // (core/Repro) run without an engine at all: one triangle soup instead of a physics server.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class ReproGeometryCapture
 {
     // How finely the round primitives are tessellated. The bodies these represent are lamp posts,
