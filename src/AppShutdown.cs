@@ -25,7 +25,6 @@ namespace UnturnedGodot;
 // Hence: raise the flag, wait for the registered work to observe it, then quit. Workers poll
 // IsShuttingDown at their loop boundaries rather than being aborted, which keeps a half-written cache
 // file from ever being left behind.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class AppShutdown
 {
     // How long the quit will wait for background work before leaving regardless. A cold load's decode
