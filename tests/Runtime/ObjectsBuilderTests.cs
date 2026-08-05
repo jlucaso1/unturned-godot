@@ -103,6 +103,102 @@ public class ObjectsBuilderTests : TestClass
         root.QueueFree();
     }
 
+    // Breadth. A map is not fifty copies of one prefab: it is hundreds of assets, spread over kilometres,
+    // some with collision and some without, at every scale and rotation the editor allows. The builder
+    // partitions that into cells and batches, and a fixture with one asset at the origin exercises
+    // neither.
+    [Test]
+    public async Task AWholeMapsWorthOfPlacementsBuilds()
+    {
+        var db = new ObjectAssetDatabase();
+        var meshes = new Dictionary<Guid, ArrayMesh>();
+        var colliders = new Dictionary<Guid, List<CachedCollider>>();
+        var placements = new List<PlacedObject>();
+        var rng = new RandomNumberGenerator();
+        rng.Seed = 12345; // fixed, so a failure is reproducible
+
+        // Forty assets, half of them with collision — the split a real catalogue has.
+        var assets = new List<Guid>();
+        for (int i = 0; i < 40; i++)
+        {
+            Guid guid = Guid.NewGuid();
+            assets.Add(guid);
+            db.Add(Asset(guid, $"Prop{i}"));
+            meshes[guid] = Triangle();
+            if (i % 2 == 0)
+            {
+                colliders[guid] = new List<CachedCollider>
+                {
+                    CachedCollider.Box(Transform3D.Identity, Vector3.Zero, Vector3.One * (1f + i * 0.1f)),
+                };
+            }
+        }
+
+        // Six hundred placements spread over a kilometre, at varied scales and rotations, so the cell
+        // partitioning and the per-instance transforms both run over something other than identity.
+        for (int i = 0; i < 600; i++)
+        {
+            Guid guid = assets[i % assets.Count];
+            placements.Add(new PlacedObject(
+                new Vector3(rng.RandfRange(-500f, 500f), rng.RandfRange(0f, 20f), rng.RandfRange(-500f, 500f)),
+                new Vector3(0f, rng.RandfRange(0f, 360f), 0f),
+                Vector3.One * rng.RandfRange(0.5f, 2f),
+                0, guid));
+        }
+
+        Node3D root = ObjectsBuilder.Build(placements, db, meshes, colliders, out int withMesh);
+        TestScene.AddChild(root);
+        await NextPhysicsFrame();
+
+        Assert.Equal(600, withMesh);
+        Assert.Equal(600, TotalInstances(root));
+
+        // Batched, not one draw call per placement — the entire reason this exists. Forty assets over a
+        // partitioned kilometre gives more batches than assets, and far fewer than placements.
+        int batches = BatchCount(root);
+        Assert.True(batches < 600, $"the placements were not batched: {batches} batches");
+        Assert.True(batches >= assets.Count / 2,
+            $"{batches} batches for 40 assets over a kilometre — the cell partitioning did not run");
+
+        root.QueueFree();
+    }
+
+    // The same spread with a lower LOD level available. An authored LOD is a second batch per asset that
+    // takes over at distance, so this is where the visibility ranges and the second library are used.
+    [Test]
+    public async Task ALowerLodLevelAddsItsOwnBatches()
+    {
+        var db = new ObjectAssetDatabase();
+        var meshes = new Dictionary<Guid, ArrayMesh>();
+        var lods = new Dictionary<Guid, ArrayMesh>();
+        var placements = new List<PlacedObject>();
+
+        for (int i = 0; i < 8; i++)
+        {
+            Guid guid = Guid.NewGuid();
+            db.Add(Asset(guid, $"Tree{i}"));
+            meshes[guid] = Triangle();
+            lods[guid] = Triangle();
+            for (int p = 0; p < 20; p++)
+                placements.Add(new PlacedObject(new Vector3(p * 30f, 0f, i * 30f), Vector3.Zero,
+                    Vector3.One, 0, guid));
+        }
+
+        Node3D withoutLod = ObjectsBuilder.Build(placements, db, meshes,
+            new Dictionary<Guid, List<CachedCollider>>(), out int _);
+        Node3D withLod = ObjectsBuilder.Build(placements, db, meshes,
+            new Dictionary<Guid, List<CachedCollider>>(), out int _, lod1Library: lods);
+        TestScene.AddChild(withoutLod);
+        TestScene.AddChild(withLod);
+        await NextFrame();
+
+        Assert.True(TotalInstances(withLod) > TotalInstances(withoutLod),
+            "the authored LOD level produced no instances of its own");
+
+        withoutLod.QueueFree();
+        withLod.QueueFree();
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
 
     private static int TotalInstances(Node parent)
