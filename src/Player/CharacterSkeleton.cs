@@ -15,7 +15,6 @@ namespace UnturnedGodot;
 // enabled while the rig is visible (no IsVisibleInTree poll per frame), rest poses are cached on the C#
 // side so a full ResetBonePoses is never issued — only channels that stop being animated are reset — and
 // the pitch bend composes with the sampled pose in C# instead of reading the bone back from the engine.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class CharacterSkeleton : Skeleton3D
 {
     private const float BlendDuration = 0.25f; // CharacterAnimator.BLEND
