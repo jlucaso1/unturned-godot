@@ -51,9 +51,37 @@ public static class Log
     // from the worker threads that report extraction progress.
     private static string Stamp() => $"[{Time.GetTicksMsec() / 1000.0,8:0.000}] ";
 
-    public static void Print(string message) => GD.Print(Remember(Stamp() + message));
+    // Every line as it is written, for whoever wants them live rather than after the fact — today the
+    // in-game console, which shows the same stream the terminal gets.
+    //
+    // Raised on the thread that logged, and that is very often NOT the main one: the bundle decoders, the
+    // extraction workers and the foliage streamer all report from a task. A subscriber that touches the
+    // engine has to hand the line to the main thread itself; this deliberately does not, because
+    // deferring here would put a marshalling cost on every log line in the process for the benefit of a
+    // subscriber that usually is not there.
+    public static event Action<LogSeverity, string>? LineWritten;
 
-    public static void PrintErr(string message) => GD.PrintErr(Remember(Stamp() + message));
+    public static void Print(string message)
+    {
+        string line = Remember(Stamp() + message);
+        GD.Print(line);
+        LineWritten?.Invoke(LogSeverity.Info, line);
+    }
 
-    public static void PushWarning(string message) => GD.PushWarning(Remember(Stamp() + message));
+    public static void PrintErr(string message)
+    {
+        string line = Remember(Stamp() + message);
+        GD.PrintErr(line);
+        LineWritten?.Invoke(LogSeverity.Error, line);
+    }
+
+    public static void PushWarning(string message)
+    {
+        string line = Remember(Stamp() + message);
+        GD.PushWarning(line);
+        LineWritten?.Invoke(LogSeverity.Warning, line);
+    }
 }
+
+// How loud a log line was, kept alongside the text so a reader can colour or filter without parsing it.
+public enum LogSeverity { Info, Warning, Error }

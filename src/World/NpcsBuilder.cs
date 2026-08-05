@@ -33,6 +33,7 @@ public static class NpcsBuilder
             return null;
 
         var root = new Node3D { Name = "Npcs" };
+        root.AddToGroup(SceneGroups.Npcs);
 
         // One import for the whole map: reading the player rig out of resources.assets costs ~100 ms and
         // tens of MB of transient heap, and every NPC is the same rig underneath.

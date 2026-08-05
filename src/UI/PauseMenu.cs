@@ -21,6 +21,9 @@ public partial class PauseMenu : CanvasLayer
     public override void _Ready()
     {
         Layer = 20; // above the debug overlay
+        // The dev console releases the mouse while it is open and restores it on close, and "restore"
+        // must not mean "capture the mouse out from under an open pause menu". This is how it asks.
+        AddToGroup(SceneGroups.PauseMenu);
 
         _root = new Control
         {

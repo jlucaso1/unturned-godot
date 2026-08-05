@@ -162,6 +162,9 @@ public partial class FoliageStreamingRenderer : Node3D
     public override void _Ready()
     {
         AddToGroup("foliage_streaming");
+        // Also joined by FoliageBuilder, which cannot know which of the three foliage shapes it built;
+        // a renderer created directly (the runtime suite does) still advertises itself from here.
+        AddToGroup(SceneGroups.Foliage);
         SetProcess(true);
         Log.Print($"[foliage-stream] indexed {_index.IndexedInstances} instances in {_items.Count} renderable "
             + $"chunks; prefetch {_prefetchMargin:0} m, hysteresis {_unloadHysteresis:0} m, "
@@ -554,6 +557,32 @@ public partial class FoliageStreamingRenderer : Node3D
         }
     }
 
+    // What the dev console pulls the draw distance in by, as a fraction of the range the world was built
+    // with. Only the drawing moves: residency, prefetch and retirement all key off the built radii, so a
+    // chunk this hides is still decoded and still resident. That is the honest way to measure what
+    // foliage costs the GPU — the CPU-side streaming stays exactly as it was, and the difference in the
+    // frame is the drawing alone. Pulling it in is all it does; pushing past 1 would ask for chunks
+    // residency never made resident, which is why the console's range stops there.
+    private float _rangeScale = 1f;
+
+    public float RangeScale => _rangeScale;
+
+    public void SetRangeScale(float scale)
+    {
+        _rangeScale = Mathf.Clamp(scale, 0.01f, 1f);
+        foreach ((int index, Resident resident) in _resident)
+            ApplyVisibilityRange(resident.Instance, index);
+    }
+
+    // The margin scales with the end, because Godot keeps DRAWING through it while the chunk fades: a
+    // scale that moved the end alone would leave a 32 m tail on top of a range pulled down to two, and
+    // `foliage.range 0.01` would measure a sixteenth of what it asked for. At scale 1 this is exactly
+    // the margin the world was built with.
+    private void ApplyVisibilityRange(Rid instance, int index) =>
+        RenderingServer.InstanceGeometrySetVisibilityRange(instance, 0f,
+            _visibilityEnds[index] * _rangeScale, 0f, FoliageBuilder.FadeMarginValue * _rangeScale,
+            RenderingServer.VisibilityRangeFadeMode.Self);
+
     private void Upload(int index, FoliageChunk chunk)
     {
         if (_resident.ContainsKey(index) || !_meshes.TryGetValue(index, out ArrayMesh? mesh))
@@ -571,8 +600,7 @@ public partial class FoliageStreamingRenderer : Node3D
             GlobalTransform * new Transform3D(Basis.Identity, chunk.Origin));
         RenderingServer.InstanceGeometrySetCastShadowsSetting(instance,
             RenderingServer.ShadowCastingSetting.Off);
-        RenderingServer.InstanceGeometrySetVisibilityRange(instance, 0f, _visibilityEnds[index], 0f,
-            FoliageBuilder.FadeMarginValue, RenderingServer.VisibilityRangeFadeMode.Self);
+        ApplyVisibilityRange(instance, index);
         RenderingServer.InstanceSetScenario(instance, GetWorld3D().Scenario);
         RenderingServer.InstanceSetVisible(instance, IsVisibleInTree());
         long bytes = (long)chunk.Packed.Length * sizeof(float);

@@ -118,9 +118,9 @@ never extracted streams in just those.
 **Controls** (Unturned's own defaults, from `PlayerSettings`): `WASD` move, mouse look, `Space` jump,
 `Shift` sprint, `X` crouch, `Z` prone, `F` climb the ladder you are looking at (walking into one climbs it
 too), `H` (or `F5`) toggle first/third person, `Esc` pause. In free-camera
-mode: `WASD` + `Q`/`E` down/up, `Shift` to boost. `F3` toggles the performance HUD, and `F7` writes a
-bug-repro dump — the last few seconds of the simulation, replayable headless or back inside the game
-(see [docs/REPRO.md](docs/REPRO.md)).
+mode: `WASD` + `Q`/`E` down/up, `Shift` to boost. `F3` toggles the performance HUD, `F1` (or `` ` ``) opens
+the console, and `F7` writes a bug-repro dump — the last few seconds of the simulation, replayable headless
+or back inside the game (see [docs/REPRO.md](docs/REPRO.md)).
 
 **Multiplayer.** The main menu's *Connect* joins a `host:port`. You do not pick the map: the client asks
 the server which one it is running and loads that, so both ends are always on the same world — and a
@@ -132,11 +132,54 @@ to LAN* in the pause menu, or run a dedicated server:
 "$GODOT" --headless -- --server --port=27015 --map=Washington
 ```
 
+### The console
+
+`F1` (or the backtick) drops a console over the top of the screen: the game's log, live, and a prompt.
+
+It exists for measuring. The goal order is parity first, then performance, and a frame time only means
+something next to a second one taken under **one** deliberate difference. Restarting with a different
+environment variable gives you that across two loads, two shader caches and two thermal states; typing it
+gives it to you between two frames of the same session, with the `F3` HUD in view the whole time:
+
+```
+> objects.trees.enabled 0        # what do the trees cost right now?
+> foliage.enabled 0              # and the grass?
+> sun.shadows.distance 32        # half the shadow range, same lighting
+> reset all                      # back to how the game ships
+```
+
+Names read `subject[.part].property`, the last segment is always the property, and the same word means the
+same thing everywhere (`enabled` for every switch). Nothing here rebuilds the world or touches collision,
+navigation, audio or the server — a toggle changes what is *submitted to the renderer* and nothing else, so
+the frame before and the frame after differ in exactly one thing. Settings survive a return to the menu and
+are re-applied to the next map you load, which is what makes "the same difference, on two maps" a thing you
+can actually do.
+
+| Namespace | Variables |
+|---|---|
+| `terrain` | `terrain.enabled` |
+| `objects` | `objects.enabled`, `.small.enabled`, `.medium.enabled`, `.large.enabled`, `.trees.enabled` (Unturned's RESOURCE family: trees, rocks, bushes), `.shadows.enabled` |
+| `foliage` | `foliage.enabled`, `foliage.range` (draw distance as a fraction of the built one; streaming is unchanged, so this isolates the cost of *drawing* it) |
+| world | `roads.enabled`, `water.enabled`, `vehicles.enabled`, `npcs.enabled`, `zombies.enabled`, `players.enabled` |
+| sun | `sun.enabled`, `sun.shadows.enabled`, `sun.shadows.distance` |
+| environment | `env.sky.enabled`, `env.fog.enabled`, `env.volumetric.enabled`, `env.ssao.enabled`, `env.ssil.enabled`, `env.glow.enabled` |
+| renderer | `r.scale`, `r.msaa`, `r.taa.enabled`, `r.occlusion.enabled`, `r.lod.threshold`, `r.shadow.atlas`, `r.debug` (overdraw/wireframe), `r.vsync.enabled`, `r.fps.max` |
+| commands | `help`, `list`, `find <text>`, `reset <name\|all>`, `perf`, `clear`, `quit` |
+
+`help` and `list` are the authority — the table above is a map, not a manual. `find shadow` answers "what
+can I turn off about shadows", Tab completes names, and Up/Down walk what you already typed. A line may
+carry several statements: `foliage.enabled 0; objects.trees.enabled 0; perf`.
+
+`UG_CONSOLE="foliage.enabled 0; sun.shadows.enabled 0"` runs a line at startup, so a benchmark tier, a
+screenshot or a bug report can be given the same configuration a person would have typed; `SHOW_CONSOLE=1`
+opens the pane for a capture run. A headless session has no console — there is no key to press and nothing
+being drawn to switch off.
+
 **Useful environment flags** (mostly for automation and screenshots): `UNTURNED_PATH`, `MAP=Washington`
 (skip the browser and load that map), `SOLO=1` (boot straight into a local session), `FREECAM=1`,
 `JOIN=host:port`, `OPEN_LAN=1`, `PLAYER=1`, `SCREENSHOT_PATH`, `TIME_OF_DAY=0..1`, `DAY_SPEED=N`,
 `NAV_DEBUG=1`, `NAV_PREVIEW=1` (`NAV_XRAY`, `NAV_LIFT`, `NAV_RIM`, `NAV_BEACONS`, `NAV_BOUNDS`),
-`AUDIO_DEBUG=1`, `REPRO_*` ([docs/REPRO.md](docs/REPRO.md)).
+`AUDIO_DEBUG=1`, `UG_CONSOLE="<console line>"`, `SHOW_CONSOLE=1`, `REPRO_*` ([docs/REPRO.md](docs/REPRO.md)).
 
 ### Export
 

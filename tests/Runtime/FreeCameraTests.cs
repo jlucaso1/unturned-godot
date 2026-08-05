@@ -129,6 +129,33 @@ public class FreeCameraTests : TestClass
         Release(cam);
     }
 
+    // A focused text field owns the keyboard. The console reads WASD as text, and this camera reads the
+    // keyboard by POLLING — marking the event handled cannot reach it — so without this guard typing
+    // `water.enabled 0` into the console would fly the camera across the map while you typed it.
+    [Test]
+    public async Task AFocusedTextFieldStopsTheCameraFlying()
+    {
+        var cam = new FreeCamera();
+        TestScene.AddChild(cam);
+        var prompt = new LineEdit();
+        TestScene.AddChild(prompt);
+        prompt.GrabFocus();
+        await NextFrame();
+
+        Vector3 start = cam.Position;
+        PressPhysical(Key.W, true);
+        await NextFrame();
+        await NextFrame();
+        PressPhysical(Key.W, false);
+
+        Assert.Equal(start, cam.Position);
+
+        prompt.ReleaseFocus();
+        prompt.GetParent()?.RemoveChild(prompt);
+        prompt.Free();
+        Release(cam);
+    }
+
     // Each direction key maps to its own axis. Wired one axis wrong and the camera strafes when asked to
     // rise, which is the kind of thing nobody notices until they are trying to frame a shot.
     [Test]

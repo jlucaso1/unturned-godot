@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Godot;
 using UnturnedGodot.Data;
+using UnturnedGodot.DevConsole;
 
 namespace UnturnedGodot.Benchmark;
 
@@ -42,6 +43,19 @@ public static class GpuBenchmark
 
             var camera = new Camera3D { Name = "BenchCamera", Current = true };
             context.AddChild(camera);
+
+            // This tier has no console pane — there is nobody at the keyboard — but UG_CONSOLE is how a
+            // measurement asks for one deliberate difference, and a run that silently ignored it would
+            // report the default scene under a name that says otherwise. Same registry, same bindings,
+            // resolved against the world above; what it cannot reach here (this tier builds its own sun
+            // and environment rather than the day/night cycle) says so in the log rather than pretending.
+            RenderConsole.Host = context;
+            if (RenderConsole.TryTakeStartupLine(out string startup))
+            {
+                Log.Print($"[benchmark] UG_CONSOLE: {startup}");
+                foreach (ConsoleLine line in RenderConsole.Console.Execute(startup))
+                    Log.Print($"[benchmark] {line.Text}");
+            }
 
             // One frame so the render server populates instance buffers and AABBs before we read them.
             await context.ToSignal(tree, SceneTree.SignalName.ProcessFrame);

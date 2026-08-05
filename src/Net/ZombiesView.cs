@@ -82,6 +82,7 @@ public partial class ZombiesView : Node3D
         };
         client.OnUnhandledMessage += view.Handle;
         client.OnSessionReset += view.ForgetSession;
+        view.AddToGroup(SceneGroups.Zombies);
         return view;
     }
 

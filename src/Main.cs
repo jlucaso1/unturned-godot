@@ -785,6 +785,10 @@ public partial class Main : Node3D
         overlay.Track(streamer); // connect before Begin so a warm cache's instant signals are caught
         streamer.Finished += loading.Finish; // fade out once the scene (and warm textures) are in
         streamer.Finished += () => _player?.MarkWorldReady();
+        // Only now does the world hold the objects, foliage and vehicles a console setting names, so this
+        // is where a configuration carried over from the last map (or handed in through UG_CONSOLE) is
+        // pushed at it. Before this point those nodes do not exist and the values would have gone nowhere.
+        streamer.Finished += () => _console?.ReapplySettings();
         // ExtractionFinished, not Finished: this may open a bundle, and a warm mesh cache with cold
         // terrain layers finishes the scene while its pass is still decoding the very bundle this would
         // reach for. Waiting also means the pass has had its chance to extract these definitions itself,
@@ -1055,6 +1059,10 @@ public partial class Main : Node3D
     // live; both camera paths hand theirs over here.
     private DayNightController? _dayNight;
 
+    // The F1 console, on the windowed paths that have one. Held so the world build can hand it the
+    // finished world to re-apply against.
+    private ConsoleOverlay? _console;
+
     // Measurement runs need frames as fast as the machine can produce them; players do not. project.godot
     // used to ship vsync OFF so the benchmarks would be uncapped, which meant every player also got an
     // uncapped renderer — a menu spinning the GPU at several hundred FPS, and tearing, as the default.
@@ -1134,7 +1142,16 @@ public partial class Main : Node3D
         AddChild(_dayNight);
 
         if (DisplayServer.GetName() != "headless")
+        {
             AddChild(new DebugOverlay { Name = "DebugOverlay" });
+            // The console goes in with the environment rather than with the player, so a free-camera
+            // session — the one a measurement usually runs in — has it too. Its settings are process-wide
+            // and survive this node, so a world built after another one adopts whatever was set on the
+            // last: see ConsoleOverlay.ReapplySettings, which the streamed path calls once the objects
+            // this world was configured against actually exist.
+            _console = new ConsoleOverlay { Name = "Console" };
+            AddChild(_console);
+        }
     }
 
     // Builds one optional part of the world and attaches it, or logs why it could not be built and carries

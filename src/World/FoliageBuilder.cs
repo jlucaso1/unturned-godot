@@ -32,17 +32,25 @@ public static class FoliageBuilder
         && !EnvFlag.IsOn(System.Environment.GetEnvironmentVariable("UG_NODE_MULTIMESH"), whenUnset: false);
 
     public static Node3D Build(FoliageResidencyIndex? foliage,
-        IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary) => foliage == null
+        IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary) => Advertised(foliage == null
             ? new Node3D { Name = "Foliage" }
-            : FoliageStreamingRenderer.Create(foliage, meshLibrary, DrawDistance);
+            : FoliageStreamingRenderer.Create(foliage, meshLibrary, DrawDistance));
+
+    // Every foliage root, whichever of the three shapes it took, answers to the same group so the dev
+    // console can find it without knowing which one this session built. See SceneGroups.
+    private static Node3D Advertised(Node3D root)
+    {
+        root.AddToGroup(SceneGroups.Foliage);
+        return root;
+    }
 
     public static Node3D Build(LevelFoliageChunks? foliage,
         IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary)
     {
         bool nodeWrappers = EnvFlag.IsOn(OS.GetEnvironment("UG_NODE_MULTIMESH"), whenUnset: false);
-        Node3D root = nodeWrappers
+        Node3D root = Advertised(nodeWrappers
             ? new Node3D { Name = "Foliage" }
-            : new MultiMeshRidRenderer { Name = "Foliage" };
+            : new MultiMeshRidRenderer { Name = "Foliage" });
         if (foliage == null) return root;
         var rebaseWatch = System.Diagnostics.Stopwatch.StartNew();
         foliage.RebaseAll(EnvFlag.IsOn(OS.GetEnvironment("UG_PARALLEL_FOLIAGE_REBASE"), whenUnset: true));
@@ -87,7 +95,7 @@ public static class FoliageBuilder
     // than re-reading the 43 MB / 667k-instance blob from disk a second time.
     public static Node3D Build(LevelFoliage? foliage, IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary)
     {
-        var root = new Node3D { Name = "Foliage" };
+        Node3D root = Advertised(new Node3D { Name = "Foliage" });
         if (foliage == null)
             return root;
 

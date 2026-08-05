@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using Godot;
+using UnturnedGodot.Assets;
 using UnturnedGodot.Data;
 using Xunit;
 
@@ -334,5 +335,38 @@ public class RenderBatchGroupingTests
         Assert.Equal(first.Select(g => g.Key), second.Select(g => g.Key));
         for (int i = 0; i < first.Count; i++)
             Assert.Equal(first[i].Transforms, second[i].Transforms);
+    }
+
+    // What the placements ARE travels with the batch, so the dev console can stop drawing one kind of
+    // object — the trees, say — without touching the buildings batched beside them.
+    [Fact]
+    public void Merge_CarriesTheCategoryOntoTheSubmittedGroup()
+    {
+        List<MergedRenderGroup> merged = RenderBatchGrouping.Merge(new[]
+        {
+            new RenderBatch(RenderMeshKey.Single(0), Cell, new[] { At(1f) }, true, EObjectType.Resource),
+        });
+
+        Assert.Equal(EObjectType.Resource, Assert.Single(merged).Category);
+    }
+
+    // Two categories over one deduplicated mesh stay two submissions. It is a rare shape — a mesh belongs
+    // to the asset that ships it — but a merge there would hand two kinds of object one visibility flag,
+    // and switching the small clutter off would take the furniture with it.
+    [Fact]
+    public void Merge_KeepsCategoriesApartEvenOverTheSameMesh()
+    {
+        var clutter = new RenderBatch(RenderMeshKey.Single(0), Cell, new[] { At(0f), At(10f) }, true,
+            EObjectType.Small);
+        var furniture = new RenderBatch(RenderMeshKey.Single(0), Cell, new[] { At(0f), At(10f) }, true,
+            EObjectType.Medium);
+
+        List<MergedRenderGroup> merged = RenderBatchGrouping.Merge(new[] { clutter, furniture });
+
+        Assert.Equal(2, merged.Count);
+        Assert.Equal(new[] { EObjectType.Small, EObjectType.Medium }, merged.Select(g => g.Category));
+
+        // Same category, same mesh, same footprint: that pair is exactly what the merge is for.
+        Assert.Single(RenderBatchGrouping.Merge(new[] { clutter, clutter }));
     }
 }

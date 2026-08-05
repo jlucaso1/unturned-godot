@@ -41,7 +41,7 @@ public static class WaterBuilder
             DepthDrawMode = BaseMaterial3D.DepthDrawModeEnum.Always,
         };
 
-        return new MeshInstance3D
+        var plane = new MeshInstance3D
         {
             Name = "Water",
             Mesh = new PlaneMesh { Size = new Vector2(PlaneSize, PlaneSize) },
@@ -51,5 +51,7 @@ public static class WaterBuilder
             // every directional cascade for no visible benefit. Don't cast.
             CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
         };
+        plane.AddToGroup(SceneGroups.Water);
+        return plane;
     }
 }

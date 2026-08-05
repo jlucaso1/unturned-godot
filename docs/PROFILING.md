@@ -49,6 +49,57 @@ The counts, which *are* machine-independent, live in `bench/structural/` instead
 gated in CI. `./scripts/check-structural-metrics.sh` diffs them and `--write` re-records when a change is
 meant; see [the gate](#running-without-a-gpu) for what it does and does not cover.
 
+## Measuring one thing at a time (the console)
+
+The three tiers answer "what does this build cost". The console answers "what does *that* cost", in the
+session you are already looking at. `F1` (or the backtick) opens it; `F3` keeps the numbers on screen.
+
+```
+> perf                           # write the current numbers into the scrollback
+> objects.trees.enabled 0        # stop submitting Unturned's RESOURCE family
+> perf                           # ...and again, one frame later
+> reset all
+```
+
+Why it is not just another environment variable: a variable is answered across two processes, and the two
+differ in more than the thing you changed — a cold or warm shader cache, a different streaming order, a
+GPU at a different clock. A toggle is answered across two frames of one session, and the difference is the
+submission you named. Nothing a toggle touches is rebuilt: collision, navigation, audio, the loopback
+server and the streaming decisions all keep running exactly as they were, so switching the trees off
+prices the *drawing* of the trees and nothing else. That is also its limit — it moves what is submitted,
+never what was built, so it cannot price extraction, batching or residency. The tiers still own those.
+
+Three of them are worth calling out for measurement specifically:
+
+- **`r.vsync.enabled 0`** first, always. With vsync on, every frame time below the refresh rate reads as
+  the refresh rate, and an A/B where both sides are pinned to 16.6 ms shows nothing. (The benchmark tiers
+  already turn it off for themselves; a normal session ships with it on.)
+- **`foliage.range`** pulls the foliage draw distance in as a fraction of the built range while leaving
+  residency, prefetch and retirement exactly as they were. It is the way to separate "foliage costs the
+  GPU" from "foliage costs the streamer", which switching it off entirely cannot do.
+- **`r.debug 3`** (overdraw) and **`r.debug 4`** (wireframe) answer *which* geometry is expensive rather
+  than how much of it there is — the question a draw-call count cannot.
+
+`UG_CONSOLE="<line>"` applies a configuration at startup, before anybody can type, so a tier-2 or tier-3
+run can be given one:
+
+```sh
+UG_CONSOLE="objects.trees.enabled 0" "$GODOT" -- --benchmark --gpu
+UG_CONSOLE="foliage.enabled 0; sun.shadows.enabled 0" UG_RUNTIME_BENCH_SECS=12 SOLO=1 "$GODOT"
+```
+
+Both write their usual JSON report, so the pair of runs is diffable the same way any other pair is — with
+the difference being one named submission rather than a build flag. Settings also survive a return to the
+menu and are re-applied to the next map, which is how "the same difference, on PEI and on Germany" is
+measured without restarting.
+
+Tier 2 has no console pane — nobody is at the keyboard — but it applies the line against the world it
+built and logs what each statement did. It builds its own sun and environment rather than the day/night
+cycle, so the `sun.*` and `env.*` names report that there is no lighting to reach there instead of
+silently doing nothing; everything else (`terrain`, `objects.*`, `foliage.*`, `vehicles`, `r.*`) applies.
+
+`help`, `list` and `find <text>` are the authority on what exists; README has the map of the namespaces.
+
 ## Parsers in isolation
 
 ```sh
