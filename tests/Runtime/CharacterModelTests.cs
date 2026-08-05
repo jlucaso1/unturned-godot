@@ -137,10 +137,12 @@ public class CharacterModelTests : TestClass
         CharacterModel.PlayerRigs rigs = CharacterModel.BuildPlayerRigs(install);
         try
         {
+            // Asserted rather than skipped past: a rig that came back static, or without the swing
+            // decoded, is precisely the failure this test exists to catch, and stepping over it would
+            // report the missing punch as a mixed one.
             foreach (Node3D? node in new[] { rigs.Body, rigs.Viewmodel })
             {
-                if (node is not CharacterSkeleton rig || rig.Clips.Count == 0)
-                    continue;
+                var rig = Assert.IsType<CharacterSkeleton>(node);
 
                 foreach ((string clip, string arm, string other) in new[]
                 {
@@ -148,6 +150,9 @@ public class CharacterModelTests : TestClass
                     ("Punch_Right", "Right_Shoulder", "Left_Shoulder"),
                 })
                 {
+                    // Registering a mix says nothing about the clip existing: PlayerAnimator mixes by
+                    // name, and a name the character does not carry registers just as quietly.
+                    Assert.True(rig.Clips.ContainsKey(clip), $"{rig.Name}: {clip} was not decoded");
                     Assert.True(rig.Mixes.ContainsKey(clip), $"{rig.Name}: {clip} was never mixed");
                     BoneMask mask = rig.Mixes[clip]
                         ?? throw new Xunit.Sdk.XunitException($"{rig.Name}: {clip} restricts nothing");

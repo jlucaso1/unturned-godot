@@ -209,17 +209,27 @@ public class AnimationSamplerTests
 
     // A masked bone the movement clip says nothing about still reaches the pose — the gesture is the only
     // thing animating it, and dropping it would leave the arm on its bind rest mid-swing.
+    //
+    // The bone the mask EXCLUDES and the layer below does not carry is the same case from the other side,
+    // and it is the one the fix turns on: the punch clips animate legs, and a rig whose movement clip is
+    // silent about a leg must not take the swing's. The other overlay tests cannot see this — their
+    // masked-out bone is in `under` too, so passing it through and skipping it look identical.
     [Fact]
     public void Overlay_AddsMaskedBonesTheLayerBelowDoesNotCarry()
     {
         var under = new Dictionary<int, BonePose> { [2] = new(2, Quaternion.Identity, null, null) };
-        var over = new Dictionary<int, BonePose> { [1] = new(1, new Quaternion(Vector3.Up, 1f), null, null) };
+        var over = new Dictionary<int, BonePose>
+        {
+            [1] = new(1, new Quaternion(Vector3.Up, 1f), null, null),
+            [0] = new(0, new Quaternion(Vector3.Up, 1f), null, null), // masked out, and absent from `under`
+        };
 
         var dest = new Dictionary<int, BonePose>();
         AnimationSampler.Overlay(under, over, BoneMask.Subtrees(new[] { -1, -1, -1 }, new[] { 1 }), dest);
 
         Assert.Equal(2, dest.Count);
         Assert.Equal(new Quaternion(Vector3.Up, 1f), dest[1].Rotation);
+        Assert.False(dest.ContainsKey(0)); // a masked-out bone never reaches the pose at all
     }
 
     // The destination is a reused per-frame buffer, so it must be refilled rather than added to.
