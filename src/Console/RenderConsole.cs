@@ -219,6 +219,9 @@ public static class RenderConsole
 
         console.Add("perf", "One line of the numbers the F3 HUD shows, into the scrollback — so a "
             + "measurement is recorded next to the command that produced it.", "perf", Snapshot);
+        console.Add("copy", "Put the whole scrollback on the clipboard as plain text — the transcript a "
+            + "bug report wants. Ctrl+C copies just what you have selected, when something is.",
+            "copy", arguments => Copy(host, arguments));
         console.Add("clear", "Empty the scrollback. The log keeps running; only what is on screen goes.",
             "clear", arguments => Clear(host, arguments));
         console.Add("quit", "Leave the game, the same cooperative shutdown the pause menu's button runs.",
@@ -358,6 +361,18 @@ public static class RenderConsole
             "{0:0} fps   {1:0.00} ms frame   {2:0.00} ms cpu   {3:0} draw calls   {4:0} primitives   "
             + "{5:0} render objects   {6:0.0} MB rss",
             fps, frameMs, cpuMs, drawCalls, primitives, objects, rssMb));
+    }
+
+    private static IEnumerable<ConsoleLine> Copy(Func<Node?> host, IReadOnlyList<string> arguments)
+    {
+        if (host() is not ConsoleOverlay overlay)
+        {
+            yield return ConsoleLine.Failure("There is no scrollback to copy.");
+            yield break;
+        }
+        yield return overlay.CopyScrollback()
+            ? ConsoleLine.Reply("Scrollback copied to the clipboard.")
+            : ConsoleLine.Failure("This session has no clipboard to copy to.");
     }
 
     private static IEnumerable<ConsoleLine> Clear(Func<Node?> host, IReadOnlyList<string> arguments)

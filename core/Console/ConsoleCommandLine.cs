@@ -12,16 +12,19 @@ namespace UnturnedGodot.DevConsole;
 //     `foliage.enabled 0; objects.trees.enabled 0; sun.shadows.enabled 0`. Toggling three things with
 //     three round trips through the input box is three different frames, which is the one thing a
 //     measurement cannot afford.
+//   * a NEWLINE separates them too, for the same reason and a more common one: a measurement recipe is
+//     written down one command per line — in a note, an issue, this repo's own docs — and that is the
+//     shape it gets copied in. It also ends any quote left open on its line, so one unterminated quote
+//     cannot swallow the commands under it.
 //   * double quotes group words, because a value may contain a space and a summary certainly does.
-//   * `//` ends the line, so a configuration can be pasted out of a note or a commit message with the
-//     reasoning still attached to it.
+//   * `//` ends its LINE, so a recipe can be pasted with the reasoning still attached to each step.
 //
 // Everything else — variables, substitution, globbing — is absent on purpose: this parses the input of a
 // person watching a frame time, and every construct that can surprise them costs more than it buys.
 public static class ConsoleCommandLine
 {
-    // The statements on one line, in order, with blank ones dropped. A `;` inside quotes is a character
-    // like any other, so a quoted value is never cut in half.
+    // The statements in some input, in order, with blank ones dropped. A `;` inside quotes is a
+    // character like any other, so a quoted value is never cut in half.
     public static List<string> Split(string line)
     {
         var statements = new List<string>();
@@ -30,8 +33,22 @@ public static class ConsoleCommandLine
         for (int i = 0; i < line.Length; i++)
         {
             char c = line[i];
+            if (c == '\n' || c == '\r')
+            {
+                // A line break ends the statement and any quote open on that line: several lines are
+                // several commands, and a stray quote must not reach the ones below it.
+                Flush(statements, current);
+                quoted = false;
+                continue;
+            }
             if (!quoted && c == '/' && i + 1 < line.Length && line[i + 1] == '/')
-                break; // a comment runs to the end of the line, so nothing after it is a statement
+            {
+                // A comment runs to the end of ITS line, not to the end of everything that was pasted.
+                while (i < line.Length && line[i] != '\n' && line[i] != '\r')
+                    i++;
+                i--; // leave the break itself to the case above
+                continue;
+            }
             if (c == '"')
                 quoted = !quoted;
             if (c == ';' && !quoted)
@@ -44,6 +61,17 @@ public static class ConsoleCommandLine
         Flush(statements, current);
         return statements;
     }
+
+    // Several lines as ONE console line, which is the only shape the prompt can hold: it is a LineEdit,
+    // so it drops the newlines on paste, and a recipe copied as
+    //
+    //     terrain.enabled 0
+    //     perf
+    //
+    // arrived as `terrain.enabled 0perf` — two commands welded into a name that does not exist. Joining
+    // on `;` instead means the paste runs as what it plainly reads as, with each line's comment dropped
+    // alongside the line it annotated rather than swallowing every step under it.
+    public static string Flatten(string text) => string.Join("; ", Split(text));
 
     private static void Flush(List<string> statements, StringBuilder current)
     {

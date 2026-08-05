@@ -165,11 +165,17 @@ can actually do.
 | sun | `sun.enabled`, `sun.shadows.enabled`, `sun.shadows.distance` |
 | environment | `env.sky.enabled`, `env.fog.enabled`, `env.volumetric.enabled`, `env.ssao.enabled`, `env.ssil.enabled`, `env.glow.enabled` |
 | renderer | `r.scale`, `r.msaa`, `r.taa.enabled`, `r.occlusion.enabled`, `r.lod.threshold`, `r.shadow.atlas`, `r.debug` (overdraw/wireframe), `r.vsync.enabled`, `r.fps.max` |
-| commands | `help`, `list`, `find <text>`, `reset <name\|all>`, `perf`, `clear`, `quit` |
+| commands | `help`, `list`, `find <text>`, `reset <name\|all>`, `perf`, `copy`, `clear`, `quit` |
 
 `help` and `list` are the authority — the table above is a map, not a manual. `find shadow` answers "what
 can I turn off about shadows", Tab completes names, and Up/Down walk what you already typed. A line may
 carry several statements: `foliage.enabled 0; objects.trees.enabled 0; perf`.
+
+Recipes travel by clipboard, so both directions work. **Pasting** a block written a command per line —
+the shape one is written in here, in a note or in an issue — runs those commands in order, comments and
+all; the prompt holds one line, so the block is flattened onto the `;` above rather than welded into a
+name that does not exist. **Ctrl+C** copies whatever you have selected in the scrollback, and `copy` puts
+the whole of it on the clipboard as plain text, which is the transcript a bug report wants.
 
 `UG_CONSOLE="foliage.enabled 0; sun.shadows.enabled 0"` runs a line at startup, so a benchmark tier, a
 screenshot or a bug report can be given the same configuration a person would have typed; `SHOW_CONSOLE=1`

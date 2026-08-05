@@ -197,6 +197,54 @@ public class ConsoleTests : TestClass
         Release(console);
     }
 
+    // Ctrl+C had to be taken from the LineEdit to reach the scrollback at all, and taking it must not
+    // cost the prompt its own copy: with nothing selected in the log, the keystroke belongs to whatever
+    // the person selected in the input box.
+    //
+    // Asserted on the decision rather than on the viewport's handled flag, because that flag cannot tell
+    // the two outcomes apart: the focused LineEdit consumes Ctrl+C either way, and its doing so is the
+    // fallback this is about. What the overlay controls is whether it takes the key first.
+    [Test]
+    public async Task CtrlCCopiesNothingWhenNothingInTheLogIsSelected()
+    {
+        ConsoleOverlay console = await Open();
+        console.Submit("help", echo: true); // scrollback with text in it, but no selection
+
+        Assert.False(console.CopySelection());
+        // And the keystroke still reaches the prompt, which is where the caret is.
+        TestScene.GetViewport().PushInput(Press(Key.C, control: true));
+        Assert.True(console.Prompt.HasFocus());
+
+        Release(console);
+    }
+
+    // A one-line clipboard is left to the LineEdit: its own paste already handles the selection, the
+    // caret and the undo stack, and there is nothing about it to fix. Only a block it cannot hold —
+    // one the newlines would be silently dropped from — is taken over.
+    [Test]
+    public async Task ASingleLineClipboardIsLeftToTheLineEdit()
+    {
+        ConsoleOverlay console = await Open();
+
+        Assert.False(console.PasteBlock());
+
+        Release(console);
+    }
+
+    // A session with no clipboard — this one, and any headless run — says so rather than reporting a
+    // copy that did not happen.
+    [Test]
+    public async Task TheCopyCommandSaysWhenThereIsNoClipboardToCopyTo()
+    {
+        ConsoleOverlay console = await Attached();
+
+        console.Submit("copy", echo: false);
+
+        Assert.Contains(DisplayServer.HasFeature(DisplayServer.Feature.Clipboard)
+            ? "Scrollback copied" : "no clipboard", console.Output.GetParsedText());
+        Release(console);
+    }
+
     // The splat toggle does not hide anything — it reaches into the shading of the tiles that stay on
     // screen. It also has to tell "no terrain at all" apart from "terrain wearing the flat fallback
     // material", because on a map whose layer textures could not be read there is nothing to skip and a
@@ -388,7 +436,8 @@ public class ConsoleTests : TestClass
         node.Free();
     }
 
-    private static InputEventKey Press(Key key) => new() { Keycode = key, Pressed = true };
+    private static InputEventKey Press(Key key, bool control = false) =>
+        new() { Keycode = key, Pressed = true, CtrlPressed = control };
 
     private static MultiMesh Batch()
     {
