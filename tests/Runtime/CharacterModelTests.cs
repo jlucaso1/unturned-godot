@@ -121,6 +121,55 @@ public class CharacterModelTests : TestClass
         }
     }
 
+    // The punch clips arrive mixed onto one arm each, over the game's REAL skeleton. This is asserted
+    // against the imported rig rather than a stand-in because the data is what makes it necessary:
+    // Punch_Left and Punch_Right are authored over all sixteen bones, legs included, so an unmixed swing
+    // replaces the walk cycle and the legs stand still for its whole 0.63 s.
+    //
+    // Both rigs are checked. First person is a CLONE of the body, and a clone that lost its mixing
+    // transforms would swing full-body from inside the head while the third-person copy behaved.
+    [Test]
+    public void ThePunchClipsAreMixedOntoOneArmEach()
+    {
+        if (!Installed(out string install))
+            return;
+
+        CharacterModel.PlayerRigs rigs = CharacterModel.BuildPlayerRigs(install);
+        try
+        {
+            foreach (Node3D? node in new[] { rigs.Body, rigs.Viewmodel })
+            {
+                if (node is not CharacterSkeleton rig || rig.Clips.Count == 0)
+                    continue;
+
+                foreach ((string clip, string arm, string other) in new[]
+                {
+                    ("Punch_Left", "Left_Shoulder", "Right_Shoulder"),
+                    ("Punch_Right", "Right_Shoulder", "Left_Shoulder"),
+                })
+                {
+                    Assert.True(rig.Mixes.ContainsKey(clip), $"{rig.Name}: {clip} was never mixed");
+                    BoneMask mask = rig.Mixes[clip]
+                        ?? throw new Xunit.Sdk.XunitException($"{rig.Name}: {clip} restricts nothing");
+
+                    // The whole limb, and only that limb.
+                    foreach (string bone in new[] { arm, arm.Replace("Shoulder", "Arm"),
+                                 arm.Replace("Shoulder", "Hand"), arm.Replace("Shoulder", "Hook") })
+                        Assert.True(mask.Contains(rig.FindBone(bone)), $"{rig.Name}: {clip} misses {bone}");
+
+                    foreach (string bone in new[] { other, "Spine", "Skull",
+                                 "Left_Hip", "Left_Leg", "Left_Foot", "Right_Hip", "Right_Leg", "Right_Foot" })
+                        Assert.False(mask.Contains(rig.FindBone(bone)), $"{rig.Name}: {clip} reaches {bone}");
+                }
+            }
+        }
+        finally
+        {
+            rigs.Body?.Free();
+            rigs.Viewmodel?.Free();
+        }
+    }
+
     // Both zombie looks come out of ONE import. The mega is the same character in a different skin, and
     // paying a second full read for it would put a synchronous character import in the frame a player
     // first meets one.

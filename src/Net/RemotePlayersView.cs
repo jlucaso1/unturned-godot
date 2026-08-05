@@ -105,8 +105,8 @@ public partial class RemotePlayersView : Node3D
             }
 
             // One-shot hand animations the server said this player performed. Taken (not peeked) so each
-            // swing plays exactly once, and applied after the movement state above so it wins the frame
-            // it arrives on — SetState defers to a gesture that already owns the rig.
+            // swing plays exactly once. It lays over the movement state above rather than replacing it:
+            // the walk cycle carries on under a swing, only the mixed arm comes from the gesture.
             if (remote.PendingGesture != EPlayerGesture.None)
             {
                 EPlayerGesture gesture = remote.TakeGesture();

@@ -11,6 +11,13 @@ namespace UnturnedGodot;
 // half the pitch). State selection follows PlayerAnimator.updateState: moving -> Move_<stance>, else
 // Idle_<stance>, with STAND/SPRINT sharing the stand clips.
 //
+// There are TWO layers, as in the game. The movement state is layer 0 and never stops: updateState pushes
+// it every frame whatever else is happening. A gesture — a punch, and every hand interaction after it —
+// is layer 1, laid over the top through GestureOverlay, and MixAnimation is what says which bones it may
+// write (Unturned's CharacterAnimator.mixAnimation -> AnimationState.AddMixingTransform). The punch clips
+// are authored full-body, so that mask is the difference between a swing that moves an arm and a swing
+// that stops the legs dead for its whole length.
+//
 // The per-frame engine boundary is kept minimal (profiled at ~5% of all samples before): _Process is only
 // enabled while the rig is visible (no IsVisibleInTree poll per frame), rest poses are cached on the C#
 // side so a full ResetBonePoses is never issued — only channels that stop being animated are reset — and
@@ -26,6 +33,10 @@ public partial class CharacterSkeleton : Skeleton3D
     // Reused sample/blend buffers so the per-frame pose path allocates nothing (the sampler refills them).
     private readonly Dictionary<int, BonePose> _poseBuf = new();
     private readonly Dictionary<int, BonePose> _blendBuf = new();
+    private readonly Dictionary<int, BonePose> _gestureBuf = new(); // layer 1's own sample buffer
+    private readonly Dictionary<int, BonePose> _mergeBuf = new();   // the two layers composed
+    private string _gestureBufClip = "";                            // which clip _gestureBuf holds
+    private static readonly Dictionary<int, BonePose> Nothing = new(); // an empty pose; never written to
     private float _blend = 1f;
     private float _pitchBend; // Godot pitch degrees, split across spine + skull
     private int _spine = -1;
@@ -44,16 +55,15 @@ public partial class CharacterSkeleton : Skeleton3D
     private bool _anchorEye;
     private Vector3 _eyeNudge;
 
-    // The current clip is a FINISHED one-shot, parked on its last key rather than looping. Distinct from
-    // the overlay's IsPlaying, which is already false by then: this covers the frames after a gesture
-    // ends but before a movement clip has taken the rig back — one frame in the ordinary case, and
-    // indefinitely for a character that carries no clip for the stance it should return to.
-    private bool _holdingLastPose;
-
-    // A one-shot overlay — a punch, and every hand interaction after it. The arbitration between the
-    // gesture and the looping movement state lives in GestureOverlay, where it is unit-tested; this node
-    // only owns the clip clock and the bones.
+    // Layer 1: a one-shot laid over the movement state — a punch, and every hand interaction after it.
+    // The playhead's own rules live in GestureOverlay, where they are unit-tested; this node owns the
+    // sampling and the bones.
     private readonly GestureOverlay _gesture = new();
+
+    // Which bones each gesture clip is allowed to write, by clip name — Unturned's mixAnimation calls,
+    // made once per rig. A clip with no entry here overlays the whole body, which is what
+    // `mixAnimation(name)` with no mixing transforms means.
+    private readonly Dictionary<string, BoneMask?> _mixes = new();
 
     // C#-side rest cache + written-channel tracking: bones the previous frame animated and this frame
     // doesn't fall back to these rests, everything else is left untouched (it already rests).
@@ -75,6 +85,52 @@ public partial class CharacterSkeleton : Skeleton3D
     public IReadOnlyDictionary<string, AnimationClipData> Clips => _clips;
 
     public void StoreClip(string name, AnimationClipData clip) => _clips[name] = clip;
+
+    // The registered mixing transforms, exposed so a clone inherits them rather than swinging full-body.
+    public IReadOnlyDictionary<string, BoneMask?> Mixes => _mixes;
+
+    // CharacterAnimator.mixAnimation: puts `clip` on layer 1 and restricts it to the named shoulders (and
+    // optionally the skull), recursively — so Punch_Left reaches Left_Shoulder, Left_Arm, Left_Hand and
+    // Left_Hook, and nothing else. PlayerAnimator registers exactly this set once, when the player's rigs
+    // are built; the port does it in CharacterModel for the same reason.
+    //
+    // All three false is the game's `mixAnimation(name)` overload: layer 1 with no mixing transforms at
+    // all, which restricts nothing and overlays the whole body.
+    public void MixAnimation(string clip, bool mixLeftShoulder, bool mixRightShoulder, bool mixSkull = false)
+    {
+        var roots = new List<string>(3);
+        if (mixLeftShoulder)
+            roots.Add("Left_Shoulder");
+        if (mixRightShoulder)
+            roots.Add("Right_Shoulder");
+        if (mixSkull)
+            roots.Add("Skull");
+        MixAnimation(clip, Subtrees(roots));
+    }
+
+    // The same registration against an already-resolved mask (null = the whole body).
+    public void MixAnimation(string clip, BoneMask? mask) => _mixes[clip] = mask;
+
+    // The bones under the named ones, by name — a rig that does not carry one simply contributes nothing,
+    // the way AddMixingTransform against a transform the skeleton does not have would.
+    public BoneMask? Subtrees(IReadOnlyList<string> boneNames)
+    {
+        var roots = new List<int>(boneNames.Count);
+        foreach (string name in boneNames)
+        {
+            int bone = FindBone(name);
+            if (bone >= 0)
+                roots.Add(bone);
+        }
+        if (roots.Count == 0)
+            return null;
+
+        int count = GetBoneCount();
+        var parents = new int[count];
+        for (int i = 0; i < count; i++)
+            parents[i] = GetBoneParent(i);
+        return BoneMask.Subtrees(parents, roots);
+    }
 
     public void BindPitchBones(int spine, int skull)
     {
@@ -121,14 +177,13 @@ public partial class CharacterSkeleton : Skeleton3D
     // Picks and crossfades to the clip for a stance (Unturned's PlayerAnimator.updateState mapping).
     // Keep the discrete state dirty: local and remote callers commonly invoke this from their render or
     // physics loop, but the clip name cannot change while stance/movement are unchanged.
-    // Returns false when the request could not be applied — a gesture still owns the rig, or the
-    // character carries no clip for that stance.
+    // Returns false when the character carries no clip for that stance.
+    //
+    // A gesture never blocks this. updateState runs every frame regardless of what layer 1 is doing, and
+    // the movement clip it chooses goes on running underneath the swing — which is exactly what stops a
+    // punch from freezing the legs.
     public bool SetState(EPlayerStance stance, bool moving)
     {
-        // A gesture owns the rig until it finishes; the overlay remembers this request for then.
-        if (!_gesture.Request(stance, moving))
-            return false;
-
         if (_stateApplied && _lastStateStance == stance && _lastStateMoving == moving)
             return true;
 
@@ -142,23 +197,26 @@ public partial class CharacterSkeleton : Skeleton3D
         return true;
     }
 
-    // Plays a clip once over the movement state, then lets the state resume. Returns false when the
-    // character carries no such clip, which is how a gesture the entity cannot perform is skipped rather
-    // than freezing it on a missing animation.
+    // Lays a clip over the movement state for its own length, restricted to whatever MixAnimation
+    // registered for it (CharacterAnimator.play with smooth: false, which is what PlayerEquipment.punch
+    // uses — the swing starts at full weight on the frame the button went down, no fade in).
+    //
+    // Returns false when the character carries no such clip, which is how a gesture the entity cannot
+    // perform is skipped rather than freezing it on a missing animation.
     public bool PlayOnce(string clip)
     {
         if (!_clips.TryGetValue(clip, out AnimationClipData? data) || data.Length <= 0f)
             return false;
+        if (!_gesture.Begin(clip, data.Length, _mixes.GetValueOrDefault(clip)))
+            return false;
 
-        // The state to come back to is captured BEFORE the clip takes over. Without it a swing thrown
-        // while the stance had not changed since the last SetState would return to nothing: the dirty
-        // check would see the same stance it last applied and never reissue it.
-        Replay(clip);
-        _gesture.Begin(data.Length, _lastStateStance, _lastStateMoving);
+        // A gesture alone is reason enough to sample: a rig parked on no movement clip at all still has
+        // to run the swing.
+        UpdateProcessing();
         return true;
     }
 
-    // True while a one-shot gesture owns the rig.
+    // True while a one-shot gesture is laid over the movement state.
     public bool IsPlayingOnce => _gesture.IsPlaying;
 
     // Restarts a clip from its beginning even when it is already the current one — an attack swing
@@ -170,7 +228,6 @@ public partial class CharacterSkeleton : Skeleton3D
             _fromPose = new Dictionary<int, BonePose>(CurrentPose());
             _time = 0f;
             _blend = 0f;
-            _holdingLastPose = false; // restarting it: the clock runs again from the top
             return;
         }
         Play(clip);
@@ -180,27 +237,28 @@ public partial class CharacterSkeleton : Skeleton3D
     {
         if (clip == _current || !_clips.ContainsKey(clip))
             return; // already playing, or the clip isn't present -> keep going
-        _gesture.Cancel(); // a deliberate clip change drops any gesture (PlayOnce re-arms it after)
+        // The gesture is deliberately NOT dropped here: layer 0 and layer 1 are independent, and
+        // Unturned's `state()` crossfade leaves whatever `play()` put on layer 1 alone.
         _stateApplied = false;
         // Snapshot to blend out of — an owned copy, since CurrentPose refills the shared buffer every frame.
         _fromPose = _current.Length > 0 ? new Dictionary<int, BonePose>(CurrentPose()) : null;
         _current = clip;
         _poseBuf.Clear(); // the new clip's bone set differs: flush before the overwrite sampling
-        _holdingLastPose = false; // whatever one-shot was being held is gone with the clip
         _time = 0f;
         _blend = _fromPose == null ? 1f : 0f;
         UpdateProcessing();
     }
 
-    // Jumps the current clip to an absolute time and poses immediately (used to inspect a frame off-line;
-    // in play the animation advances by real delta in _Process).
+    // Jumps the movement clip to an absolute time and poses immediately (used to inspect a frame off-line;
+    // in play the animation advances by real delta in _Process). A gesture in flight is composed over the
+    // result at its own current time, which this does not move — the two layers have separate clocks.
     public void Seek(float time)
     {
-        if (_current.Length == 0)
+        if (_current.Length == 0 && !_gesture.IsPlaying)
             return; // nothing selected to seek within (a character that carries no clip at all)
         _time = time;
         _blend = 1f;
-        Apply(CurrentPose());
+        Apply(Compose(_current.Length > 0 ? CurrentPose() : null));
     }
 
     // _Process only runs while a clip is active AND the rig is effectively visible — checked on visibility
@@ -209,20 +267,16 @@ public partial class CharacterSkeleton : Skeleton3D
     // also froze before) resumes on the first visible frame.
     private void UpdateProcessing()
     {
-        bool active = _current.Length > 0 && IsVisibleInTree();
-        // A rig that stops being drawn stops advancing its clock, so a gesture caught mid-swing would
+        bool visible = IsVisibleInTree();
+        // A rig that stops being drawn stops advancing its clocks, so a gesture caught mid-swing would
         // freeze and then thaw — replaying a stale punch from where it stopped the next time the rig is
-        // shown. Hand it back to the movement state instead: a swing nobody can see need not finish.
-        // Ends the gesture by advancing past any length, which is also what restores the pending state.
-        if (!active && _gesture.Advance(float.MaxValue) is { } resume)
-        {
-            Resume(resume);
-            active = _current.Length > 0 && IsVisibleInTree(); // the resume may have changed the clip
-        }
-        SetProcess(active);
-        // A rig that was hidden froze its clock, so the pose it comes back with is the one it left —
-        // and if the stance changed meanwhile, Resume just swapped the clip. Anchor before the first
-        // drawn frame rather than one frame into it.
+        // shown. Drop it instead: a swing nobody can see need not finish, and the movement layer
+        // underneath is already the pose it would have come back to.
+        if (!visible)
+            _gesture.Cancel();
+        SetProcess(visible && (_current.Length > 0 || _gesture.IsPlaying));
+        // A rig that was hidden froze its clock, so the pose it comes back with is the one it left.
+        // Anchor before the first drawn frame rather than one frame into it.
         AnchorEye();
     }
 
@@ -244,64 +298,64 @@ public partial class CharacterSkeleton : Skeleton3D
 
     public override void _Process(double delta)
     {
-        // No clip selected: there is nothing to sample. UpdateProcessing normally keeps _Process off for
-        // this state, so reaching it means something outside this class turned processing back on (the
-        // engine does exactly that at NOTIFICATION_READY). Settle it rather than index _clips[""].
-        if (_current.Length == 0)
+        // Neither layer has anything to sample. UpdateProcessing normally keeps _Process off for this
+        // state, so reaching it means something outside this class turned processing back on (the engine
+        // does exactly that at NOTIFICATION_READY). Settle it rather than index _clips[""].
+        if (_current.Length == 0 && !_gesture.IsPlaying)
         {
             SetProcess(false);
             return;
         }
 
-        _time += (float)delta;
+        // Layer 1 first, so the frame a swing runs out on is already the movement pose alone rather than
+        // one more frame held on the gesture's last key.
+        bool ended = _gesture.Advance((float)delta);
 
-        // The swing is over: hand the rig back to the movement state. Done before posing so the frame
-        // the gesture ends on already shows the state clip crossfading in, rather than one more frame
-        // frozen on the gesture's last key.
-        if (_gesture.Advance((float)delta) is { } resume)
-            Resume(resume);
-
-        Dictionary<int, BonePose> pose = CurrentPose();
-        if (_blend < 1f && _fromPose != null)
+        Dictionary<int, BonePose>? pose = null;
+        if (_current.Length > 0)
         {
-            _blend = Mathf.Min(1f, _blend + ((float)delta / BlendDuration));
-            AnimationSampler.Blend(_fromPose, pose, _blend, _blendBuf);
-            pose = _blendBuf;
+            _time += (float)delta;
+            pose = CurrentPose();
+            if (_blend < 1f && _fromPose != null)
+            {
+                _blend = Mathf.Min(1f, _blend + ((float)delta / BlendDuration));
+                AnimationSampler.Blend(_fromPose, pose, _blend, _blendBuf);
+                pose = _blendBuf;
+            }
         }
-        Apply(pose);
+
+        Apply(Compose(pose));
+        if (ended)
+            UpdateProcessing(); // a rig running the swing alone has nothing left to sample
     }
 
-    // Hands the rig back to the movement state after a gesture.
-    //
-    // The clock is pinned to the one-shot's end FIRST, before anything else reads the pose. The overlay
-    // has already declared the gesture over by now, so CurrentPose would wrap this clip's clock — and a
-    // clock that has just run PAST the end wraps to nearly zero, which is the swing's opening frame.
-    // Both things that happen next read it: SetState's Play snapshots CurrentPose as the pose to
-    // crossfade out of, so every completed punch would blend back through its own wind-up; and a
-    // character with no clip for that stance keeps the one-shot as its current clip, where the wrap
-    // would loop it forever. Holding the final key is the one thing that is certainly not wrong.
-    private void Resume((EPlayerStance Stance, bool Moving) state)
+    // The two layers as one pose: the movement clip, with the gesture laid over the bones its mixing
+    // transforms cover. `under` is null for a rig that carries no movement clip at all, where the
+    // gesture is the only thing posing it.
+    private Dictionary<int, BonePose> Compose(Dictionary<int, BonePose>? under)
     {
-        if (_clips.TryGetValue(_current, out AnimationClipData? held))
-        {
-            _time = held.Length;
-            _holdingLastPose = true;
-        }
+        if (!_gesture.IsPlaying)
+            return under ?? Nothing; // no layer left: every channel written last frame falls to its rest
 
-        _stateApplied = false; // force SetState past its dirty check: the gesture displaced the clip
-        SetState(state.Stance, state.Moving);
+        AnimationClipData clip = _clips[_gesture.Clip];
+        if (_gestureBufClip != _gesture.Clip)
+        {
+            _gestureBuf.Clear(); // a different clip's bone set: flush before the overwrite sampling
+            _gestureBufClip = _gesture.Clip;
+        }
+        // The gesture's clock is NOT wrapped — it plays exactly once and the sampler clamps past the
+        // last key, which is what an Animation.Play of a non-looping clip does.
+        AnimationSampler.SampleOverwrite(clip, _gesture.Time, _gestureBuf);
+        // `Nothing` for a rig with no movement clip: the mask still applies, so the bones outside it fall
+        // to their rests rather than taking a swing they were never meant to see.
+        AnimationSampler.Overlay(under ?? Nothing, _gestureBuf, _gesture.Mask, _mergeBuf);
+        return _mergeBuf;
     }
 
     private Dictionary<int, BonePose> CurrentPose()
     {
         AnimationClipData clip = _clips[_current];
-        // A gesture holds its final pose instead of looping; the sampler clamps past the last key, so
-        // simply not wrapping the clock is what makes it play exactly once. That has to outlast the
-        // gesture itself — the clip is still the one-shot on the frames between the overlay ending and a
-        // movement clip taking over, and wrapping there would show the swing's first frame.
-        float t = _gesture.IsPlaying || _holdingLastPose
-            ? _time
-            : clip.Length > 0f ? _time % clip.Length : 0f;
+        float t = clip.Length > 0f ? _time % clip.Length : 0f;
         // Overwrite in place: the buffer holds exactly this clip's bones (Play clears it on switch),
         // so the per-frame dictionary Clear (bucket zeroing) is skipped entirely.
         AnimationSampler.SampleOverwrite(clip, t, _poseBuf);
