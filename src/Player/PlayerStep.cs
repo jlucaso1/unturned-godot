@@ -9,7 +9,6 @@ namespace UnturnedGodot;
 //
 // It lives apart from PlayerController so the behaviour can be exercised against a real physics world
 // without a player, a camera or input — see STEP_PROBE in Main.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class PlayerStep
 {
     // Call right after MoveAndSlide, with where the body started and the horizontal motion it wanted.
