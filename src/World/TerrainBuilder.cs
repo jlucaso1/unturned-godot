@@ -4,7 +4,6 @@ using UnturnedGodot.Data;
 
 namespace UnturnedGodot;
 
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static partial class TerrainBuilder
 {
     // One material shared by every tile (#4): 16 identical StandardMaterial3D instances become one, so
