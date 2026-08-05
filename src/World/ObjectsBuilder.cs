@@ -47,6 +47,14 @@ public static class ObjectsBuilder
     // Ceiling for that coarsening walk. Past the widest map a cell holds every copy of a group, so going
     // further cannot change the partition — this only bounds the loop against degenerate coordinates.
     private const float MaxCellMetres = 65_536f;
+    // How much wider than the wider of the two footprints a merge of two batches over the same mesh may
+    // leave them. A merged batch is one culling decision where there were two, so this is what stops the
+    // merge buying draw calls with rejection. Swept on the two maps: Germany reaches its whole saving by
+    // 0.02 and holds it to 1000, while PEI submits no extra geometry up to 0.05 and 996 extra primitives
+    // at its ground pose by 0.1 — so the default sits inside both plateaus, on the side that degrades
+    // gracefully. Zero merges only batches that do not widen the batch at all; large values merge every
+    // co-located pair and are the A/B control for the constraint.
+    private static readonly float BatchMergeGrowth = EnvFloat("UG_BATCH_MERGE_GROWTH", 0.02f, 0f, 1000f);
     private static readonly bool ChunkSparseObjects = EnvBool("UG_CHUNK_SPARSE_OBJECTS", true);
     private static readonly long SparseChunkMinTriangles =
         EnvLong("UG_SPARSE_OBJECT_MIN_TRIS", 0, 0, long.MaxValue);
@@ -115,17 +123,31 @@ public static class ObjectsBuilder
         int renderBatches = 0, sparseGroups = 0, sparseExtraBatches = 0;
         if (renderGeometry && EnvFlag.IsOn(OS.GetEnvironment("UG_OBJECT_PROFILE"), whenUnset: false))
             PrintObjectCosts(byMesh, meshLibrary, db);
-        foreach ((Guid guid, List<Transform3D> transforms) in byMesh)
+        if (renderGeometry)
         {
-            if (renderGeometry)
+            // A level index per distinct mesh RESOURCE, which is what "the same mesh" means to the
+            // renderer: two assets ModelLibrary deduplicated onto one ArrayMesh share it. See LevelIndex.
+            var levels = new List<ArrayMesh>();
+            var levelOf = new Dictionary<ulong, int>();
+            var partitioned = new List<RenderBatch>();
+
+            // No MaterialOverride: the mesh's per-submesh surface materials carry the textures.
+            // The lower level is the prefab's own, if it shipped one. AddLevels derives the distance past
+            // which it takes over from the batch it is actually given, so chunked cells switch on their own
+            // largest placement rather than on the whole map's.
+            foreach ((Guid guid, List<Transform3D> transforms) in byMesh)
             {
-                // No MaterialOverride: the mesh's per-submesh surface materials carry the textures.
                 ArrayMesh renderMesh = meshLibrary[guid];
-                // The prefab's own lower level, if it shipped one. AddLevels derives the distance past which
-                // it takes over from the batch it is actually given, so chunked cells switch on their own
-                // largest placement rather than on the whole map's.
                 ArrayMesh? lodMesh = LodEnabled && lod1Library != null
                     && lod1Library.TryGetValue(guid, out ArrayMesh? candidate) ? candidate : null;
+                var key = new RenderMeshKey(LevelIndex(levels, levelOf, renderMesh),
+                    lodMesh == null ? RenderMeshKey.NoLevel : LevelIndex(levels, levelOf, lodMesh));
+                // What may be folded in with another batch of the same mesh. A levelled group may not:
+                // AddLevels derives the switch distance from the placements it is handed, so a merged
+                // batch switches at a distance neither half would have used. Nor may transparent
+                // geometry: it is depth-sorted per render object and not between the instances inside
+                // one, so merging drops the sort between the two halves. See RenderBatchGrouping.
+                bool mergeable = lodMesh == null && !HasBlendedSurface(renderMesh);
                 // A visibility range is a property of the whole batch, never of the placements inside it: a
                 // batch spanning the map is wholly near or wholly far, so whichever level it picks says
                 // nothing about the objects the camera is actually looking at — and picking the far level for
@@ -156,17 +178,28 @@ public static class ObjectsBuilder
                         sparseExtraBatches += cells.Count - 1;
                     }
                     foreach (((int x, int z), List<Transform3D> inCell) in cells)
-                    {
-                        renderBatches += AddLevels(root, render, renderMesh, lodMesh, inCell);
-                    }
+                        partitioned.Add(new RenderBatch(key, chunkMetres, inCell, mergeable));
                 }
                 else
                 {
-                    renderBatches += AddLevels(root, render, renderMesh, lodMesh, transforms);
+                    // No cell size was promised for this group, so no merge may claim one either.
+                    partitioned.Add(new RenderBatch(key, 0f, transforms, mergeable));
                 }
                 withMesh += transforms.Count;
             }
 
+            List<MergedRenderGroup> submitted = RenderBatchGrouping.Merge(partitioned, BatchMergeGrowth);
+            foreach (MergedRenderGroup group in submitted)
+                renderBatches += AddLevels(root, render, levels[group.Key.Level0],
+                    group.Key.Level1 == RenderMeshKey.NoLevel ? null : levels[group.Key.Level1],
+                    group.Transforms);
+            if (submitted.Count < partitioned.Count)
+                Log.Print($"[unturned-godot] {label} batch merge: {partitioned.Count} partitioned "
+                    + $"batches share {submitted.Count} co-located mesh batches");
+        }
+
+        foreach ((Guid guid, List<Transform3D> transforms) in byMesh)
+        {
             // Only LARGE/MEDIUM objects block the player (SMALL objects have their collider stripped in
             // Unturned). Resources (trees/rocks/bushes) have no such gate: ResourceSpawnpoint instantiates
             // the Resource prefab with all of its colliders while the resource is alive — and at map load
@@ -226,6 +259,33 @@ public static class ObjectsBuilder
                 $"+{sparseExtraBatches} batches)");
 
         return root;
+    }
+
+    // Placements are collected per GUID because collision, ladders and asset policy are keyed there. The
+    // renderer only cares which mesh RESOURCE a placement draws, and ModelLibrary already hands one
+    // ArrayMesh to every asset whose cached geometry is byte-identical (UG_DEDUP_GPU) — so the RID, not
+    // the GUID, is the identity a batch is keyed on. See RenderBatchGrouping for what may then share one.
+    private static int LevelIndex(List<ArrayMesh> levels, Dictionary<ulong, int> levelOf, ArrayMesh mesh)
+    {
+        ulong rid = mesh.GetRid().Id;
+        if (levelOf.TryGetValue(rid, out int existing))
+            return existing;
+        levelOf.Add(rid, levels.Count);
+        levels.Add(mesh);
+        return levels.Count - 1;
+    }
+
+    // True when any surface of the mesh blends rather than being opaque or alpha-clipped. Only a blended
+    // surface depends on the order render objects are drawn in; a cutout one discards fragments and is
+    // order-independent, which is why the test is on Transparency and not on the presence of an alpha
+    // channel. See RenderBatchGrouping for why a blended batch is never merged.
+    private static bool HasBlendedSurface(ArrayMesh mesh)
+    {
+        for (int surface = 0; surface < mesh.GetSurfaceCount(); surface++)
+            if (mesh.SurfaceGetMaterial(surface) is BaseMaterial3D material
+                && material.Transparency != BaseMaterial3D.TransparencyEnum.Disabled)
+                return true;
+        return false;
     }
 
     private static float EnvFloat(string name, float fallback, float min, float max) =>
