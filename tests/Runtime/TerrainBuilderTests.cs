@@ -220,12 +220,14 @@ public class TerrainBuilderTests : TestClass
         Assert.DoesNotContain("uniform sampler2D layer5 :", code);
         Assert.Contains("uniform sampler2D control1 :", code); // a fifth layer needs a second control
         Assert.Contains("if (sample_unpainted || c1.r > 0.0)", code);
-        Assert.Contains("textureGrad(layer4, uv, duv_dx, duv_dy).rgb * c1.r", code);
+        Assert.Contains("texture(layer4, uv).rgb * c1.r", code);
         Assert.Contains("float total = c0.r + c0.g + c0.b + c0.a + c1.r;", code);
         Assert.Contains("ALBEDO = total > 0.0 ? albedo / total : albedo;", code);
-        // The gradients are taken in uniform control flow; sampling with them is what keeps anisotropic
-        // filtering intact inside a branch.
-        Assert.Contains("vec2 duv_dx = dFdx(uv);", code);
+        // The sample inside the branch keeps its implicit LOD — textureGrad measurably lost the
+        // anisotropic taps — and SPECULAR stays written, because the sky's indirect specular reads f0
+        // even though the render mode has disabled the direct lobe.
+        Assert.DoesNotContain("textureGrad", code);
+        Assert.Contains("SPECULAR = 0.0;", code);
     }
 
     // --- helpers -------------------------------------------------------------------------------------

@@ -33,16 +33,25 @@ public static partial class TerrainBuilder
     //   fewer needs ONE control texture instead of two, which is a sample and half the control VRAM.
     //
     //   Per pixel, most layers are zero. 87% of PEI's splat texels give all their weight to a single
-    //   layer and 99% to at most two, so a layer whose weight is zero here is skipped outright. The
-    //   gradients are taken once, outside the branches, and the samples use textureGrad — the derivative
-    //   of a value computed in uniform control flow, which keeps anisotropic filtering exactly as it was
-    //   (an implicit-LOD `texture()` inside a branch would have undefined derivatives).
+    //   layer and 99% to at most two, so a layer whose weight is zero here is skipped outright.
     //
     // Neither changes a pixel: skipping `sample * 0.0` removes a term that contributes +0.0, and `total`
-    // still sums every weight, so the normalized average is bit-identical to the eight-way form.
-    // `specular_disabled` is likewise free — SPECULAR was already 0, which makes f0 (and therefore the
-    // whole Schlick-GGX lobe) zero, so the render mode drops ALU that was multiplying out to nothing.
-    // It is what the flat fallback material below has always done.
+    // still sums every weight, so the normalized average is bit-identical to the eight-way form. That
+    // was checked rather than argued — a terrain-only PEI capture (`water/foliage/objects` switched off,
+    // so nothing animated is in frame) renders bit-for-bit the same before and after.
+    //
+    // The sample inside the branch keeps its IMPLICIT LOD. `uv` is computed in uniform control flow, so
+    // every lane of the quad — helper lanes included — holds the value the derivative is taken from, and
+    // the sampler picks the same mip and the same anisotropic taps it always did. The spec-tidy
+    // alternative, hoisting dFdx/dFdy and sampling with textureGrad, was tried and rejected on evidence:
+    // it came back visibly blurrier (deltas to 110/255 against the unmodified render), because explicit
+    // gradients drop out of the anisotropic path on at least one driver.
+    //
+    // `specular_disabled` rides along for free: SPECULAR is 0, which makes f0 zero and with it the whole
+    // Schlick-GGX lobe, so the render mode drops ALU that was multiplying out to nothing. SPECULAR still
+    // has to be WRITTEN — the render mode only guards direct light, while the sky's indirect specular
+    // reads f0 all the same, and leaving SPECULAR at its 0.5 default lit the ground measurably brighter.
+    // Both halves are what the flat fallback material below has always done.
     private static readonly Dictionary<int, Shader> SplatShaders = new();
 
     private static Shader SplatShaderFor(int painted)
@@ -77,15 +86,13 @@ public static partial class TerrainBuilder
         code.Append("void fragment() {\n");
         for (int control = 0; control < controls; control++)
             code.Append($"    vec4 c{control} = texture(control{control}, UV2);\n");
-        code.Append("    vec2 uv = world_xz * tiling;\n");
-        code.Append("    vec2 duv_dx = dFdx(uv);\n");
-        code.Append("    vec2 duv_dy = dFdy(uv);\n");
+        code.Append("    vec2 uv = world_xz * tiling; // uniform control flow: the sampler's derivative\n");
         code.Append("    vec3 albedo = vec3(0.0);\n");
         for (int slot = 0; slot < painted; slot++)
         {
             string weight = $"c{slot / 4}.{"rgba"[slot % 4]}";
             code.Append($"    if (sample_unpainted || {weight} > 0.0)\n");
-            code.Append($"        albedo += textureGrad(layer{slot}, uv, duv_dx, duv_dy).rgb * {weight};\n");
+            code.Append($"        albedo += texture(layer{slot}, uv).rgb * {weight};\n");
         }
         code.Append("    float total = ");
         for (int slot = 0; slot < painted; slot++)
@@ -93,6 +100,8 @@ public static partial class TerrainBuilder
         code.Append(";\n");
         code.Append("    ALBEDO = total > 0.0 ? albedo / total : albedo;\n");
         code.Append("    ROUGHNESS = 1.0;\n");
+        code.Append("    SPECULAR = 0.0; // f0 = 0: the sky's indirect specular reads this even with the\n");
+        code.Append("                    // direct lobe disabled, and its 0.5 default brightens the ground\n");
         code.Append("}\n");
         return code.ToString();
     }
