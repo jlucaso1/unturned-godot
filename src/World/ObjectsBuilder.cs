@@ -142,6 +142,12 @@ public static class ObjectsBuilder
                     && lod1Library.TryGetValue(guid, out ArrayMesh? candidate) ? candidate : null;
                 var key = new RenderMeshKey(LevelIndex(levels, levelOf, renderMesh),
                     lodMesh == null ? RenderMeshKey.NoLevel : LevelIndex(levels, levelOf, lodMesh));
+                // What may be folded in with another batch of the same mesh. A levelled group may not:
+                // AddLevels derives the switch distance from the placements it is handed, so a merged
+                // batch switches at a distance neither half would have used. Nor may transparent
+                // geometry: it is depth-sorted per render object and not between the instances inside
+                // one, so merging drops the sort between the two halves. See RenderBatchGrouping.
+                bool mergeable = lodMesh == null && !HasBlendedSurface(renderMesh);
                 // A visibility range is a property of the whole batch, never of the placements inside it: a
                 // batch spanning the map is wholly near or wholly far, so whichever level it picks says
                 // nothing about the objects the camera is actually looking at — and picking the far level for
@@ -172,12 +178,12 @@ public static class ObjectsBuilder
                         sparseExtraBatches += cells.Count - 1;
                     }
                     foreach (((int x, int z), List<Transform3D> inCell) in cells)
-                        partitioned.Add(new RenderBatch(key, chunkMetres, inCell));
+                        partitioned.Add(new RenderBatch(key, chunkMetres, inCell, mergeable));
                 }
                 else
                 {
                     // No cell size was promised for this group, so no merge may claim one either.
-                    partitioned.Add(new RenderBatch(key, 0f, transforms));
+                    partitioned.Add(new RenderBatch(key, 0f, transforms, mergeable));
                 }
                 withMesh += transforms.Count;
             }
@@ -267,6 +273,19 @@ public static class ObjectsBuilder
         levelOf.Add(rid, levels.Count);
         levels.Add(mesh);
         return levels.Count - 1;
+    }
+
+    // True when any surface of the mesh blends rather than being opaque or alpha-clipped. Only a blended
+    // surface depends on the order render objects are drawn in; a cutout one discards fragments and is
+    // order-independent, which is why the test is on Transparency and not on the presence of an alpha
+    // channel. See RenderBatchGrouping for why a blended batch is never merged.
+    private static bool HasBlendedSurface(ArrayMesh mesh)
+    {
+        for (int surface = 0; surface < mesh.GetSurfaceCount(); surface++)
+            if (mesh.SurfaceGetMaterial(surface) is BaseMaterial3D material
+                && material.Transparency != BaseMaterial3D.TransparencyEnum.Disabled)
+                return true;
+        return false;
     }
 
     private static float EnvFloat(string name, float fallback, float min, float max) =>

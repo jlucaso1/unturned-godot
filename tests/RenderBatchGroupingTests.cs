@@ -120,6 +120,38 @@ public class RenderBatchGroupingTests
         Assert.Equal(new[] { At(0f), At(5_000f), At(2_000f) }, Assert.Single(merged).Transforms);
     }
 
+    // A batch the caller marked ineligible — an authored lower level, whose switch distance is derived
+    // from the placements in the batch, or an alpha-blended surface, whose draw order is per render
+    // object — is submitted exactly as the partitioner emitted it.
+    [Fact]
+    public void Merge_IneligibleBatch_IsNeitherFoldedInNorFoldedInto()
+    {
+        var eligible = new RenderBatch(RenderMeshKey.Single(0), Cell, new[] { At(0f), At(20f) });
+        var ineligible = new RenderBatch(RenderMeshKey.Single(0), Cell, new[] { At(5f) }, Mergeable: false);
+        var alsoEligible = new RenderBatch(RenderMeshKey.Single(0), Cell, new[] { At(10f) });
+
+        List<MergedRenderGroup> merged = RenderBatchGrouping.Merge(
+            new[] { eligible, ineligible, alsoEligible });
+
+        Assert.Equal(2, merged.Count);
+        // The ineligible batch did not join the first bucket, and the third batch was not diverted into
+        // the ineligible one either — it went to the bucket it would have joined anyway.
+        Assert.Equal(new[] { At(0f), At(20f), At(10f) }, merged[0].Transforms);
+        Assert.Equal(new[] { At(5f) }, merged[1].Transforms);
+    }
+
+    [Fact]
+    public void Merge_TwoIneligibleBatchesOfOneMesh_StayApart()
+    {
+        List<MergedRenderGroup> merged = RenderBatchGrouping.Merge(new[]
+        {
+            new RenderBatch(RenderMeshKey.Single(0), Cell, new[] { At(0f) }, Mergeable: false),
+            new RenderBatch(RenderMeshKey.Single(0), Cell, new[] { At(0f) }, Mergeable: false),
+        });
+
+        Assert.Equal(2, merged.Count);
+    }
+
     [Fact]
     public void Merge_DifferentBaseLevels_StayApart()
     {
@@ -191,6 +223,33 @@ public class RenderBatchGroupingTests
             growth);
 
         Assert.Equal(expected, merged.Count);
+    }
+
+    // The allowance is 2% of an original batch, not 2% compounded per merge. Measuring each candidate
+    // against the bucket's running union instead would let a chain of slightly shifted batches ratchet
+    // the batch open one step at a time, all the way out to the cell size.
+    [Fact]
+    public void Merge_ChainOfShiftedBatches_DoesNotRatchetPastTheAllowance()
+    {
+        // Ten batches 100 m wide, each starting 2 m after the last. Every one overlaps the batch before
+        // it and every single step is inside the 5% allowance, so a union-relative check accepts all of
+        // them and walks one submission out to 118 m — nearly a fifth wider than any batch it holds.
+        var batches = new List<RenderBatch>();
+        for (int i = 0; i < 10; i++)
+            batches.Add(new RenderBatch(RenderMeshKey.Single(0), 1_000f,
+                new[] { At(i * 2f), At(i * 2f + 100f) }));
+
+        List<MergedRenderGroup> merged = RenderBatchGrouping.Merge(batches, growth: 0.05f);
+
+        Assert.True(merged.Count > 1, "the chain was expected to merge at least once before being cut");
+
+        foreach (MergedRenderGroup group in merged)
+        {
+            float min = group.Transforms.Min(t => t.Origin.X);
+            float max = group.Transforms.Max(t => t.Origin.X);
+            Assert.True(max - min <= 105f, $"a submission spans {max - min:0.#} m, over the 5% allowance");
+        }
+        Assert.Equal(batches.Sum(b => b.Transforms.Count), merged.Sum(g => g.Transforms.Count));
     }
 
     // A batch joins the FIRST bucket that accepts it, so a batch that could extend either of two lands in

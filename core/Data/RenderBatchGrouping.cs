@@ -17,8 +17,20 @@ public readonly record struct RenderMeshKey(int Level0, int Level1)
 // One batch as the spatial partitioner emitted it: the mesh levels it draws, the placements in it, and
 // the width the partition allows a batch of that group to cover — its cell size, or a non-positive value
 // when the group was not partitioned at all and no width is being promised.
+//
+// `Mergeable` is false for a batch whose submission is load-bearing beyond the geometry in it, so it is
+// submitted exactly as the partitioner emitted it. Two things disqualify a batch, both because the merge
+// would change the frame rather than only how it is packed:
+//
+//   * an authored lower level. The switch distance a batch uses is derived from the placements inside it
+//     — the largest scale among them, plus the batch's own radius — so a merged batch switches at a
+//     distance neither of its halves would have used, and the half that used to switch earlier keeps
+//     drawing LOD0 out to the merged range. That is different geometry, not different packing.
+//   * an alpha-blended surface. Transparent geometry is depth-sorted per render object and never between
+//     the instances inside one MultiMesh, so folding two transparent batches into one drops the sort
+//     between them and overlapping glass can blend in a different order.
 public readonly record struct RenderBatch(RenderMeshKey Key, float MaxExtentMetres,
-    IReadOnlyList<Transform3D> Transforms);
+    IReadOnlyList<Transform3D> Transforms, bool Mergeable = true);
 
 // One submitted batch: the placements of every input batch that was merged into it.
 public sealed class MergedRenderGroup
@@ -66,6 +78,12 @@ public static class RenderBatchGrouping
         public RenderMeshKey Key;
         public float Limit;
         public float MinX, MaxX, MinZ, MaxZ;
+        // The widest footprint any single batch in this bucket arrived with, per axis. The growth check
+        // is against this and never against the running union: comparing against the union would let each
+        // accepted merge raise the bar for the next one, so a chain of slightly shifted batches could
+        // ratchet 2% at a time all the way out to the cell-size cap. The allowance is meant to be 2% of
+        // an original batch, not 2% compounded per merge.
+        public float WidestX, WidestZ;
         public List<Transform3D> Transforms = new();
     }
 
@@ -87,6 +105,24 @@ public static class RenderBatchGrouping
                 continue;
             Footprint area = Footprint.Of(batch.Transforms);
             float limit = batch.MaxExtentMetres > 0f ? batch.MaxExtentMetres : float.PositiveInfinity;
+            if (!batch.Mergeable)
+            {
+                // Submitted on its own, and offered to nobody: an ineligible batch must not collect
+                // others into itself either.
+                buckets.Add(new Bucket
+                {
+                    Key = batch.Key,
+                    Limit = limit,
+                    MinX = area.MinX,
+                    MaxX = area.MaxX,
+                    MinZ = area.MinZ,
+                    MaxZ = area.MaxZ,
+                    WidestX = area.MaxX - area.MinX,
+                    WidestZ = area.MaxZ - area.MinZ,
+                    Transforms = new List<Transform3D>(batch.Transforms),
+                });
+                continue;
+            }
             if (!byKey.TryGetValue(batch.Key, out List<Bucket>? candidates))
                 byKey.Add(batch.Key, candidates = new List<Bucket>());
 
@@ -101,8 +137,8 @@ public static class RenderBatchGrouping
                 float unionZ = MathF.Max(candidate.MaxZ, area.MaxZ) - MathF.Min(candidate.MinZ, area.MinZ);
                 if (unionX > joint || unionZ > joint)
                     continue;  // wider than the partition promised a batch of this group would be
-                float wideX = MathF.Max(candidate.MaxX - candidate.MinX, area.MaxX - area.MinX);
-                float wideZ = MathF.Max(candidate.MaxZ - candidate.MinZ, area.MaxZ - area.MinZ);
+                float wideX = MathF.Max(candidate.WidestX, area.MaxX - area.MinX);
+                float wideZ = MathF.Max(candidate.WidestZ, area.MaxZ - area.MinZ);
                 if (unionX > wideX * (1f + growth) || unionZ > wideZ * (1f + growth))
                     continue;  // the merge would widen the batch, and a wider batch is culled less often
                 target = candidate;
@@ -119,6 +155,8 @@ public static class RenderBatchGrouping
                     MaxX = area.MaxX,
                     MinZ = area.MinZ,
                     MaxZ = area.MaxZ,
+                    WidestX = area.MaxX - area.MinX,
+                    WidestZ = area.MaxZ - area.MinZ,
                 };
                 buckets.Add(target);
                 candidates.Add(target);
@@ -126,6 +164,8 @@ public static class RenderBatchGrouping
             else
             {
                 target.Limit = MathF.Min(target.Limit, limit);
+                target.WidestX = MathF.Max(target.WidestX, area.MaxX - area.MinX);
+                target.WidestZ = MathF.Max(target.WidestZ, area.MaxZ - area.MinZ);
                 target.MinX = MathF.Min(target.MinX, area.MinX);
                 target.MaxX = MathF.Max(target.MaxX, area.MaxX);
                 target.MinZ = MathF.Min(target.MinZ, area.MinZ);

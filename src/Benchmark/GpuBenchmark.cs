@@ -116,6 +116,11 @@ public static class GpuBenchmark
                 renderObjects, sm, poses.Count, perPose);
             AddFoliageMetrics(tree, report.Metrics, foliageSettled);
 
+            BenchmarkRunner.Finish(report, $"{mapName}-gpu", DiffOptions(),
+                "gpu.frameMs.* are wall-clock medians — noisy, and CPU-bound when draw-call limited; "
+                    + "foliage residency counts compare only with foliage.settled=1 on both sides");
+            failed = false;
+
             // Optional visual check: UG_SHOT=<path> saves a PNG from one of the poses that were just
             // measured, so the frame photographed is the frame the counts describe. UG_SHOT_POSE names
             // which (default `ground_diag`, the only vantage where directional shadows — capped ~100 m
@@ -131,6 +136,7 @@ public static class GpuBenchmark
             {
                 string wanted = System.Environment.GetEnvironmentVariable("UG_SHOT_POSE") ?? "ground_diag";
                 bool everyPose = string.Equals(wanted, "all", StringComparison.OrdinalIgnoreCase);
+                int captured = 0;
                 foreach ((string name, Transform3D xform) in poses)
                 {
                     if (!everyPose && name != wanted)
@@ -139,20 +145,40 @@ public static class GpuBenchmark
                     // they were sampled above; anything else keeps the whole-scene range.
                     camera.Far = name.StartsWith("ground", StringComparison.Ordinal) ? 4000f : sceneFar;
                     camera.GlobalTransform = xform;
-                    for (int i = 0; i < 20; i++)
+                    for (int i = 0; i < SettleFrames; i++)
                         await context.ToSignal(tree, SceneTree.SignalName.ProcessFrame);
+                    // The camera jump moves the foliage streamer's visible set, and it refills on a worker
+                    // over an unknown number of frames. Waiting for the settling predicate rather than a
+                    // fixed frame count is what keeps two captures of the same build byte-identical — a
+                    // fixed count photographs whatever had landed by then, which differs between machines
+                    // and between runs, and a capture that cannot reproduce itself cannot prove anything.
+                    if (!await FoliageBenchmarkSettling.WaitAsync(context, tree))
+                        Log.PushWarning($"[benchmark] foliage was still filling when '{name}' was "
+                            + "captured; this image is not comparable against another run");
                     string path = everyPose ? SuffixedPath(shotPath, name) : shotPath;
                     context.GetViewport().GetTexture().GetImage().SavePng(path);
                     Log.Print($"[benchmark] screenshot saved: {path}");
+                    captured++;
                     if (!everyPose)
                         break;
                 }
+                // Writing nothing is the dangerous outcome, not an error: automation that diffs two
+                // captures would compare whatever the last run left behind and report that the frame is
+                // unchanged. A pose can go missing from a typo in UG_SHOT_POSE, or because TryGroundPoint
+                // found no land on a sparse or workshop map and the ground poses were never generated.
+                if (captured == 0)
+                {
+                    var names = new List<string>(poses.Count);
+                    foreach ((string name, Transform3D _) in poses)
+                        names.Add(name);
+                    Log.PrintErr($"[benchmark] UG_SHOT_POSE='{wanted}' matched none of the poses this run "
+                        + $"sampled ({string.Join(", ", names)}); no screenshot written.");
+                    // The report is still written — the counts were measured fine — but the run exits
+                    // non-zero so a script that asked for a capture cannot mistake a stale file for one.
+                    failed = true;
+                }
             }
 
-            BenchmarkRunner.Finish(report, $"{mapName}-gpu", DiffOptions(),
-                "gpu.frameMs.* are wall-clock medians — noisy, and CPU-bound when draw-call limited; "
-                    + "foliage residency counts compare only with foliage.settled=1 on both sides");
-            failed = false;
         }
         catch (Exception e)
         {
