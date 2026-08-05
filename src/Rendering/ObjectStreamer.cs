@@ -68,6 +68,10 @@ public partial class ObjectStreamer : Node
     // both the cold-load check and which slice of the shared cache is realised.
     private HashSet<Guid> _neededGuids = new();
     public IReadOnlySet<Guid> NeededGuids => _neededGuids;
+
+    // The level's breakable placements (trees, rocks, rubble props) with the health off their assets,
+    // built once the map has been read and handed to the hosted server. Null until then.
+    public UnturnedGodot.Damage.DamageableWorld? Damageable { get; private set; }
     private List<ContentExtraction.BundlePlan> _plans = new();
 
     private readonly ConcurrentQueue<string> _readyKeys = new();
@@ -531,6 +535,14 @@ public partial class ObjectStreamer : Node
         _totalTextureKeys = _registry.PendingKeyCount;
         Log.Print($"[stream] built {withMesh}/{_objects.Count + _npcs.Count} objects ({meshLibrary.Count} meshes), " +
             $"{_totalTextureKeys} texture keys pending");
+
+        // The hosted server's ledger of what can be broken, derived from the SAME placements and asset
+        // database the bodies above were built from — which is the whole reason it is taken here rather
+        // than re-read later: an independently loaded copy could disagree about what stands where, and
+        // then a punch would break the wrong tree. Distilled to positions and hit points, so it survives
+        // the drop below at a fraction of the size.
+        Damageable = UnturnedGodot.Damage.DamageableWorldBuilder.Build(_objects, _db);
+        Log.Print($"[stream] breakable placements: {Damageable.Count}");
 
         // These parsed inputs are consumed only up to here — the MultiMesh buffers now hold their own
         // copies and the streaming worker already captured _db by value. Drop them so the ~32 MB foliage

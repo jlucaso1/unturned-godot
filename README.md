@@ -21,7 +21,8 @@ and checked byte-for-byte against the game's own data, using
 | **Foliage** | `Foliage.blob` grass, flowers and pebbles as chunked MultiMeshes (~667k instances on PEI, 7.2M on Germany) |
 | **Roads / water** | Bezier splines lofted through the port of `Road.buildMesh`, real road textures; sea plane from the map's lighting |
 | **Lighting** | Day/night cycle driven by the map's `Lighting.dat` keyframes: sun, ambient, fog, ported skybox (sun disc, stars, moon phases, clouds) |
-| **Player** | Port of `PlayerMovement`/`PlayerLook`/`PlayerStance` with the game's own constants; real character model, skeleton and animations; first/third person. Left click throws a punch (`PlayerEquipment`), replicated so everyone sees it; ladders are climbable — walk into one or look at it and interact, both through the game's own climb rules |
+| **Player** | Port of `PlayerMovement`/`PlayerLook`/`PlayerStance` with the game's own constants; real character model, skeleton and animations; first/third person. Left click throws a punch (`PlayerEquipment`), animated from either camera and replicated so everyone sees it; ladders are climbable — walk into one or look at it and interact, both through the game's own climb rules |
+| **Damage** | `PlayerEquipment`'s punch table, ported number for number: 15 base scaled per limb, 20 to a resource, 5 to a destructible object, 2 to a buildable, and the vehicle turned off. Zombies carry the map's own table health and die to it; trees and rubble carry theirs off the asset `.dat` (`Health`, `Vulnerable_To_Fists`, `Rubble_Health`, `Rubble_Blade_ID`) |
 | **Audio** | Footsteps/landings resolved through the terrain splat like `PhysicsTool.GetTerrainMaterialName`, clips extracted from the master bundle's FSB5 banks |
 | **Zombies** | Spawn tables, navigation bounds and the pre-baked navmeshes; detection, hunting and the `Zombie.cs` animation set |
 | **Vehicles** | The map's own `Spawns/Vehicles.dat` rolled through its spawn tables and redirectors, as many as the level's size allows, each drawn from its real `Vehicle.prefab`. Parked scenery for now: no driving, physics or damage |
@@ -36,27 +37,36 @@ in view.
   needs — it costs one extra forward pass over the bundle on a cold cache, and only when something still
   to be extracted has a streamed buffer. Quantized geometry (`m_CompressedMesh`), which workshop bundles
   lean on heavily, and texture pixels in `.resS` were already decoded.
-- **Gameplay**: no items, inventory, building, damage or survival stats. Zombies exist and hunt, and you
-  can swing at them, but the punch is an animation only — nothing takes damage yet. Vehicles spawn and
+- **Gameplay**: no items, inventory, building or survival stats. Punching works — zombies take the
+  game's own per-limb damage, aggro onto whoever hit them, and die — but the fist is the only damage
+  source there is, and nothing yet gives the player a health bar of their own. Vehicles spawn and
   render, but they are scenery: nothing drives, collides with or damages them, and a vehicle sits at the
   height its spawnpoint was authored at instead of settling onto the ground as its rigidbody would.
+- **First-person arms**: the swing animates in first person, but what it animates is the third-person
+  body drawn from inside its own head, not the game's purpose-built arms. The `Viewmodel` rig carries a
+  single renderer whose skin weights live in the compressed vertex stream this port does not decode yet,
+  so it imports as an unposable bind-pose mesh. The stand-in rig does ride its own skull the way the game
+  parents its `ViewmodelCamera` under `firstSkeleton/Spine/Skull`, so the framing holds across stances and
+  through a swing; what cannot be borrowed is that camera's authored *rotation*, which only means something
+  on the rig it was authored against. `UG_VIEWMODEL_OFFSET="x,y,z"` nudges it meanwhile.
+- **Breaking the world visually**: a punched tree or rubble pile loses health on the server and the
+  destruction is reported (`PUNCH_LOG=1`), but the placement is still drawn. Objects are rendered as
+  batched `MultiMesh` instances with no per-instance handle, so removing one — or swapping a felled tree
+  for its stump prefab, which is what the game does — needs that batching to carry an index first. Worth
+  knowing: none of the game's own trees is `Vulnerable_To_Fists`, so bare hands never fell one anyway;
+  the rubble props are what a fist really breaks.
 - **Ladders**: the ones a map places as objects are climbable. Player-built barricade ladders are not,
   because barricades do not exist here yet — their prefabs carry the same climbing volume on the same
   layer, so they come for free once they do. Neither does the climb/swim transition, for the same reason:
   there is no swimming stance to move between.
-<<<<<<< HEAD
 - **NPC clothing**: the NPC characters Russia places stand in the player rig's default look. Their
   `.dat` names a Shirt, Pants, Hat and Face, and those are item assets whose meshes are a family nothing
   reads yet, so every one of them is currently the same undressed character.
-=======
-- **NPC characters**: Russia places 40 of them (`Bundles/NPCs/Characters`), and nothing reads that asset
-  family yet, so each one stands there as a placeholder box instead of a dressed character.
 - **Projected decals**: the `Decal` objects a map places (graffiti, faction tags) draw their texture on a
   flat quad at the authored transform. Unturned projects them onto whatever is underneath, so one on
   uneven ground creases where this stays flat — every one the official maps place sits on a wall or a
   road, where the two agree. The decal a prefab carries as a child component (the blast marks Germany
   scatters) is a separate mechanism and is not read yet.
->>>>>>> origin/main
 
 ## Requirements
 
@@ -70,7 +80,9 @@ Nothing else is needed: the master bundle, maps and assets are read directly out
 
 To *develop* rather than play, the Steam install is optional: `./scripts/fetch-game-data.sh` pulls the
 same content out of Unturned's anonymously-downloadable dedicated server, which is what CI and the agent
-sandboxes use. See [Game content without a Steam install](#game-content-without-a-steam-install).
+sandboxes use — including the character prefabs, which the server keeps in `Unturned_Headless_Data/`
+where the retail client keeps them in `Unturned_Data/`. See
+[Game content without a Steam install](#game-content-without-a-steam-install).
 
 ## Run
 
@@ -256,7 +268,7 @@ content the client reads. That is enough for the whole suite, and it needs no St
 and no Steam client:
 
 ```sh
-./scripts/fetch-game-data.sh                       # bundles + PEI (~165 MB) into build/game-data
+./scripts/fetch-game-data.sh                       # bundles + PEI + prefabs (~200 MB) into build/game-data
 export UNTURNED_PATH="$(./scripts/fetch-game-data.sh --print-dir)"
 dotnet test tests/UnturnedGodot.Tests.csproj       # now with the data-backed tests running for real
 ```

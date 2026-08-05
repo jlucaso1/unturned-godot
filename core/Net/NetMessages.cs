@@ -38,6 +38,7 @@ public enum ENetMessage : byte
     // renumbers them, and a version query between mismatched builds then decodes as some other message
     // and times out instead of reporting the mismatch it exists to report.
     PlayerGesture, // server -> all but the owner, reliable: a one-shot hand animation (a punch today)
+    ZombieKilled,  // server -> a region's clients, reliable: zombies that died this tick
 }
 
 // Why a Hello was refused. Sent before the connection is closed so the player is told what happened
@@ -121,14 +122,29 @@ public readonly struct InputCommand
     // has already answered and answers nothing twice.
     public readonly bool HasSwing;
 
-    // Wraps, and is only ever compared for EQUALITY against the last swing played — never ordered. Seven
-    // bits is far more than the two frames a repeat spans.
+    // Wraps, and is compared as a wrap-safe seven-bit ORDER against the last swing played: the same
+    // number is the repeat of a swing already answered, and a lower one is a swing that reached the
+    // server behind a newer swing and must not be answered a second time. Seven bits is far more than
+    // the two frames a repeat spans.
     public readonly byte SwingSequence;
     public readonly EPlayerPunch SwingFist;
 
+    // The aim the swing was thrown WITH, which is not necessarily this frame's.
+    //
+    // Input is unreliable, so the frame carrying a swing is repeated for a couple of ticks. If the first
+    // copy is lost, the copy that reaches the server first belongs to a LATER frame with a later yaw,
+    // pitch and stance — and judging the punch by that frame's aim would raycast from where the player is
+    // looking now rather than where they were looking when they swung. The swing therefore carries its
+    // own aim, pinned when the owner's hands accepted it, while the frame's own yaw/pitch/stance stay
+    // live because movement still needs them. On the frame that threw the swing the two are equal.
+    public readonly byte SwingYaw;
+    public readonly byte SwingPitch;
+    public readonly EPlayerStance SwingStance;
+
     public InputCommand(uint frame, sbyte inputX, sbyte inputY, bool jump, bool sprint, byte yaw, byte pitch,
         EPlayerStance stance = EPlayerStance.Stand, bool grounded = true,
-        bool hasSwing = false, byte swingSequence = 0, EPlayerPunch swingFist = EPlayerPunch.Left)
+        bool hasSwing = false, byte swingSequence = 0, EPlayerPunch swingFist = EPlayerPunch.Left,
+        byte? swingYaw = null, byte? swingPitch = null, EPlayerStance? swingStance = null)
     {
         Frame = frame;
         InputX = inputX;
@@ -144,13 +160,19 @@ public readonly struct InputCommand
         HasSwing = hasSwing;
         SwingSequence = swingSequence;
         SwingFist = swingFist;
+        // A caller that does not pin one means "this frame is the swing frame", which is the truth on the
+        // frame the swing was minted and the honest default everywhere else.
+        SwingYaw = swingYaw ?? yaw;
+        SwingPitch = swingPitch ?? pitch;
+        SwingStance = swingStance ?? stance;
     }
 
     public InputCommand(uint frame, sbyte inputX, sbyte inputY, bool jump, bool sprint, byte yaw, byte pitch,
         EPlayerStance stance, Vector3 position, bool grounded = true,
-        bool hasSwing = false, byte swingSequence = 0, EPlayerPunch swingFist = EPlayerPunch.Left)
+        bool hasSwing = false, byte swingSequence = 0, EPlayerPunch swingFist = EPlayerPunch.Left,
+        byte? swingYaw = null, byte? swingPitch = null, EPlayerStance? swingStance = null)
         : this(frame, inputX, inputY, jump, sprint, yaw, pitch, stance, grounded, hasSwing, swingSequence,
-            swingFist)
+            swingFist, swingYaw, swingPitch, swingStance)
     {
         HasPosition = true;
         Position = position;
@@ -205,7 +227,11 @@ public static class NetMessages
     // Bump whenever a message layout changes; the server refuses mismatched clients at the handshake.
     // Version 9 does not move a byte: it adds the value 0 (Climb) to the stance a build can send, which
     // a version 8 peer would read as a stance it has no state for. Refusing the mix is the cheap answer.
-    public const byte ProtocolVersion = 9;
+    // Version 10 adds ZombieKilled, which a version 9 client would drop as an unknown type — leaving
+    // the corpse of every punched zombie standing on its screen forever.
+    // Version 11 widens the Input swing block by the three bytes of the swing's own aim, so a version 10
+    // client's swing frames would be read three bytes short and every field after them would be garbage.
+    public const byte ProtocolVersion = 11;
 
     // Two level names denote the same world. The name on the wire is the map's FOLDER name — the one
     // identity that survives the trip between two machines (paths and workshop ids do not) — and it
@@ -431,7 +457,14 @@ public static class NetMessages
         w.Write(input.Pitch);
         w.Write((byte)input.Stance);
         if (input.HasSwing)
+        {
             w.Write((byte)(((input.SwingSequence & 0x7F) << 1) | (input.SwingFist == EPlayerPunch.Right ? 1 : 0)));
+            // The swing's own aim, so a repeat that arrives first is still judged by the frame that
+            // threw it. Three bytes on the handful of frames a session's punches occupy.
+            w.Write(input.SwingYaw);
+            w.Write(input.SwingPitch);
+            w.Write((byte)input.SwingStance);
+        }
         if (input.HasPosition)
         {
             w.Write(input.Position.X);
@@ -457,18 +490,24 @@ public static class NetMessages
         bool hasSwing = (flags & 16) != 0;
         byte swingSequence = 0;
         EPlayerPunch swingFist = EPlayerPunch.Left;
+        byte? swingYaw = null;
+        byte? swingPitch = null;
+        EPlayerStance? swingStance = null;
         if (hasSwing)
         {
             byte swing = r.ReadByte();
             swingSequence = (byte)(swing >> 1);
             swingFist = (swing & 1) != 0 ? EPlayerPunch.Right : EPlayerPunch.Left;
+            swingYaw = r.ReadByte();
+            swingPitch = r.ReadByte();
+            swingStance = (EPlayerStance)r.ReadByte();
         }
         if ((flags & 4) == 0)
             return new InputCommand(frame, x, y, jump, sprint, yaw, pitch, stance, grounded, hasSwing,
-                swingSequence, swingFist);
+                swingSequence, swingFist, swingYaw, swingPitch, swingStance);
         var position = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
         return new InputCommand(frame, x, y, jump, sprint, yaw, pitch, stance, position, grounded, hasSwing,
-            swingSequence, swingFist);
+            swingSequence, swingFist, swingYaw, swingPitch, swingStance);
     }
 
     // A one-shot hand animation somebody else performed. Reliable and event-shaped rather than a bit in

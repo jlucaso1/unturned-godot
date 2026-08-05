@@ -151,6 +151,46 @@ public static class ZombieNetMessages
         return (tick, states);
     }
 
+    // The zombies that died this tick, for one region. Reliable and event-shaped for the same reason a
+    // gesture is: a death is a moment, and the state stream carries no "alive" bit a client could infer
+    // it from — an unreplicated death simply leaves the avatar standing there, since the server stops
+    // sending snapshots for a zombie that no longer exists.
+    //
+    // The bound rides along like the list's does, so a client can ignore a death in a region it has
+    // already walked out of rather than reaching into avatars it is about to drop wholesale anyway.
+    //
+    // One byte of count, like the list and snapshot payloads: a region holds at most 255 zombies
+    // (NavBound.MaxZombies is a byte), so a single tick's deaths cannot overflow it.
+    public static byte[] WriteZombieKilled(byte bound, IReadOnlyList<ushort> ids)
+    {
+        ArgumentNullException.ThrowIfNull(ids);
+        // The count header is one byte, and a silent truncation here would be the worst possible
+        // failure: a payload advertising zero ids that the reader believes, leaving every one of those
+        // corpses standing forever. A region cannot hold more than 255 zombies, so this can only fire
+        // on a caller that has already gone wrong somewhere else.
+        if (ids.Count > byte.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(ids),
+                $"a ZombieKilled payload carries at most {byte.MaxValue} ids, not {ids.Count}");
+        var payload = new byte[3 + (ids.Count * 2)];
+        payload[0] = (byte)ENetMessage.ZombieKilled;
+        payload[1] = bound;
+        payload[2] = (byte)ids.Count;
+        for (int i = 0; i < ids.Count; i++)
+            BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(3 + (i * 2)), ids[i]);
+        return payload;
+    }
+
+    public static (byte Bound, List<ushort> Ids) ReadZombieKilled(byte[] payload)
+    {
+        using BinaryReader r = Reader(payload);
+        byte bound = r.ReadByte();
+        int count = r.ReadByte();
+        var ids = new List<ushort>(count);
+        for (int i = 0; i < count; i++)
+            ids.Add(r.ReadUInt16());
+        return (bound, ids);
+    }
+
     private static BinaryReader Reader(byte[] payload)
     {
         var r = new BinaryReader(new MemoryStream(payload));

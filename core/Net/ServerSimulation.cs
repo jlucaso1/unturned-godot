@@ -6,7 +6,21 @@ using UnturnedGodot.Player;
 namespace UnturnedGodot.Net;
 
 // One hand animation a player performed on a tick, for the server to replicate.
-public readonly record struct PlayerGestureEvent(byte PlayerId, EPlayerGesture Gesture);
+//
+// `Yaw`/`Pitch`/`Stance` are the ones the input frame that ANNOUNCED the gesture carried, not the ones
+// the tick it goes out on happens to be simulating. The two part company whenever a burst of datagrams
+// arrives together: a swing is accepted the moment its packet lands (see AcceptSwing), while the loop
+// still plays one queued movement frame per tick, so by the time the gesture is emitted the state can be
+// several frames behind the frame the player actually swung on. A player turns 180 degrees inside three
+// ticks, so anything deciding WHAT a swing hit has to read the swing's own angles or it is aiming a
+// third of a second into the past.
+//
+// Angles are the client's word either way — ApplyTrustedPosition takes them verbatim from whatever frame
+// it plays — so carrying them here trusts the client with nothing new. The POSITION deliberately does
+// not travel: that one is validated against a speed budget, and a punch resolves from the authoritative
+// position rather than from a claim that has not been through it.
+public readonly record struct PlayerGestureEvent(byte PlayerId, EPlayerGesture Gesture,
+    byte Yaw = 0, byte Pitch = 0, EPlayerStance Stance = EPlayerStance.Stand);
 
 // One player's authoritative state on the server.
 public struct PlayerMoveState
@@ -19,6 +33,11 @@ public struct PlayerMoveState
     public UnturnedGodot.Player.EPlayerStance Stance;
     public bool Moving; // input-derived (keys held), NOT position-derived: drives remote walk/idle animation
 }
+
+// A swing waiting for the tick that announces it, with the aim of the frame that threw it. See
+// PlayerGestureEvent for why the angles travel with it rather than being read off the tick.
+internal readonly record struct PendingGesture(EPlayerGesture Gesture, byte Yaw, byte Pitch,
+    EPlayerStance Stance);
 
 // How the server resolves one input frame into movement. The pure heightfield solver below covers open
 // terrain and drives the deterministic tests; the Godot runtime can swap in a solver backed by real
@@ -161,14 +180,14 @@ public sealed class ServerSimulation
         // what keeps two from going out under the same tick number, where the client's freshness guard
         // would read the second as a retransmission of the first and drop it. Bounded by the allowance,
         // which is the most that can ever be accepted at once.
-        public readonly Queue<EPlayerGesture> PendingGestures = new();
+        public readonly Queue<PendingGesture> PendingGestures = new();
         public bool HasSwung;
         public byte LastSwingSequence;
 
         // How many swings this player may spend, and when that was last topped up. Starts at one so a
-        // session's opening punch lands.
+        // session's opening punch lands, and accrues from admission (AddPlayer seeds AllowanceAt) rather
+        // than from the first swing — see AcceptSwing.
         public double SwingAllowance = 1;
-        public bool HasSwingAllowance;
         public double AllowanceAt;
 
         // Trusted-position bookkeeping: the budget rate-limits CONSECUTIVE client claims, so it needs the
@@ -227,6 +246,8 @@ public sealed class ServerSimulation
                 Grounded = false,
                 Stance = EPlayerStance.Stand,
             },
+            // Swing allowance accrues from the moment they are admitted; see AcceptSwing.
+            AllowanceAt = _clock,
         };
     }
 
@@ -311,19 +332,26 @@ public sealed class ServerSimulation
         // played must not rewind the player — not just its position, but the stance, the jump and the
         // direction it was steering. Signed subtraction is the standard wrap-safe sequence comparison,
         // as long as the sender cannot be over 2^31 frames ahead.
-        if (entry.HasReceivedFrame && unchecked((int)(input.Frame - entry.LastReceivedFrame)) <= 0)
-            return;
-        entry.HasReceivedFrame = true;
-        entry.LastReceivedFrame = input.Frame;
-        entry.Inputs.Enqueue(input);
-
         // A swing is answered HERE, as it arrives, and never from the queue below. What the rate limit
         // measures is real elapsed time, and the queue is precisely where real time stops being legible:
         // an input can wait several ticks in it, be trimmed off it unplayed, or arrive in a burst beside
         // the frames around it. Answering on arrival also means the trim can no longer swallow a punch,
         // so nothing has to be carried past it.
+        //
+        // Ahead of the freshness guard, and that ordering is load-bearing. The guard exists to stop stale
+        // MOVEMENT from rewinding the player, and a swing is not movement: it carries its own aim, spends
+        // its own allowance, and is deduplicated by its own sequence. Behind the guard, one reordered
+        // datagram would lose the punch outright — deliver a later non-swing frame before the repeats of a
+        // swing and every copy of that swing is discarded as stale, so an honest hit the owner watched
+        // connect deals nothing at all.
         if (input.HasSwing)
             AcceptSwing(entry, input, receivedAt);
+
+        if (entry.HasReceivedFrame && unchecked((int)(input.Frame - entry.LastReceivedFrame)) <= 0)
+            return;
+        entry.HasReceivedFrame = true;
+        entry.LastReceivedFrame = input.Frame;
+        entry.Inputs.Enqueue(input);
 
         // The loop plays one frame per tick, so a client that sends faster than the server ticks builds
         // a backlog that never drains — and a backlog is time: the avatar everyone else sees keeps
@@ -340,17 +368,18 @@ public sealed class ServerSimulation
     // the last tick is the best date available and the one the loop would have used anyway.
     public void QueueInput(byte id, in InputCommand input) => QueueInput(id, input, _clock);
 
-    // One swing, judged once. Repeats of it carry the same number and are recognised as the swing already
-    // answered, so losing the first datagram costs nothing and receiving all of them costs nothing either.
+    // One swing, answered once. Repeats of it carry the same number and are recognised as the swing
+    // already answered, so losing the first datagram costs nothing and receiving all of them costs
+    // nothing either. A swing the rate limit refuses is not "answered" — see below.
     private void AcceptSwing(Entry entry, in InputCommand input, double receivedAt)
     {
-        if (entry.HasSwung && input.SwingSequence == entry.LastSwingSequence)
-            return; // a repeat of the swing we already answered
-
-        // Equality, not order: the number wraps, and a client whose swings were lost outright leaves gaps
-        // in it. What matters is only that a NEW number is a new swing.
-        entry.HasSwung = true;
-        entry.LastSwingSequence = input.SwingSequence;
+        // Wrap-safe seven-bit order. Distance 0 is the repeat of the swing already answered; anything in
+        // the lower half is newer and is a swing of its own, gaps and all (a client whose swings were lost
+        // outright leaves them). The upper half is a swing that arrived BEHIND a newer one — plain
+        // equality would read that as new and answer the same punch twice, which reordering alone is
+        // enough to produce now that swings are judged ahead of the freshness guard.
+        if (entry.HasSwung && ((input.SwingSequence - entry.LastSwingSequence) & 0x7F) is 0 or >= 0x40)
+            return;
 
         // Allowance accrues with real time and a swing spends one, rather than the rule being a gap
         // since the last swing. A gap cannot be measured when a stall makes the transport hand over a
@@ -360,16 +389,32 @@ public sealed class ServerSimulation
         // pass is the time before the batch, and that is what this counts. The ceiling is what keeps an
         // idle player from banking a long burst, and it is what a client sending a hundred swings at
         // once runs into.
-        if (entry.HasSwingAllowance)
-            entry.SwingAllowance = Math.Min(MaxSwingAllowance,
-                entry.SwingAllowance + ((receivedAt - entry.AllowanceAt) / PunchCooldownSeconds));
-        entry.HasSwingAllowance = true;
+        // The clock this counts from is set when the player is admitted, not by their first swing. Left to
+        // the first swing there is no earlier moment on record, so a stall that drains a player's opening
+        // two punches together gives the second one zero elapsed time and refuses it — the exact case the
+        // allowance exists for, unavailable until some prior swing had established a timestamp. Waiting
+        // before swinging now banks credit the way it does for the rest of the session.
+        entry.SwingAllowance = Math.Min(MaxSwingAllowance,
+            entry.SwingAllowance + ((receivedAt - entry.AllowanceAt) / PunchCooldownSeconds));
         entry.AllowanceAt = receivedAt;
 
+        // Refused, and deliberately NOT recorded as answered. The number is what the repeat frames carry
+        // to survive an unreliable channel, so burning it here would spend the swing's only redundancy on
+        // a refusal: a punch that arrived a hair inside the cooldown — jitter between the client's own
+        // gate and this clock is enough — would have its repeats swallowed by the guard above and never
+        // be answered at all, while its owner watched the swing connect. Leaving the number unspent makes
+        // a refusal retryable, and the retry costs nothing: allowance is a time integral, so re-running
+        // the accrual above is the same arithmetic, and a grant still spends one whatever the client does.
         if (entry.SwingAllowance < 1)
-            return; // faster than the rule allows, whatever the client says its frame numbers were
+            return;
+
         entry.SwingAllowance -= 1;
-        entry.PendingGestures.Enqueue(Player.PlayerGestures.For(input.SwingFist));
+        entry.HasSwung = true;
+        entry.LastSwingSequence = input.SwingSequence;
+        // The swing's own aim, not the delivering frame's: a repeat that arrives first belongs to a later
+        // frame, and the punch is the one the owner threw. See InputCommand.SwingYaw.
+        entry.PendingGestures.Enqueue(new PendingGesture(Player.PlayerGestures.For(input.SwingFist),
+            input.SwingYaw, input.SwingPitch, input.SwingStance));
     }
 
     // Advances one 0.08 s step on the nominal clock: each call is one tick of simulated time. What the
@@ -418,8 +463,9 @@ public sealed class ServerSimulation
             // tick, because an avatar cannot throw two punches inside 0.08 s and a client holds a single
             // pending swing on that basis — two events under the same tick number would read as a
             // retransmission of each other anyway.
-            if (entry.PendingGestures.TryDequeue(out EPlayerGesture announced))
-                _gestures.Add(new PlayerGestureEvent(id, announced));
+            if (entry.PendingGestures.TryDequeue(out PendingGesture announced))
+                _gestures.Add(new PlayerGestureEvent(id, announced.Gesture, announced.Yaw,
+                    announced.Pitch, announced.Stance));
 
             states.Add(new PlayerSnapshotState(id, entry.State.Position,
                 NetAngles.QuantizePitch(entry.State.Pitch), NetAngles.QuantizeYaw(entry.State.Yaw),

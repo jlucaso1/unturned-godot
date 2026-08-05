@@ -15,6 +15,18 @@ public static class ZombieBody
     public const float CapsuleHeight = CapsuleTop - CapsuleBottom;
     public const float CapsuleCenter = (CapsuleTop + CapsuleBottom) / 2f;
 
+    // Zombie.cs's spawn scale. A mega and a normal zombie get the SAME 2 m CharacterController — both
+    // call SetCapsuleRadiusAndHeight(radius, 2f) and differ only in radius (0.75 against 0.4). What makes
+    // a mega big is the avatar under the animator, scaled by Random.Range(1.45, 1.55) where a normal one
+    // draws Random.Range(0.95, 1.05). So the radius is the mover's business and this scale is the
+    // geometry's: the bone colliders Unturned raycasts hang off that scaled skeleton, and the boulder
+    // spawn heights read `transform.localScale.y` rather than the capsule.
+    public const float MegaModelScale = 1.5f;
+    public const float ModelScale = 1f;
+    public const float ModelScaleJitter = 0.05f; // the half-width of both authored ranges
+
+    public static float ModelScaleFor(bool isMega) => isMega ? MegaModelScale : ModelScale;
+
     // Unity's CharacterController.Move is iterative: advance to first contact, project the rest of the
     // motion onto that surface, go again. Four passes covers a corner (two walls) plus slack.
     public const int MaxSlides = 4;

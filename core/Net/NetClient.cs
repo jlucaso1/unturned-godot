@@ -115,6 +115,12 @@ public sealed class NetClient
     // instead of being dropped, so a feature module can subscribe without editing NetClient.
     public Action<byte[]>? OnUnhandledMessage;
 
+    // Raised when the session is abandoned and rejoined from scratch (the StateTimeout branch in Update).
+    // Subscribers holding anything keyed on server-assigned ids must drop it: the host that answers the
+    // next Hello may be a restarted one, numbering everything from zero again, and ids from the session
+    // that ended name different things in the one that follows.
+    public Action? OnSessionReset;
+
     // Set once the server refuses us (wrong map, wrong build, full). Terminal: the retry loop stops,
     // and the UI has a reason to show instead of a join that quietly never happens.
     public JoinRejection? Rejection { get; private set; }
@@ -178,6 +184,10 @@ public sealed class NetClient
             _remotes.Clear();
             Array.Clear(_leftAtVersion);
             _lastHello = double.NegativeInfinity;
+            // Everything else keyed on ids this server handed out has to start over too, for the same
+            // reason the roster versions do — a restarted host numbers its zombies from zero again, and a
+            // subscriber holding the old session's ids would judge the new session's by them.
+            OnSessionReset?.Invoke();
         }
     }
 

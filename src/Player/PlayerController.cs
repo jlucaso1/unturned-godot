@@ -21,11 +21,24 @@ public partial class PlayerController : CharacterBody3D
     // Set before adding to the tree to choose the initial perspective (e.g. third person for a screenshot).
     public bool StartThirdPerson { get; set; }
 
+    // The stance to boot into, for a screenshot that has to show one. Crouching and going prone tilt
+    // the spine and skull hardest, so they are where the first-person rig's framing is most visibly
+    // wrong — which is the whole reason this is reachable without a keyboard.
+    public EPlayerStance StartStance { get; set; } = EPlayerStance.Stand;
+
     // The third-person body model; when null a simple placeholder figure is used instead.
     public Node3D? BodyModel { get; set; }
 
-    // The first-person arms (the prefab's Viewmodel rig). Optional: without it first person simply shows
-    // no hands, which is what the port did before.
+    // The first-person rig: the prefab's own Viewmodel arms where they can be imported, and otherwise a
+    // clone of the body (see CharacterModel.ViewmodelFromBody). Optional — without one first person
+    // shows no hands and no swing, which is what the port did before there was a fallback.
+    //
+    // On the FALLBACK the framing is not the game's. Unturned draws purpose-built arms here and renders
+    // them from a camera parented to that rig's own skull; a body rig has neither, and there is no
+    // authored answer to borrow (the two skeletons are different rigs, so composing one's camera with
+    // the other's skull is off by that difference). The rig is parked with its skull on the eye, which
+    // gets the swing on screen; UG_VIEWMODEL_OFFSET nudges it. Framing this properly needs Model_0's
+    // compressed mesh to decode, which is what would give us the real arms.
     public Node3D? ViewmodelModel { get; set; }
 
     // Movement audio (footsteps + landing), built by the caller with the map's terrain material data.
@@ -77,6 +90,10 @@ public partial class PlayerController : CharacterBody3D
     private byte _swingSequence;
     private EPlayerPunch _swingFist;
     private int _swingRepeats;
+    // The aim the current swing was thrown with, held for as long as its repeats are being sent.
+    private byte _swingYaw;
+    private byte _swingPitch;
+    private EPlayerStance _swingStance;
 
     // How many input frames a thrown swing is announced on. Input datagrams are unreliable, so a single
     // dropped one would eat the swing for everyone else while the thrower saw their own — the one desync
@@ -122,6 +139,8 @@ public partial class PlayerController : CharacterBody3D
     public override void _Ready()
     {
         _thirdPerson = StartThirdPerson;
+        _wantCrouch = StartStance == EPlayerStance.Crouch;
+        _wantProne = StartStance == EPlayerStance.Prone;
         _benchmarkMovement = EnvFlag.IsOn(OS.GetEnvironment("UG_RUNTIME_BENCH_MOVE"), whenUnset: false);
         _benchmarkMovementStarted = Engine.GetPhysicsFrames();
 
@@ -354,6 +373,13 @@ public partial class PlayerController : CharacterBody3D
                 _swingSequence = (byte)((_swingSequence + 1) & 0x7F);
                 _swingFist = gesture == EPlayerGesture.PunchRight ? EPlayerPunch.Right : EPlayerPunch.Left;
                 _swingRepeats = AttackEdgeRepeats;
+                // Pinned with the number, and sent unchanged on the repeat frames. A repeat that reaches
+                // the server first would otherwise hand it the aim of a LATER frame, and the server
+                // raycasts the punch from what it is given: turn or drop prone while the first datagram
+                // is being lost and the damage would come out of where the view had moved on to.
+                _swingYaw = UnturnedGodot.Net.NetAngles.QuantizeYaw(RotationDegrees.Y);
+                _swingPitch = UnturnedGodot.Net.NetAngles.QuantizePitch(_pitch + 90f);
+                _swingStance = _stance;
             }
 
             bool sendSwing = _swingRepeats > 0;
@@ -371,7 +397,8 @@ public partial class PlayerController : CharacterBody3D
                     (sbyte)input.X, (sbyte)input.Y, jumpHeld, wantSprint,
                     UnturnedGodot.Net.NetAngles.QuantizeYaw(RotationDegrees.Y),
                     UnturnedGodot.Net.NetAngles.QuantizePitch(_pitch + 90f),
-                    _stance, GlobalPosition, isOnFloor, sendSwing, _swingSequence, _swingFist));
+                    _stance, GlobalPosition, isOnFloor, sendSwing, _swingSequence, _swingFist,
+                    _swingYaw, _swingPitch, _swingStance));
             }
         }
 
@@ -639,10 +666,11 @@ public partial class PlayerController : CharacterBody3D
             PlaceThirdPersonCamera();
     }
 
-    // Hangs the first-person arms off the head so they follow the look, and slides the rig so its Skull
-    // bone lands on the camera — which is exactly where Unturned parents its ViewmodelCamera. Deriving the
-    // offset from the rig's own rest pose keeps it correct if the character is ever re-authored, instead
-    // of pinning a measured number. UG_VIEWMODEL_OFFSET="x,y,z" nudges it from there.
+    // Hangs the first-person arms off the head so they follow the look, and rides the rig on the eye the
+    // prefab authors (CharacterModel.BindEye: the head's Spot, which the game pairs with its own
+    // first-person camera). The rig re-anchors on every posed frame (ViewmodelAnchor), so the stance clips
+    // carry the eye with the head instead of leaving it where the bind pose happened to put it.
+    // UG_VIEWMODEL_OFFSET="x,y,z" nudges it from there.
     private void AttachViewmodel()
     {
         if (ViewmodelModel is { } imported && imported is not CharacterSkeleton)
@@ -660,9 +688,7 @@ public partial class PlayerController : CharacterBody3D
             return;
 
         _viewmodel = rig;
-        int skull = rig.FindBone("Skull");
-        Vector3 offset = skull >= 0 ? -rig.GetBoneGlobalRest(skull).Origin : Vector3.Zero;
-        rig.Position = offset + EnvOffset("UG_VIEWMODEL_OFFSET");
+        rig.AnchorEyeToCamera(EnvOffset("UG_VIEWMODEL_OFFSET"));
         // Close to the near plane and lit like the world around it, but never casting into it: an arm a
         // handspan from the eye throws a shadow across the whole view.
         foreach (Node child in rig.GetChildren())

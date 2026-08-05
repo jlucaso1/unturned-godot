@@ -43,11 +43,13 @@ public partial class DedicatedServer : Node
         var navigationField = new CollisionFieldBuilder();
         node.AddChild(WorldBuilder.BuildTerrainCollision(tiles, navigationField));
         node.AddChild(WorldBuilder.BuildObjectCollision(unturnedPath, level,
-            out IReadOnlySet<System.Guid> selectedGuids, navigationField));
+            out IReadOnlySet<System.Guid> selectedGuids,
+            out UnturnedGodot.Damage.DamageableWorld damageable, navigationField));
 
         UnturnedGodot.Zombies.ZombieSystem? zombies = UnturnedGodot.Zombies.ZombieWorld.Load(
             level.Path, ground,
             UnturnedGodot.Repro.ReproRandom.ForSession(OS.GetEnvironment("ZOMBIE_SEED"), out _));
+        UnturnedGodot.Zombies.ZombieHost? zombieHost = null;
         if (zombies != null)
         {
             ZombiePhysics.Attach(zombies, () => node.GetViewport()?.World3D, ground);
@@ -67,6 +69,7 @@ public partial class DedicatedServer : Node
             else
                 navigationField.Release();
             var host = new UnturnedGodot.Zombies.ZombieHost(zombies, node._server);
+            zombieHost = host;
 
             // The same bug-report recorder the windowed session arms. There is no key to press on a
             // dedicated server, which is the point: REPRO_AUTO=1 and REPRO_CAPTURE_AT are for exactly
@@ -83,6 +86,13 @@ public partial class DedicatedServer : Node
         }
         else
             navigationField.Release();
+
+        // Punches resolve against the same world the movement solver uses, whether or not this level
+        // has zombies: the rubble and resources are there either way. Hooked after the zombie host so a
+        // swing sees the population that tick already moved.
+        var punches = new UnturnedGodot.Damage.PunchDamageHost(node._server, zombies, zombieHost, damageable);
+        PunchPhysics.Attach(punches, () => node.GetViewport()?.World3D);
+        node.PunchDamage = punches;
 
         Log.Print($"[server] dedicated server for {levelName} listening on UDP {port} ({tiles.Count} height tiles)");
         return node;
@@ -101,6 +111,8 @@ public partial class DedicatedServer : Node
         }
     }
 
+    // Held only so the host it hooks outlives the constructor: it drives itself off NetServer.OnTick.
+    public UnturnedGodot.Damage.PunchDamageHost? PunchDamage { get; private set; }
     private ZombieNavigation? _zombieNavigation;
     private CollisionFieldBuilder? _navigationField;
     private IReadOnlySet<System.Guid>? _selectedColliderGuids;

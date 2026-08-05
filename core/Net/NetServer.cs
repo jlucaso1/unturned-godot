@@ -69,6 +69,18 @@ public sealed class NetServer
                 visit(session.PlayerId, _simulation.GetState(session.PlayerId), connection);
     }
 
+    // The hand animations this tick produced, for a replicated system that has to act on one rather
+    // than merely relay it: a punch is announced to the other clients from Update, and what the swing
+    // DID — who it hit and for how much — is decided by whoever hooks OnTick and reads this. Refilled
+    // by every step, so it is only meaningful from inside an OnTick callback.
+    public IReadOnlyList<PlayerGestureEvent> Gestures => _simulation.Gestures;
+
+    // One player's authoritative state, for a system that needs where they are and where they are
+    // looking. TryGet rather than an indexer because a gesture can outlive the player who threw it by a
+    // tick — the disconnect is handled between the step and the callback.
+    public bool TryGetPlayerState(byte id, out PlayerMoveState state) =>
+        _simulation.TryGetState(id, out state);
+
     // The level this server runs, by folder name. Not optional: a server always hosts one specific
     // world, and a handshake that cannot name it is how two players ended up walking different maps.
     public string LevelName => _levelName;

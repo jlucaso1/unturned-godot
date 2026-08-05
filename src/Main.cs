@@ -81,17 +81,40 @@ public partial class Main : Node3D
         string shotOnly = OS.GetEnvironment("SCREENSHOT_PATH");
         if (EnvFlag.IsOn(OS.GetEnvironment("CHAR_ONLY"), whenUnset: false) && !string.IsNullOrEmpty(shotOnly))
         {
-            if (CharacterModel.Build(unturnedPath) is { } model)
+            // CHAR_FIRST=1 frames the character the way first person does — the arms rig parented to the
+            // camera and riding its own Skull — so the per-stance framing can be read off a shot that
+            // takes seconds, instead of a full-world build. CHAR_REST_ANCHOR=1 pins it to the BIND pose
+            // instead, which is the shape of the bug the live anchor fixes.
+            bool charFirst = EnvFlag.IsOn(OS.GetEnvironment("CHAR_FIRST"), whenUnset: false);
+            var cam = new Camera3D { Current = true };
+            Node3D? model = charFirst
+                ? CharacterModel.BuildPlayerRigs(unturnedPath).Viewmodel
+                : CharacterModel.Build(unturnedPath);
+            if (model is { } built)
             {
-                if (model is CharacterSkeleton rig && OS.GetEnvironment("CHAR_STANCE") is { Length: > 0 } s)
+                if (built is CharacterSkeleton rig && OS.GetEnvironment("CHAR_STANCE") is { Length: > 0 } s)
                 {
                     rig.SetState(System.Enum.Parse<Player.EPlayerStance>(s, ignoreCase: true),
                         EnvFlag.IsOn(OS.GetEnvironment("CHAR_MOVING"), whenUnset: false));
                     if (OS.GetEnvironment("CHAR_PITCH") is { Length: > 0 } cp)
                         rig.SetPitch(cp.ToFloat()); // look pitch -> spine/skull bend
+                    // CHAR_GESTURE=Punch_Left plays a one-shot over the stance, for reading a swing.
+                    if (OS.GetEnvironment("CHAR_GESTURE") is { Length: > 0 } gesture)
+                        rig.PlayOnce(gesture);
                     rig.Seek(OS.GetEnvironment("CHAR_ANIM_TIME") is { Length: > 0 } at ? at.ToFloat() : 0f);
                 }
-                AddChild(model);
+                if (charFirst)
+                    cam.AddChild(built);
+                else
+                    AddChild(built);
+                if (charFirst && built is CharacterSkeleton eyed)
+                {
+                    int skull = eyed.FindBone("Skull");
+                    if (skull >= 0 && EnvFlag.IsOn(OS.GetEnvironment("CHAR_REST_ANCHOR"), whenUnset: false))
+                        eyed.Position = -eyed.GetBoneGlobalRest(skull).Origin;
+                    else
+                        eyed.AnchorEyeToCamera(Vector3.Zero);
+                }
             }
             AddChild(new DirectionalLight3D { RotationDegrees = new Vector3(-50, -140, 0) });
             AddChild(new WorldEnvironment
@@ -103,13 +126,15 @@ public partial class Main : Node3D
                     AmbientLightEnergy = 1.0f,
                 },
             });
-            var cam = new Camera3D { Current = true };
             AddChild(cam);
-            float side = EnvFlag.IsOn(OS.GetEnvironment("CHAR_BACK"), whenUnset: false) ? 3.2f : -3.2f; // -Z is the front
-            cam.Position = EnvFlag.IsOn(OS.GetEnvironment("CHAR_SIDE"), whenUnset: false)
-                ? new Vector3(4.0f, 1.0f, 0f)  // side profile, for reading prone/lie-down poses
-                : new Vector3(0, 1.1f, side);  // full-body 3/4-front, so any stance is framed
-            cam.LookAt(new Vector3(0, 0.5f, 0));
+            if (!charFirst)
+            {
+                float side = EnvFlag.IsOn(OS.GetEnvironment("CHAR_BACK"), whenUnset: false) ? 3.2f : -3.2f; // -Z is the front
+                cam.Position = EnvFlag.IsOn(OS.GetEnvironment("CHAR_SIDE"), whenUnset: false)
+                    ? new Vector3(4.0f, 1.0f, 0f)  // side profile, for reading prone/lie-down poses
+                    : new Vector3(0, 1.1f, side);  // full-body 3/4-front, so any stance is framed
+                cam.LookAt(new Vector3(0, 0.5f, 0));
+            }
             int settle = OS.GetEnvironment("CHAR_SETTLE") is { Length: > 0 } sf ? int.Parse(sf) : 5;
             _ = CaptureAndQuit(shotOnly, settle); // more settle frames -> the animation advances further
             return;
@@ -246,11 +271,13 @@ public partial class Main : Node3D
             }
 
             // A screenshot uses the free camera + SHOT_CAM by default; PLAYER=1 spawns the character and
-            // shoots from its (third-person) camera instead.
+            // shoots from its camera instead — third person by default, and PLAYER_FIRST=1 for the
+            // first-person view, which is the only way to capture how the viewmodel rig is framed.
             if (EnvFlag.IsOn(OS.GetEnvironment("PLAYER"), whenUnset: false))
             {
+                bool firstPerson = EnvFlag.IsOn(OS.GetEnvironment("PLAYER_FIRST"), whenUnset: false);
                 // A screenshot run never reconciles the navmesh, so there is nothing to record into.
-                SpawnPlayer(world.Terrain, thirdPerson: true, unturnedPath, world.Heights,
+                SpawnPlayer(world.Terrain, thirdPerson: !firstPerson, unturnedPath, world.Heights,
                     navigationField: null);
                 RunPendingAudioExtraction(); // no streamer on this path; extract right away
                 int settle = OS.GetEnvironment("SETTLE") is { Length: > 0 } sv ? int.Parse(sv) : 40;
@@ -756,6 +783,13 @@ public partial class Main : Node3D
             streamer.MeshesReady += elapsedMs => _ = RunStepProbe(stepProbe);
         // Only now do the object colliders exist, so only now can the navmesh be checked against them.
         streamer.Finished += () => _network?.ReconcileNavigation(streamer.NeededGuids, navigationField);
+        // The hosted server can damage the world's trees and rubble as soon as it knows what they are.
+        // Late by design: the session is already up and punching zombies while the map streams in.
+        streamer.Finished += () =>
+        {
+            if (_network != null && streamer.Damageable != null)
+                _network.Damageable = streamer.Damageable;
+        };
         if (OS.GetEnvironment("UG_RUNTIME_BENCH_SECS") is { Length: > 0 } duration
             && double.TryParse(duration, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out double seconds))
@@ -816,7 +850,7 @@ public partial class Main : Node3D
             network.Configure(heights, spawnPosition);
         AddChild(network);
 
-        (Node3D? Body, Node3D? Viewmodel) rigs = CharacterModel.BuildPlayerRigs(unturnedPath);
+        CharacterModel.PlayerRigs rigs = CharacterModel.BuildPlayerRigs(unturnedPath);
         var player = new PlayerController
         {
             Name = "Player",
@@ -828,6 +862,13 @@ public partial class Main : Node3D
             // no game data means the placeholder figure, no Viewmodel rig means no hands in first person.
             BodyModel = rigs.Body,
             ViewmodelModel = rigs.Viewmodel,
+            // PLAYER_STANCE=Crouch|Prone: the stances that tilt the head hardest, and so the ones a
+            // first-person capture has to be able to reach without a keyboard. Set here rather than
+            // after the spawn because the controller reads it in _Ready.
+            StartStance = OS.GetEnvironment("PLAYER_STANCE") is { Length: > 0 } stanceName
+                && System.Enum.TryParse(stanceName, ignoreCase: true, out Player.EPlayerStance stance)
+                    ? stance
+                    : Player.EPlayerStance.Stand,
         };
         (player.Footsteps, _movementAudioFactory) = BuildMovementAudio(unturnedPath);
         player.Sounds = _oneShotAudio; // BuildMovementAudio created the pool; gestures share it

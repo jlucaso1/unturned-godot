@@ -62,10 +62,14 @@ public static class Program
             NavigationProbeSuite(map);
         if (all || wanted.Contains("repro"))
             ReproSuite();
+        if (all || wanted.Contains("bundle"))
+            BundleSuite(unturned);
         if (wanted.Contains("nav"))
             NavigationDiagnostic(map);
         if (wanted.Contains("ress"))
             ResSDiagnostic(unturned, map);
+        if (wanted.Contains("lzma"))
+            LzmaDiagnostic(unturned);
         return 0;
     }
 
@@ -359,6 +363,473 @@ public static class Program
         Console.WriteLine($"  hands {confirm:N0}/{faces:N0} faces ({100.0 * confirm / faces:0.0}%) to the "
             + $"physics server; {uncertain:N0} uncertain probes, {unknown:N0} faces with no surface found");
         Console.WriteLine();
+    }
+
+    // Classes a bundle-wide loop decodes EVERY object of, on any load of this bundle, whatever the map:
+    // `PrefabGraph.ReadContainer` (AssetBundle), `BuildTransformMaps` (Transform), the MeshFilter /
+    // SkinnedMeshRenderer sweep, and the collider sweep. Each is `foreach (o in file.Objects)` filtered on
+    // class id alone, so the suite's figure for these is load work measured, not bounded.
+    private static readonly int[] ScannedClasses =
+    {
+        4,   // Transform          — BuildTransformMaps
+        33,  // MeshFilter         — the mesh-part sweep
+        64,  // MeshCollider       — the collider sweep
+        65,  // BoxCollider        — the collider sweep
+        135, // SphereCollider     — the collider sweep
+        136, // CapsuleCollider    — the collider sweep
+        137, // SkinnedMeshRenderer— the mesh-part sweep
+        142, // AssetBundle        — ReadContainer
+    };
+
+    // Classes the port reads only through a targeted path-id or GUID lookup from an asset that names them:
+    // `ModelExtractor` skips GUIDs the map does not need before it touches a Mesh/Material/Texture2D,
+    // `MaterialsOf` reaches a MeshRenderer through its GameObject's component list, and `GameObjectOf`
+    // caches GameObjects by id. A map placing a small subset of the bundle decodes a small subset of these,
+    // so the whole-file figure is an UPPER BOUND on load work and must not be read as a measurement of it.
+    private static readonly int[] TargetedClasses =
+    {
+        21,  // Material       — from a renderer's material list
+        28,  // Texture2D      — from a material's texture properties
+        43,  // Mesh           — from a MeshFilter/collider part, GUID-filtered
+        48,  // Shader         — from a material
+    };
+
+    // Split out of the targeted row because a different cache gates them. Every decode of these two classes
+    // in the port happens inside AudioExtractor — `Plan` reads the definition MonoBehaviour
+    // (AudioExtractor.cs:186) and the AudioClip it names (:377) — and `ModelExtractor.ReadSerializedNode`
+    // calls `Plan` only when `audio != null`. So a load whose audio cache is warm decodes none of these,
+    // and charging them to the object/texture pass puts them under the wrong condition entirely. Still an
+    // upper bound within their own block, for the same reason the targeted row is: only the definitions a
+    // map's surfaces actually name get read.
+    private static readonly int[] AudioClasses =
+    {
+        83,  // AudioClip      — from an audio definition
+        114, // MonoBehaviour  — the audio definitions themselves
+    };
+
+    // Classes neither row can claim. `PrefabGraph.Read` runs its mesh and collider sweeps before any GUID
+    // filtering, so for every swept component it decodes the attached GameObject (through
+    // AnchorOf/NameOf/LayerOf) and its renderer (through MeshRendererMaterials) — unconditionally, on any
+    // load, whatever the map. But only objects attached to a swept component are reached, not every object
+    // of the class, so calling them scanned would overstate that row as badly as leaving them in targeted
+    // understates it. The suite cannot split them without re-running the walk, so it reports them apart and
+    // says which way each bound runs.
+    private static readonly int[] PartlyScannedClasses =
+    {
+        1,   // GameObject   — AnchorOf/NameOf/LayerOf, from both sweeps
+        23,  // MeshRenderer — MeshRendererMaterials, called for every swept mesh part
+    };
+
+    // A class in neither list is not a class the port never reads: CharacterModel walks the player rig's
+    // own AnimationClips by id, for instance. It means no pass decodes every object of that class here.
+
+    // Unity class ids worth naming in the per-class table; anything else prints as its bare id.
+    private static readonly Dictionary<int, string> ClassNames = new()
+    {
+        [1] = "GameObject",
+        [4] = "Transform",
+        [21] = "Material",
+        [23] = "MeshRenderer",
+        [25] = "Renderer",
+        [28] = "Texture2D",
+        [33] = "MeshFilter",
+        [43] = "Mesh",
+        [48] = "Shader",
+        [64] = "MeshCollider",
+        [65] = "BoxCollider",
+        [74] = "AnimationClip",
+        [82] = "AudioSource",
+        [83] = "AudioClip",
+        [95] = "Animator",
+        [108] = "Light",
+        [111] = "Animation",
+        [114] = "MonoBehaviour",
+        [115] = "MonoScript",
+        [135] = "SphereCollider",
+        [136] = "CapsuleCollider",
+        [137] = "SkinnedMeshRenderer",
+        [142] = "AssetBundle",
+        [198] = "ParticleSystem",
+        [199] = "ParticleSystemRenderer",
+        [205] = "LODGroup",
+        [212] = "SpriteRenderer",
+        [213] = "Sprite",
+    };
+
+    // What the masterbundle's object metadata costs to turn into values: the SerializedFile table, then
+    // the TypeTree-driven object reader over it. The cold load's single biggest Core cost after LZMA, and
+    // until now the only major decode path with no suite at all. Splits what a cold object/texture pass
+    // decodes from what only a map that places it decodes, because conflating the two prices the wrong
+    // thing. Note that the pass itself is conditional — a load with warm caches never runs one, so none of
+    // these rows are "per load". See docs/PROFILING.md for which caches gate which block.
+    private static void BundleSuite(string? unturned)
+    {
+        string? bundlePath = Environment.GetEnvironmentVariable("BUNDLE_PATH")
+            ?? (unturned == null ? null : UnturnedInstall.FindMasterBundle(unturned));
+        if (Skip("bundle", bundlePath != null && File.Exists(bundlePath) ? bundlePath : null, out string path))
+            return;
+
+        using MasterBundleStream? stream = MasterBundleStream.OpenFile(path);
+        if (stream == null)
+        {
+            Console.WriteLine($"== bundle: SKIP ({Path.GetFileName(path)} is not the single-LZMA-block "
+                + "shape the streaming reader handles) ==\n");
+            return;
+        }
+
+        // EVERY serialized node, not just the first: the streaming load processes each in physical order,
+        // so measuring one of several would report too few objects and hide the later files' cost. Nodes
+        // sitting behind a stream node are counted and skipped rather than scanned — reaching them means
+        // decoding the ~1.18 GB of pixels in between, which is the cost this suite exists to stay off.
+        var ordered = new List<MasterBundleStream.Node>(stream.Nodes);
+        ordered.Sort((a, b) => a.Offset.CompareTo(b.Offset));
+
+        Console.WriteLine($"== bundle: object decode over {Path.GetFileName(path)} ==");
+        Console.WriteLine($"  {Mb(new FileInfo(path).Length)} on disk, {Mb(stream.TotalSize)} decompressed");
+
+        var files = new List<(string Name, SerializedFile File, byte[] Bytes)>();
+        int skippedBehindStream = 0;
+        bool pastFirstStream = false;
+        foreach (MasterBundleStream.Node node in ordered)
+        {
+            if (IsResSNode(node.Path))
+            {
+                pastFirstStream = true;
+                continue;
+            }
+
+            if (pastFirstStream)
+            {
+                skippedBehindStream++;
+                continue;
+            }
+
+            // The stream is forward-only, so anything between the cursor and this node has to be consumed
+            // before it can be read — otherwise SerializedFile is handed a slice of somebody else's bytes.
+            if (!WindTo(stream, node.Offset))
+            {
+                Console.WriteLine($"  note: the stream ended before {LastSegment(node.Path)} — not measured");
+                break;
+            }
+
+            var timer = Stopwatch.StartNew();
+            byte[] bytes = stream.Read((int)node.Size);
+            timer.Stop();
+            Console.WriteLine($"  serialized: {LastSegment(node.Path)} {Mb(bytes.Length)} LZMA-decoded in "
+                + $"{timer.Elapsed.TotalSeconds:0.00} s "
+                + $"({bytes.Length / 1048576.0 / timer.Elapsed.TotalSeconds:0.0} MiB/s) — setup, not a measurement");
+            files.Add((LastSegment(node.Path), SerializedFile.Read(bytes), bytes));
+        }
+
+        if (files.Count == 0)
+        {
+            Console.WriteLine($"== bundle: SKIP ({Path.GetFileName(path)} declares no readable serialized "
+                + "file ahead of its stream nodes) ==\n");
+            return;
+        }
+
+        if (skippedBehindStream > 0)
+        {
+            Console.WriteLine($"  note: {skippedBehindStream} serialized file(s) sit behind a stream node and "
+                + "were not scanned — their objects are missing from the numbers below");
+        }
+
+        // Every serialized node, so the timed row covers the same files the object counts below do.
+        var tableBytes = new List<byte[]>(files.Count);
+        foreach ((string _, SerializedFile _, byte[] b) in files)
+            tableBytes.Add(b);
+
+        void ParseTables()
+        {
+            foreach (byte[] b in tableBytes)
+                SerializedFile.Read(b);
+        }
+
+        Bench($"SerializedFile.Read (all {files.Count} node(s))", ParseTables);
+        long tableAlloc = AllocatedBy(ParseTables);
+        int totalObjects = 0, totalTrees = 0;
+        foreach ((string _, SerializedFile f, byte[] _) in files)
+        {
+            totalObjects += f.Objects.Count;
+            totalTrees += f.TypeTreesByClassId.Count;
+        }
+        Console.WriteLine($"    {totalObjects:N0} objects across {files.Count} serialized file(s), "
+            + $"{totalTrees} class type trees, {Mb(tableAlloc)} allocated");
+
+        // Objects whose type tree was stripped cannot be decoded without a donor file; they are not part
+        // of what this measures, so they are excluded from every set rather than silently throwing.
+        var readable = new List<(SerializedObject Obj, SerializedFile File)>(totalObjects);
+        foreach ((string _, SerializedFile f, byte[] _) in files)
+            foreach (SerializedObject o in f.Objects)
+                if (o.TypeTree.Count > 0)
+                    readable.Add((o, f));
+
+        var scanned = new HashSet<int>(ScannedClasses);
+        var partly = new HashSet<int>(PartlyScannedClasses);
+        var targeted = new HashSet<int>(TargetedClasses);
+        var audio = new HashSet<int>(AudioClasses);
+        var scannedSet = new List<(SerializedObject Obj, SerializedFile File)>();
+        var partlySet = new List<(SerializedObject Obj, SerializedFile File)>();
+        var targetedSet = new List<(SerializedObject Obj, SerializedFile File)>();
+        var audioSet = new List<(SerializedObject Obj, SerializedFile File)>();
+        foreach ((SerializedObject o, SerializedFile f) in readable)
+        {
+            if (scanned.Contains(o.ClassId))
+                scannedSet.Add((o, f));
+            else if (partly.Contains(o.ClassId))
+                partlySet.Add((o, f));
+            else if (targeted.Contains(o.ClassId))
+                targetedSet.Add((o, f));
+            else if (audio.Contains(o.ClassId))
+                audioSet.Add((o, f));
+        }
+
+        if (readable.Count < totalObjects)
+        {
+            Console.WriteLine($"    note: {totalObjects - readable.Count:N0} object(s) carry no type tree "
+                + "and are excluded from the decode below");
+        }
+
+        // Every row decodes each object exactly ONCE, which is a floor and not what a load pays: several
+        // objects are decoded again by a later pass, and the table after these prices those repeats.
+        //
+        // Far fewer iterations than the default 15: one pass over every object is seconds, not
+        // milliseconds, and fifteen of them would cost more than the rest of the harness put together.
+        // The coarser the row, the smaller its budget.
+        ReadPass("TypeTreeReader.Read (scanned classes, once each)", scannedSet, iters: 5);
+        ReadPass("TypeTreeReader.Read (partly scanned, once each)", partlySet, iters: 5);
+        ReadPass("TypeTreeReader.Read (targeted classes, once each)", targetedSet, iters: 5);
+        ReadPass("TypeTreeReader.Read (audio classes, once each)", audioSet, iters: 5);
+        ReadPass("TypeTreeReader.Read (every object, once each)", readable, iters: 3);
+
+        RepeatDecodeTable(readable);
+        PerClassTable(readable);
+        Console.WriteLine();
+    }
+
+    private const int AssetBundleClassId = 142;
+
+    // Median time and allocation for decoding one set of objects. Allocation is reported alongside because
+    // this reader's cost is dominated by it — boxed leaves, a Dictionary per struct and a List per array.
+    private static void ReadPass(string label, List<(SerializedObject Obj, SerializedFile File)> objects,
+        int iters)
+    {
+        if (objects.Count == 0)
+        {
+            Console.WriteLine($"  {label,-44} (no objects)");
+            return;
+        }
+
+        void Pass()
+        {
+            foreach ((SerializedObject o, SerializedFile f) in objects)
+                TypeTreeReader.Read(o.TypeTree, f.ReaderFor(o));
+        }
+
+        Bench($"{label} x{objects.Count:N0}", Pass, warmup: 1, iters: iters);
+        long alloc = AllocatedBy(Pass);
+        long input = 0;
+        foreach ((SerializedObject o, SerializedFile _) in objects)
+            input += o.ByteSize;
+        Console.WriteLine($"    {Mb(alloc)} allocated over {Mb(input)} of object bytes "
+            + $"({(input > 0 ? alloc / (double)input : 0):0.0}x), {alloc / (double)objects.Count / 1024:0.0} KiB per object");
+    }
+
+    // Objects the port decodes MORE THAN ONCE during a cold object/texture pass, and what the extra
+    // decodes cost. The rows above decode everything exactly once, so they already contain the first decode
+    // of each of these; only the decodes beyond the first are additional, which is what the "extra" column
+    // reports. The counts assume that pass is running: a load whose caches are warm runs no pass, and then
+    // several of these sites do not execute at all (the standalone AudioExtractor.Extract fallback, for
+    // instance, decodes the container once with no pass around it).
+    //
+    // THIS LIST IS NOT EXHAUSTIVE, and cannot be. It is a hand-maintained mirror of what several passes in
+    // `src/` happen to do, many of them behind conditions the suite cannot see (which map is loaded, which
+    // caches are warm, which env flags are set). Ten rounds of review found seven sites; there is no reason
+    // to believe the eighth does not exist. Read the table as a demonstrated LOWER BOUND on repeated
+    // decode work, never as its total, and re-derive it against the code before trusting any figure here.
+    //
+    // `EveryObject` says whether the multiplicity applies to every object of the class in the file or only
+    // to the subset a particular pass reaches. Where it is false the extra is an UPPER BOUND for that
+    // entry, because the suite has no way to know which objects a given map's placements actually reach —
+    // pricing it over the whole class is the widest that subset could be. So entries bound their own cost
+    // from above while the table as a whole bounds the total from below. Each entry names its sites so the
+    // count can be checked against the code rather than trusted.
+    private static readonly (int ClassId, int MinDecodes, int MaxDecodes, bool EveryObject, string Where)[]
+        RepeatDecoded =
+    {
+        // PrefabGraph.ReadContainer and BundleTextures.Locate always walk m_Container by decoding the whole
+        // AssetBundle object again. Two more sites are conditional: AudioExtractor.Plan runs only when the
+        // pass was given an audio request (ModelExtractor.ReadSerializedNode skips it when `audio` is null,
+        // and ObjectStreamer.PlanAudio wants nothing under FREECAM/STEP_PROBE or once the audio cache is
+        // warm), and CharacterModel.ExtractInlineTexture walks it on a cold face cache — against THIS
+        // bundle, since the path it looks up is assets/coremasterbundle/items/faces/... RoadsBuilder scans
+        // a container too, but its own map's bundle, so it is not counted.
+        (AssetBundleClassId, 2, 4, true,
+            "PrefabGraph.ReadContainer + BundleTextures.Locate (+ AudioExtractor.Plan when audio is "
+            + "wanted, + CharacterModel.ExtractInlineTexture on a cold face cache)"),
+
+        // ReadStreamedVertices decodes each placed mesh to read its StreamRef, then BuildLevel decodes the
+        // same mesh again for the geometry. Only on a cold mesh cache, and only for meshes a placement
+        // reaches, so this is bounded twice over.
+        (43, 2, 2, false, "ModelExtractor.ReadStreamedVertices + BuildLevel (cold mesh cache only)"),
+
+        // MapObjectKeysToMeshes decodes each skinned renderer in its class-id sweep, then
+        // MeshRendererMaterials reaches the same component from its GameObject and decodes it again — but
+        // only for parts that clear the mesh and anchor checks, so this is a bound over the class.
+        (137, 2, 2, false, "MapObjectKeysToMeshes sweep + MeshRendererMaterials"),
+
+        // AnchorOf decodes a GameObject (and caches it) for the part name, then MeshRendererMaterials
+        // decodes the same GameObject again to walk m_Component — it is a separate static and cannot see
+        // that cache. Only mesh-bearing prefab GameObjects take both paths.
+        (1, 2, 2, false, "PrefabWalk.AnchorOf's cache + MeshRendererMaterials"),
+
+        // BlendOf and CullOf both go through ShaderOf but with SEPARATE caches (_shaderBlends,
+        // _shaderCulls), so the first material using a shader decodes it once for each. Only shaders a
+        // resolved material actually names are reached.
+        (48, 2, 2, false, "MaterialResolver.BlendOf + CullOf (separate shader caches)"),
+    };
+
+    // Materials have no fixed multiplicity to report: MaterialResolver.Resolve decodes the material on
+    // EVERY call and is called per submesh, so the count is the number of submeshes sharing it, which is
+    // a property of the map's placements rather than of the bundle.
+    private const string TargetedRepeatNote =
+        "MaterialResolver.Resolve re-decodes a material on every submesh that uses it (no cache), with no "
+        + "fixed multiplicity to price — the count belongs to the map's placements, not the bundle";
+
+    private static void RepeatDecodeTable(List<(SerializedObject Obj, SerializedFile File)> readable)
+    {
+        var byClass = new Dictionary<int, List<(SerializedObject Obj, SerializedFile File)>>();
+        foreach ((SerializedObject o, SerializedFile f) in readable)
+        {
+            if (!byClass.TryGetValue(o.ClassId, out List<(SerializedObject, SerializedFile)>? list))
+                byClass[o.ClassId] = list = new List<(SerializedObject, SerializedFile)>();
+            list.Add((o, f));
+        }
+
+        bool header = false;
+        foreach ((int classId, int minDecodes, int maxDecodes, bool everyObject, string where)
+            in RepeatDecoded)
+        {
+            if (!byClass.TryGetValue(classId, out List<(SerializedObject Obj, SerializedFile File)>? objects)
+                || objects.Count == 0)
+                continue;
+
+            if (!header)
+            {
+                Console.WriteLine("  decoded more than once per load (the rows above count only the first;"
+                    + " this list is a LOWER BOUND, not a total — see the comment on RepeatDecoded):");
+                header = true;
+            }
+
+            void Pass()
+            {
+                foreach ((SerializedObject o, SerializedFile f) in objects)
+                    TypeTreeReader.Read(o.TypeTree, f.ReaderFor(o));
+            }
+
+            string name = ClassNames.TryGetValue(classId, out string? n) ? n : classId.ToString();
+            double median = Bench($"  {name} x{objects.Count:N0}, one decode", Pass, warmup: 1, iters: 5);
+            long alloc = AllocatedBy(Pass);
+            string count = minDecodes == maxDecodes
+                ? $"{maxDecodes} decodes per load, so {maxDecodes - 1} extra"
+                : $"{minDecodes}-{maxDecodes} decodes per load, so {minDecodes - 1}-{maxDecodes - 1} extra";
+            string cost = minDecodes == maxDecodes
+                ? $"{median * (maxDecodes - 1):N0} ms and {Mb(alloc * (maxDecodes - 1))}"
+                : $"{median * (minDecodes - 1):N0}-{median * (maxDecodes - 1):N0} ms and "
+                    + $"{Mb(alloc * (minDecodes - 1))}-{Mb(alloc * (maxDecodes - 1))}";
+            Console.WriteLine($"      {count}: {cost}"
+                + (everyObject
+                    ? " beyond the rows above"
+                    : " AT MOST — only the objects a placement reaches take both paths"));
+            Console.WriteLine($"      {where}");
+        }
+
+        Console.WriteLine($"  note: {TargetedRepeatNote}");
+    }
+
+    // Where the decode time and allocation actually sit, per Unity class.
+    //
+    // Timed one CLASS at a time rather than one object at a time, with the GC levelled before each class.
+    // Timing every object individually put a stopwatch boundary around every allocation in a pass that
+    // leaves gigabytes of garbage, so whichever object happened to trip a Gen2/LOH collection was billed
+    // for it — the sorted column could rank GC pauses rather than decode cost. Batching per class makes
+    // each measurement long enough that the per-call overhead disappears, and collecting first means a
+    // class is not charged for the previous one's garbage. It cannot remove a collection provoked from
+    // *within* a class's own batch, which is honest: that allocation really is that class's doing.
+    private static void PerClassTable(List<(SerializedObject Obj, SerializedFile File)> objects)
+    {
+        var scannedClasses = new HashSet<int>(ScannedClasses);
+        var partlyClasses = new HashSet<int>(PartlyScannedClasses);
+        var targetedClasses = new HashSet<int>(TargetedClasses);
+        var audioClasses = new HashSet<int>(AudioClasses);
+
+        var byClass = new Dictionary<int, List<(SerializedObject Obj, SerializedFile File)>>();
+        foreach ((SerializedObject o, SerializedFile f) in objects)
+        {
+            if (!byClass.TryGetValue(o.ClassId, out List<(SerializedObject, SerializedFile)>? list))
+                byClass[o.ClassId] = list = new List<(SerializedObject, SerializedFile)>();
+            list.Add((o, f));
+        }
+
+        var perClass = new Dictionary<int, (int Count, double Ms, long Input, long Alloc)>();
+        foreach (KeyValuePair<int, List<(SerializedObject Obj, SerializedFile File)>> entry in byClass)
+        {
+            long input = 0;
+            foreach ((SerializedObject o, SerializedFile _) in entry.Value)
+                input += o.ByteSize;
+
+            GC.Collect(); // level the field: this class is not billed for the previous class's garbage
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            var sw = Stopwatch.StartNew();
+            foreach ((SerializedObject o, SerializedFile f) in entry.Value)
+                TypeTreeReader.Read(o.TypeTree, f.ReaderFor(o));
+            sw.Stop();
+            long alloc = GC.GetAllocatedBytesForCurrentThread() - before;
+            perClass[entry.Key] = (entry.Value.Count, sw.Elapsed.TotalMilliseconds, input, alloc);
+        }
+
+        var ordered = new List<KeyValuePair<int, (int Count, double Ms, long Input, long Alloc)>>(perClass);
+        ordered.Sort((a, b) => b.Value.Ms.CompareTo(a.Value.Ms));
+
+        Console.WriteLine("    by class (one batch each, GC levelled between; 'how' is scan = every object "
+            + "decoded, partly = swept subset, targeted = by id, audio = only when the audio cache is "
+            + "cold)");
+        Console.WriteLine("      class                      count      input        ms      alloc  how");
+        int shown = 0;
+        foreach (KeyValuePair<int, (int Count, double Ms, long Input, long Alloc)> entry in ordered)
+        {
+            if (shown++ == 8)
+                break;
+            string name = ClassNames.TryGetValue(entry.Key, out string? n) ? $"{n} ({entry.Key})" : entry.Key.ToString();
+            Console.WriteLine($"      {name,-24} {entry.Value.Count,7:N0} {Mb(entry.Value.Input),10} "
+                + $"{entry.Value.Ms,9:0} {Mb(entry.Value.Alloc),10}  {(scannedClasses.Contains(entry.Key) ? "scan" : partlyClasses.Contains(entry.Key) ? "partly" : targetedClasses.Contains(entry.Key) ? "targeted" : audioClasses.Contains(entry.Key) ? "audio" : "-"),-8}");
+        }
+    }
+
+    // Consumes the forward-only stream up to `offset`, returning false if it ended first.
+    private static bool WindTo(MasterBundleStream stream, long offset)
+    {
+        if (stream.Cursor >= offset)
+            return stream.Cursor == offset;
+
+        var skip = new byte[1 << 20];
+        while (stream.Cursor < offset)
+        {
+            int n = stream.Read(skip, 0, (int)Math.Min(skip.Length, offset - stream.Cursor));
+            if (n <= 0)
+                return false;
+        }
+        return true;
+    }
+
+    // Bytes allocated on this thread by one call, with the GC levelled first so a collection triggered by
+    // the previous measurement is not billed to this one.
+    private static long AllocatedBy(Action act)
+    {
+        GC.Collect();
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        act();
+        return GC.GetAllocatedBytesForCurrentThread() - before;
     }
 
     // Synthetic input (no game data needed): alternating long literal runs and short matches, the shape
@@ -912,6 +1383,142 @@ public static class Program
     // the wanted ranges actually sit, and what the pass would read if the last k of them were deferred.
     // If the ranges are spread evenly there is nothing to win by deferring and the idea dies here.
     //
+    // Decode rate as a function of WHERE in the masterbundle's single LZMA stream the pass has reached.
+    // `ress` prices a deferral with one 64 MiB sample taken at the head of the first stream node and
+    // applies it to the whole node; this walks the entire blob and reports the rate per window, which is
+    // the measurement that says how wrong a single sample is. Only run when named: it decodes the whole
+    // ~1.4 GB blob and so costs far more than every timed suite put together.
+
+    // Bucket for bytes inside no node's declared extent. Named rather than inlined so the read loop and
+    // the report cannot drift apart and start hiding a gap in a node's row.
+    private const string OutsideAnyNode = "(outside every node)";
+
+    private static void LzmaDiagnostic(string? unturned)
+    {
+        string? bundlePath = Environment.GetEnvironmentVariable("BUNDLE_PATH")
+            ?? (unturned == null ? null : UnturnedInstall.FindMasterBundle(unturned));
+        if (Skip("lzma", bundlePath != null && File.Exists(bundlePath) ? bundlePath : null, out string path))
+            return;
+
+        using MasterBundleStream? stream = MasterBundleStream.OpenFile(path);
+        if (stream == null)
+        {
+            Console.WriteLine($"== lzma: SKIP ({Path.GetFileName(path)} is not the single-LZMA-block "
+                + "shape the streaming reader handles) ==\n");
+            return;
+        }
+
+        var ordered = new List<MasterBundleStream.Node>(stream.Nodes);
+        ordered.Sort((a, b) => a.Offset.CompareTo(b.Offset));
+
+        // 32 MiB keeps the per-window table readable over a 1.4 GB blob; LZMA_WINDOW=8 resolves the tail
+        // finely enough to see where a node's rate changes.
+        // The upper guard matters: `configured << 20` on a large-but-valid long wraps to a non-positive
+        // window, and the read loop below would then decode nothing and report rates over a zero divisor.
+        // Anything out of range keeps the default rather than failing, since this is a diagnostic.
+        long window = 32L << 20;
+        if (long.TryParse(Environment.GetEnvironmentVariable("LZMA_WINDOW"), out long configured)
+            && configured > 0 && configured <= (long.MaxValue >> 20))
+            window = configured << 20;
+
+        Console.WriteLine($"== lzma: decode rate by region over {Path.GetFileName(path)} ==");
+        Console.WriteLine($"  {Mb(new FileInfo(path).Length)} on disk, {Mb(stream.TotalSize)} decompressed, "
+            + $"{Mb(window)} windows");
+        foreach (MasterBundleStream.Node node in ordered)
+            Console.WriteLine($"    node {LastSegment(node.Path),-52} at {Mb(node.Offset),12}, {Mb(node.Size)}");
+        Console.WriteLine("       from         to        rate     window   node");
+
+        var buffer = new byte[4 << 20];
+        long done = 0;
+        double total = 0;
+        double slowest = double.MaxValue, fastest = 0;
+        // Per-node totals: the figure a caller deferring work actually needs, since the node a range sits
+        // in predicts its decode cost far better than any single sample of the stream does.
+        var perNode = new Dictionary<string, (long Bytes, double Seconds)>(StringComparer.Ordinal);
+        while (done < stream.TotalSize)
+        {
+            // Clip to the next EDGE — a node's start or its end, whichever comes first — so no window
+            // spans two nodes or straddles the space between them. The whole point of the table below is
+            // that a node's content, not its position, sets its rate, and a straddling window would
+            // average two together and hide exactly the difference being measured.
+            //
+            // Clipping on starts alone is not enough. `MasterBundleStream` takes Offset and Size from the
+            // directory without requiring that the nodes partition the blob, so a prefix before the first
+            // node, or a gap between two, is representable. Bytes there belong to no node, and billing
+            // them to whichever node happens to precede them would silently pad that node's figure while
+            // the header below calls it exact.
+            long boundary = stream.TotalSize;
+            foreach (MasterBundleStream.Node node in ordered)
+            {
+                if (node.Offset > done && node.Offset < boundary)
+                    boundary = node.Offset;
+                long end = node.Offset + node.Size;
+                if (end > done && end < boundary)
+                    boundary = end;
+            }
+
+            long want = Math.Min(window, boundary - done);
+            var timer = Stopwatch.StartNew();
+            long got = 0;
+            while (got < want)
+            {
+                int n = stream.Read(buffer, 0, (int)Math.Min(buffer.Length, want - got));
+                if (n <= 0)
+                    break;
+                got += n;
+            }
+            timer.Stop();
+            if (got <= 0)
+                break;
+
+            double seconds = timer.Elapsed.TotalSeconds;
+            double rate = got / 1048576.0 / seconds;
+            total += seconds;
+            slowest = Math.Min(slowest, rate);
+            fastest = Math.Max(fastest, rate);
+
+            // Inside a node means inside its declared extent, not merely after its start.
+            string where = OutsideAnyNode;
+            foreach (MasterBundleStream.Node node in ordered)
+                if (node.Offset <= done && done < node.Offset + node.Size)
+                {
+                    where = LastSegment(node.Path);
+                    break;
+                }
+            perNode.TryGetValue(where, out (long Bytes, double Seconds) acc);
+            perNode[where] = (acc.Bytes + got, acc.Seconds + seconds);
+
+            Console.WriteLine($"  {Mb(done),10} {Mb(done + got),10} {rate,8:0.0} MiB/s {seconds,7:0.00} s   {where}");
+            done += got;
+        }
+
+        // Reported before the per-node table rather than folded into it: if the nodes do not partition the
+        // blob, that is a fact about the bundle the reader needs, and hiding it inside a node's row is
+        // what would make the "exact" claim below false.
+        if (perNode.TryGetValue(OutsideAnyNode, out (long Bytes, double Seconds) outside) && outside.Bytes > 0)
+        {
+            Console.WriteLine($"\n  outside every node: {Mb(outside.Bytes)} in {outside.Seconds:0.00} s "
+                + "— a prefix or inter-node gap, billed to no node below");
+        }
+
+        Console.WriteLine("\n  by node (windows are clipped to node starts AND ends, so these count only "
+            + "bytes inside the node and are exact)");
+        foreach (MasterBundleStream.Node node in ordered)
+        {
+            if (!perNode.TryGetValue(LastSegment(node.Path), out (long Bytes, double Seconds) acc)
+                || acc.Seconds <= 0)
+                continue;
+            Console.WriteLine($"    {LastSegment(node.Path),-52} {Mb(acc.Bytes),12} in {acc.Seconds,6:0.00} s "
+                + $"= {acc.Bytes / 1048576.0 / acc.Seconds,7:0.0} MiB/s");
+        }
+
+        Console.WriteLine($"\n  whole blob: {Mb(done)} in {total:0.0} s = {done / 1048576.0 / total:0.0} MiB/s average");
+        Console.WriteLine($"  slowest window {slowest:0.0} MiB/s, fastest {fastest:0.0} MiB/s "
+            + $"({(slowest > 0 ? fastest / slowest : 0):0}x) — one sampled rate cannot price a deferral "
+            + "elsewhere in the blob");
+        Console.WriteLine();
+    }
+
     // Only metadata is decoded: the ranges come from the SerializedFile, so the .resS itself is never
     // read except for the short sample that measures this machine's decode rate.
     // RESS_BUNDLE overrides the bundle; RESS_TAG the cache tag when it is not derived from the file name.

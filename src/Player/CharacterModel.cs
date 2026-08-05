@@ -117,22 +117,29 @@ public static class CharacterModel
     // (the caller then falls back to the placeholder figure).
     public static Node3D? Build(string unturnedPath) => BuildEntity(unturnedPath, PlayerEntity);
 
-    // The player's two rigs from ONE read of resources.assets: the third-person body, and the first-person
-    // arms rigged into the prefab's Viewmodel subtree with the same clips, so a swing plays identically
-    // from either side of the camera. Either may be null — no game data at all, or a prefab that carries
-    // no Viewmodel subtree, in which case first person simply shows no hands.
+    // The player's two rigs. There is deliberately no first-person EYE transform here: Unturned's
+    // ViewmodelCamera is a child of firstSkeleton/Spine/Skull — the VIEWMODEL skeleton's skull, not the
+    // body's — so its authored offset only means anything on the rig it was authored against. When the
+    // body rig stands in for the arms (see ViewmodelFromBody), there is no authored answer to compose
+    // with, and inventing one is how the arms end up at ninety degrees to the view.
+    public readonly record struct PlayerRigs(Node3D? Body, Node3D? Viewmodel);
+
+    // Both rigs from ONE read of resources.assets: the third-person body, and the first-person arms
+    // rigged into the prefab's Viewmodel subtree with the same clips, so a swing plays identically from
+    // either side of the camera. Either may be null — no game data at all, or a prefab that carries no
+    // Viewmodel subtree, in which case first person falls back to the body rig.
     //
     // One entry point rather than two calls because opening that file is the expensive part (~100 ms and
     // tens of MB of transient heap), and it happens inside the load's character stage. Same reason
     // BuildZombieTemplates imports once for both zombie looks.
-    public static (Node3D? Body, Node3D? Viewmodel) BuildPlayerRigs(string unturnedPath)
+    public static PlayerRigs BuildPlayerRigs(string unturnedPath)
     {
         AssetSource source;
         Node3D? body;
         try
         {
             if (Open(unturnedPath) is not { } opened)
-                return (null, null);
+                return default;
             source = opened;
             if (EnvFlag.IsOn(OS.GetEnvironment("UG_DUMP_PLAYER_RIG"), whenUnset: false))
                 DumpRigs(source);
@@ -142,23 +149,54 @@ public static class CharacterModel
         {
             Log.PrintErr($"[unturned-godot] Character: failed to load real {PlayerEntity.Root} "
                 + $"({e.GetType().Name}: {e.Message}); using placeholder.\n{e.StackTrace}");
-            return (null, null);
+            return default;
         }
 
         // The arms are caught on their own, because the two rigs fail differently. No body means the
         // placeholder figure; no viewmodel means first person shows no hands, which is what a prefab
         // without a Viewmodel subtree already gives. Sharing one catch would let an unsupported mesh in
         // that subtree throw away a body that imported perfectly and drop the whole player to a capsule.
+        Node3D? viewmodel = null;
         try
         {
-            return (body, BuildFrom(source, PlayerViewmodelEntity));
+            viewmodel = BuildFrom(source, PlayerViewmodelEntity);
         }
         catch (System.Exception e)
         {
             Log.PrintErr($"[unturned-godot] Character: failed to load the {ViewmodelSubtree} rig "
-                + $"({e.GetType().Name}: {e.Message}); first person will show no hands.");
-            return (body, null);
+                + $"({e.GetType().Name}: {e.Message}); falling back to the body rig for first person.");
         }
+
+        if (viewmodel is CharacterSkeleton arms)
+            return new PlayerRigs(body, arms);
+
+        // The import produced something, but not a rig — a static bind-pose mesh, which cannot be posed
+        // and so would hang in front of the camera in one frozen attitude. It is a Node nothing owns and
+        // nothing else will free, so it is freed here rather than left to the collector that does not
+        // exist for Godot objects.
+        viewmodel?.Free();
+        return new PlayerRigs(body, ViewmodelFromBody(body));
+    }
+
+    // First person without the prefab's own arms rig.
+    //
+    // The Viewmodel subtree carries a single renderer, Model_0, and Model_0's skin weights live in the
+    // compressed vertex stream this pipeline does not decode — so BuildFrom finds no skinnable mesh
+    // there and returns a static bind-pose mesh, which cannot be posed and therefore cannot throw a
+    // punch. That is why first person had no swing while third person did: not a missing clip, a
+    // missing RIG.
+    //
+    // The body rig is skinnable (Model_1 decodes), carries the same Punch_Left/Punch_Right clips, and is
+    // the same character, so a clone of it stands in. It is a STAND-IN and not the real thing: the game
+    // draws purpose-built arms here, and the framing that goes with them (ViewmodelCamera) is authored
+    // against that rig's skeleton, so it cannot be borrowed. Until Model_0 decodes, first person shows
+    // the body from inside its own head rather than the arms the game would draw.
+    private static CharacterSkeleton? ViewmodelFromBody(Node3D? body)
+    {
+        CharacterSkeleton? clone = Clone(body);
+        if (clone != null)
+            clone.Name = "Viewmodel";
+        return clone;
     }
 
     // Builds the skinned Zombie_Client character with the real zombie skin tone and face.
@@ -227,6 +265,12 @@ public static class CharacterModel
 
         foreach ((string name, AnimationClipData clip) in source.Clips)
             skeleton.StoreClip(name, clip);
+        // The bindings travel with the copy. The eye especially: a clone with no eye is exactly the rig
+        // that gets parked in its own neck, and this clone is the one first person looks through.
+        (int eyeBone, Vector3 eyeLocal) = source.Eye;
+        skeleton.BindEye(eyeBone, eyeLocal);
+        (int spine, int skull) = source.PitchBones;
+        skeleton.BindPitchBones(spine, skull);
         return skeleton;
     }
 
@@ -250,9 +294,9 @@ public static class CharacterModel
 
     private static AssetSource? Open(string unturnedPath)
     {
-        string assetsPath = Path.Combine(unturnedPath, "Unturned_Data", "resources.assets");
+        string? assetsPath = UnturnedInstall.FindDataFile(unturnedPath, "resources.assets");
         string? bundlePath = UnturnedInstall.FindMasterBundle(unturnedPath);
-        if (!File.Exists(assetsPath) || bundlePath == null)
+        if (assetsPath == null || bundlePath == null)
             return null;
 
         // resources.assets ships with its type trees stripped (enableTypeTree = 0). Type trees are identical
@@ -402,11 +446,45 @@ public static class CharacterModel
 
         StoreClips(file, byId, skeleton, boneByName, Id(smr["m_GameObject"]), entity);
         skeleton.BindPitchBones(boneByName.GetValueOrDefault("Spine", -1), boneByName.GetValueOrDefault("Skull", -1));
+        BindEye(file, byId, skeleton, boneByName, boneIds);
         skeleton.Play(entity.PrimaryIdle);
 
         Log.Print($"[unturned-godot] Character: real {entity.Root} skinned body loaded ({boneCount} bones, " +
             (skeleton.HasAnyPose ? "animated" : "bind pose") + ").");
         return skeleton;
+    }
+
+    // Where this character looks from, taken off the prefab.
+    //
+    // The eye is NOT the Skull bone's origin. Skull is a joint at the neck; the head hangs above it, and
+    // the prefab puts a child transform called Spot at the far end of it — 0.45 m along the head, which
+    // lands at the same 1.77 m as the prefab's own Aim/Fire. That Spot is the game's own answer to "where
+    // is the viewer": Player.cs resolves `thirdSpot` as Skeleton/Spine/Skull/Spot on the third-person rig
+    // and `firstSpot` as a child of the main camera itself, so the two name one point in the two
+    // perspectives. Anchoring first person on the bone instead put the camera in the neck, which is why
+    // the head hung over the top of the screen and the shoulders — at exactly the bone's height — swept
+    // the arms through the eye.
+    //
+    // Spot carries no vertex weights, so it is not in the renderer's bone list and cannot be a bone here.
+    // Its authored offset within the Skull's frame is read instead, which keeps this correct if the
+    // character is ever re-authored rather than pinning a measured number.
+    private static void BindEye(SerializedFile file, Dictionary<long, SerializedObject> byId,
+        CharacterSkeleton skeleton, Dictionary<string, int> boneByName, long[] boneIds)
+    {
+        if (!boneByName.TryGetValue("Skull", out int skull))
+            return;
+
+        foreach (object child in (List<object>)Read(file, byId, boneIds[skull])["m_Children"])
+        {
+            Dictionary<string, object> transform = Read(file, byId, Id(child));
+            if ((string)Read(file, byId, Id(transform["m_GameObject"]))["m_Name"] != "Spot")
+                continue;
+            skeleton.BindEye(skull, LocalTransformOf(transform).Origin);
+            return;
+        }
+
+        // No Spot: the head bone itself is the best point available, which is where this started.
+        skeleton.BindEye(skull, Vector3.Zero);
     }
 
     // The clips the on-foot animator plays (PlayerAnimator.updateState): idle + move per stance. They live in

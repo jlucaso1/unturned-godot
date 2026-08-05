@@ -55,6 +55,20 @@ public partial class ZombiesView : Node3D
     private System.Func<Vector3>? _localPosition;
     private byte _localBound = LevelNavigationData.NoBound;
 
+    // Zombies this client has been told are dead. Reliable delivery retransmits and de-duplicates but
+    // does NOT order — the same reason a replicated gesture carries its tick — so a region's zombie list
+    // can arrive after a kill for a zombie in it, and SpawnOrReset would then stand the corpse back up
+    // with nothing left to remove it again. A death is final, so remembering it is enough.
+    //
+    // Kept for the life of the view rather than dropped on a region change. Ids are handed out once at
+    // load and run across every bound (ZombieSystem numbers the whole level from a single counter) and
+    // nothing recycles one — Remove takes the instance out and no respawn puts another in its place — so
+    // an id names exactly one zombie for the session and a tombstone can never suppress a live one. A
+    // stale list can also outlive a round trip through a region: leave and come back before the pre-kill
+    // list for it is delivered, and clearing here would be the difference between a corpse staying down
+    // and standing back up with nothing left to remove it. A session's dead are a few thousand ushorts.
+    private readonly HashSet<ushort> _killed = new();
+
     public static ZombiesView Create(NetClient client, string unturnedPath, OneShotAudio? audio,
         IReadOnlyList<NavBound> navBounds, System.Func<Vector3> localPosition)
     {
@@ -68,13 +82,30 @@ public partial class ZombiesView : Node3D
             _localPosition = localPosition,
         };
         client.OnUnhandledMessage += view.Handle;
+        client.OnSessionReset += view.ForgetSession;
         return view;
+    }
+
+    // The client gave up on the session and is rejoining from scratch. Whatever answers the next Hello
+    // may be a restarted host, which numbers its zombies from zero again — so every id this view holds
+    // stops meaning anything, tombstones included. Keeping them would refuse the new session's zombies
+    // one by one, exactly as a stale roster version would refuse its players.
+    private void ForgetSession()
+    {
+        _killed.Clear();
+        _localBound = LevelNavigationData.NoBound;
+        foreach (ZombieAvatar avatar in _avatars.Values)
+            avatar.Root.QueueFree();
+        _avatars.Clear();
     }
 
     public override void _ExitTree()
     {
         if (_client != null)
+        {
             _client.OnUnhandledMessage -= Handle;
+            _client.OnSessionReset -= ForgetSession;
+        }
 
         // Templates are deliberately not children (they must never render); unlike their shared Resources,
         // unparented Nodes are not reclaimed by tree teardown, so release them explicitly with the view.
@@ -152,7 +183,35 @@ public partial class ZombiesView : Node3D
                 foreach (ZombieSnapshotState state in update.States)
                     Push(state, now);
                 break;
+            case ENetMessage.ZombieKilled:
+                if (!MalformedPacket.TryDecode(payload, ReadZombieKilled, out var killed))
+                {
+                    MalformedPacketsDropped++;
+                    break;
+                }
+
+                // The bound is not checked the way the list's is. A kill for a region already left names
+                // an avatar DropForeignRegions is about to free anyway, and one that arrives while the
+                // player is mid-transition still names a zombie that is genuinely gone — the one thing
+                // that must not happen is leaving a dead zombie standing because the message looked
+                // late.
+                foreach (ushort id in killed.Ids)
+                    Kill(id);
+                break;
         }
+    }
+
+    // ZombieManager's death: the avatar goes. Unturned plays a ragdoll here (Zombie.askDamage hands
+    // askDamage's force to the ragdoll and the body falls); there is no ragdoll in this port, so the
+    // body is simply freed, which is what its own dead-zombie cleanup does once the ragdoll expires.
+    private void Kill(ushort id)
+    {
+        // Remembered whether or not an avatar exists for it: a kill that arrives BEFORE the list that
+        // would have spawned this zombie is precisely the case the tombstone is for.
+        _killed.Add(id);
+        if (!_avatars.Remove(id, out ZombieAvatar? avatar))
+            return; // never spawned here, or already removed on a region change
+        avatar.Root.QueueFree();
     }
 
     // Zombie datagrams that reached a decoder and did not survive it; see NetServer.MalformedPacketsDropped.
@@ -164,9 +223,13 @@ public partial class ZombiesView : Node3D
         ZombieNetMessages.ReadZombieList;
     private static readonly System.Func<byte[], (uint Tick, List<ZombieSnapshotState> States)> ReadZombieStates =
         ZombieNetMessages.ReadZombieStates;
+    private static readonly System.Func<byte[], (byte Bound, List<ushort> Ids)> ReadZombieKilled =
+        ZombieNetMessages.ReadZombieKilled;
 
     private void SpawnOrReset(in ZombieListing listing, byte bound)
     {
+        if (_killed.Contains(listing.Id))
+            return; // a list that outran the death it predates
         if (!_avatars.TryGetValue(listing.Id, out ZombieAvatar? avatar))
             _avatars[listing.Id] = avatar = Spawn(listing);
 
@@ -191,7 +254,10 @@ public partial class ZombiesView : Node3D
 
         var root = new Node3D { Name = $"Zombie_{listing.Id}" };
         // Zombie.cs randomizes each zombie's visual scale locally on spawn.
-        root.Scale = Vector3.One * (isMega ? _rng.RandfRange(1.45f, 1.55f) : _rng.RandfRange(0.95f, 1.05f));
+        // Zombie.cs's spawn scale, from the one definition the punch hitbox is sized against too.
+        float scale = ZombieBody.ModelScaleFor(isMega);
+        root.Scale = Vector3.One * _rng.RandfRange(
+            scale - ZombieBody.ModelScaleJitter, scale + ZombieBody.ModelScaleJitter);
         root.AddChild(body);
         AddChild(root);
 
@@ -394,6 +460,9 @@ public partial class ZombiesView : Node3D
     // on (the guard the original doesn't need, since its RPCs can't outrun its bound events).
     private void DropForeignRegions()
     {
+        // The tombstones deliberately survive this: see _killed. Ids are level-global and never reused,
+        // so nothing here can go stale, and a region the player re-enters may still have a pre-kill list
+        // in flight.
         _leaving.Clear();
         foreach ((ushort id, ZombieAvatar avatar) in _avatars)
             if (avatar.Bound != _localBound)

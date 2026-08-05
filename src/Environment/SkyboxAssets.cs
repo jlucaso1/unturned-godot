@@ -41,9 +41,9 @@ public sealed class SkyboxAssets
 
     private static SkyboxAssets? LoadInternal(string unturnedPath)
     {
-        string assetsPath = Path.Combine(unturnedPath, "Unturned_Data", "resources.assets");
+        string? assetsPath = UnturnedInstall.FindDataFile(unturnedPath, "resources.assets");
         string? bundlePath = UnturnedInstall.FindMasterBundle(unturnedPath);
-        if (!File.Exists(assetsPath) || bundlePath == null)
+        if (assetsPath == null || bundlePath == null)
             return null;
 
         IReadOnlyDictionary<int, List<TypeTreeNode>> trees = ModelExtractor.ReadClassTypeTrees(bundlePath);

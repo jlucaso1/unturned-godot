@@ -55,6 +55,8 @@ public sealed class ZombieSystemState
         destination.Gear = source.Gear;
         destination.Move = source.Move;
         destination.Idle = source.Idle;
+        destination.Health = source.Health;
+        destination.MaxHealth = source.MaxHealth;
         destination.IsHyper = source.IsHyper;
         destination.Home = source.Home;
         destination.Position = source.Position;
@@ -157,6 +159,14 @@ public sealed partial class ZombieSystem
                 throw new ArgumentOutOfRangeException(nameof(state),
                     $"zombie {zombie.Id} belongs to nav bound {zombie.Bound}, and this level has "
                     + $"{_byBound.Length}: the dump was taken on another map.");
+            // A dump written before zombies had health carries none, and zero health is dead — a whole
+            // restored population the very next tick would treat as corpses. The tables are right here,
+            // so an unstated health is filled in as a fresh spawn's rather than being trusted.
+            if (zombie.MaxHealth == 0 && zombie.Type < _tables.Count)
+            {
+                zombie.MaxHealth = ZombieInstance.HealthFor(_tables[zombie.Type], zombie.Speciality);
+                zombie.Health = zombie.MaxHealth;
+            }
             _zombies.Add(zombie);
             _byBound[zombie.Bound].Add(zombie);
         }
