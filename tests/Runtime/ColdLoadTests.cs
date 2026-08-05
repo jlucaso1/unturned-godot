@@ -96,7 +96,66 @@ public class ColdLoadTests : TestClass
         }
     }
 
+    // And the SECOND load over the same cache, which is a different program.
+    //
+    // A warm load opens no bundle at all: the meshes, colliders and textures are read straight back from
+    // the cache the first one wrote, and the scene is built from those. That is the load every session
+    // after the first one runs, and it has its own way of going wrong — a cache written in one format and
+    // read in another, an entry that is present but unreadable, a build that starts before the read
+    // finished. None of it is reachable from a cold run, because a cold run never takes that path.
+    //
+    // The two are driven back to back deliberately: a warm load over a cache some OTHER run wrote would
+    // prove only that the reader agrees with whatever happens to be on that machine.
+    [Test]
+    [Timeout(600_000)]
+    public async Task TheSecondLoadOverTheSameCacheIsWarm()
+    {
+        if (!RealMap(out string install, out LevelInfo level))
+            return;
+
+        using var cache = new TempDir();
+
+        // The cold pass, purely to fill the cache. What it does is asserted above.
+        await Load(install, level, cache.Path);
+
+        // And again, over what it left behind.
+        int neededAtFinish = await Load(install, level, cache.Path);
+
+        Assert.True(neededAtFinish > 0,
+            $"the warm load finished having selected {neededAtFinish} assets to build from");
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
+
+    // One load into the given cache directory, run to completion. Returns how many assets the build
+    // selected, captured at the signal for the reason given above.
+    private async Task<int> Load(string install, LevelInfo level, string cacheDir)
+    {
+        var streamer = new ObjectStreamer
+        {
+            Name = "ObjectStreamer",
+            CacheDirOverride = cacheDir,
+            TextureCacheDirOverride = cacheDir,
+        };
+        int neededAtFinish = -1;
+        streamer.Finished += () => neededAtFinish = streamer.NeededGuids.Count;
+        TestScene.AddChild(streamer);
+
+        try
+        {
+            streamer.StartPrepare(install, level);
+            await streamer.BeginAsync();
+            if (!await Within(TimeSpan.FromMinutes(4), streamer.Completion))
+                Assert.Fail("a load never finished; a real one has no longer to wait than this");
+
+            return neededAtFinish;
+        }
+        finally
+        {
+            await streamer.CancelAsync();
+            streamer.QueueFree();
+        }
+    }
 
     // Waits on a task by advancing frames, since the work it is waiting for is driven by them. Returns
     // false on timeout rather than throwing, so the caller can say what the timeout MEANT.
