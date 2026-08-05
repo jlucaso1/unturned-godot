@@ -4,7 +4,6 @@ using UnturnedGodot.Data;
 
 namespace UnturnedGodot.Benchmark;
 
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 internal static class FoliageBenchmarkSettling
 {
     private const int RequiredStableFrames = 3;

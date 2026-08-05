@@ -16,7 +16,6 @@ namespace UnturnedGodot;
 //
 // Width is fixed and the value right-aligned so the messages line up and the eye can run down the column.
 // For wall-clock instead, swap Stamp's body for DateTime.Now.ToString("HH:mm:ss.fff").
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class Log
 {
     // The last few hundred lines, for whoever needs the run-up to something rather than the moment of

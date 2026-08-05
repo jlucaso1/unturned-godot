@@ -7,7 +7,6 @@ namespace UnturnedGodot;
 // lists every map installed on this machine and Play loads the selected one; Connect reveals a host:port
 // field and joins, loading whichever map THAT SERVER says it is running (the browser selection is only
 // for Play — a joining client is a guest on someone else's world); Quit exits.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class MainMenu : CanvasLayer
 {
     // The install to list maps from, and the map to preselect (the previous session's, or MAP=).

@@ -16,7 +16,6 @@ namespace UnturnedGodot;
 // so every key stands in for its own identity and byte-identical textures build a material each. That is
 // why the surfaces are recorded here — once the textures have settled, Rededuplicate re-runs the grouping
 // with the real identities and points the aliases at one material, which is what a warm load had all along.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed class MaterialTable
 {
     // The complete material state, with the texture named by identity rather than by cache key.

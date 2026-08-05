@@ -17,7 +17,6 @@ namespace UnturnedGodot;
 // Plan/WriteClip/CompleteDefs are that interface. Extract is the standalone fallback for everything the
 // pass did not cover — an unstreamable bundle, an interrupted pass, or a load whose meshes were cached and
 // therefore ran no pass at all.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class AudioExtractor
 {
     // Cache layout: <audioCacheDir>/<DefKey>/def.bin + <clip>.ogg. A def.bin marks the def as complete.

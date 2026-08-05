@@ -15,7 +15,6 @@ namespace UnturnedGodot;
 // So every piece of one-time work compacts once when it finishes, off the steady frame loop. "When it
 // finishes" is the part that matters: a reclaim that runs before the last of that work — as the loader's
 // did, ahead of the deferred audio extraction — leaves exactly the transient it was meant to return.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class LoadMemory
 {
     public static void Reclaim(string what)

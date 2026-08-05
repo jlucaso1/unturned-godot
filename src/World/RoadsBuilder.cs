@@ -12,7 +12,6 @@ namespace UnturnedGodot;
 // with the real asphalt/dirt textures from the map's Roads.unity3d (UnityRaw or UnityFS). One material
 // is shared per road-material index (highway, dirt, ...) so the many roads batch. If the bundle can't be
 // read, roads fall back to a procedural asphalt/dirt shader.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class RoadsBuilder
 {
     private const float FallbackRepeat = 24f; // metres per texture tile when drawing procedurally

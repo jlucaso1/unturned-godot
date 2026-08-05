@@ -13,7 +13,6 @@ namespace UnturnedGodot;
 // side has a vertex in the middle of the other side's edge. Godot's NavigationServer only joins exact
 // edge pairs inside a region and therefore severs those surfaces. BakedNavGraph preserves the authored
 // topology, including those joins, and works headless.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed class ZombieNavigation
 {
     private BakedNavGraph? _bakedGraph;

@@ -10,7 +10,6 @@ namespace UnturnedGodot;
 // Loads cached models into Godot ArrayMeshes keyed by object GUID: one surface per submesh, with the
 // submesh's texture applied. Vertices convert Unity->Godot (negate Z, matching ObjectPlacement), which
 // flips winding, so triangles are reversed; UV V is flipped for Godot's texture origin.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class ModelLibrary
 {
     private static readonly bool DeduplicateGpu = EnvFlag.IsOn(System.Environment.GetEnvironmentVariable("UG_DEDUP_GPU"), whenUnset: true);
@@ -107,8 +106,26 @@ public static class ModelLibrary
         if (!MeshCache.IsCurrent(data)) // stale format; the extraction pass rewrites it
             return new PreparedMesh(guid, "", null, new List<CachedSubmesh>());
 
-        var (verts, normals, uvs, submeshes) = MeshCache.Read(data);
-        return Build(guid, contentKey, verts, normals, uvs, submeshes);
+        // IsCurrent is a MAGIC test — four bytes — so a file that starts right and is damaged after that
+        // reads as current and only fails here. Left unguarded, one bad cache entry faults the whole
+        // object build and drops the player back to the menu; and because nothing rewrites the file, it
+        // does so on every later load too. Skip the asset and invalidate it, exactly as ColliderLibrary
+        // does for the same failure: the read is the only thing that knows the payload is bad, so the read
+        // is what marks it for re-extraction.
+        try
+        {
+            var (verts, normals, uvs, submeshes) = MeshCache.Read(data);
+            return Build(guid, contentKey, verts, normals, uvs, submeshes);
+        }
+        catch (Exception e) when (e is InvalidDataException or ArgumentException or OverflowException
+            or IndexOutOfRangeException)
+        {
+            if (Path.GetDirectoryName(path) is { Length: > 0 } cacheDir)
+                ExtractionIndex.RemoveCachedAsset(cacheDir, guid);
+            Log.Print($"[models] dropped an unreadable mesh cache entry ({guid:N}); "
+                + "that object loads without a mesh this run and re-extracts on the next.");
+            return new PreparedMesh(guid, "", null, new List<CachedSubmesh>());
+        }
     }
 
     // Phase 2 — main thread: GetMesh creates the RenderingServer resource, and each surface takes the

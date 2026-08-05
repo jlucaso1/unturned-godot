@@ -6,7 +6,6 @@ namespace UnturnedGodot;
 // Builds the ocean: a single large translucent plane at the map's sea level. Unturned places the water
 // surface at seaLevel * Level.TERRAIN, colored by the lighting's SEA color, which is what turns the
 // sandy seabed into blue water and gives the island its coastline.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class WaterBuilder
 {
     private const float TerrainHeight = 256f; // Level.TERRAIN: sea level is a fraction of this

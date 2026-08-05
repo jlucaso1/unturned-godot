@@ -5,7 +5,6 @@ namespace UnturnedGodot;
 
 // One lifecycle node owns many RenderingServer instances. MultiMeshInstance3D is otherwise only a managed
 // wrapper around this same RID state; large maps paid for ~18k wrappers with no per-node behaviour.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class MultiMeshRidRenderer : Node3D
 {
     private List<Entry> _entries = new();

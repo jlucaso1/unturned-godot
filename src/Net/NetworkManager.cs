@@ -10,7 +10,6 @@ namespace UnturnedGodot;
 //  - Client: NetClient over UDP to someone else's server (JOIN=host:port).
 //  - Dedicated: see DedicatedServer (no local player at all).
 // Pumps everything on the physics tick and forwards the local player's 12.5 Hz inputs.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class NetworkManager : Node
 {
     public const ushort DefaultPort = 27015;

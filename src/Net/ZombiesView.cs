@@ -12,7 +12,6 @@ namespace UnturnedGodot;
 // remote players use. Animation follows Zombie.cs exactly: Move_{move}/Idle_{idle} variants with the
 // crawler (Move_4/Idle_3) and sprinter (Move_5/Idle_4) overrides, Attack_0..4 swings, and the replicated
 // per-zombie scale band (megas 1.45-1.55, everyone else 0.95-1.05).
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class ZombiesView : Node3D
 {
     private const float AnimateWithin = 100f;  // skeletons past this stop sampling (Unturned's far
