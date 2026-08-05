@@ -191,7 +191,12 @@ public partial class Main : Node3D
             }
 
             Benchmark.BenchmarkRunner.Run(this, unturnedPath, _mapName);
-            GetTree().Quit();
+            // Through AppShutdown, like every other way out of a loaded world. Tier 1 has no background
+            // work to wait for, so this is the same instant exit it always was — but it is now the same
+            // CODE PATH, which is what lets a coverage run measure the tier at all: SceneTree.Quit never
+            // returns to managed code, so the instrumenter's hit counts were never written and the tier
+            // reported zero lines however completely it ran.
+            AppShutdown.RequestQuit(GetTree());
             return;
         }
 

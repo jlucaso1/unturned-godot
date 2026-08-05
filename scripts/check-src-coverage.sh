@@ -95,9 +95,32 @@ if (( with_game_run )); then
         --target "$godot" \
         --targetargs "--headless --audio-driver Dummy --path $repo_dir" \
         --merge-with "$result_dir/suite.json" \
-        --format cobertura --output "$report" --include-test-assembly \
+        --format json --output "$result_dir/session.json" --include-test-assembly \
         > "$result_dir/game.log" 2>&1 \
         || { echo "The game session failed; coverage was not measured:" >&2; tail -40 "$result_dir/game.log" >&2; exit 1; }
+
+    # Tier 1, which is a whole program of its own: it builds the world synchronously, measures it, writes
+    # a report and leaves. Nothing about it is reachable from a session, because it never starts one.
+    UG_COVERAGE=1 \
+    dotnet coverlet "$assembly" \
+        --target "$godot" \
+        --targetargs "--headless --audio-driver Dummy --path $repo_dir -- --benchmark" \
+        --merge-with "$result_dir/session.json" \
+        --format json --output "$result_dir/tier1.json" --include-test-assembly \
+        > "$result_dir/tier1.log" 2>&1 \
+        || { echo "The structural benchmark failed; coverage was not measured:" >&2; tail -40 "$result_dir/tier1.log" >&2; exit 1; }
+
+    # Tier 3, the runtime tier: a real session measured over a few seconds of frames, which is the only
+    # caller RuntimeBenchmark has. Kept short — what is being measured here is that the code runs, not
+    # what it measured.
+    UG_COVERAGE=1 UG_HEADLESS_INTERACTIVE=1 SOLO=1 UG_RUNTIME_BENCH_SECS=5 \
+    dotnet coverlet "$assembly" \
+        --target "$godot" \
+        --targetargs "--headless --audio-driver Dummy --path $repo_dir" \
+        --merge-with "$result_dir/tier1.json" \
+        --format cobertura --output "$report" --include-test-assembly \
+        > "$result_dir/tier3.log" 2>&1 \
+        || { echo "The runtime benchmark failed; coverage was not measured:" >&2; tail -40 "$result_dir/tier3.log" >&2; exit 1; }
 fi
 
 [[ -s "$report" ]] || { echo "coverlet produced no report:" >&2; tail -20 "$result_dir/run.log" >&2; exit 1; }
