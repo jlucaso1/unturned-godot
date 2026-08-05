@@ -47,7 +47,7 @@ public class AppShutdownTests : TestClass
     public async Task FinishedWorkIsDroppedRatherThanAccumulated()
     {
         for (int i = 0; i < 200; i++)
-            AppShutdown.Track(Task.CompletedTask);
+            _ = AppShutdown.Track(Task.CompletedTask);
 
         // Nothing observable to read back — the set is private, deliberately — so what this covers is
         // that registering repeatedly stays cheap and cannot throw. A leak here would show up as a quit
