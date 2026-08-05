@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# The checks that are too slow or too demanding to sit on every commit, run once before the code leaves
+# the machine. Installed by ./scripts/install-git-hooks.sh alongside pre-commit.
+#
+# Today that is the Godot runtime suite. It needs the engine binary — a ~130 MB download that not every
+# checkout has — so putting it in pre-commit would make committing conditional on an install that is
+# optional for most work. Here it can simply skip when the engine is absent, which is the honest
+# behaviour: CI runs it regardless, so a skip locally costs a round trip and not correctness.
+#
+#   SKIP_RUNTIME_TESTS=1 git push ...   skip it explicitly
+#   git push --no-verify ...            skip this hook entirely
+set -uo pipefail
+
+repo_dir="$(git rev-parse --show-toplevel)"
+cd "$repo_dir" || exit 1
+
+if [[ "${SKIP_RUNTIME_TESTS:-}" == "1" ]]; then
+    echo "pre-push: SKIP_RUNTIME_TESTS=1, skipping the runtime suite."
+    exit 0
+fi
+
+godot="${GODOT:-$(./scripts/install-godot.sh --print-path 2>/dev/null)}"
+if [[ -z "$godot" || ! -x "$godot" ]]; then
+    # Not a failure. The engine is optional for most of this repo's work, and CI is the backstop.
+    echo "pre-push: no Godot binary (run ./scripts/install-godot.sh to check locally); skipping the runtime suite."
+    exit 0
+fi
+
+echo "pre-push: running the Godot runtime suite..."
+if ! ./scripts/run-godot-tests.sh; then
+    echo "" >&2
+    echo "pre-push: the runtime suite failed. Push with --no-verify if you know better." >&2
+    exit 1
+fi
+
+echo "pre-push: ok."
