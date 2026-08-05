@@ -8,7 +8,6 @@ namespace UnturnedGodot;
 // Places a floating billboard label at each named location (town/landmark) from Environment/Nodes.dat,
 // like Unturned's in-world place names. Labels show through terrain (map-marker style) so a town's name is
 // readable even from across the island.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class NodesBuilder
 {
     private const float LabelHeight = 28f; // metres above the node point, clearing most buildings and trees
