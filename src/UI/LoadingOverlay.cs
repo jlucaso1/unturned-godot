@@ -5,7 +5,6 @@ namespace UnturnedGodot;
 // A small load-status banner driven by ObjectStreamer's signals: shows while the cold-load streams the
 // object meshes and then the textures, and hides itself once everything is applied. On a warm cache the
 // streamer fires MeshesReady + Finished before the first frame, so the banner never appears.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class LoadingOverlay : CanvasLayer
 {
     private Label _label = null!;

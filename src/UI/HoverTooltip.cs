@@ -12,7 +12,6 @@ namespace UnturnedGodot;
 //
 // It is top-level so no container lays it out and no ScrollContainer clips it, and it ignores the mouse
 // so it never steals the hover it is describing.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class HoverTooltip : PanelContainer
 {
     // Past this the hint is ellipsized rather than allowed to span the window; long workshop paths are
