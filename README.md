@@ -164,7 +164,7 @@ can actually do.
 | places | `locations.enabled` — the map's town and landmark names, floated over the world. Off by default (the game names a place when you reach it); one command brings them back |
 | sun | `sun.enabled`, `sun.shadows.enabled`, `sun.shadows.distance` |
 | environment | `env.sky.enabled`, `env.fog.enabled`, `env.volumetric.enabled`, `env.ssao.enabled`, `env.ssil.enabled`, `env.glow.enabled` |
-| renderer | `r.scale`, `r.msaa`, `r.taa.enabled`, `r.occlusion.enabled`, `r.lod.threshold`, `r.shadow.atlas`, `r.debug` (overdraw/wireframe), `r.vsync.enabled`, `r.fps.max` |
+| renderer | `r.scale`, `r.msaa`, `r.taa.enabled`, `r.occlusion.enabled`, `r.lod.threshold`, `r.shadow.atlas` (positional), `r.shadow.directional` (the sun's shadow map edge — cleared and written every frame, so it is memory bandwidth first), `r.shadow.filter` (taps per shadowed pixel), `r.debug` (overdraw/wireframe), `r.vsync.enabled`, `r.fps.max` |
 | commands | `help`, `list`, `find <text>`, `reset <name\|all>`, `perf`, `clear`, `quit` |
 
 `help` and `list` are the authority — the table above is a map, not a manual. `find shadow` answers "what

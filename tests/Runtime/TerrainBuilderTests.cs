@@ -146,6 +146,87 @@ public class TerrainBuilderTests : TestClass
         tile.QueueFree();
     }
 
+    // The splat shader is generated for the number of layers the tile paints, and the eight-layer form is
+    // the maximum rather than the norm. What has to hold is that the pruned program is the SAME blend:
+    // a weighted average over the layers that are there, divided by their total.
+    [Test]
+    public void TheSplatShaderSamplesOnlyTheLayersTheTilePaints()
+    {
+        string three = TerrainBuilder.SplatShaderCode(3, covered: true);
+
+        Assert.Contains("uniform sampler2D layer2", three);
+        Assert.DoesNotContain("layer3", three);      // the five it does not paint cost it no fetch
+        Assert.Contains("uniform sampler2D control0", three);
+        Assert.DoesNotContain("control1", three);    // nor does the second half of the weights
+        Assert.Contains("albedo / total", three);
+
+        string eight = TerrainBuilder.SplatShaderCode(8, covered: false);
+        Assert.Contains("uniform sampler2D layer7", eight);
+        Assert.Contains("uniform sampler2D control1", eight);
+        Assert.Contains("c1.a", eight);              // layer 7's weight, in the last channel of the second
+        // A tile with an unpainted texel keeps the guard the eight-layer blend always had.
+        Assert.Contains("total > 0.0", eight);
+    }
+
+    // One layer painted over the whole tile is `layer * w / w`. The weights cancel, so the tile needs no
+    // control texture at all — three of PEI's sixteen are exactly this.
+    [Test]
+    public void ASingleFullyPaintedLayerNeedsNoControlTexture()
+    {
+        string code = TerrainBuilder.SplatShaderCode(1, covered: true);
+
+        Assert.Contains("ALBEDO = texture(layer0, layer_uv).rgb;", code);
+        Assert.DoesNotContain("control", code);
+        Assert.DoesNotContain("total", code);
+
+        // Not painted everywhere, though, and the weight no longer cancels: the blend comes back.
+        Assert.Contains("control0", TerrainBuilder.SplatShaderCode(1, covered: false));
+    }
+
+    // A splatmap that paints nothing produced black out of the eight-layer blend (a zero numerator over a
+    // zero total). It still does, without sampling anything to get there.
+    [Test]
+    public void ATileThatPaintsNothingDrawsBlackWithoutSampling()
+    {
+        string code = TerrainBuilder.SplatShaderCode(0, covered: false);
+
+        Assert.Contains("ALBEDO = vec3(0.0);", code);
+        Assert.DoesNotContain("texture(", code);
+    }
+
+    // End to end on the main thread: the material a painted tile gets binds the layers it paints, in the
+    // compacted order the shader indexes them by, and nothing else.
+    [Test]
+    public void TheMaterialBindsThePaintedLayersInPackedOrder()
+    {
+        const int res = Landscape.SPLATMAP_RESOLUTION;
+        var weights = new byte[res * res * SplatmapTile.LAYERS];
+        for (int texel = 0; texel < res * res; texel++)
+        {
+            weights[(texel * SplatmapTile.LAYERS) + 2] = 100; // layers 2 and 5, both over the whole tile
+            weights[(texel * SplatmapTile.LAYERS) + 5] = 155;
+        }
+        SplatmapTile splat = SplatmapTile.Parse(weights, 0, 0);
+        var layers = new ImageTexture[SplatmapTile.LAYERS];
+        for (int i = 0; i < layers.Length; i++)
+            layers[i] = Pixel();
+
+        TerrainBuilder.TileMesh built = TerrainBuilder.BuildTileMesh(Flat(0, 0, 0.5f), splat, textured: true);
+        MeshInstance3D tile = TerrainBuilder.FinishTile(built, layers);
+        TestScene.AddChild(tile);
+
+        var material = (ShaderMaterial)tile.Mesh.SurfaceGetMaterial(0);
+        Assert.Equal(layers[2].GetRid(), material.GetShaderParameter("layer0").As<ImageTexture>().GetRid());
+        Assert.Equal(layers[5].GetRid(), material.GetShaderParameter("layer1").As<ImageTexture>().GetRid());
+        Assert.NotNull(material.GetShaderParameter("control0").As<ImageTexture>());
+        Assert.Null(material.GetShaderParameter("control1").As<ImageTexture>());
+        // Two layers ride in two channels, not the four the eight-layer packing always uploaded.
+        Assert.Equal(Image.Format.Rg8, material.GetShaderParameter("control0")
+            .As<ImageTexture>().GetImage().GetFormat());
+
+        tile.QueueFree();
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
 
     private static StaticBody3D? FindBody(Node parent)

@@ -20,43 +20,96 @@ public static partial class TerrainBuilder
         SpecularMode = BaseMaterial3D.SpecularModeEnum.Disabled,
     };
 
-    // Blends the 8 splat layers per pixel: two control textures carry the layer weights (sampled by UV2,
-    // the tile-normalized position), each layer texture is tiled by world XZ, and the result is their
-    // weighted average. World XZ comes straight from VERTEX since each tile mesh sits at the origin.
-    private static readonly Shader SplatShader = new()
+    // Blends the splat layers a tile actually paints, per pixel: a control texture carries the layer
+    // weights (sampled by UV2, the tile-normalized position), each layer texture is tiled by world XZ,
+    // and the result is their weighted average. World XZ comes straight from VERTEX since each tile mesh
+    // sits at the origin.
+    //
+    // The shader is generated per layer count rather than written once for eight, because the terrain is
+    // the surface that covers most of the screen and every layer costs it an anisotropic fetch of every
+    // pixel of that surface. Eight is the format's maximum, not a map's habit: PEI's sixteen tiles paint
+    // 3.4 layers on average and three of them paint exactly one. A layer whose weight is zero over the
+    // whole tile adds zero to the weighted sum AND zero to the divisor, so leaving it out is not an
+    // approximation — see SplatmapTile.Coverage, which is what decides.
+    //
+    // Only the layer COUNT varies the code (the weights are repacked into the leading channels of the
+    // control texture, so a tile painting layers 0, 2 and 5 runs the same three-layer shader as one
+    // painting 1, 3 and 4), so every tile of every map shares a handful of programs — nine layer counts
+    // times the one branch that turns on whether the tile leaves any texel unpainted. PEI needs five.
+    private static readonly Dictionary<(int Layers, bool Covered), Shader> SplatShaders = new();
+
+    // Main thread only (a Shader is a RenderingServer resource); FinishTile is the only caller.
+    private static Shader SplatShaderFor(int layers, bool covered)
     {
-        Code = """
-        shader_type spatial;
-        render_mode cull_back;
-        uniform sampler2D layer0 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
-        uniform sampler2D layer1 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
-        uniform sampler2D layer2 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
-        uniform sampler2D layer3 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
-        uniform sampler2D layer4 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
-        uniform sampler2D layer5 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
-        uniform sampler2D layer6 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
-        uniform sampler2D layer7 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
-        uniform sampler2D control0 : repeat_disable; // weights of layers 0..3
-        uniform sampler2D control1 : repeat_disable; // weights of layers 4..7
-        uniform float tiling = 0.15;                 // texture repeats every 1/tiling world metres
-        varying vec3 world_pos;
-        void vertex() { world_pos = VERTEX; }
-        void fragment() {
-            vec4 c0 = texture(control0, UV2);
-            vec4 c1 = texture(control1, UV2);
-            vec2 uv = world_pos.xz * tiling;
-            vec3 albedo =
-                texture(layer0, uv).rgb * c0.r + texture(layer1, uv).rgb * c0.g +
-                texture(layer2, uv).rgb * c0.b + texture(layer3, uv).rgb * c0.a +
-                texture(layer4, uv).rgb * c1.r + texture(layer5, uv).rgb * c1.g +
-                texture(layer6, uv).rgb * c1.b + texture(layer7, uv).rgb * c1.a;
-            float total = c0.r + c0.g + c0.b + c0.a + c1.r + c1.g + c1.b + c1.a;
-            ALBEDO = total > 0.0 ? albedo / total : albedo;
-            ROUGHNESS = 1.0;
-            SPECULAR = 0.0;
+        if (!SplatShaders.TryGetValue((layers, covered), out Shader? shader))
+        {
+            shader = new Shader { Code = SplatShaderCode(layers, covered) };
+            SplatShaders[(layers, covered)] = shader;
         }
-        """,
-    };
+        return shader;
+    }
+
+    // `covered` means every texel of the tile has some weight on it, which is what lets the blend divide
+    // by its total unconditionally — and, at one layer, skip the control texture entirely, since
+    // `layer * w / w` is the layer whatever w is.
+    internal static string SplatShaderCode(int layers, bool covered)
+    {
+        int controls = layers == 0 || (layers == 1 && covered) ? 0 : (layers + 3) / 4;
+        var code = new System.Text.StringBuilder();
+        code.AppendLine("shader_type spatial;");
+        code.AppendLine("render_mode cull_back;");
+        for (int i = 0; i < layers; i++)
+        {
+            code.AppendLine($"uniform sampler2D layer{i} : source_color, repeat_enable, "
+                + "filter_linear_mipmap_anisotropic;");
+        }
+        for (int i = 0; i < controls; i++)
+            code.AppendLine($"uniform sampler2D control{i} : repeat_disable; // weights of the layers packed into it");
+
+        if (layers == 0)
+        {
+            // A splatmap that paints nothing: the eight-layer blend produced a zero numerator over a zero
+            // total, which it resolved to black. Same pixel, no fetches.
+            code.AppendLine("void fragment() { ALBEDO = vec3(0.0); ROUGHNESS = 1.0; SPECULAR = 0.0; }");
+            return code.ToString();
+        }
+
+        code.AppendLine("uniform float tiling = 0.15; // texture repeats every 1/tiling world metres");
+        // Only XZ of the world position is ever used, so only XZ is interpolated. The scaling stays in the
+        // fragment: interpolating the SCALED coordinate instead rounds differently, and the terrain is a
+        // surface where a fraction of a texel of drift is visible as a changed pixel.
+        code.AppendLine("varying vec2 world_xz;");
+        code.AppendLine("void vertex() { world_xz = VERTEX.xz; }");
+        code.AppendLine("void fragment() {");
+        code.AppendLine("    vec2 layer_uv = world_xz * tiling;");
+        for (int i = 0; i < controls; i++)
+            code.AppendLine($"    vec4 c{i} = texture(control{i}, UV2);");
+
+        if (controls == 0)
+        {
+            code.AppendLine("    ALBEDO = texture(layer0, layer_uv).rgb;");
+        }
+        else
+        {
+            var albedo = new System.Text.StringBuilder();
+            var total = new System.Text.StringBuilder();
+            for (int i = 0; i < layers; i++)
+            {
+                string weight = $"c{i / 4}.{"rgba"[i % 4]}";
+                albedo.Append(i == 0 ? "" : " + ").Append($"texture(layer{i}, layer_uv).rgb * {weight}");
+                total.Append(i == 0 ? "" : " + ").Append(weight);
+            }
+            code.AppendLine($"    vec3 albedo = {albedo};");
+            code.AppendLine($"    float total = {total};");
+            code.AppendLine(covered
+                ? "    ALBEDO = albedo / total;"
+                : "    ALBEDO = total > 0.0 ? albedo / total : albedo;");
+        }
+        code.AppendLine("    ROUGHNESS = 1.0;");
+        code.AppendLine("    SPECULAR = 0.0;");
+        code.AppendLine("}");
+        return code.ToString();
+    }
 
     // Maps the map's terrain textures (by name) onto the 8 splat layers in layer order, returning null if
     // any layer's texture is missing so the caller falls back to the averaged-color material.
@@ -83,8 +136,11 @@ public static partial class TerrainBuilder
         public readonly int X;
         public readonly int Y;
         public readonly SplatmapTile? Splat;
+        // Which layers the splatmap paints, scanned on the worker thread beside the tessellation rather
+        // than on the main thread while the loading screen is waiting on it.
+        public readonly SplatmapTile.SplatCoverage Coverage;
         public TileMesh(ImporterMesh importer, ushort[]? heights16, float[]? heights32,
-            int x, int y, SplatmapTile? splat)
+            int x, int y, SplatmapTile? splat, SplatmapTile.SplatCoverage coverage = default)
         {
             Importer = importer;
             Heights16 = heights16;
@@ -92,6 +148,7 @@ public static partial class TerrainBuilder
             X = x;
             Y = y;
             Splat = splat;
+            Coverage = coverage;
         }
         public float HeightAt(int index) => Heights16 != null
             ? Heights16[index] / (float)ushort.MaxValue : Heights32![index];
@@ -230,7 +287,8 @@ public static partial class TerrainBuilder
                 for (int hy = 0; hy < fullRes; hy++)
                     flat[(hx * fullRes) + hy] = tile.HeightAt(hx, hy);
         }
-        return new TileMesh(importer, tile.RawSamples, flat, tile.CoordX, tile.CoordY, splat);
+        return new TileMesh(importer, tile.RawSamples, flat, tile.CoordX, tile.CoordY, splat,
+            splat?.Coverage() ?? default);
     }
 
     // Phase 2 — main thread only: realise the LOD mesh (GetMesh creates the ArrayMesh RenderingServer
@@ -240,23 +298,23 @@ public static partial class TerrainBuilder
     {
         private readonly Dictionary<string, ImageTexture> _textures = new();
 
-        public ImageTexture GetOrCreate(byte[] bytes)
+        public ImageTexture GetOrCreate(byte[] bytes, Image.Format format)
         {
             if (!EnvFlag.IsOn(System.Environment.GetEnvironmentVariable("UG_DEDUP_GPU"), whenUnset: true))
-            {
-                const int rawRes = Landscape.SPLATMAP_RESOLUTION;
-                return ImageTexture.CreateFromImage(
-                    Image.CreateFromData(rawRes, rawRes, false, Image.Format.Rgba8, bytes));
-            }
-            string key = ExactContentKey.Bytes(bytes);
+                return Create(bytes, format);
+            // The format rides in the key beside the content: two tiles whose weights happen to agree
+            // byte for byte are still different textures if one packs them into one channel and the
+            // other into four.
+            string key = $"{(int)format}:{ExactContentKey.Bytes(bytes)}";
             if (!_textures.TryGetValue(key, out ImageTexture? texture))
-            {
-                const int res = Landscape.SPLATMAP_RESOLUTION;
-                texture = ImageTexture.CreateFromImage(
-                    Image.CreateFromData(res, res, false, Image.Format.Rgba8, bytes));
-                _textures[key] = texture;
-            }
+                _textures[key] = texture = Create(bytes, format);
             return texture;
+        }
+
+        private static ImageTexture Create(byte[] bytes, Image.Format format)
+        {
+            const int res = Landscape.SPLATMAP_RESOLUTION;
+            return ImageTexture.CreateFromImage(Image.CreateFromData(res, res, false, format, bytes));
         }
     }
 
@@ -265,7 +323,7 @@ public static partial class TerrainBuilder
     {
         ArrayMesh mesh = tm.Importer.GetMesh();
         mesh.SurfaceSetMaterial(0, layerTextures != null && tm.Splat != null
-            ? BuildSplatMaterial(layerTextures, tm.Splat, controls)
+            ? BuildSplatMaterial(layerTextures, tm.Splat, tm.Coverage, controls)
             : SharedMaterial);
 
         var node = new TerrainTileNode
@@ -339,41 +397,61 @@ public static partial class TerrainBuilder
         return data;
     }
 
-    // A per-tile ShaderMaterial: the shared 8 layer textures plus this tile's two splat control textures
-    // (the 8 weights packed into two RGBA8 images, sampled by UV2).
+    // A per-tile ShaderMaterial: the layer textures this tile paints with, bound in the compacted order
+    // its shader expects, plus the control texture(s) holding their weights.
     private static ShaderMaterial BuildSplatMaterial(ImageTexture[] layers, SplatmapTile splat,
-        ControlTextureCache? controls)
+        SplatmapTile.SplatCoverage coverage, ControlTextureCache? controls)
     {
-        var material = new ShaderMaterial { Shader = SplatShader };
-        for (int i = 0; i < layers.Length; i++)
-            material.SetShaderParameter($"layer{i}", layers[i]);
-        material.SetShaderParameter("control0", ControlTexture(splat, 0, controls));
-        material.SetShaderParameter("control1", ControlTexture(splat, 4, controls));
+        int[] used = coverage.UsedLayers();
+        var material = new ShaderMaterial
+        {
+            Shader = SplatShaderFor(used.Length, coverage.Covered),
+        };
+        for (int i = 0; i < used.Length; i++)
+            material.SetShaderParameter($"layer{i}", layers[used[i]]);
+
+        // One control texture per four painted layers, and none at all for the single fully-painted
+        // layer whose weights the blend would only divide back out.
+        if (used.Length == 0 || (used.Length == 1 && coverage.Covered))
+            return material;
+        for (int first = 0, control = 0; first < used.Length; first += 4, control++)
+        {
+            int count = System.Math.Min(4, used.Length - first);
+            material.SetShaderParameter($"control{control}",
+                ControlTexture(splat, new System.ReadOnlySpan<int>(used, first, count), controls));
+        }
         return material;
     }
 
-    // Packs 4 splat layers (firstLayer..firstLayer+3) into an RGBA8 image. Image pixel (x, y) — addressed
-    // (y * res + x) — carries the weights the splatmap stores at [x, y], so UV2 (which runs x->u, y->v)
-    // samples the same texel TerrainColor blends per vertex.
-    private static ImageTexture ControlTexture(SplatmapTile splat, int firstLayer,
+    // Packs the given splat layers, in order, into the leading channels of an image — one channel each,
+    // so a tile painting three layers uploads three channels rather than the eight the format allows.
+    // Image pixel (x, y) — addressed (y * res + x) — carries the weights the splatmap stores at [x, y],
+    // so UV2 (which runs x->u, y->v) samples the same texel TerrainColor blends per vertex.
+    private static ImageTexture ControlTexture(SplatmapTile splat, System.ReadOnlySpan<int> pack,
         ControlTextureCache? controls)
     {
         const int res = Landscape.SPLATMAP_RESOLUTION;
+        // R8 and RG8 are real GPU formats and cut the bytes this texture reads per pixel; RGB8 is not
+        // (the driver would widen it back to four channels), so three layers ride in an RGBA8 whose
+        // alpha nothing samples.
+        (Image.Format format, int channels) = pack.Length switch
+        {
+            1 => (Image.Format.R8, 1),
+            2 => (Image.Format.Rg8, 2),
+            _ => (Image.Format.Rgba8, 4),
+        };
         byte[] weights = splat.Weights;
-        var bytes = new byte[res * res * 4];
+        var bytes = new byte[res * res * channels];
         for (int x = 0; x < res; x++)
         {
             for (int y = 0; y < res; y++)
             {
-                int src = SplatmapTile.WeightIndex(x, y, firstLayer);
-                int dst = (y * res + x) * 4;
-                bytes[dst + 0] = weights[src + 0];
-                bytes[dst + 1] = weights[src + 1];
-                bytes[dst + 2] = weights[src + 2];
-                bytes[dst + 3] = weights[src + 3];
+                int dst = (y * res + x) * channels;
+                for (int i = 0; i < pack.Length; i++)
+                    bytes[dst + i] = weights[SplatmapTile.WeightIndex(x, y, pack[i])];
             }
         }
-        return controls?.GetOrCreate(bytes)
-            ?? ImageTexture.CreateFromImage(Image.CreateFromData(res, res, false, Image.Format.Rgba8, bytes));
+        return controls?.GetOrCreate(bytes, format)
+            ?? ImageTexture.CreateFromImage(Image.CreateFromData(res, res, false, format, bytes));
     }
 }

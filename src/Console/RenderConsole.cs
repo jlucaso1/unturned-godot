@@ -187,6 +187,27 @@ public static class RenderConsole
             "Positional (point/spot) shadow atlas edge, in texels.",
             viewport?.PositionalShadowAtlasSize ?? 1024, 128, 8192,
             ViewportSetting(host, (target, value) => target.PositionalShadowAtlasSize = value.AsInt)));
+        console.Add(ConsoleVariable.Whole("r.shadow.directional",
+            "The sun's shadow map edge, in texels — cleared and written every frame, so on a machine "
+            + "whose GPU shares system memory it is bandwidth before it is anything else. Read it against "
+            + "`sun.shadows.distance`: 2 cascades over 64 m at 4096 spend a texel per 4 mm of near ground "
+            + "and per 16 mm of far, where one screen pixel at 64 m covers ~40 mm. Halving the edge "
+            + "quarters the bytes and is still finer than the display.",
+            DirectionalShadowSize(), 256, 16384, value =>
+            {
+                RenderingServer.DirectionalShadowAtlasSetSize(value.AsInt, DirectionalShadow16Bits());
+                return null;
+            }));
+        console.Add(ConsoleVariable.Whole("r.shadow.filter",
+            "Soft shadow filter quality: 0 hard (one tap), 1-2 low, 3 medium, 4-5 high. Every step up is "
+            + "more taps per shadowed pixel. Unlike the two above, this one is visible — it is the "
+            + "softness of the edge — so it is a trade, not a free saving.",
+            SoftShadowFilterQuality(), 0, 5, value =>
+            {
+                RenderingServer.DirectionalSoftShadowFilterSetQuality(
+                    (RenderingServer.ShadowQuality)value.AsInt);
+                return null;
+            }));
         console.Add(ConsoleVariable.Whole("r.debug",
             "Viewport debug draw: 0 normal, 1 unshaded, 2 lighting, 3 overdraw, 4 wireframe. Overdraw and "
             + "wireframe are how you find WHICH geometry is expensive rather than how much there is.",
@@ -220,6 +241,17 @@ public static class RenderConsole
 
         return console;
     }
+
+    // The renderer-global shadow settings have no node and no viewport to read back from — RenderingServer
+    // takes them and does not return them — so their defaults come from where the engine itself took them.
+    private static int DirectionalShadowSize() =>
+        ProjectSettings.GetSetting("rendering/lights_and_shadows/directional_shadow/size", 4096).AsInt32();
+
+    private static bool DirectionalShadow16Bits() =>
+        ProjectSettings.GetSetting("rendering/lights_and_shadows/directional_shadow/16_bits", true).AsBool();
+
+    private static int SoftShadowFilterQuality() => ProjectSettings.GetSetting(
+        "rendering/lights_and_shadows/directional_shadow/soft_shadow_filter_quality", 2).AsInt32();
 
     // Resolved through a provider rather than a captured node, and re-resolved on every call. Both
     // halves matter: the registry is built once per process so a configuration survives a return to the

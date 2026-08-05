@@ -43,6 +43,63 @@ public sealed class SplatmapTile
     public static SplatmapTile? TryRead(string filePath, int coordX, int coordY) =>
         File.Exists(filePath) ? Parse(File.ReadAllBytes(filePath), coordX, coordY) : null;
 
+    // Which of the eight layers this tile actually paints, and whether every texel is painted by
+    // something.
+    //
+    // The renderer blends all eight layers per pixel, which is eight anisotropic texture fetches over the
+    // surface that covers most of the screen — the terrain's dominant GPU cost. A tile almost never uses
+    // eight: PEI's sixteen tiles use 3.4 on average and three of them use exactly one. A layer whose
+    // weight is zero across the whole tile contributes zero to both the weighted sum and the divisor, so
+    // dropping it from the shader is not an approximation — the pixel that comes out is the same one.
+    //
+    // `Covered` says the used weights sum to something non-zero at every texel, which is what lets the
+    // renderer divide by the total unconditionally (and, for a single-layer tile, skip the control
+    // texture altogether: `layer * w / w` is that layer).
+    public readonly record struct SplatCoverage(int UsedMask, bool Covered)
+    {
+        public int UsedCount => System.Numerics.BitOperations.PopCount((uint)UsedMask);
+        public bool Uses(int layer) => (UsedMask & (1 << layer)) != 0;
+
+        // The used layers in ascending order — the order the renderer packs them into its control texture.
+        public int[] UsedLayers()
+        {
+            var layers = new int[UsedCount];
+            int n = 0;
+            for (int layer = 0; layer < LAYERS; layer++)
+                if (Uses(layer))
+                    layers[n++] = layer;
+            return layers;
+        }
+    }
+
+    public SplatCoverage Coverage() => CoverageOf(Weights);
+
+    public static SplatCoverage CoverageOf(byte[] data)
+    {
+        const int res = Landscape.SPLATMAP_RESOLUTION;
+        int texels = res * res;
+        if (data.Length < texels * LAYERS)
+            throw new IOException($"Splatmap has {data.Length} bytes, expected {texels * LAYERS}");
+
+        int mask = 0;
+        bool covered = true;
+        for (int texel = 0; texel < texels; texel++)
+        {
+            int baseIndex = texel * LAYERS;
+            int total = 0;
+            for (int layer = 0; layer < LAYERS; layer++)
+            {
+                byte w = data[baseIndex + layer];
+                total += w;
+                if (w != 0)
+                    mask |= 1 << layer;
+            }
+            if (total == 0)
+                covered = false;
+        }
+        return new SplatCoverage(mask, covered);
+    }
+
     // The per-texel argmax over the raw splatmap bytes (Landscape.getSplatmapHighestWeightLayerIndex),
     // one dominant-layer index per texel at [x * res + y]. Strict '>' keeps the FIRST layer on ties and
     // byte/255 is monotonic, so this matches an argmax over the normalized float weights exactly —
