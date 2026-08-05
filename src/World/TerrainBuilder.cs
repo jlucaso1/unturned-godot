@@ -40,12 +40,20 @@ public static partial class TerrainBuilder
     // was checked rather than argued — a terrain-only PEI capture (`water/foliage/objects` switched off,
     // so nothing animated is in frame) renders bit-for-bit the same before and after.
     //
-    // The sample inside the branch keeps its IMPLICIT LOD. `uv` is computed in uniform control flow, so
-    // every lane of the quad — helper lanes included — holds the value the derivative is taken from, and
-    // the sampler picks the same mip and the same anisotropic taps it always did. The spec-tidy
-    // alternative, hoisting dFdx/dFdy and sampling with textureGrad, was tried and rejected on evidence:
-    // it came back visibly blurrier (deltas to 110/255 against the unmodified render), because explicit
-    // gradients drop out of the anisotropic path on at least one driver.
+    // The sample inside the branch keeps its IMPLICIT LOD — the opposite of what the tidy reading of the
+    // spec suggests, and what three captures against the unmodified render actually say:
+    //
+    //     texture() inside the branch       0 of 5,988,600 channel samples differ
+    //     textureGrad(), no branch          max delta 5/255 — coarse-against-fine derivative rounding
+    //     textureGrad() inside the branch   max delta 110/255 — visibly blurrier ground
+    //
+    // The middle row is the one that settles it: the gradients themselves are right, so what fails is
+    // hoisting them PAST a branch. A compiler is free to sink a dFdx whose only use is inside the
+    // conditional back into it, and taken there it is taken under divergent flow. The implicit form has
+    // no such value to sink — the derivative belongs to the sample instruction, which the quad's own
+    // semantics cover — and `uv` is computed before the branch, so every lane, helper lanes included,
+    // holds what it is taken from. The zero is the evidence that matters rather than the argument: that
+    // frame is full of splat boundaries, which are exactly the divergent quads the doubt is about.
     //
     // `specular_disabled` rides along for free: SPECULAR is 0, which makes f0 zero and with it the whole
     // Schlick-GGX lobe, so the render mode drops ALU that was multiplying out to nothing. SPECULAR still
