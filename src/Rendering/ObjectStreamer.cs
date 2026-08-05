@@ -42,6 +42,11 @@ public partial class ObjectStreamer : Node
     private IReadOnlyList<ContentSource> _sources = System.Array.Empty<ContentSource>();
     private string _cacheDir = "";
     private string _textureCacheDir = "";
+
+    // Set before StartPrepare to send the extraction somewhere other than user://. For tests only; a
+    // production load leaves both null and gets the session's real caches.
+    internal string? CacheDirOverride { get; set; }
+    internal string? TextureCacheDirOverride { get; set; }
     private LevelInfo _level = null!;
     // Kept from StartPrepare: the NPC characters are imported out of the install's resources.assets at
     // build time, long after the path was handed in.
@@ -142,8 +147,12 @@ public partial class ObjectStreamer : Node
     {
         _level = level;
         _sources = ContentSource.Discover(unturnedPath);
-        _cacheDir = ProjectSettings.GlobalizePath("user://model_cache");
-        _textureCacheDir = ProjectSettings.GlobalizePath("user://texture_cache");
+        // Where the extraction's output lands. Overridable so a test can drive a real prepare into a
+        // temporary directory: resolved unconditionally to user://, any test of this path would write
+        // into the machine's own model and texture caches, which is not a thing a test may do.
+        // Production never sets the override.
+        _cacheDir = CacheDirOverride ?? ProjectSettings.GlobalizePath("user://model_cache");
+        _textureCacheDir = TextureCacheDirOverride ?? ProjectSettings.GlobalizePath("user://texture_cache");
         _registry = new TextureRegistry(_textureCacheDir);
         _prepTask = AppShutdown.Track(Task.Run(() =>
         {
