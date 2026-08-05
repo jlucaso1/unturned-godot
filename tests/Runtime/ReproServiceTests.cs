@@ -135,6 +135,67 @@ public class ReproServiceTests : TestClass
         Assert.Equal(before, pei.Zombies.Zombies.Count);
     }
 
+    // A dump from THIS map is restored: the population it recorded replaces the one running now.
+    //
+    // That is the whole point of the recorder — a bug that took twenty minutes of play to reach becomes a
+    // file you load — and it is the half that changes state rather than only reading it, which is why the
+    // restore does three things beyond swapping the zombies. Everyone connected is told to resend their
+    // regions, because they are still drawing the avatars of the population that was just replaced. The
+    // recorder's ring is restarted, because capturing straight after a load would splice a pre-load
+    // anchor onto post-load ticks. And the automatic trigger forgets what it was watching, because ids
+    // are reused by the restored population and the dump most likely to be loaded is the one whose
+    // incident filled those tracks with exactly the churn the trigger looks for.
+    [Test]
+    public async Task ADumpFromThisMapIsRestored()
+    {
+        using var dir = new TempDir();
+        using var repro = new Recorder(TestScene, dir.Path);
+        await repro.Ready();
+
+        repro.Run(ticks: 20);
+
+        int before = repro.Zombies.Zombies.Count;
+        Assert.True(before > 0, "nothing was hosted, so there is nothing to restore over");
+
+        string? path = repro.Service.Capture("test", Vector3.Zero, "a population to come back to");
+        Assert.NotNull(path);
+
+        repro.Run(ticks: 20);
+        repro.Service.Load(path!);
+
+        // The population is the one the dump held, which is the one that was running when it was taken.
+        Assert.Equal(before, repro.Zombies.Zombies.Count);
+    }
+
+    // A dump whose zombie records name types this map does not have is refused rather than restored. The
+    // bound check inside RestoreState only catches the cases where this map happens to have fewer
+    // regions; a type index past the table would fault the moment that zombie landed a hit.
+    [Test]
+    public async Task ADumpThisMapCannotHoldIsRefused()
+    {
+        using var dir = new TempDir();
+
+        string? path;
+        using (var rich = new Recorder(TestScene, dir.Path, bounds: 4))
+        {
+            await rich.Ready();
+            rich.Run(ticks: 20);
+            path = rich.Service.Capture("test", Vector3.Zero, "captured on a map with more regions");
+        }
+
+        Assert.NotNull(path);
+
+        using var poor = new Recorder(TestScene, dir.Path, bounds: 1);
+        await poor.Ready();
+        int before = poor.Zombies.Zombies.Count;
+
+        poor.Service.Load(path!);
+
+        // The population is left as it was: RestoreState refuses a record whose bounds this session does
+        // not have, and the refusal is reported rather than swallowed into a half-restored world.
+        Assert.Equal(before, poor.Zombies.Zombies.Count);
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
 
     // A recorder over a small hosted population, in the tree so _Ready reads its environment.
@@ -148,22 +209,29 @@ public class ReproServiceTests : TestClass
         public ZombieSystem Zombies { get; }
         public ReproService Service { get; }
 
-        public Recorder(Node testScene, string directory, string levelName = "PEI")
+        public Recorder(Node testScene, string directory, string levelName = "PEI", int bounds = 1)
         {
             _testScene = testScene;
             _server = new NetServer(_transport,
                 new ServerSimulation(new HeightfieldMoveSolver(FlatGround)), Vector3.Zero, levelName);
 
-            var bounds = new[]
+            var regions = new NavBound[bounds];
+            for (int i = 0; i < bounds; i++)
             {
-                new NavBound { Center = Vector3.Zero, Size = new Vector3(256f, 64f, 256f) },
-            };
+                regions[i] = new NavBound
+                {
+                    Center = new Vector3(i * 512f, 0f, 0f),
+                    Size = new Vector3(256f, 64f, 256f),
+                };
+            }
+
             Zombies = new ZombieSystem(
                 new List<ZombieTable> { new() { Name = "Normal", Health = 100, Damage = 10 } },
-                bounds, FlatGround);
+                regions, FlatGround);
             var spawns = new List<ZombieSpawnpointData>();
-            for (int i = 0; i < 4; i++)
-                spawns.Add(new ZombieSpawnpointData(0, new Vector3(i * 2f, 0f, i * 2f)));
+            for (int region = 0; region < bounds; region++)
+                for (int i = 0; i < 4; i++)
+                    spawns.Add(new ZombieSpawnpointData(0, new Vector3((region * 512f) + (i * 2f), 0f, i * 2f)));
             Zombies.Spawn(spawns, new Random(7));
 
             var host = new ZombieHost(Zombies, _server);
@@ -180,6 +248,20 @@ public class ReproServiceTests : TestClass
         // _Ready reads REPRO_DIR, so nothing may capture until the node has had a frame in the tree.
         public SignalAwaiter Ready() =>
             _testScene.ToSignal(_testScene.GetTree(), SceneTree.SignalName.ProcessFrame);
+
+        // Run the session. A dump is a window of TICKS — the recorder's ring is what a capture is built
+        // from — so a session that has not ticked has nothing to record, and restoring such a dump would
+        // restore an empty population over a live one.
+        public void Run(int ticks)
+        {
+            for (int i = 0; i < ticks; i++)
+            {
+                _now += ServerSimulation.TickRate;
+                _server.Update(_now);
+            }
+        }
+
+        private double _now = 1000.0;
 
         private static bool FlatGround(float x, float z, out float y)
         {
