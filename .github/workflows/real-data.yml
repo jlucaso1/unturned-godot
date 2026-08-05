@@ -329,6 +329,98 @@ jobs:
           UG_REQUIRE_REAL_DATA: '1'
         run: ./scripts/run-godot-tests.sh
 
+  src-coverage:
+    # This was the last step of the structural job, and it was the workflow's clock: measured across two
+    # runs of the same commit it took 10m16 and 10m13, out of jobs that took 19m20 and 19m35. The two
+    # steps ahead of it — the structural gate and the runtime suite — spent about eight minutes between
+    # them, and the other two jobs finish in under three, so everything else was already waiting on this.
+    #
+    # Nothing here feeds those steps and nothing they produce is read here: this runs the suite again
+    # under coverlet from a clean checkout either way. Sequence was buying nothing but wall time, so it
+    # runs alongside instead. Same content, same engine, same command, same reporting contract; the
+    # workflow just stops finishing ten minutes after it has learned everything it gates on.
+    name: src/ coverage with real content
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Non-gating all the way up, not just on the report step. The preamble below used to be shared with
+    # the structural work, so a Steam flake or a failed Godot install took down a job that was gating
+    # something; split out, the same failure would redden the workflow over a job that gates nothing.
+    # This keeps the run's verdict where it was before the split. It does NOT paper over the report
+    # itself — that step carries its own continue-on-error, so it never reaches this and the job still
+    # shows green when only the measurement failed. What this catches is exactly the setup.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      # Same key as the structural job: this needs both tools for the same reasons, and sharing the key
+      # means the two jobs share one entry rather than each keeping a copy of a ~130 MB editor. On a cold
+      # key both will try to save it and one will lose the reservation; actions/cache logs that and moves
+      # on. That is the same race the content save already accepts, for the same reason: the other job is
+      # storing the same bytes.
+      - name: Cache the downloader and Godot
+        uses: actions/cache@v6
+        with:
+          path: build/tools
+          key: tools-${{ hashFiles('scripts/fetch-game-data.sh', 'scripts/install-godot.sh') }}
+
+      - name: Resolve the content cache key
+        id: content-key
+        run: echo "key=$(./scripts/fetch-game-data.sh --manifest-key)" >> "$GITHUB_OUTPUT"
+
+      # Same receipt namespace and restore/save split as the jobs above; see the comments there.
+      - name: Restore the game content
+        uses: actions/cache/restore@v6
+        with:
+          path: build/game-data
+          key: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-
+          restore-keys: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-
+
+      - name: Fetch the game content
+        id: content
+        run: |
+          if ./scripts/fetch-game-data.sh --verify 2> /dev/null; then
+            echo "Restored content verified; skipping the download."
+          else
+            ./scripts/fetch-game-data.sh
+            echo "downloaded=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save the game content
+        if: steps.content.outputs.downloaded == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: build/game-data
+          key: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-${{ github.run_id }}-${{ github.job }}
+
+      # Restore-only, and the reason is what this job lost in the split. user://model_cache and
+      # user://texture_cache are shared across every run in a job — measured after one local
+      # --with-game-run: 15 MB of models, 3.3 MB of textures — and the structural benchmark used to fill
+      # them before the coverage runs got here, so those runs read caches rather than extracting. Alone,
+      # this job's first pass extracts cold and the rest read warm. That is a change in which paths the
+      # reported figure exercises, so the cache comes along; the same key means it warms exactly when the
+      # structural job's would have.
+      #
+      # No save: the structural job is the producer for this key, and two jobs writing one key is a race
+      # over identical bytes.
+      - name: Restore the extracted asset cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.local/share/godot/app_userdata/unturned-godot
+          key: godot-userdata-${{ steps.content-key.outputs.key }}-${{ hashFiles('core/**/*.cs', 'src/Rendering/**/*.cs', 'src/World/**/*.cs') }}
+
+      # check-src-coverage.sh needs a Godot binary and the Debug assembly the engine loads. It builds the
+      # assembly itself, but it only ever *looks up* the binary (`install-godot.sh --print-path`) and
+      # fails when it is not there — so the install runs as its own step rather than being left to a
+      # cache hit that a change to install-godot.sh would take away.
+      - name: Install Godot
+        run: ./scripts/install-godot.sh
+
       # Reported, not gated. src/ is being brought under measurement file by file (see
       # check-src-coverage.sh), and this is the number with the content present — the hermetic job's
       # figure is the same measurement with every content-dependent test skipped.
@@ -339,8 +431,12 @@ jobs:
       #
       # continue-on-error because the sentence above is the contract: this number is reported, not gated.
       # --with-game-run adds real sessions on top of the suite, and a session that wedges or a mode that
-      # exits badly would otherwise fail a job whose actual subject — the structural metrics and the
-      # runtime suite — has already passed by the time this step runs.
+      # exits badly must not turn a PR red over a figure that has no floor yet.
+      #
+      # Kept here as well as on the job, because the two mean different things. This one absorbs a failed
+      # MEASUREMENT and leaves the job green, which is what it did before the split and is the state a
+      # reader should see when the setup was fine. The job-level one absorbs a failed SETUP, which the
+      # split newly made possible; that case is worth showing as a failed job, and does not reach here.
       - name: Report src/ coverage with real content
         continue-on-error: true
         env:
