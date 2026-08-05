@@ -11,7 +11,6 @@ namespace UnturnedGodot;
 //
 // Two readers share it: the terrain build, which needs the textures to make its tile materials, and the
 // object extraction pass, which is already decoding the same bundles and so produces them on the way past.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class TerrainLayerCache
 {
     public static string Directory => ProjectSettings.GlobalizePath("user://terrain_cache");

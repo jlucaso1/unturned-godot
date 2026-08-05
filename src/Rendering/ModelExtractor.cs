@@ -13,7 +13,6 @@ namespace UnturnedGodot;
 // graph to map each object GUID to its Model_0 mesh, resolve per-submesh textures through the object's
 // material palette, and cache compact per-GUID meshes + deduplicated textures. Excluded from coverage
 // (orchestration glue over the fully tested Core parser); correctness is validated by the rendered scene.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class ModelExtractor
 {
     // The SerializedFile (meshes + object/material metadata) sits in the first ~171 MB of the 1.4 GB

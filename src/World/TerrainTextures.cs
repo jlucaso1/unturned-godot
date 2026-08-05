@@ -13,7 +13,6 @@ namespace UnturnedGodot;
 // Two container formats ship in the wild and both are read here: the legacy uncompressed UnityRaw (PEI,
 // Russia, Germany) and UnityFS (Washington, Yukon, and workshop maps), whose pixels can live in a .resS
 // entry inside the same bundle.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class TerrainTextures
 {
     public static Dictionary<string, ImageTexture> Load(string terrainDir)

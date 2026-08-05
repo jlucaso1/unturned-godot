@@ -11,7 +11,6 @@ namespace UnturnedGodot;
 // masterbundle meshes. Instances are grouped into chunks of foliage tiles so each MultiMesh keeps a
 // compact AABB Godot frustum-culls on its own — only the foliage in view is submitted, which matters
 // with PEI's ~667k instances.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class FoliageBuilder
 {
     // Four 32 m tiles keep culling bounds compact. Chunk nodes are centred on their actual transforms

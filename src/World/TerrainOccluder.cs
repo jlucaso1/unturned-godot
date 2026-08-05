@@ -20,7 +20,6 @@ namespace UnturnedGodot;
 //   visible — the worst kind of bug, because it looks like objects popping out of existence. Each coarse
 //   vertex therefore takes the MINIMUM height of the heightmap cells it spans, never the average, so the
 //   occluder always sits at or below the surface it stands for.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class TerrainOccluder
 {
     // Heightmap samples per occluder quad edge. 16 quads across a 1024 m tile is a 64 m grid: coarse
