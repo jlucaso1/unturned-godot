@@ -69,7 +69,13 @@ assembly="$repo_dir/.godot/mono/temp/bin/Debug/unturned-godot.dll"
 [[ -f "$assembly" ]] || { echo "No Debug assembly at $assembly." >&2; exit 1; }
 
 result_dir="$(mktemp -d "${TMPDIR:-/tmp}/unturned-godot-src-coverage.XXXXXX")"
-trap 'rm -rf -- "$result_dir"' EXIT
+# UG_COVERAGE_KEEP=1 leaves the working directory behind, which is the only way to read the per-run logs
+# when a merged number comes out wrong: every run's stdout lands there and nothing else records it.
+if [[ -n "${UG_COVERAGE_KEEP:-}" ]]; then
+    echo "keeping $result_dir" >&2
+else
+    trap 'rm -rf -- "$result_dir"' EXIT
+fi
 report="$result_dir/src-coverage.cobertura.xml"
 
 # --include-test-assembly: coverlet treats the assembly it is pointed at as the test assembly and would
@@ -92,33 +98,75 @@ dotnet coverlet "$assembly" \
     || { echo "The runtime suite failed; coverage was not measured:" >&2; tail -40 "$result_dir/run.log" >&2; exit 1; }
 
 if (( with_game_run )); then
-    # One real session, measured and merged in. QUIT_AFTER leaves through the same path the pause menu's
-    # button uses, and UG_COVERAGE=1 makes that exit go through the runtime rather than the engine — a
-    # SceneTree.Quit never returns to managed code, so the instrumenter's hit counts would never be
-    # written and the whole run would report zero.
-    # UG_HEADLESS_INTERACTIVE runs the ordinary interactive path — player, session, zombies, streaming —
-    # with no display driver, and QUIT_AFTER leaves through AppShutdown, which is the single way out of a
-    # loaded world. The screenshot mode would be quicker and is deliberately NOT used: it quits straight
-    # out of the loader, so it never runs the session it is supposed to measure.
-    UG_COVERAGE=1 UG_HEADLESS_INTERACTIVE=1 SOLO=1 QUIT_AFTER=45 \
-    dotnet coverlet "$assembly" \
-        --target "$godot" \
-        --targetargs "--headless --audio-driver Dummy --path $repo_dir" \
-        --merge-with "$result_dir/suite.json" \
-        --format json --output "$result_dir/session.json" --include-test-assembly \
-        > "$result_dir/game.log" 2>&1 \
-        || { echo "The game session failed; coverage was not measured:" >&2; tail -40 "$result_dir/game.log" >&2; exit 1; }
+    # Every automation flag this project reads, cleared for every run below.
+    #
+    # One list, expanded everywhere, because the hazard is uniform: an exported flag redirects a run into
+    # a mode it was never measuring, and the redirected run still writes coverage — so it is accepted.
+    # An exported BOT_JOIN turns the tier-1 run into the scripted bot client; an exported
+    # UG_HEADLESS_INTERACTIVE turns the loader run into a session with nothing to end it. Each run then
+    # sets only the flags it means, after this list has taken the caller's out.
+    clear_modes=(
+        UG_HEADLESS_INTERACTIVE= SOLO= FREECAM= OPEN_LAN= OPEN_LAN_AFTER= JOIN= MAP=
+        BOT_JOIN= BOT_SECONDS= BOT_NAME= STEP_PROBE= UG_RUNTIME_BENCH_SECS= QUIT_AFTER=
+        SCREENSHOT_PATH= MENU_SHOT= REPRO_AUTO= REPRO_CAPTURE_AT=
+    )
+
+    # How long any one run may take before it is treated as wedged.
+    #
+    # QUIT_AFTER only bounds a run that reaches the session; a failed join or a world build that gives up
+    # returns before that timer is ever created. Without this the only backstop is the workflow's own
+    # job timeout, which kills everything and throws away the log tail these guards print.
+    run_limit="${UG_COVERAGE_RUN_TIMEOUT:-600}"
+
+    # Run one measured pass and merge it onto the previous one. Fails loudly if the process wedged, and
+    # checks the REPORT rather than the exit status: several of these modes are supposed to exit nonzero.
+    measure() {
+        local name="$1" previous="$2" output="$3" format="$4"
+        shift 4
+        timeout --kill-after=30s "$run_limit" env UG_COVERAGE=1 "${clear_modes[@]}" "$@" \
+            dotnet coverlet "$assembly" \
+                --target "$godot" \
+                --targetargs "--headless --audio-driver Dummy --path $repo_dir" \
+                --merge-with "$previous" \
+                --format "$format" --output "$output" --include-test-assembly \
+                > "$result_dir/$name.log" 2>&1 || true
+
+        if [[ ! -s "$output" ]]; then
+            echo "The $name run produced no coverage at all (wedged, crashed, or left through the" >&2
+            echo "engine rather than the runtime):" >&2
+            tail -40 "$result_dir/$name.log" >&2
+            exit 1
+        fi
+    }
+
+    # One real session. UG_HEADLESS_INTERACTIVE runs the ordinary interactive path — player, session,
+    # zombies, streaming — with no display driver, and QUIT_AFTER leaves through AppShutdown, the single
+    # way out of a loaded world. The screenshot mode would be quicker and is deliberately NOT used: it
+    # quits straight out of the loader, so it never runs the session it is supposed to measure.
+    measure session "$result_dir/suite.json" "$result_dir/session.json" json \
+        UG_HEADLESS_INTERACTIVE=1 SOLO=1 QUIT_AFTER=45
 
     # Tier 1, which is a whole program of its own: it builds the world synchronously, measures it, writes
     # a report and leaves. Nothing about it is reachable from a session, because it never starts one.
-    UG_COVERAGE=1 \
-    dotnet coverlet "$assembly" \
-        --target "$godot" \
-        --targetargs "--headless --audio-driver Dummy --path $repo_dir -- --benchmark" \
-        --merge-with "$result_dir/session.json" \
-        --format json --output "$result_dir/tier1.json" --include-test-assembly \
-        > "$result_dir/tier1.log" 2>&1 \
-        || { echo "The structural benchmark failed; coverage was not measured:" >&2; tail -40 "$result_dir/tier1.log" >&2; exit 1; }
+    measure_with_args() {
+        local name="$1" previous="$2" output="$3" format="$4" args="$5"
+        shift 5
+        timeout --kill-after=30s "$run_limit" env UG_COVERAGE=1 "${clear_modes[@]}" "$@" \
+            dotnet coverlet "$assembly" \
+                --target "$godot" \
+                --targetargs "--headless --audio-driver Dummy --path $repo_dir -- $args" \
+                --merge-with "$previous" \
+                --format "$format" --output "$output" --include-test-assembly \
+                > "$result_dir/$name.log" 2>&1 || true
+
+        if [[ ! -s "$output" ]]; then
+            echo "The $name run produced no coverage at all:" >&2
+            tail -40 "$result_dir/$name.log" >&2
+            exit 1
+        fi
+    }
+
+    measure_with_args tier1 "$result_dir/session.json" "$result_dir/tier1.json" json --benchmark
 
     # The runs that need a rendering driver. gamescope's headless backend supplies one without a window.
     #
@@ -133,36 +181,34 @@ if (( with_game_run )); then
             exit 2
         fi
 
-        gpu_number=0
-        for mode in "SCREENSHOT_PATH=$result_dir/shot.png" "SCREENSHOT_PATH=$result_dir/player.png PLAYER=1"; do
-            gpu_number=$((gpu_number + 1))
-            # shellcheck disable=SC2086  # $mode is one or two deliberate assignments
-            gamescope --backend headless -- \
-                env UG_COVERAGE=1 \
-                UG_HEADLESS_INTERACTIVE= SOLO= FREECAM= OPEN_LAN= JOIN= MAP= BOT_JOIN= \
-                STEP_PROBE= UG_RUNTIME_BENCH_SECS= QUIT_AFTER= $mode \
-                dotnet coverlet "$assembly" \
-                    --target "$godot" \
-                    --targetargs "--audio-driver Dummy --path $repo_dir" \
-                    --merge-with "$gpu_previous" \
-                    --format json --output "$result_dir/gpu$gpu_number.json" --include-test-assembly \
-                    > "$result_dir/gpu$gpu_number.log" 2>&1 \
-                || { echo "A rendered run failed; coverage was not measured:" >&2; \
-                     tail -40 "$result_dir/gpu$gpu_number.log" >&2; exit 1; }
-            gpu_previous="$result_dir/gpu$gpu_number.json"
-        done
+        measure_rendered() {
+            local name="$1" previous="$2" output="$3" format="$4" args="$5"
+            shift 5
+            timeout --kill-after=30s "$run_limit" gamescope --backend headless -- \
+                env UG_COVERAGE=1 "${clear_modes[@]}" "$@" \
+                    dotnet coverlet "$assembly" \
+                        --target "$godot" \
+                        --targetargs "--audio-driver Dummy --path $repo_dir $args" \
+                        --merge-with "$previous" \
+                        --format "$format" --output "$output" --include-test-assembly \
+                        > "$result_dir/$name.log" 2>&1 || true
+
+            # gamescope forwards the child's status on a clean shutdown and does not on a hung one, so
+            # the report is what is checked here too.
+            if [[ ! -s "$output" ]]; then
+                echo "The $name rendered run produced no coverage at all:" >&2
+                tail -40 "$result_dir/$name.log" >&2
+                exit 1
+            fi
+        }
+
+        measure_rendered shot "$gpu_previous" "$result_dir/gpu1.json" json "" \
+            SCREENSHOT_PATH="$result_dir/shot.png"
+        measure_rendered player "$result_dir/gpu1.json" "$result_dir/gpu2.json" json "" \
+            SCREENSHOT_PATH="$result_dir/player.png" PLAYER=1
 
         # Tier 2, which is the only caller GpuBenchmark has: real frames from authored camera poses.
-        gamescope --backend headless -- \
-            env UG_COVERAGE=1 \
-            dotnet coverlet "$assembly" \
-                --target "$godot" \
-                --targetargs "--audio-driver Dummy --path $repo_dir -- --benchmark --gpu" \
-                --merge-with "$gpu_previous" \
-                --format json --output "$result_dir/tier2.json" --include-test-assembly \
-                > "$result_dir/tier2.log" 2>&1 \
-            || { echo "The GPU benchmark failed; coverage was not measured:" >&2; \
-                 tail -40 "$result_dir/tier2.log" >&2; exit 1; }
+        measure_rendered tier2 "$result_dir/gpu2.json" "$result_dir/tier2.json" json "-- --benchmark --gpu"
         gpu_previous="$result_dir/tier2.json"
     fi
 
@@ -172,24 +218,9 @@ if (( with_game_run )); then
     # The SCREENSHOT family that sits behind the same entry point is NOT driven, and cannot be from here:
     # with --headless the display server is named "headless", and the loader takes this early-exit branch
     # before any capture code is reached. Verified rather than assumed — running it with SCREENSHOT_PATH,
-    # PLAYER=1 and FREECAM=1 produced three identical measurements. Capturing needs a display (the repo's
-    # screenshot tooling wraps renders in gamescope), which is an infrastructure decision rather than a
-    # test one.
-    # Every automation flag CLEARED, not merely unset by this line. A caller with
-    # UG_HEADLESS_INTERACTIVE=1 exported turns this into an interactive session — Main treats it as such
-    # and skips the loader branch entirely — and with no QUIT_AFTER to end it, coverlet waits on a live
-    # session that never leaves.
-    env UG_COVERAGE=1 \
-        UG_HEADLESS_INTERACTIVE= SOLO= FREECAM= OPEN_LAN= OPEN_LAN_AFTER= JOIN= MAP= \
-        BOT_JOIN= STEP_PROBE= UG_RUNTIME_BENCH_SECS= QUIT_AFTER= \
-    dotnet coverlet "$assembly" \
-        --target "$godot" \
-        --targetargs "--headless --audio-driver Dummy --path $repo_dir" \
-        --merge-with "$gpu_previous" \
-        --format json --output "$result_dir/loader.json" --include-test-assembly \
-        > "$result_dir/loader.log" 2>&1 \
-        || { echo "The loader run failed; coverage was not measured:" >&2; \
-             tail -40 "$result_dir/loader.log" >&2; exit 1; }
+    # PLAYER=1 and FREECAM=1 produced three identical measurements. Capturing needs a display, which is
+    # what --with-gpu-run supplies.
+    measure loader "$gpu_previous" "$result_dir/loader.json" json
 
     # The session's other shapes. Each is an automation mode that exists because a human at a keyboard
     # cannot be part of a verification run, and each takes a branch of the world build nothing else does:
@@ -197,48 +228,22 @@ if (( with_game_run )); then
     # a player-shaped body at a sill to answer "can the player get over that", and the scripted client
     # that plays the other side of a multiplayer check.
     #
-    # They are short on purpose. What is being measured is that the code runs, not what it concluded.
-    session_previous="$result_dir/loader.json"
-    session_number=0
-    while IFS= read -r mode; do
-        [[ -n "$mode" ]] || continue
-        session_number=$((session_number + 1))
-        # shellcheck disable=SC2086  # each line is a deliberate set of env assignments
-        env UG_COVERAGE=1 UG_HEADLESS_INTERACTIVE=1 $mode \
-        dotnet coverlet "$assembly" \
-            --target "$godot" \
-            --targetargs "--headless --audio-driver Dummy --path $repo_dir" \
-            --merge-with "$session_previous" \
-            --format json --output "$result_dir/mode$session_number.json" --include-test-assembly \
-            > "$result_dir/mode$session_number.log" 2>&1 || true
-        # A nonzero exit is expected from several of these and is not a measurement failure: a join that
-        # finds no server, a step probe that reports the player cannot make it, a bot whose host is not
-        # there — each is the mode DOING ITS JOB and saying so through the exit status, which is exactly
-        # why they exist. What would be a failure is no report at all, so that is what is checked.
-        if [[ ! -s "$result_dir/mode$session_number.json" ]]; then
-            echo "A session mode produced no coverage at all:" >&2
-            tail -40 "$result_dir/mode$session_number.log" >&2
-            exit 1
-        fi
-        session_previous="$result_dir/mode$session_number.json"
-    done <<'MODES'
-SOLO=1 OPEN_LAN=1 QUIT_AFTER=20
-JOIN=127.0.0.1:27099 QUIT_AFTER=20
-SOLO=1 STEP_PROBE=0,40,0>4,40,0 QUIT_AFTER=25
-BOT_JOIN=127.0.0.1:27099 BOT_SECONDS=5
-MODES
+    # They are short on purpose. What is being measured is that the code runs, not what it concluded —
+    # and a nonzero exit is expected from several of them, which is why `measure` checks the report.
+    measure lan "$result_dir/loader.json" "$result_dir/mode1.json" json \
+        UG_HEADLESS_INTERACTIVE=1 SOLO=1 OPEN_LAN=1 QUIT_AFTER=20
+    measure join "$result_dir/mode1.json" "$result_dir/mode2.json" json \
+        UG_HEADLESS_INTERACTIVE=1 JOIN=127.0.0.1:27099 QUIT_AFTER=20
+    measure step "$result_dir/mode2.json" "$result_dir/mode3.json" json \
+        UG_HEADLESS_INTERACTIVE=1 SOLO=1 STEP_PROBE="0,40,0>4,40,0" QUIT_AFTER=25
+    measure bot "$result_dir/mode3.json" "$result_dir/mode4.json" json \
+        UG_HEADLESS_INTERACTIVE=1 BOT_JOIN=127.0.0.1:27099 BOT_SECONDS=5
 
     # Tier 3, the runtime tier: a real session measured over a few seconds of frames, which is the only
     # caller RuntimeBenchmark has. Kept short — what is being measured here is that the code runs, not
-    # what it measured.
-    UG_COVERAGE=1 UG_HEADLESS_INTERACTIVE=1 SOLO=1 UG_RUNTIME_BENCH_SECS=5 \
-    dotnet coverlet "$assembly" \
-        --target "$godot" \
-        --targetargs "--headless --audio-driver Dummy --path $repo_dir" \
-        --merge-with "$session_previous" \
-        --format cobertura --output "$report" --include-test-assembly \
-        > "$result_dir/tier3.log" 2>&1 \
-        || { echo "The runtime benchmark failed; coverage was not measured:" >&2; tail -40 "$result_dir/tier3.log" >&2; exit 1; }
+    # what it measured. This one emits the cobertura the reader below reads.
+    measure tier3 "$result_dir/mode4.json" "$report" cobertura \
+        UG_HEADLESS_INTERACTIVE=1 SOLO=1 UG_RUNTIME_BENCH_SECS=5
 fi
 
 [[ -s "$report" ]] || { echo "coverlet produced no report:" >&2; tail -20 "$result_dir/run.log" >&2; exit 1; }

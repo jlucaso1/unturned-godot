@@ -30,7 +30,7 @@ public class DedicatedSessionTests : TestClass
     [Timeout(300_000)]
     public async Task ABotJoinsARealServerOverARealSocket()
     {
-        ushort port = FreePort();
+        ushort port = RealData.FreePort();
         DedicatedServer server = Host(port, "PEI");
         // Comfortably beyond this test body. The bot ENDS THE PROCESS when its lifetime expires — that
         // is how an automated multiplayer check reports itself finished — so a lifetime tuned to the
@@ -71,7 +71,7 @@ public class DedicatedSessionTests : TestClass
     [Timeout(120_000)]
     public async Task ABotPointedAtNothingWaits()
     {
-        BotClient bot = BotClient.Create("127.0.0.1", FreePort(), "Bot", lifetime: 3600f);
+        BotClient bot = BotClient.Create("127.0.0.1", RealData.FreePort(), "Bot", lifetime: 3600f);
         TestScene.AddChild(bot);
 
         try
@@ -102,7 +102,7 @@ public class DedicatedSessionTests : TestClass
         if (!RealInstall(out string install))
             return;
 
-        DedicatedServer server = DedicatedServer.Create(install, "PEI", "PEI", new Vector3(0f, 64f, 0f), FreePort());
+        DedicatedServer server = DedicatedServer.Create(install, "PEI", "PEI", new Vector3(0f, 64f, 0f), RealData.FreePort());
         TestScene.AddChild(server);
 
         try
@@ -128,14 +128,6 @@ public class DedicatedSessionTests : TestClass
         }
     }
 
-    // A port the OS says is free, rather than one this file hopes is. DedicatedServer.Create binds
-    // immediately, so an occupied port fails the test at construction — and two runtime-test processes on
-    // one machine would collide on any fixed number.
-    private static ushort FreePort()
-    {
-        using var probe = new System.Net.Sockets.UdpClient(0, System.Net.Sockets.AddressFamily.InterNetwork);
-        return (ushort)((System.Net.IPEndPoint)probe.Client.LocalEndPoint!).Port;
-    }
 
     // Every static body under a node, however deep. The roots nest by region and by placement, so a
     // shallow count would miss all of it.

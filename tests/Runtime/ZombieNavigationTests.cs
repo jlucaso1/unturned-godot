@@ -688,7 +688,7 @@ public class ZombieNavigationTests : TestClass
                 {
                     System.IO.File.Delete(leftover);
                 }
-                catch (System.IO.IOException)
+                catch (System.Exception e) when (e is System.IO.IOException or System.UnauthorizedAccessException)
                 {
                     // A leftover cache entry keyed to a directory that no longer exists is harmless.
                 }
@@ -698,7 +698,7 @@ public class ZombieNavigationTests : TestClass
             {
                 System.IO.Directory.Delete(Path, recursive: true);
             }
-            catch (System.IO.IOException)
+            catch (System.Exception e) when (e is System.IO.IOException or System.UnauthorizedAccessException)
             {
                 // Same.
             }

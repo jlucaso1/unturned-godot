@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using Chickensoft.GoDotTest;
@@ -187,7 +188,7 @@ public class NetworkManagerTests : TestClass
     public async Task AClientDoesNotHostItsOwnZombies()
     {
         using var session = new Session(TestScene);
-        session.Net.JoinServer("127.0.0.1", FreePort(), "Player");
+        session.Net.JoinServer("127.0.0.1", RealData.FreePort(), "Player");
         await session.PhysicsFrame();
 
         Assert.True(session.Net.IsActive, "the fixture is not a client at all");
@@ -234,7 +235,7 @@ public class NetworkManagerTests : TestClass
 
         NetServer? beforeServer = session.Net.Server;
         NetClient? beforeClient = session.Net.Client;
-        session.Net.JoinServer("127.0.0.1", FreePort(), "Player");
+        session.Net.JoinServer("127.0.0.1", RealData.FreePort(), "Player");
 
         // Both halves: replacing the CLIENT while leaving the server standing would have the local host
         // player trying to join somebody else's world, and a server-only check cannot see that.
@@ -249,7 +250,7 @@ public class NetworkManagerTests : TestClass
     public async Task AJoinToNothingWaitsRatherThanRefusing()
     {
         using var session = new Session(TestScene);
-        session.Net.JoinServer("127.0.0.1", FreePort(), "Player");
+        session.Net.JoinServer("127.0.0.1", RealData.FreePort(), "Player");
 
         for (int i = 0; i < 10; i++)
             await session.PhysicsFrame();
@@ -331,7 +332,10 @@ public class NetworkManagerTests : TestClass
         if (!RealMap(out string levelDir))
             return;
 
-        using var probe = new EnvFlagScope("PATH_PROBE", "0,0,0>32,0,32");
+        // Coordinates nothing else uses, because Log.Tail is a fixed-size RING: in a full suite run the
+        // lines between a mark and a check scroll out of it, so a positional slice proves nothing. A
+        // string only this test can produce survives that.
+        using var probe = new EnvFlagScope("PATH_PROBE", "11,0,11>37,0,37");
         using var session = new Session(TestScene);
         session.Net.StartSingleplayer("Player");
         await session.PhysicsFrame();
@@ -339,10 +343,15 @@ public class NetworkManagerTests : TestClass
         session.Net.HostZombies(levelDir);
 
         // Long enough for the probe's first timer to fire and for at least one retry to be scheduled.
+        int before = Log.Tail().Count;
         for (int i = 0; i < 150; i++)
             await session.PhysicsFrame();
 
-        Assert.True(session.Net.IsActive, "the probe took the session down with it");
+        // The probe REPORTED, on the endpoints only this test asks for. IsActive is set synchronously by
+        // StartSingleplayer and nothing here clears it, so ending on that flag was a test that could only
+        // fail by crashing — while the thing being covered is a diagnostic that answers, retries until
+        // the graph exists, and says what it found.
+        Assert.Contains(Log.Tail(), line => line.Contains("(11, 0, 11)", StringComparison.Ordinal));
     }
 
     // A probe on a map with no navmesh is simply never armed. The flag is a diagnostic, and a diagnostic
@@ -350,16 +359,25 @@ public class NetworkManagerTests : TestClass
     [Test]
     public async Task ThePathProbeIsNotArmedWithoutANavmesh()
     {
-        using var probe = new EnvFlagScope("PATH_PROBE", "0,0,0>32,0,32");
+        // Coordinates nothing else uses, because Log.Tail is a fixed-size RING: in a full suite run the
+        // lines between a mark and a check scroll out of it, so a positional slice proves nothing. A
+        // string only this test can produce survives that.
+        using var probe = new EnvFlagScope("PATH_PROBE", "11,0,11>37,0,37");
         using var session = new Session(TestScene);
         session.Net.StartSingleplayer("Player");
         await session.PhysicsFrame();
 
+        int before = Log.Tail().Count;
         session.Net.HostZombies("/nonexistent-map");
 
         for (int i = 0; i < 20; i++)
             await session.PhysicsFrame();
 
+        // Never armed: these endpoints appear nowhere. HostZombies returns before the PATH_PROBE block
+        // when the level ships no zombie data, and a diagnostic that crashed a session it could not
+        // measure would be worse than no diagnostic — but so would one that quietly probed anyway, which
+        // is what asserting IsActive could not tell apart.
+        Assert.DoesNotContain(Log.Tail(), line => line.Contains("(13, 0, 13)", StringComparison.Ordinal));
         Assert.True(session.Net.IsActive);
     }
 
@@ -380,13 +398,6 @@ public class NetworkManagerTests : TestClass
         public void Dispose() => OS.SetEnvironment(_name, _previous);
     }
 
-    // A port the OS says is free. A hard-coded one turns "nobody is listening" into an assumption about
-    // the machine, and these tests depend on that being a fact.
-    private static ushort FreePort()
-    {
-        using var probe = new System.Net.Sockets.UdpClient(0, System.Net.Sockets.AddressFamily.InterNetwork);
-        return (ushort)((System.Net.IPEndPoint)probe.Client.LocalEndPoint!).Port;
-    }
 
     private static bool RealMap(out string levelDir)
     {

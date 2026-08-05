@@ -130,8 +130,10 @@ public class ReproServiceTests : TestClass
         await pei.Ready();
         pei.Run(ticks: 20);
 
-        // Positions, not a count. Both sessions are built from the same table, bounds and seed, so a
-        // refusal that had silently restored anyway would leave the counts equal and this test green.
+        // A DIFFERENT population from the one in the dump. Both recorders are built from the same table,
+        // bounds and seed, so without this the refusal and a silent restore leave identical state — and
+        // positions alone would not tell them apart either.
+        pei.Respawn(seed: 4242);
         string before = Fingerprint(pei.Zombies);
 
         pei.Service.Load(path!);
@@ -199,13 +201,21 @@ public class ReproServiceTests : TestClass
 
         using var poor = new Recorder(TestScene, dir.Path, bounds: 1);
         await poor.Ready();
+        poor.Respawn(seed: 4242);
         int before = poor.Zombies.Zombies.Count;
+        string state = Fingerprint(poor.Zombies);
 
         poor.Service.Load(path!);
 
-        // The population is left as it was: RestoreState refuses a record whose bounds this session does
-        // not have, and the refusal is reported rather than swallowed into a half-restored world.
+        // Untouched, in contents as well as in count. RestoreState clears the population and appends
+        // records BEFORE it throws on the first invalid bound, so a count alone cannot tell a refusal
+        // from a session left holding the leading records of a dump it rejected.
+        // Untouched, in contents as well as in count. This used to fail: RestoreState cleared the
+        // population and appended records BEFORE it reached the bound it could not accept, so a refused
+        // dump left the session holding that dump's leading records — neither the population it had nor
+        // the one the dump describes, and nobody told, because from here the load merely declined.
         Assert.Equal(before, poor.Zombies.Zombies.Count);
+        Assert.Equal(state, Fingerprint(poor.Zombies));
     }
 
     // Who is alive and where, to the centimetre. A count alone cannot tell a restore from a no-op when
@@ -356,7 +366,7 @@ public class ReproServiceTests : TestClass
             {
                 System.IO.Directory.Delete(Path, recursive: true);
             }
-            catch (System.IO.IOException)
+            catch (System.Exception e) when (e is System.IO.IOException or System.UnauthorizedAccessException)
             {
                 // A leftover temp directory is not worth failing a test over.
             }

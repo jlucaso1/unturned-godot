@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 using Chickensoft.GoDotTest;
@@ -203,7 +204,7 @@ public class CorruptCacheTests : TestClass
         using var level = new TempLevel();
         using var sandbox = new PhysicsSandbox(TestScene);
         sandbox.AddBox(new Vector3(0f, -0.5f, 0f), new Vector3(40f, 1f, 40f));
-        sandbox.AddBox(new Vector3(0f, 0.5f, 0f), new Vector3(6f, 1f, 6f));
+        StaticBody3D building = sandbox.AddBox(new Vector3(0f, 0.5f, 0f), new Vector3(6f, 1f, 6f));
         await sandbox.Settle();
 
         PhysicsDirectSpaceState3D space = sandbox.Root.GetWorld3D().DirectSpaceState;
@@ -211,16 +212,32 @@ public class CorruptCacheTests : TestClass
         // One pass at one step offset, which writes a cache under that offset's fingerprint.
         ZombieNavigation first = Floor(level.Path);
         await first.PruneAgainstCollisionAsync(sandbox.Root, space, 0.5f,
-            new System.Collections.Generic.HashSet<Guid>());
+            new HashSet<Guid>());
+        SortedSet<string> atHalfAMetre = Dropped(first);
         first.Free();
 
-        // A second pass with a DIFFERENT step offset must not restore it: what a body can step over is
-        // exactly what decides which faces are routes.
+        Assert.True(File.Exists(level.CacheEntry), "the first pass wrote no cache to be stale");
+
+        // Take the obstruction away. A second pass that restored the stale cache would still report the
+        // building; one that recomputed finds clear ground. Publishing a graph proves neither, because
+        // the cache-hit path publishes one too.
+        sandbox.Root.RemoveChild(building);
+        building.QueueFree();
+        await sandbox.Settle();
+
+        // A DIFFERENT step offset: what a body can step over is exactly what decides which faces are
+        // routes, so its fingerprint must not match.
         ZombieNavigation second = Floor(level.Path);
         await second.PruneAgainstCollisionAsync(sandbox.Root, space, 0.05f,
-            new System.Collections.Generic.HashSet<Guid>());
+            new HashSet<Guid>());
 
         Assert.True(second.IsReady, "the second pass published no graph");
+        if (ZombieNavigation.RecordsDisabledFaces)
+        {
+            Assert.NotEmpty(atHalfAMetre);
+            Assert.NotEqual(atHalfAMetre, Dropped(second));
+        }
+
         second.Free();
     }
 
@@ -238,7 +255,8 @@ public class CorruptCacheTests : TestClass
 
         ZombieNavigation first = Floor(level.Path);
         await first.PruneAgainstCollisionAsync(sandbox.Root, space, 0.5f,
-            new System.Collections.Generic.HashSet<Guid>());
+            new HashSet<Guid>());
+        SortedSet<string> beforeDamage = Dropped(first);
         first.Free();
 
         string entry = Path.Combine(ProjectSettings.GlobalizePath("user://nav_reconcile"),
@@ -251,9 +269,16 @@ public class CorruptCacheTests : TestClass
 
         ZombieNavigation second = Floor(level.Path);
         await second.PruneAgainstCollisionAsync(sandbox.Root, space, 0.5f,
-            new System.Collections.Generic.HashSet<Guid>());
+            new HashSet<Guid>());
 
         Assert.True(second.IsReady, "a damaged cache stopped the pass from publishing at all");
+
+        // And it PROBED rather than reading: the world is unchanged, so a run that recomputed reaches
+        // the same verdicts the first one did. A damaged cache that was somehow accepted would produce
+        // something else, and publishing a graph alone cannot tell the two apart.
+        if (ZombieNavigation.RecordsDisabledFaces)
+            Assert.Equal(beforeDamage, Dropped(second));
+
         second.Free();
     }
 
@@ -278,7 +303,10 @@ public class CorruptCacheTests : TestClass
             streamer.StartPrepare(install, level);
             await streamer.BeginAsync();
 
-            ulong deadline = Time.GetTicksMsec() + 240_000;
+            // The same eight minutes ColdLoadTests allows one cold load. This helper does a full cold
+            // decode whenever the cache it is handed is empty, and a shorter deadline fails a machine
+            // that is still inside the time a cold load is permitted to take.
+            ulong deadline = Time.GetTicksMsec() + 480_000;
             while (!streamer.Completion.IsCompleted && Time.GetTicksMsec() < deadline)
                 await TestScene.ToSignal(TestScene.GetTree(), SceneTree.SignalName.ProcessFrame);
 
@@ -293,6 +321,17 @@ public class CorruptCacheTests : TestClass
         }
     }
 
+    // The faces one pass dropped, per flag, so two passes can be compared by WHICH ones they removed.
+    private static SortedSet<string> Dropped(ZombieNavigation nav)
+    {
+        var faces = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (KeyValuePair<int, IReadOnlySet<int>> flag in nav.DisabledFaces)
+            foreach (int face in flag.Value)
+                faces.Add($"{flag.Key}:{face}");
+        return faces;
+    }
+
+    // The reconciliation cache entry this level writes.
     // A 20 m floor tessellated at 2 m, keyed to a level directory of the test's own.
     private static ZombieNavigation Floor(string levelDir)
     {
@@ -354,6 +393,12 @@ public class CorruptCacheTests : TestClass
         public string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
             "unturned-godot-faultlevel-" + Guid.NewGuid().ToString("N"));
 
+        // Where this level's verdicts land, so a test can tell "the cache was read" from "there was no
+        // cache to read".
+        public string CacheEntry => System.IO.Path.Combine(
+            ProjectSettings.GlobalizePath("user://nav_reconcile"),
+            NavReconcileCache.MapKey(Path) + ".cache");
+
         public TempLevel() => Directory.CreateDirectory(Path);
 
         public void Dispose()
@@ -367,7 +412,7 @@ public class CorruptCacheTests : TestClass
                 {
                     File.Delete(leftover);
                 }
-                catch (IOException)
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException)
                 {
                     // A leftover entry keyed to a directory that no longer exists is harmless.
                 }
@@ -377,7 +422,7 @@ public class CorruptCacheTests : TestClass
             {
                 Directory.Delete(Path, recursive: true);
             }
-            catch (IOException)
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {
                 // Same.
             }
@@ -397,7 +442,7 @@ public class CorruptCacheTests : TestClass
             {
                 Directory.Delete(Path, recursive: true);
             }
-            catch (IOException)
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {
                 // A leftover temp directory is not worth failing a test over.
             }

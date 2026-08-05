@@ -102,7 +102,10 @@ public partial class BotClient : Node
             if (_query.State == EServerQueryState.TimedOut)
             {
                 Log.PrintErr("[bot] no server answered the level query; giving up");
-                GetTree().Quit(1);
+                // The same door the lifetime exit takes. This is the one a coverage run actually
+                // reaches — a bot pointed at a port with no listener times out long before its lifetime
+                // expires — and a native quit here records no hit counts at all.
+                AppShutdown.QuitNow(GetTree(), 1);
                 return;
             }
             if (_query.State != EServerQueryState.Answered)

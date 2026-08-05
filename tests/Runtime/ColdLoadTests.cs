@@ -209,6 +209,12 @@ public class ColdLoadTests : TestClass
             if (!await Within(ColdLoadBudget, streamer.Completion))
                 Assert.Fail("a load never finished; a real one has no longer to wait than this");
 
+            // Asserted for EVERY load, not only PEI's. The terrain build awaits this promise, so a map
+            // that left it unfinished hangs the loading screen for good — and the second-map test says
+            // it checks the same invariants as the first.
+            Assert.True(streamer.LayerTextures.IsCompleted,
+                "the terrain build was left waiting on a finished load");
+
             return neededAtFinish;
         }
         finally
@@ -338,7 +344,7 @@ public class ColdLoadTests : TestClass
             {
                 System.IO.Directory.Delete(Path, recursive: true);
             }
-            catch (System.IO.IOException)
+            catch (System.Exception e) when (e is System.IO.IOException or System.UnauthorizedAccessException)
             {
                 // A leftover temp directory is not worth failing a test over.
             }

@@ -1,3 +1,4 @@
+using System.Threading;
 using System.Threading.Tasks;
 using Chickensoft.GoDotTest;
 using Godot;
@@ -49,9 +50,17 @@ public class AppShutdownTests : TestClass
         for (int i = 0; i < 200; i++)
             _ = AppShutdown.Track(Task.CompletedTask);
 
-        // Nothing observable to read back — the set is private, deliberately — so what this covers is
-        // that registering repeatedly stays cheap and cannot throw. A leak here would show up as a quit
-        // that walks an ever-longer list.
+        // Two hundred registrations, none of them still running. The count is what the quit path walks,
+        // so a set that accumulated would make every shutdown inspect a list of finished work — and the
+        // name of this test was the only thing saying otherwise until now.
+        Assert.Equal(0, AppShutdown.StillRunning());
+
+        // And one that IS running is kept, or the pruning would be indiscriminate rather than correct.
+        using var running = new System.Threading.CancellationTokenSource();
+        _ = AppShutdown.Track(Task.Delay(Timeout.Infinite, running.Token));
+        Assert.Equal(1, AppShutdown.StillRunning());
+
+        running.Cancel();
         await Task.CompletedTask;
     }
 

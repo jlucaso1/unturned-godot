@@ -46,7 +46,7 @@ public class RemotePlayersViewTests : TestClass
         using var session = new Session(TestScene);
         session.AddSecondPlayer("Other");
 
-        await session.Run(frames: 40);
+        await session.RunUntil(() => session.View.GetChildCount() > 0);
 
         Assert.True(session.View.GetChildCount() > 0, "a second player joined and nothing was drawn");
     }
@@ -58,10 +58,11 @@ public class RemotePlayersViewTests : TestClass
     {
         using var session = new Session(TestScene);
         session.AddSecondPlayer("Other");
-        await session.Run(frames: 40);
+        await session.RunUntil(() => session.View.GetChildCount() > 0);
 
-        if (session.View.GetChildCount() == 0)
-            return; // covered by the test above; nothing to place
+        // Asserted rather than skipped. An early return here turns a slow runner into a silent pass, and
+        // the run that was too slow reports one failure and one skip instead of two failures.
+        Assert.True(session.View.GetChildCount() > 0, "nobody was drawn to place");
 
         var avatar = (Node3D)session.View.GetChild(0);
         Assert.Equal(session.Spawn.Y, avatar.Position.Y, 1);
@@ -74,12 +75,14 @@ public class RemotePlayersViewTests : TestClass
     {
         using var session = new Session(TestScene);
         session.AddSecondPlayer("Other");
-        await session.Run(frames: 40);
-        if (session.View.GetChildCount() == 0)
-            return;
+        await session.RunUntil(() => session.View.GetChildCount() > 0);
+
+        // Asserted, not skipped: returning here would skip the removal below, which is the whole point
+        // of this test — so a slow runner would report success for the behaviour it never observed.
+        Assert.True(session.View.GetChildCount() > 0, "nobody joined, so nothing can leave");
 
         session.DropSecondPlayer();
-        await session.Run(frames: 20);
+        await session.RunUntil(() => session.View.GetChildCount() == 0);
 
         Assert.Equal(0, session.View.GetChildCount());
     }
@@ -161,13 +164,26 @@ public class RemotePlayersViewTests : TestClass
         public async Task Run(int frames)
         {
             for (int i = 0; i < frames; i++)
-            {
-                double now = NetworkManager.Now;
-                _server.Update(now);
-                Client.Update(now);
-                _second?.Update(now);
-                await _testScene.ToSignal(_testScene.GetTree(), SceneTree.SignalName.ProcessFrame);
-            }
+                await OneFrame();
+        }
+
+        // Pumps until the condition holds or the deadline passes. A fixed frame count either wastes
+        // time or fails on a slow machine, and the tests here are about replication ARRIVING rather
+        // than about how many frames it took.
+        public async Task RunUntil(Func<bool> settled, int limitMs = 20_000)
+        {
+            ulong deadline = Time.GetTicksMsec() + (ulong)limitMs;
+            while (!settled() && Time.GetTicksMsec() < deadline)
+                await OneFrame();
+        }
+
+        private SignalAwaiter OneFrame()
+        {
+            double now = NetworkManager.Now;
+            _server.Update(now);
+            Client.Update(now);
+            _second?.Update(now);
+            return _testScene.ToSignal(_testScene.GetTree(), SceneTree.SignalName.ProcessFrame);
         }
 
         private static bool FlatGround(float x, float z, out float y)

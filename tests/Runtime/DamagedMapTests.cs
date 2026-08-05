@@ -212,9 +212,17 @@ public class DamagedMapTests : TestClass
             Node3D root = WorldBuilder.BuildObjectCollision(map.Install, level,
                 out IReadOnlySet<Guid> selected, out Damage.DamageableWorld damageable);
 
-            Assert.NotNull(damageable);
-            Assert.NotNull(selected);
-            root.Free();
+            try
+            {
+                Assert.NotNull(damageable);
+                Assert.NotNull(selected);
+            }
+            finally
+            {
+                // A failed assertion would otherwise leak the whole collision tree into the rest of the
+                // run, where it answers queries no later test expects.
+                root.Free();
+            }
         }
     }
 
@@ -356,7 +364,7 @@ public class DamagedMapTests : TestClass
             {
                 Directory.Delete(_root, recursive: true);
             }
-            catch (IOException)
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {
                 // A leftover temp directory is not worth failing a test over.
             }

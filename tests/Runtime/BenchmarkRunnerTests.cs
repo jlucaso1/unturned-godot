@@ -66,7 +66,16 @@ public class BenchmarkRunnerTests : TestClass
         string stamp = BenchmarkRunner.Timestamp();
 
         Assert.NotEmpty(stamp);
-        Assert.NotEqual(stamp, "");
+
+        // UTC, and readable as a date. Two reports are ordered against each other before anything else
+        // is done with them, and a stamp in local time silently reorders runs from two machines — which
+        // a "not empty" check cannot see, and neither can a switch of utc:true to utc:false.
+        Assert.True(DateTime.TryParse(stamp, System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AdjustToUniversal
+            | System.Globalization.DateTimeStyles.AssumeUniversal, out DateTime parsed),
+            $"the stamp '{stamp}' is not a date anything can order");
+        Assert.True(Math.Abs((DateTime.UtcNow - parsed).TotalHours) < 1.0,
+            $"the stamp '{stamp}' is an hour or more from UTC, so it is local time");
     }
 
     // With a baseline, the run diffs against it — and that diff is the only reason a tier exists. A
@@ -78,11 +87,10 @@ public class BenchmarkRunnerTests : TestClass
     [Test]
     public void WithABaselineTheRunDiffsAgainstIt()
     {
-        using var baseline = new Baseline(Report(("load.total.ms", 1000.0), ("draw.calls", 500.0)));
+        using var baseline = new Baseline(Report(("diff.probe.ms", 1000.0), ("draw.calls", 500.0)));
 
         // Slower and heavier than the baseline, which is what a regression looks like.
-        int before = Log.Tail().Count;
-        BenchmarkRunner.Finish(Report(("load.total.ms", 2000.0), ("draw.calls", 800.0)),
+        BenchmarkRunner.Finish(Report(("diff.probe.ms", 2000.0), ("draw.calls", 800.0)),
             baseline.Key, new BaselineDiffOptions(), "");
 
         Assert.True(System.IO.File.Exists(baseline.LatestPath), "the diffing run wrote no report");
@@ -90,7 +98,7 @@ public class BenchmarkRunnerTests : TestClass
         // The comparison was REPORTED. Finish writes *-latest.json before it even looks for a baseline,
         // so the file alone would still be there if the whole diff branch were deleted — and a diff
         // nobody printed is a diff nobody reads.
-        Assert.Contains(Said(before), line => line.Contains("load.total.ms", StringComparison.Ordinal));
+        Assert.Contains(Said(), line => line.Contains("diff.probe.ms", StringComparison.Ordinal));
     }
 
     // A metric the baseline never had is reported as new rather than as a change from zero. Every added
@@ -100,12 +108,11 @@ public class BenchmarkRunnerTests : TestClass
     {
         using var baseline = new Baseline(Report(("load.total.ms", 1000.0)));
 
-        int before = Log.Tail().Count;
-        BenchmarkRunner.Finish(Report(("load.total.ms", 1000.0), ("nav.reconcile.ms", 42.0)),
+        BenchmarkRunner.Finish(Report(("load.total.ms", 1000.0), ("newcounter.probe.ms", 42.0)),
             baseline.Key, new BaselineDiffOptions(), "a counter that did not exist before");
 
         Assert.True(System.IO.File.Exists(baseline.LatestPath));
-        Assert.Contains(Said(before), line => line.Contains("nav.reconcile.ms", StringComparison.Ordinal));
+        Assert.Contains(Said(), line => line.Contains("newcounter.probe.ms", StringComparison.Ordinal));
     }
 
     // A baseline that parses to nothing is skipped, and says so. This is the case the code guards, and
@@ -167,6 +174,12 @@ public class BenchmarkRunnerTests : TestClass
             new BaselineDiffOptions(), "");
 
         Assert.True(System.IO.File.Exists(baseline.LatestPath));
+
+        // The WARNING was printed. Finish writes the report before it reads the baseline at all, so the
+        // file alone is there whether or not the environment comparison still happens — and a delta
+        // reported without it has someone chasing a regression that is a different graphics card.
+        Assert.Contains(Said(),
+            line => line.Contains("environment differs", StringComparison.OrdinalIgnoreCase));
     }
 
     // A run with no baseline to compare against still writes its report, and says what to do about the
@@ -215,13 +228,11 @@ public class BenchmarkRunnerTests : TestClass
 
     // --- helpers -------------------------------------------------------------------------------------
 
-    // Whatever was logged since the mark. The diff has no return value — it prints — so this is the only
-    // place its conclusions are observable from.
-    private static List<string> Said(int since)
-    {
-        List<string> tail = Log.Tail();
-        return since >= tail.Count ? new List<string>() : tail.GetRange(since, tail.Count - since);
-    }
+    // The diff has no return value — it prints — so the log is the only place its conclusions are
+    // observable from. Searched whole rather than sliced from a mark: Log.Tail is a fixed-size RING, so
+    // in a full suite run an index taken before the call no longer points where it did. Every string
+    // matched below is unique to the report this test just wrote.
+    private static List<string> Said() => Log.Tail();
 
     private static BenchmarkReport Report(params (string Name, double Value)[] metrics)
     {

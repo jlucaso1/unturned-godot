@@ -326,24 +326,27 @@ public class PlayerControllerTests : TestClass
 
     // --- the hands ------------------------------------------------------------------------------------
 
-    // A click is latched as an EDGE and spent on the next 12.5 Hz tick. Polling the button on the physics
-    // step instead would miss a click that started and ended inside one 0.08 s tick — which is most of
-    // them, at a hundred frames a second.
+    // A click with no session behind it is spent harmlessly.
+    //
+    // This is the whole claim, and it is smaller than it looks: a player clicking during the loading
+    // screen, or after a host has gone away, has a controller whose Net is null — and the swing goes out
+    // on an input datagram there is nothing to send. That the LATCH works is covered by
+    // InASessionASwingIsAnnounced, which can see the wire; asserting the local body's floor state here
+    // proved nothing, because Land() already made it true before the click.
     [Test]
-    public async Task AClickIsLatchedAndSpentOnTheNextTick()
+    public async Task AClickWithNoSessionIsSpentHarmlessly()
     {
         using var world = new PlayerWorld(TestScene);
         await world.Land();
 
+        Assert.Null(world.Player.Net);
         world.Click();
-
-        // Several ticks' worth of frames, so the latch is definitely consumed and the swing announced.
         await world.Run(40);
 
-        // Nothing observable without a session to announce into — the swing goes out on the input
-        // datagram — so what this holds is that a click on a controller with no session is spent
-        // harmlessly rather than latched forever or thrown.
+        // Still standing, still simulating: the tick that consumed the latch did not take the controller
+        // with it. Anything stronger needs a session, and that test exists.
         Assert.True(world.Player.IsOnFloor());
+        Assert.True(world.Player.IsInsideTree());
     }
 
     // A click while a menu owns the controls is not a punch. The pause menu is full of things to click

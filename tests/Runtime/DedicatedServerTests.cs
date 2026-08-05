@@ -27,15 +27,23 @@ public class DedicatedServerTests : TestClass
     public async Task AMapThatIsNotThereStillYieldsAListeningServer()
     {
         DedicatedServer server = DedicatedServer.Create("/nonexistent-unturned", "NoSuchMap", "NoSuchMap",
-            Vector3.Zero, FreePort());
+            Vector3.Zero, RealData.FreePort());
         TestScene.AddChild(server);
-        await NextFrame();
 
-        // Punches resolve against the world whether or not the level has zombies — the rubble and the
-        // resources are there either way — so this host exists on every level that loads at all.
-        Assert.NotNull(server.PunchDamage);
+        try
+        {
+            await NextFrame();
 
-        Free(server);
+            // Punches resolve against the world whether or not the level has zombies — the rubble and
+            // the resources are there either way — so this host exists on every level that loads at all.
+            Assert.NotNull(server.PunchDamage);
+        }
+        finally
+        {
+            // In a finally because a failed assertion would otherwise leave the server parented and its
+            // UDP socket bound; every later test then fails to bind, and the first cause is buried.
+            Free(server);
+        }
     }
 
     // An empty install path takes the same road. The catalog resolves nothing, and the server comes up
@@ -43,13 +51,18 @@ public class DedicatedServerTests : TestClass
     [Test]
     public async Task AnEmptyInstallPathTakesTheSameRoad()
     {
-        DedicatedServer server = DedicatedServer.Create("", "PEI", "PEI", Vector3.Zero, FreePort());
+        DedicatedServer server = DedicatedServer.Create("", "PEI", "PEI", Vector3.Zero, RealData.FreePort());
         TestScene.AddChild(server);
-        await NextFrame();
 
-        Assert.NotNull(server.PunchDamage);
-
-        Free(server);
+        try
+        {
+            await NextFrame();
+            Assert.NotNull(server.PunchDamage);
+        }
+        finally
+        {
+            Free(server);
+        }
     }
 
     // Ticking a server nobody has joined is quiet, and it is what an idle host does forever. The tick
@@ -59,13 +72,24 @@ public class DedicatedServerTests : TestClass
     public async Task AnIdleServerTicksQuietly()
     {
         DedicatedServer server = DedicatedServer.Create("/nonexistent-unturned", "NoSuchMap", "NoSuchMap",
-            Vector3.Zero, FreePort());
+            Vector3.Zero, RealData.FreePort());
         TestScene.AddChild(server);
 
-        for (int i = 0; i < 10; i++)
-            await NextPhysicsFrame();
+        try
+        {
+            for (int i = 0; i < 10; i++)
+                await NextPhysicsFrame();
 
-        Free(server);
+            // Still hosting after ten ticks. Without this the test passed if the server had torn itself
+            // down during them, which is the one outcome "ticks quietly" must exclude — and the
+            // reconciliation it starts on its first physics frame is what could take it there.
+            Assert.NotNull(server.PunchDamage);
+            Assert.True(server.IsInsideTree(), "the host left the tree while idling");
+        }
+        finally
+        {
+            Free(server);
+        }
     }
 
     // Leaving closes the socket. A server whose transport outlived it would hold the port, and the next
@@ -73,34 +97,38 @@ public class DedicatedServerTests : TestClass
     [Test]
     public async Task LeavingClosesTheSocket()
     {
-        ushort port = FreePort();
+        ushort port = RealData.FreePort();
         DedicatedServer first = DedicatedServer.Create("/nonexistent-unturned", "NoSuchMap", "NoSuchMap",
             Vector3.Zero, port);
         TestScene.AddChild(first);
-        await NextFrame();
-        Free(first);
+        try
+        {
+            await NextFrame();
+        }
+        finally
+        {
+            Free(first);
+        }
+
         await NextFrame();
 
         // The restart: same port, straight away.
         DedicatedServer second = DedicatedServer.Create("/nonexistent-unturned", "NoSuchMap", "NoSuchMap",
             Vector3.Zero, port);
         TestScene.AddChild(second);
-        await NextFrame();
-
-        Assert.NotNull(second.PunchDamage);
-        Free(second);
+        try
+        {
+            await NextFrame();
+            Assert.NotNull(second.PunchDamage);
+        }
+        finally
+        {
+            Free(second);
+        }
     }
 
     // --- helpers -------------------------------------------------------------------------------------
 
-    // A port the OS says is free, rather than one this file hopes is. Two runtime-test processes on one
-    // machine, or any unrelated listener, would otherwise fail these tests before their assertions —
-    // DedicatedServer.Create binds immediately, so an occupied port is a failure at construction.
-    private static ushort FreePort()
-    {
-        using var probe = new System.Net.Sockets.UdpClient(0, System.Net.Sockets.AddressFamily.InterNetwork);
-        return (ushort)((System.Net.IPEndPoint)probe.Client.LocalEndPoint!).Port;
-    }
 
     private void Free(DedicatedServer server)
     {

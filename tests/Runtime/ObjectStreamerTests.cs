@@ -255,7 +255,7 @@ public class ObjectStreamerTests : TestClass
             {
                 System.IO.Directory.Delete(Path, recursive: true);
             }
-            catch (System.IO.IOException)
+            catch (System.Exception e) when (e is System.IO.IOException or System.UnauthorizedAccessException)
             {
                 // A leftover temp directory is not worth failing a test over.
             }

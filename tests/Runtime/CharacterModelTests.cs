@@ -174,6 +174,10 @@ public class CharacterModelTests : TestClass
 
             MeshInstance3D? source = template.GetChildOrNull<MeshInstance3D>(0);
             MeshInstance3D? copy = clone.GetChildOrNull<MeshInstance3D>(0);
+
+            // Both asserted: a template with no mesh child would otherwise throw a NullReferenceException
+            // out of the line below and report as a crash rather than as the expectation that failed.
+            Assert.NotNull(source);
             Assert.NotNull(copy);
             Assert.Same(source!.Mesh, copy!.Mesh);
 

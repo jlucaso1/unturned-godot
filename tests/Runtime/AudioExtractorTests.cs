@@ -348,7 +348,7 @@ public class AudioExtractorTests : TestClass
             {
                 Directory.Delete(Path, recursive: true);
             }
-            catch (IOException)
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {
                 // A leftover temp directory is not worth failing a test over.
             }

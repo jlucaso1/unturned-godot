@@ -173,7 +173,12 @@ public class FoliageStreamingRendererTests : TestClass
             world.LookFrom(index.Chunks.Count > 0 ? index.Chunks[0].Centre : Vector3.Zero);
             await world.Renderer.PrewarmAsync();
 
-            Assert.True(world.Renderer.PrewarmTotalMs >= 0.0);
+            // The ring is RESIDENT when the warm returns. An elapsed-time check is satisfied by a warm
+            // that did nothing at all, which is the regression that puts the whole first plan back onto
+            // the frame after the scene is built.
+            Assert.True(world.Renderer.ResidentInstances > 0,
+                "the warm returned having made nothing resident, so the first frame still pays for it");
+            Assert.True(world.Renderer.ResidentBufferBytes > 0);
         }
     }
 
@@ -197,6 +202,11 @@ public class FoliageStreamingRendererTests : TestClass
             cancelled.Cancel();
 
             await world.Renderer.PrewarmAsync(cancelled.Token);
+
+            // Nothing was made resident. Without this the test passes whether the warm stopped at once
+            // or decoded and uploaded the entire ring — and the reason this token exists is that a
+            // player returning to the menu must not wait out every remaining decode.
+            Assert.Equal(0L, world.Renderer.ResidentInstances);
         }
     }
 
@@ -313,6 +323,18 @@ public class FoliageStreamingRendererTests : TestClass
         {
             temp.Dispose();
             temp = null;
+
+            // The blob was there and the index still failed to build. Under a required-real-data run
+            // that is a broken content cache, not a map without foliage — and returning quietly here
+            // would skip every test in this file while the job reported green.
+            if (System.Environment.GetEnvironmentVariable("UG_REQUIRE_REAL_DATA") == "1")
+            {
+                throw new System.IO.IOException(
+                    "UG_REQUIRE_REAL_DATA=1 and PEI's Foliage.blob is present, but no residency index "
+                    + "could be built from it; the fetched content is incomplete");
+            }
+
+            Log.Print("[runtime-tests] skipping: the foliage index could not be built");
             return false;
         }
 
@@ -333,7 +355,7 @@ public class FoliageStreamingRendererTests : TestClass
             {
                 System.IO.Directory.Delete(Path, recursive: true);
             }
-            catch (System.IO.IOException)
+            catch (System.Exception e) when (e is System.IO.IOException or System.UnauthorizedAccessException)
             {
                 // A leftover temp directory is not worth failing a test over.
             }

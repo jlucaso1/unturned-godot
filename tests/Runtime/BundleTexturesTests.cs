@@ -86,13 +86,18 @@ public class BundleTexturesTests : TestClass
         if (paths.Count == 0)
             return; // this platform's masterbundle names no textures in its first SerializedFile
 
-        // And the located set is exactly what was asked for: a lookup that returned neighbours would
-        // have the caller decode pixels nothing wanted.
+        // And the located set is exactly what was asked for — no more, and no FEWER. A loop alone
+        // passes when the lookup yields nothing at all, which is the shape of the regression that would
+        // leave every caller deciding it needs no stream pass.
+        int located = 0;
         foreach ((string path, UnityTexture texture) in BundleTextures.Locate(file, paths))
         {
             Assert.Contains(path, paths);
             Assert.NotNull(texture);
+            located++;
         }
+
+        Assert.Equal(paths.Count, located);
     }
 
     // Inline extraction over the real bundle: the textures whose pixels are already in the SerializedFile
