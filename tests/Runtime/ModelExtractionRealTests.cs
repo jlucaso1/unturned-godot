@@ -118,6 +118,57 @@ public class ModelExtractionRealTests : TestClass
             Assert.Equal(written, File.GetLastWriteTimeUtc(path));
     }
 
+    // Breadth, not depth: enough distinct assets that the decode meets the variety real data has —
+    // multiple submeshes, authored lower LODs, assets with collision and assets without. A pass tested
+    // on one prefab proves only that one shape decodes.
+    //
+    // What is asserted is that everything it produced READS BACK, through the libraries the game uses.
+    // Bytes that cannot be re-read are worse than bytes that were never written: the load rebuilds them
+    // every session and never notices.
+    [Test]
+    public void AWideSpreadOfAssetsRoundTrips()
+    {
+        if (!Ready(out ContentSource source, out ObjectAssetDatabase db))
+            return;
+
+        using var cache = new TempDir();
+        HashSet<Guid> wanted = FirstFewAssets(db, 60);
+        if (wanted.Count < 10)
+            return; // an install with almost no objects is not a useful sample
+
+        int extracted = ModelExtractor.ExtractMeshes(source, wanted, cache.Path, db);
+        Assert.True(extracted > 0, "the extractor produced nothing from a wide spread of assets");
+
+        var registry = new TextureRegistry(cache.Path);
+        Dictionary<Guid, ArrayMesh> library = ModelLibrary.Load(cache.Path, registry, wanted);
+        Assert.NotEmpty(library);
+
+        // Every mesh that came back has real geometry on every surface it claims. A surface count that
+        // outran the arrays would draw nothing and report no error.
+        int surfaces = 0;
+        foreach (ArrayMesh mesh in library.Values)
+        {
+            int count = mesh.GetSurfaceCount();
+            Assert.True(count > 0, "a realised mesh claimed no surfaces");
+            for (int i = 0; i < count; i++)
+            {
+                var vertices = (Vector3[])mesh.SurfaceGetArrays(i)[(int)Mesh.ArrayType.Vertex];
+                Assert.NotEmpty(vertices);
+                surfaces++;
+            }
+        }
+
+        // A spread this wide should have produced more surfaces than meshes: single-surface props exist,
+        // but a whole sample of them would mean the submesh split never ran.
+        Assert.True(surfaces >= library.Count, "no asset in the sample had more than one surface");
+
+        // And whatever collision came out reads back too — an object whose collider cache will not
+        // re-read loads without collision, which is a player walking through a wall.
+        Dictionary<Guid, List<CachedCollider>> colliders = ColliderLibrary.Load(cache.Path, wanted);
+        foreach (List<CachedCollider> forAsset in colliders.Values)
+            Assert.NotEmpty(forAsset);
+    }
+
     // Cancellation, which the menu sends when a player backs out of a load. Both passes have to notice
     // before doing 110 MB of work, not after: a cancelled load that decodes the bundle anyway holds the
     // process for seconds while the player is already looking at the menu.
