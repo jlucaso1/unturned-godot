@@ -11,7 +11,6 @@ namespace UnturnedGodot;
 // buildables a swing can break. Here that reduces to World (terrain, LARGE objects and resources) plus
 // MediumFurniture (the benches, gravestones and rubble piles), and deliberately NOT the player bit: a
 // punch has to reach past the thrower's own capsule, which is a metre closer than anything it can hit.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 internal static class PunchPhysics
 {
     public const uint DamageMask = CollisionLayers.World | CollisionLayers.MediumFurniture;
