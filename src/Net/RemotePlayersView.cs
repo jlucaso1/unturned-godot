@@ -8,7 +8,6 @@ namespace UnturnedGodot;
 // Renders the other players: one real character body per remote, driven by the interpolated snapshot
 // stream (position, yaw, pitch). Moving/idle animation state derives from the sampled motion, mirroring
 // how Unturned's remote players animate from their replicated state rather than their inputs.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class RemotePlayersView : Node3D
 {
     private sealed class Avatar
