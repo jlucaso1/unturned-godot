@@ -135,7 +135,76 @@ public class AudioExtractorTests : TestClass
         Assert.Equal(dir.Path, plan.CacheDirectory);
     }
 
+    // --- writing the cache ----------------------------------------------------------------------------
+
+    // Writing a clip whose index is not in the plan does nothing. The pass hands ranges back in stream
+    // order and the caller indexes into the plan, so an off-by-one there must not write a file into
+    // another definition's directory.
+    [Test]
+    public void WritingAClipOutsideThePlanDoesNothing()
+    {
+        if (!Available("the core masterbundle", MasterBundle, out string bundle))
+            return;
+
+        using var dir = new TempDir();
+        AudioExtractor.StreamPlan? plan = PlanForZombieVoices(bundle, dir.Path);
+        if (plan == null)
+            return;
+
+        AudioExtractor.WriteClip(plan, -1, System.Array.Empty<byte>());
+        AudioExtractor.WriteClip(plan, plan.Clips.Count, System.Array.Empty<byte>());
+        AudioExtractor.WriteClip(plan, plan.Clips.Count + 10, System.Array.Empty<byte>());
+
+        Assert.Empty(Directory.GetFiles(dir.Path, "*.ogg", SearchOption.AllDirectories));
+    }
+
+    // A blob FMOD cannot rebuild writes no file. The alternative — an empty or truncated .ogg on disk —
+    // would be read as a real clip by every later boot and play as silence with nothing re-extracting it.
+    [Test]
+    public void AClipThatCannotBeRebuiltWritesNothing()
+    {
+        if (!Available("the core masterbundle", MasterBundle, out string bundle))
+            return;
+
+        using var dir = new TempDir();
+        AudioExtractor.StreamPlan? plan = PlanForZombieVoices(bundle, dir.Path);
+        if (plan == null || plan.Clips.Count == 0)
+            return;
+
+        AudioExtractor.WriteClip(plan, 0, new byte[] { 0xFF, 0xFF, 0xFF, 0xFF }); // not an FSB5 bank
+
+        Assert.Empty(Directory.GetFiles(dir.Path, "*.ogg", SearchOption.AllDirectories));
+    }
+
+    // And with no clips written, no definition is marked complete. def.bin is the cache's ONLY
+    // completeness marker: one over an empty directory would make every later boot skip the definition
+    // and play silence, with nothing ever looking at it again.
+    [Test]
+    public void NoDefinitionIsMarkedCompleteWithoutClips()
+    {
+        if (!Available("the core masterbundle", MasterBundle, out string bundle))
+            return;
+
+        using var dir = new TempDir();
+        AudioExtractor.StreamPlan? plan = PlanForZombieVoices(bundle, dir.Path);
+        if (plan == null)
+            return;
+
+        int completed = AudioExtractor.CompleteDefs(plan);
+
+        Assert.Equal(0, completed);
+        Assert.Empty(Directory.GetFiles(dir.Path, "def.bin", SearchOption.AllDirectories));
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
+
+    // A plan over the game's own zombie voices, or null on a platform whose bundle does not carry them.
+    private static AudioExtractor.StreamPlan? PlanForZombieVoices(string bundle, string cacheDir)
+    {
+        SerializedFile file = ModelExtractor.ReadMasterbundleFile(bundle);
+        return AudioExtractor.Plan(file, new AudioExtractor.Request(bundle, "core",
+            new List<string>(), MovementAudioRequests.ZombieClipGroups, cacheDir));
+    }
 
     private static string? MasterBundle
     {
