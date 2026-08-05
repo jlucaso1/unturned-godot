@@ -19,7 +19,8 @@
 #   ./scripts/check-src-coverage.sh                # measure and report
 #   ./scripts/check-src-coverage.sh --min 40       # also fail below 40% of the opted-in lines
 #   ./scripts/check-src-coverage.sh --files        # per-file breakdown, worst first
-#   ./scripts/check-src-coverage.sh --with-game-run  # also measure ONE real game session and merge it
+#   ./scripts/check-src-coverage.sh --with-game-run  # also measure real game sessions and merge them
+#   ./scripts/check-src-coverage.sh --with-gpu-run   # ...including the ones that need a display
 #
 # --with-game-run exists because some of src/ cannot be reached from a test at all. Main.cs is the entry
 # point: it loads a map, builds a world and then ENDS THE PROCESS, so a test that called it would end the
@@ -29,6 +30,13 @@
 #
 # It needs the game's content, so it is opt-in rather than default.
 #
+# --with-gpu-run adds the runs that need a real rendering driver: the screenshot family and the GPU
+# benchmark tier. Headless is not merely slower for these — the display server is literally named
+# "headless" and the loader leaves before any capture code runs, so measuring them there records the same
+# lines the plain loader already did. gamescope's headless backend supplies a driver without putting a
+# window on anyone's screen, which is how this repo renders anyway (see scripts/perf-screenshots.sh).
+# Implies --with-game-run.
+#
 #   GODOT=/path/to/godot ./scripts/check-src-coverage.sh
 set -euo pipefail
 
@@ -36,11 +44,13 @@ repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 min=""
 show_files=0
 with_game_run=0
+with_gpu_run=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --min) min="$2"; shift 2 ;;
         --files) show_files=1; shift ;;
         --with-game-run) with_game_run=1; shift ;;
+        --with-gpu-run) with_game_run=1; with_gpu_run=1; shift ;;
         *) echo "Unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -110,6 +120,50 @@ if (( with_game_run )); then
         > "$result_dir/tier1.log" 2>&1 \
         || { echo "The structural benchmark failed; coverage was not measured:" >&2; tail -40 "$result_dir/tier1.log" >&2; exit 1; }
 
+    # The runs that need a rendering driver. gamescope's headless backend supplies one without a window.
+    #
+    # The exit backtrace these print is expected and harmless: leaving through the runtime (UG_COVERAGE)
+    # tears the process down while the GPU resources are still live, so the engine's native teardown
+    # complains on the way out. The screenshot lands and the hit counts are written before any of that —
+    # both verified — and this mode exists only to measure.
+    gpu_previous="$result_dir/tier1.json"
+    if (( with_gpu_run )); then
+        if ! command -v gamescope > /dev/null; then
+            echo "--with-gpu-run needs gamescope (its headless backend supplies a driver without a window)." >&2
+            exit 2
+        fi
+
+        gpu_number=0
+        for mode in "SCREENSHOT_PATH=$result_dir/shot.png" "SCREENSHOT_PATH=$result_dir/player.png PLAYER=1"; do
+            gpu_number=$((gpu_number + 1))
+            # shellcheck disable=SC2086  # $mode is one or two deliberate assignments
+            gamescope --backend headless -- \
+                env UG_COVERAGE=1 $mode \
+                dotnet coverlet "$assembly" \
+                    --target "$godot" \
+                    --targetargs "--audio-driver Dummy --path $repo_dir" \
+                    --merge-with "$gpu_previous" \
+                    --format json --output "$result_dir/gpu$gpu_number.json" --include-test-assembly \
+                    > "$result_dir/gpu$gpu_number.log" 2>&1 \
+                || { echo "A rendered run failed; coverage was not measured:" >&2; \
+                     tail -40 "$result_dir/gpu$gpu_number.log" >&2; exit 1; }
+            gpu_previous="$result_dir/gpu$gpu_number.json"
+        done
+
+        # Tier 2, which is the only caller GpuBenchmark has: real frames from authored camera poses.
+        gamescope --backend headless -- \
+            env UG_COVERAGE=1 \
+            dotnet coverlet "$assembly" \
+                --target "$godot" \
+                --targetargs "--audio-driver Dummy --path $repo_dir -- --benchmark --gpu" \
+                --merge-with "$gpu_previous" \
+                --format json --output "$result_dir/tier2.json" --include-test-assembly \
+                > "$result_dir/tier2.log" 2>&1 \
+            || { echo "The GPU benchmark failed; coverage was not measured:" >&2; \
+                 tail -40 "$result_dir/tier2.log" >&2; exit 1; }
+        gpu_previous="$result_dir/tier2.json"
+    fi
+
     # The loader's own early exit: it reads the level, builds the world and leaves without ever starting
     # a session. Nothing else reaches it, because every other run here goes on to be a session.
     #
@@ -123,7 +177,7 @@ if (( with_game_run )); then
     dotnet coverlet "$assembly" \
         --target "$godot" \
         --targetargs "--headless --audio-driver Dummy --path $repo_dir" \
-        --merge-with "$result_dir/tier1.json" \
+        --merge-with "$gpu_previous" \
         --format json --output "$result_dir/loader.json" --include-test-assembly \
         > "$result_dir/loader.log" 2>&1 \
         || { echo "The loader run failed; coverage was not measured:" >&2; \
