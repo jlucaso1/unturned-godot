@@ -11,7 +11,6 @@ namespace UnturnedGodot;
 
 // Resolves each submesh's material off a PrefabGraph: the material palette (batched objects) or the
 // object's own MeshRenderer material (rocks/trees), then reads its color, blend mode and texture key.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed class MaterialResolver
 {
     private readonly PrefabGraph _graph;
