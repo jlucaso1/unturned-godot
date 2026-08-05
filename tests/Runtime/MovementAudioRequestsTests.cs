@@ -1,6 +1,8 @@
 using System.Collections.Generic;
+using System.IO;
 using Chickensoft.GoDotTest;
 using Godot;
+using UnturnedGodot.Assets;
 using UnturnedGodot.Unity;
 using Xunit;
 
@@ -80,7 +82,96 @@ public class MovementAudioRequestsTests : TestClass
         }
     }
 
+    // --- against the real install ---------------------------------------------------------------------
+
+    // Scanning the install's own physics materials. This is what names every definition the movement
+    // audio will ask for, and a workshop map defines its own surfaces — scanning only the game's left
+    // those silent.
+    [Test]
+    public void TheInstallsPhysicsMaterialsAreScanned()
+    {
+        if (!Sources(out IReadOnlyList<ContentSource> sources))
+            return;
+
+        PhysicsMaterialBank bank = MovementAudioRequests.ScanPhysicsMaterials(sources);
+
+        Assert.True(bank.Count > 0, "the install carries no physics materials at all");
+    }
+
+    // The request list itself, built from real sources. Two consumers ask for it — the streamer's
+    // cold-load pass and the player's deferred extraction — and they have to agree, or the second sends
+    // the fallback into a full second decode of the same 1.4 GB bundle for the difference.
+    [Test]
+    public void TheRequestListIsBuiltFromTheRealSources()
+    {
+        if (!Sources(out IReadOnlyList<ContentSource> sources))
+            return;
+
+        string install = UnturnedInstall.Find()!;
+        PhysicsMaterialBank bank = MovementAudioRequests.ScanPhysicsMaterials(sources);
+        List<AudioExtractor.Request> requests =
+            MovementAudioRequests.For(sources, bank, install, Path.GetTempPath());
+
+        Assert.NotEmpty(requests);
+        foreach (AudioExtractor.Request request in requests)
+        {
+            Assert.NotEmpty(request.BundlePath);
+            Assert.Equal(Path.GetTempPath(), request.AudioCacheDir);
+        }
+
+        // Exactly one request carries the raw clip groups: they only exist in the game's own bundle, and
+        // handing them to a workshop bundle would send it looking for roars it does not have.
+        int withGroups = 0;
+        foreach (AudioExtractor.Request request in requests)
+            if (request.ClipGroups != null)
+                withGroups++;
+        Assert.True(withGroups <= 1, $"{withGroups} bundles were asked for the game's own raw clips");
+    }
+
+    // Asking the same thing twice produces the same list. It is read by two consumers at different
+    // points in the load, and a list that varied between them is the disagreement this exists to prevent.
+    [Test]
+    public void TheListIsStableBetweenCalls()
+    {
+        if (!Sources(out IReadOnlyList<ContentSource> sources))
+            return;
+
+        string install = UnturnedInstall.Find()!;
+        PhysicsMaterialBank bank = MovementAudioRequests.ScanPhysicsMaterials(sources);
+
+        List<AudioExtractor.Request> first =
+            MovementAudioRequests.For(sources, bank, install, Path.GetTempPath());
+        List<AudioExtractor.Request> second =
+            MovementAudioRequests.For(sources, bank, install, Path.GetTempPath());
+
+        Assert.Equal(first.Count, second.Count);
+        for (int i = 0; i < first.Count; i++)
+            Assert.Equal(first[i].BundlePath, second[i].BundlePath);
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
+
+    private static bool Sources(out IReadOnlyList<ContentSource> sources)
+    {
+        sources = System.Array.Empty<ContentSource>();
+        string? install = UnturnedInstall.Find();
+        if (install == null)
+        {
+            if (System.Environment.GetEnvironmentVariable("UG_REQUIRE_REAL_DATA") == "1")
+            {
+                throw new IOException(
+                    "UG_REQUIRE_REAL_DATA=1 but no Unturned install is present; this run exists to prove "
+                    + "these tests execute");
+            }
+
+            Log.Print("[runtime-tests] skipping: no Unturned install "
+                + "(set UNTURNED_PATH or run ./scripts/fetch-game-data.sh)");
+            return false;
+        }
+
+        sources = ContentSource.Discover(install);
+        return sources.Count > 0;
+    }
 
     private static AudioExtractor.RawClipGroup Find(
         IReadOnlyList<AudioExtractor.RawClipGroup> groups, string name)
