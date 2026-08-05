@@ -121,6 +121,65 @@ public class TerrainAndFoliageBuildTests : TestClass
         root.Free();
     }
 
+    // And with a mesh for every type, the walk turns those instances into BATCHES rather than nodes.
+    //
+    // This is the number that decides whether a map loads at all. PEI's blob is hundreds of thousands of
+    // instances; one node apiece would be hundreds of thousands of nodes, and the scene tree alone would
+    // cost more than the rest of the world put together. So what is asserted is that the batch count
+    // stays small while the instance count does not.
+    [Test]
+    [Timeout(300_000)]
+    public void TheRealMapsFoliageBecomesBatchesRatherThanNodes()
+    {
+        if (!RealMap(out _, out LevelInfo level))
+            return;
+
+        string blob = System.IO.Path.Combine(level.Path, "Foliage.blob");
+        if (!System.IO.File.Exists(blob))
+            return;
+
+        LevelFoliageChunks? chunks = LevelFoliageChunks.Load(blob, FoliageBuilder.RuntimeChunkTiles);
+        Assert.NotNull(chunks);
+
+        var meshes = new Dictionary<Guid, ArrayMesh>();
+        foreach (Guid asset in chunks!.AssetGuids)
+            meshes[asset] = Triangle();
+
+        Node3D root = FoliageBuilder.Build(chunks, meshes);
+
+        try
+        {
+            // Counted the way the benchmark counts it, because the batches are NOT nodes: they are
+            // MultiMesh RIDs held by a renderer, which is the point — a MultiMeshInstance3D apiece would
+            // put the node count back where batching removed it from.
+            Benchmark.SceneMetricsResult measured = Benchmark.SceneMetrics.Collect(new[] { (Node)root });
+
+            Assert.True(measured.MultiMeshInstances > 0, "the map's foliage produced no batches at all");
+            Assert.True(measured.MultiMeshTotalInstances > measured.MultiMeshInstances,
+                $"{measured.MultiMeshTotalInstances} instances came out as "
+                + $"{measured.MultiMeshInstances} batches, which is not batching");
+        }
+        finally
+        {
+            root.Free();
+        }
+    }
+
+    // One triangle standing in for a blade. What foliage looks like is the extraction's business; what
+    // the builder does with hundreds of thousands of placements is this file's.
+    private static ArrayMesh Triangle()
+    {
+        var arrays = new Godot.Collections.Array();
+        arrays.Resize((int)Mesh.ArrayType.Max);
+        arrays[(int)Mesh.ArrayType.Vertex] = new[]
+        {
+            Vector3.Zero, new Vector3(0.2f, 0f, 0f), new Vector3(0f, 0.4f, 0f),
+        };
+        var mesh = new ArrayMesh();
+        mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+        return mesh;
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
 
     private static bool RealMap(out string install, out LevelInfo level)
