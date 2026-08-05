@@ -118,6 +118,63 @@ public class ModelExtractionRealTests : TestClass
             Assert.Equal(written, File.GetLastWriteTimeUtc(path));
     }
 
+    // Cancellation, which the menu sends when a player backs out of a load. Both passes have to notice
+    // before doing 110 MB of work, not after: a cancelled load that decodes the bundle anyway holds the
+    // process for seconds while the player is already looking at the menu.
+    [Test]
+    public void ACancelledPassDoesNoWork()
+    {
+        if (!Ready(out ContentSource source, out ObjectAssetDatabase db))
+            return;
+
+        using var cache = new TempDir();
+        using var cancelled = new System.Threading.CancellationTokenSource();
+        cancelled.Cancel();
+
+        int extracted = ModelExtractor.ExtractMeshes(source, FirstFewAssets(db, 4), cache.Path, db,
+            cancellationToken: cancelled.Token);
+
+        Assert.Equal(0, extracted);
+        Assert.Empty(Directory.GetFiles(cache.Path));
+    }
+
+    // Textures are addressed the same way meshes are, so a cache that owes none does no decode. This is
+    // the warm-load path, and it has to cost nothing rather than re-reading a 110 MB bundle to discover
+    // there was nothing to do.
+    [Test]
+    public void TexturesOwedToNobodyAreNotDecoded()
+    {
+        if (!Ready(out ContentSource source, out ObjectAssetDatabase _))
+            return;
+
+        using var cache = new TempDir();
+
+        // Nothing has been extracted into this cache, so nothing references a texture: the pass has no
+        // ids to look for and must not open the bundle at all.
+        int written = ModelExtractor.ExtractTextures(source.BundlePath, source.CacheTag, cache.Path,
+            cache.Path);
+
+        Assert.Equal(0, written);
+    }
+
+    // And a cancelled texture pass likewise. It is the heavier of the two — it needs the .resS stream —
+    // so noticing late is the more expensive mistake.
+    [Test]
+    public void ACancelledTexturePassDoesNoWork()
+    {
+        if (!Ready(out ContentSource source, out ObjectAssetDatabase _))
+            return;
+
+        using var cache = new TempDir();
+        using var cancelled = new System.Threading.CancellationTokenSource();
+        cancelled.Cancel();
+
+        int written = ModelExtractor.ExtractTextures(source.BundlePath, source.CacheTag, cache.Path,
+            cache.Path, cancellationToken: cancelled.Token);
+
+        Assert.Equal(0, written);
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
 
     // The asset GUIDs a map would ask for, taken from the scanned object catalogue. Bounded, because this
