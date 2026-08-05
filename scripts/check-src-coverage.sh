@@ -19,6 +19,15 @@
 #   ./scripts/check-src-coverage.sh                # measure and report
 #   ./scripts/check-src-coverage.sh --min 40       # also fail below 40% of the opted-in lines
 #   ./scripts/check-src-coverage.sh --files        # per-file breakdown, worst first
+#   ./scripts/check-src-coverage.sh --with-game-run  # also measure ONE real game session and merge it
+#
+# --with-game-run exists because some of src/ cannot be reached from a test at all. Main.cs is the entry
+# point: it loads a map, builds a world and then ENDS THE PROCESS, so a test that called it would end the
+# suite. The benchmark tiers do the same to report their exit status. Those files are not untestable
+# because nobody wrote tests — they are unreachable from inside a test run, and the only honest way to
+# measure them is to run the game and measure THAT.
+#
+# It needs the game's content, so it is opt-in rather than default.
 #
 #   GODOT=/path/to/godot ./scripts/check-src-coverage.sh
 set -euo pipefail
@@ -26,10 +35,12 @@ set -euo pipefail
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 min=""
 show_files=0
+with_game_run=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --min) min="$2"; shift 2 ;;
         --files) show_files=1; shift ;;
+        --with-game-run) with_game_run=1; shift ;;
         *) echo "Unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -55,11 +66,39 @@ report="$result_dir/src-coverage.cobertura.xml"
 #   otherwise leave the very thing being measured uninstrumented.
 # --coverage (GoDotTest's flag, not coverlet's): the engine tears the process down without running the
 #   managed shutdown hook that flushes coverlet's hit counts, so without it every module reports 0%.
+# The suite's own pass. With a game run to follow it this emits json so the second pass can merge into it;
+# on its own it emits the cobertura the reader below reads.
+suite_format="cobertura"
+suite_output="$report"
+if (( with_game_run )); then
+    suite_format="json"
+    suite_output="$result_dir/suite.json"
+fi
+
 dotnet coverlet "$assembly" \
     --target "$godot" \
     --targetargs "--headless --audio-driver Dummy --path $repo_dir res://tests/Runtime/RuntimeTests.tscn --run-tests --quit-on-finish --coverage" \
-    --format cobertura --output "$report" --include-test-assembly > "$result_dir/run.log" 2>&1 \
+    --format "$suite_format" --output "$suite_output" --include-test-assembly > "$result_dir/run.log" 2>&1 \
     || { echo "The runtime suite failed; coverage was not measured:" >&2; tail -40 "$result_dir/run.log" >&2; exit 1; }
+
+if (( with_game_run )); then
+    # One real session, measured and merged in. QUIT_AFTER leaves through the same path the pause menu's
+    # button uses, and UG_COVERAGE=1 makes that exit go through the runtime rather than the engine — a
+    # SceneTree.Quit never returns to managed code, so the instrumenter's hit counts would never be
+    # written and the whole run would report zero.
+    # UG_HEADLESS_INTERACTIVE runs the ordinary interactive path — player, session, zombies, streaming —
+    # with no display driver, and QUIT_AFTER leaves through AppShutdown, which is the single way out of a
+    # loaded world. The screenshot mode would be quicker and is deliberately NOT used: it quits straight
+    # out of the loader, so it never runs the session it is supposed to measure.
+    UG_COVERAGE=1 UG_HEADLESS_INTERACTIVE=1 SOLO=1 QUIT_AFTER=45 \
+    dotnet coverlet "$assembly" \
+        --target "$godot" \
+        --targetargs "--headless --audio-driver Dummy --path $repo_dir" \
+        --merge-with "$result_dir/suite.json" \
+        --format cobertura --output "$report" --include-test-assembly \
+        > "$result_dir/game.log" 2>&1 \
+        || { echo "The game session failed; coverage was not measured:" >&2; tail -40 "$result_dir/game.log" >&2; exit 1; }
+fi
 
 [[ -s "$report" ]] || { echo "coverlet produced no report:" >&2; tail -20 "$result_dir/run.log" >&2; exit 1; }
 

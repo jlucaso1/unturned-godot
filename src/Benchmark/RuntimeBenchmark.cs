@@ -8,7 +8,6 @@ namespace UnturnedGodot.Benchmark;
 // Tier 3 runs through the real interactive load (player, physics, networking, zombies, lighting and
 // streamed objects) and samples the stationary spawn view. Tier 2 deliberately excludes those systems;
 // keeping this separate makes a render-only improvement distinguishable from a gameplay CPU regression.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class RuntimeBenchmark
 {
     public static async Task RunAsync(Node context, string mapName, double seconds, double loadMs)

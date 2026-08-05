@@ -127,7 +127,7 @@ public static class AppShutdown
             Log.Print("[shutdown] leaving");
             // Deferred: never tear the tree down inside the signal handler that asked for it. The code is
             // read when the call runs, not when it is scheduled, so a failure raised in between still lands.
-            Callable.From(() => tree.Quit(ExitCode)).CallDeferred();
+            Callable.From(() => Leave(tree)).CallDeferred();
             return;
         }
 
@@ -148,6 +148,27 @@ public static class AppShutdown
         Log.Print(left == 0
             ? $"[shutdown] background work stopped after {waited.ElapsedMilliseconds} ms"
             : $"[shutdown] {left} background task(s) still busy after {waited.ElapsedMilliseconds} ms; leaving anyway");
+
+        Leave(tree);
+    }
+
+    // The one place the process actually ends.
+    //
+    // UG_COVERAGE=1 leaves through the RUNTIME rather than the engine, and that is the whole reason this
+    // method exists. SceneTree.Quit tears the process down without ever returning to managed code, so the
+    // module-unload hooks never run — and a coverage instrumenter records its hit counts in exactly those
+    // hooks. Measured that way, a complete game run reports zero lines covered, which is worse than no
+    // measurement: it reads as code nothing executes. GoDotTest carries its own flag for the same reason,
+    // and this is its equivalent for a session rather than a suite.
+    //
+    // Nothing sets this in production, and the exit code is the same either way.
+    private static void Leave(SceneTree tree)
+    {
+        if (EnvFlag.IsOn(OS.GetEnvironment("UG_COVERAGE"), whenUnset: false))
+        {
+            System.Environment.Exit(ExitCode);
+            return;
+        }
 
         tree.Quit(ExitCode);
     }

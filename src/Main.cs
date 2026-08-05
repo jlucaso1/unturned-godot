@@ -5,7 +5,6 @@ using UnturnedGodot.Net;
 
 namespace UnturnedGodot;
 
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class Main : Node3D
 {
     // The map folder under Maps/ (or a workshop item) that this run loads. The menu picks it; MAP=
