@@ -171,6 +171,7 @@ public static class WorldBuilder
         // Yield on a time budget, not every N tiles: waiting for a frame costs more than finishing the
         // tile that would have shared it, and a 52-tile map was spending most of this phase waiting.
         var terrainRoot = new Node3D { Name = "Terrain" };
+        terrainRoot.AddToGroup(SceneGroups.Terrain);
         var controlTextures = new TerrainBuilder.ControlTextureCache();
         long budget = (long)(Stopwatch.Frequency * 0.008);
         long until = Stopwatch.GetTimestamp() + budget;
@@ -218,6 +219,7 @@ public static class WorldBuilder
         });
 
         var terrainRoot = new Node3D { Name = "Terrain" };
+        terrainRoot.AddToGroup(SceneGroups.Terrain);
         var controlTextures = new TerrainBuilder.ControlTextureCache();
         for (int i = 0; i < meshes.Length; i++)
         {

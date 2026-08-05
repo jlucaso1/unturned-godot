@@ -75,6 +75,39 @@ public class FoliageStreamingRendererTests : TestClass
         }
     }
 
+    // Pulling the draw distance in is a RENDERING change and nothing else. That is the whole claim the
+    // console's `foliage.range` rests on: it isolates what foliage costs the GPU from what it costs the
+    // streamer, and it can only do that if residency does not move underneath it.
+    [Test]
+    [Timeout(300_000)]
+    public async Task PullingTheDrawDistanceInLeavesResidencyWhereItWas()
+    {
+        if (!Index(out FoliageResidencyIndex index, out TempDir? temp))
+            return;
+
+        using (temp)
+        using (var world = new StreamingWorld(TestScene, index, MeshPerType(index)))
+        {
+            world.LookFrom(index.Chunks.Count > 0 ? index.Chunks[0].Centre : Vector3.Zero);
+            await world.Run(frames: 60);
+            int chunks = world.Renderer.ResidentChunks;
+            long instances = world.Renderer.ResidentInstances;
+            Assert.True(chunks > 0, "nothing was resident, so there is nothing to prove about it");
+
+            world.Renderer.SetRangeScale(0.25f);
+            await world.Run(frames: 5);
+
+            Assert.Equal(0.25f, world.Renderer.RangeScale);
+            Assert.Equal(chunks, world.Renderer.ResidentChunks);
+            Assert.Equal(instances, world.Renderer.ResidentInstances);
+
+            // And it is a fraction, not a free number: asking for more than the world was built with
+            // would ask for chunks residency never made resident.
+            world.Renderer.SetRangeScale(4f);
+            Assert.Equal(1f, world.Renderer.RangeScale);
+        }
+    }
+
     // The structural index reports the COMPLETE scene, not what happens to be resident — and that is
     // the point of it. Tier 1 attaches no camera and advances no frame, so a streaming renderer has no
     // GPU buffers at all; if the benchmark read residency it would report a world that got emptier every

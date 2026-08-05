@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Godot;
+using UnturnedGodot.Assets;
 
 namespace UnturnedGodot.Data;
 
@@ -29,18 +30,26 @@ public readonly record struct RenderMeshKey(int Level0, int Level1)
 //   * an alpha-blended surface. Transparent geometry is depth-sorted per render object and never between
 //     the instances inside one MultiMesh, so folding two transparent batches into one drops the sort
 //     between them and overlapping glass can blend in a different order.
+//
+// `Category` is what the placements in the batch ARE — Unturned's own classification of the asset, so
+// SMALL clutter, MEDIUM furniture, LARGE buildings and the RESOURCE family (trees, rocks, bushes) stay
+// separable after batching. Nothing about rendering depends on it; the dev console does, because "what do
+// the trees cost this frame" can only be answered by a submission that can be switched off on its own.
 public readonly record struct RenderBatch(RenderMeshKey Key, float MaxExtentMetres,
-    IReadOnlyList<Transform3D> Transforms, bool Mergeable = true);
+    IReadOnlyList<Transform3D> Transforms, bool Mergeable = true,
+    EObjectType Category = EObjectType.Unknown);
 
 // One submitted batch: the placements of every input batch that was merged into it.
 public sealed class MergedRenderGroup
 {
     public RenderMeshKey Key { get; }
+    public EObjectType Category { get; }
     public List<Transform3D> Transforms { get; }
 
-    internal MergedRenderGroup(RenderMeshKey key, List<Transform3D> transforms)
+    internal MergedRenderGroup(RenderMeshKey key, EObjectType category, List<Transform3D> transforms)
     {
         Key = key;
+        Category = category;
         Transforms = transforms;
     }
 }
@@ -76,6 +85,7 @@ public static class RenderBatchGrouping
     private sealed class Bucket
     {
         public RenderMeshKey Key;
+        public EObjectType Category;
         public float Limit;
         public float MinX, MaxX, MinZ, MaxZ;
         // The widest footprint any single batch in this bucket arrived with, per axis. The growth check
@@ -98,7 +108,12 @@ public static class RenderBatchGrouping
     public static List<MergedRenderGroup> Merge(IReadOnlyList<RenderBatch> batches, float growth = 0f)
     {
         var buckets = new List<Bucket>(batches.Count);
-        var byKey = new Dictionary<RenderMeshKey, List<Bucket>>();
+        // Keyed on the category as well as the mesh, so a merge can never hand two kinds of object one
+        // submission. In practice the two are the same question — a mesh belongs to the asset that ships
+        // it — and this only separates the case where deduplication gave a SMALL and a MEDIUM asset one
+        // byte-identical mesh resource. There the split is the correct answer rather than a cost:
+        // `objects.small.enabled 0` has to be able to take the small one away without the other.
+        var byKey = new Dictionary<(RenderMeshKey Key, EObjectType Category), List<Bucket>>();
         foreach (RenderBatch batch in batches)
         {
             if (batch.Transforms.Count == 0)
@@ -112,6 +127,7 @@ public static class RenderBatchGrouping
                 buckets.Add(new Bucket
                 {
                     Key = batch.Key,
+                    Category = batch.Category,
                     Limit = limit,
                     MinX = area.MinX,
                     MaxX = area.MaxX,
@@ -123,8 +139,8 @@ public static class RenderBatchGrouping
                 });
                 continue;
             }
-            if (!byKey.TryGetValue(batch.Key, out List<Bucket>? candidates))
-                byKey.Add(batch.Key, candidates = new List<Bucket>());
+            if (!byKey.TryGetValue((batch.Key, batch.Category), out List<Bucket>? candidates))
+                byKey.Add((batch.Key, batch.Category), candidates = new List<Bucket>());
 
             Bucket? target = null;
             foreach (Bucket candidate in candidates)
@@ -150,6 +166,7 @@ public static class RenderBatchGrouping
                 target = new Bucket
                 {
                     Key = batch.Key,
+                    Category = batch.Category,
                     Limit = limit,
                     MinX = area.MinX,
                     MaxX = area.MaxX,
@@ -176,7 +193,7 @@ public static class RenderBatchGrouping
 
         var merged = new List<MergedRenderGroup>(buckets.Count);
         foreach (Bucket bucket in buckets)
-            merged.Add(new MergedRenderGroup(bucket.Key, bucket.Transforms));
+            merged.Add(new MergedRenderGroup(bucket.Key, bucket.Category, bucket.Transforms));
         return merged;
     }
 

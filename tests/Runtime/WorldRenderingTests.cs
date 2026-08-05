@@ -3,6 +3,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Chickensoft.GoDotTest;
 using Godot;
+using UnturnedGodot.Assets;
 using UnturnedGodot.Data;
 using Xunit;
 
@@ -221,6 +222,95 @@ public class WorldRenderingTests : TestClass
     }
 
     // --- helpers -------------------------------------------------------------------------------------
+
+    // --- what the dev console drives ------------------------------------------------------------------
+
+    // Batches carry what their placements ARE, so one kind of object can stop being submitted while the
+    // rest of the batch keeps drawing. Rendering only: nothing here touches a collider.
+    [Test]
+    public async Task OneCategoryCanBeTakenOutOfTheSubmissionOnItsOwn()
+    {
+        var renderer = new MultiMeshRidRenderer { Name = "Batches" };
+        renderer.Add(Batch(), Transform3D.Identity, category: EObjectType.Resource);
+        renderer.Add(Batch(), Transform3D.Identity, category: EObjectType.Large);
+        TestScene.AddChild(renderer);
+        await NextFrame();
+
+        Assert.Equal(1, renderer.CountOf(EObjectType.Resource));
+        Assert.Equal(1, renderer.SetCategoryVisible(EObjectType.Resource, false));
+        await NextFrame();
+        Assert.Equal(1, renderer.SetCategoryVisible(EObjectType.Resource, true));
+
+        // A category this renderer does not submit answers zero rather than pretending it did something,
+        // which is what lets the console say "this map has none of those" instead of nothing at all.
+        Assert.Equal(0, renderer.SetCategoryVisible(EObjectType.Npc, false));
+
+        renderer.QueueFree();
+    }
+
+    // Hiding the node still wins over a per-category setting: an unsorted renderer and a sorted one both
+    // go dark, or "objects.enabled 0" would leave the trees drawing.
+    [Test]
+    public async Task HidingTheNodeOverridesWhicheverCategoriesWereLeftVisible()
+    {
+        var renderer = new MultiMeshRidRenderer { Name = "Batches" };
+        renderer.Add(Batch(), Transform3D.Identity, category: EObjectType.Resource);
+        TestScene.AddChild(renderer);
+        await NextFrame();
+
+        renderer.SetCategoryVisible(EObjectType.Resource, false);
+        renderer.Visible = false;
+        await NextFrame();
+        renderer.Visible = true;
+        await NextFrame();
+
+        Assert.Equal(1, renderer.InstanceCount);
+        renderer.QueueFree();
+    }
+
+    // An unsorted renderer — the foliage one, the placeholder boxes — retains no per-instance metadata to
+    // sort by, and says so by matching nothing rather than by hiding everything.
+    [Test]
+    public async Task ARendererThatWasNeverSortedMatchesNoCategory()
+    {
+        var renderer = new MultiMeshRidRenderer { Name = "Batches" };
+        renderer.Add(Batch(), Transform3D.Identity);
+        TestScene.AddChild(renderer);
+        await NextFrame();
+
+        Assert.Equal(0, renderer.CountOf(EObjectType.Large));
+        Assert.Equal(0, renderer.SetCategoryVisible(EObjectType.Large, false));
+        renderer.QueueFree();
+    }
+
+    // The shadow switch restores what the batches were BUILT with, so it can only answer for a renderer
+    // whose batches agreed. A mixed one is refused rather than guessed at — guessing would silently put
+    // shadows on geometry that was deliberately built without them.
+    [Test]
+    public async Task ShadowsCanBeSuppressedAndRestoredOnlyWhereTheBatchesAgree()
+    {
+        var uniform = new MultiMeshRidRenderer { Name = "Uniform" };
+        uniform.Add(Batch(), Transform3D.Identity);
+        uniform.Add(Batch(), Transform3D.Identity);
+        TestScene.AddChild(uniform);
+
+        var mixed = new MultiMeshRidRenderer { Name = "Mixed" };
+        mixed.Add(Batch(), Transform3D.Identity, shadows: true);
+        mixed.Add(Batch(), Transform3D.Identity, shadows: false);
+        TestScene.AddChild(mixed);
+        await NextFrame();
+
+        Assert.True(uniform.SetShadowsEnabled(false));
+        Assert.True(uniform.ShadowsSuppressed);
+        Assert.True(uniform.SetShadowsEnabled(true));
+        Assert.False(uniform.ShadowsSuppressed);
+
+        Assert.False(mixed.SetShadowsEnabled(false));
+        Assert.False(mixed.ShadowsSuppressed);
+
+        uniform.QueueFree();
+        mixed.QueueFree();
+    }
 
     private static MultiMesh Batch()
     {

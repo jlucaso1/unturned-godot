@@ -59,6 +59,8 @@ public partial class RemotePlayersView : Node3D
             _ownsTemplate = localTemplate == null,
         };
 
+    public override void _Ready() => AddToGroup(SceneGroups.RemotePlayers);
+
     public override void _ExitTree()
     {
         if (_ownsTemplate)

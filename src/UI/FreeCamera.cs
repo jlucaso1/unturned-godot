@@ -43,6 +43,14 @@ public partial class FreeCamera : Camera3D
 
     public override void _Process(double delta)
     {
+        // A focused text field owns the keyboard. With the console open, WASD is somebody typing
+        // `water.enabled 0`, not somebody flying — and this camera reads the keyboard by polling, so
+        // marking the event handled cannot stop it the way it stops an event-driven listener. Asking the
+        // viewport who has focus is the engine's own answer to "is this keystroke text", and it covers
+        // every future text field for free.
+        if (GetViewport().GuiGetFocusOwner() is LineEdit or TextEdit)
+            return;
+
         // PHYSICAL keys, not keycodes. WASD is a shape — a cluster under the left hand — and asking for
         // the key that PRINTS "W" gives a different physical key on every layout that is not QWERTY: on
         // AZERTY that is where Z sits and A is where Q sits, so the camera answered to a scattering of
@@ -51,6 +59,7 @@ public partial class FreeCamera : Camera3D
         //
         // PlayerController is deliberately not like this: it reads the player's own Unturned binds
         // (_settings.Forward and friends), so a keycode is the right question to ask there.
+
         var dir = Vector3.Zero;
         if (Input.IsPhysicalKeyPressed(Key.W)) dir -= Transform.Basis.Z;
         if (Input.IsPhysicalKeyPressed(Key.S)) dir += Transform.Basis.Z;

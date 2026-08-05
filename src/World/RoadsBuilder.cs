@@ -44,6 +44,7 @@ public static class RoadsBuilder
     {
         var watch = System.Diagnostics.Stopwatch.StartNew();
         var root = new Node3D { Name = "Roads" };
+        root.AddToGroup(SceneGroups.Roads);
         List<PlacedRoad> roads = LevelRoads.LoadPaths(Path.Combine(environmentDir, "Paths.dat"));
         if (roads.Count == 0)
             return root;

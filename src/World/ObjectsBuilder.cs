@@ -91,6 +91,10 @@ public static class ObjectsBuilder
         var root = new Node3D { Name = label };
 
         var byMesh = new Dictionary<Guid, List<Transform3D>>();
+        // What the dev console reaches for. The dedicated server comes through here too, with
+        // renderGeometry off and a label of its own: it advertises nothing, because a root with no
+        // renderer under it has nothing a console could switch off.
+        bool consoleReachable = label is "Objects" or "Vehicles";
         var fallback = new List<(Transform3D transform, Color color)>();
 
         foreach (PlacedObject obj in objects)
@@ -159,6 +163,10 @@ public static class ObjectsBuilder
                 float chunkMetres = lodMesh != null && ObjectChunkMetres > 0f && LodChunkMetres > 0f
                     ? Mathf.Min(ObjectChunkMetres, LodChunkMetres)
                     : ObjectChunkMetres;
+                // What these placements ARE, carried into the batch so the dev console can stop drawing
+                // one kind of object on its own — the trees without the buildings, the clutter without
+                // the walls. Resolved by GUID alone, exactly as the collision pass below does it.
+                EObjectType category = db.Resolve(guid, 0)?.Type ?? EObjectType.Unknown;
                 long trianglesPerInstance = TriangleCount(renderMesh);
                 long placementTriangles = trianglesPerInstance * transforms.Count;
                 bool spread = chunkMetres > 0f && transforms.Count > 1
@@ -177,12 +185,12 @@ public static class ObjectsBuilder
                         sparseExtraBatches += cells.Count - 1;
                     }
                     foreach (((int x, int z), List<Transform3D> inCell) in cells)
-                        partitioned.Add(new RenderBatch(key, chunkMetres, inCell, mergeable));
+                        partitioned.Add(new RenderBatch(key, chunkMetres, inCell, mergeable, category));
                 }
                 else
                 {
                     // No cell size was promised for this group, so no merge may claim one either.
-                    partitioned.Add(new RenderBatch(key, 0f, transforms, mergeable));
+                    partitioned.Add(new RenderBatch(key, 0f, transforms, mergeable, category));
                 }
                 withMesh += transforms.Count;
             }
@@ -191,7 +199,7 @@ public static class ObjectsBuilder
             foreach (MergedRenderGroup group in submitted)
                 renderBatches += AddLevels(root, render, levels[group.Key.Level0],
                     group.Key.Level1 == RenderMeshKey.NoLevel ? null : levels[group.Key.Level1],
-                    group.Transforms);
+                    group.Transforms, group.Category);
             if (submitted.Count < partitioned.Count)
                 Log.Print($"[unturned-godot] {label} batch merge: {partitioned.Count} partitioned "
                     + $"batches share {submitted.Count} co-located mesh batches");
@@ -240,8 +248,14 @@ public static class ObjectsBuilder
                 + $"({CollisionChunkMetres:0} m cells, min {MinChunkedCollisionShapes} shapes, "
                 + $"{collisionShapes.Shapes.Count} shared shapes, "
                 + $"{collisionShapes.PrimitiveAliases} primitive + {collisionShapes.MeshAliases} mesh aliases)");
+        if (consoleReachable)
+            root.AddToGroup(label == "Vehicles" ? SceneGroups.Vehicles : SceneGroups.Objects);
         if (render != null)
+        {
+            if (label == "Objects")
+                render.AddToGroup(SceneGroups.ObjectBatches);
             root.AddChild(render);
+        }
         if (collisionOwner != null)
             collision.AddChild(collisionOwner);
         root.AddChild(collision);
@@ -960,28 +974,30 @@ public static class ObjectsBuilder
     // placement nearest the player as well. It also bounds what this can buy: a batch only ever switches
     // as a whole, so the win comes from cells that are small next to their own switch distance.
     private static int AddLevels(Node3D root, MultiMeshRidRenderer? renderer, ArrayMesh mesh,
-        ArrayMesh? lodMesh, List<Transform3D> transforms)
+        ArrayMesh? lodMesh, List<Transform3D> transforms, EObjectType category)
     {
         BatchBounds bounds = BoundsOf(transforms);
         if (lodMesh == null)
         {
-            AddRenderBatch(root, renderer, BuildMultiMesh(mesh, transforms, bounds.Centre), bounds.Centre);
+            AddRenderBatch(root, renderer, BuildMultiMesh(mesh, transforms, bounds.Centre), bounds.Centre,
+                category);
             return 1;
         }
         float switchDistance = SwitchDistanceFor(mesh, transforms) + bounds.Radius;
         AddRenderBatch(root, renderer, BuildMultiMesh(mesh, transforms, bounds.Centre), bounds.Centre,
-            visibilityEnd: switchDistance, visibilityMargin: LodFadeMargin);
+            category, visibilityEnd: switchDistance, visibilityMargin: LodFadeMargin);
         AddRenderBatch(root, renderer, BuildMultiMesh(lodMesh, transforms, bounds.Centre), bounds.Centre,
-            visibilityBegin: switchDistance, visibilityMargin: LodFadeMargin);
+            category, visibilityBegin: switchDistance, visibilityMargin: LodFadeMargin);
         return 2;
     }
 
     private static void AddRenderBatch(Node3D root, MultiMeshRidRenderer? renderer, MultiMesh multimesh,
-        Vector3 centre, float visibilityEnd = 0f, float visibilityMargin = 0f, float visibilityBegin = 0f)
+        Vector3 centre, EObjectType category, float visibilityEnd = 0f, float visibilityMargin = 0f,
+        float visibilityBegin = 0f)
     {
         if (renderer != null)
             renderer.Add(multimesh, new Transform3D(Basis.Identity, centre), shadows: true, visibilityEnd,
-                visibilityMargin, visibilityBegin);
+                visibilityMargin, visibilityBegin, category);
         else
             root.AddChild(new MultiMeshInstance3D
             {

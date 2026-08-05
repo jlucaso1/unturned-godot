@@ -43,6 +43,17 @@ public partial class DayNightController : Node
     // The sun-shaft pass needs the camera it renders in front of; the caller hands it over once the
     // player (or the free camera) exists. No-op when the effect is switched off.
     public void AttachCamera(Camera3D camera) => _shafts?.Follow(camera);
+
+    // The two objects the dev console drives — the light the shadow pass is drawn from, and the
+    // environment the sky, fog and screen-space effects hang off.
+    //
+    // Handing them out is safe precisely because of what Apply() below writes: colours, energies, a fog
+    // DENSITY, a shadow OPACITY — the values the map's own keyframes decide, every one of them. It never
+    // writes an enable. So `sun.shadows.enabled 0` survives sunrise instead of being quietly undone by
+    // the next keyframe, and there is no override flag here to keep in sync with the cycle.
+    public DirectionalLight3D Sun => _sun;
+
+    public Godot.Environment WorldEnvironment => _env;
     private StandardMaterial3D? _water; // sea plane material, tinted with the blended SEA color
     private float _azimuth = DefaultAzimuth;
     private float _time;
@@ -64,6 +75,7 @@ public partial class DayNightController : Node
         SkyboxAssets? skyAssets = null)
     {
         var controller = new DayNightController { Name = "DayNight", _lighting = lighting, _water = waterMaterial };
+        controller.AddToGroup(SceneGroups.Lighting);
 
         controller._sun = new DirectionalLight3D
         {
