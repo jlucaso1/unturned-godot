@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Runs what CI's format and build-and-test jobs would run, before the commit exists.
+#
+# Install with ./scripts/install-git-hooks.sh (it points core.hooksPath here — .git/hooks itself is not
+# versioned, so a hook that lives only there is a hook nobody else gets).
+#
+# Cost, measured on this repo rather than guessed:
+#
+#   format (staged files only)   ~8 s   — nearly all of it is loading the MSBuild workspace
+#   build -warnaserror           ~5 s   — incremental
+#   xUnit suite                 ~24 s   — ~5 s of tests behind ~18 s of `dotnet test` host startup
+#
+# So a C# commit costs roughly 35-40 seconds. That is a real tax, and it is why the escapes below exist
+# and are documented rather than hidden: a hook people work around by reflex protects nothing.
+#
+#   SKIP_TESTS=1 git commit ...    format and build, skip the suite (the ~24 s)
+#   git commit --no-verify ...     skip this hook entirely
+#
+# A commit that touches no C# skips everything and costs nothing.
+#
+# Known limitation, stated rather than papered over: this checks the WORKING TREE, not the staged content.
+# With a partially staged file the two differ, and the hook then reports on code the commit will not
+# contain. Stashing the difference would fix that and would also throw away work if the hook were
+# interrupted at the wrong moment, which is a worse failure than a misleading pass. CI checks the real
+# thing regardless.
+set -uo pipefail
+
+repo_dir="$(git rev-parse --show-toplevel)"
+cd "$repo_dir" || exit 1
+
+# Added/copied/modified/renamed, never deleted: a deleted file cannot be formatted and would fail the
+# --include list with a path that no longer exists.
+mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACMR)
+
+has_csharp=0
+needs_build=0
+for file in "${staged[@]}"; do
+    case "$file" in
+        *.cs) has_csharp=1; needs_build=1 ;;
+        *.csproj|*.props|*.sln|*.runsettings) needs_build=1 ;;
+    esac
+done
+
+if [[ "$needs_build" == "0" ]]; then
+    exit 0 # documentation, workflows, scripts: nothing here can say anything about them
+fi
+
+fail() {
+    echo "" >&2
+    echo "pre-commit: $1" >&2
+    echo "  Fix it, or commit with --no-verify if you know better." >&2
+    exit 1
+}
+
+# --- format ---------------------------------------------------------------------------------------
+# Only the staged files. Whole-solution --verify-no-changes takes twice as long and would fail on drift
+# in files this commit does not touch, which is CI's job to catch and not this hook's business.
+if [[ "$has_csharp" == "1" ]]; then
+    cs_files=()
+    for file in "${staged[@]}"; do
+        [[ "$file" == *.cs ]] && cs_files+=("$file")
+    done
+    echo "pre-commit: checking format of ${#cs_files[@]} file(s)..."
+    dotnet format unturned-godot.sln --include "${cs_files[@]}" --verify-no-changes --verbosity quiet \
+        || fail "formatting drift. Run: dotnet format unturned-godot.sln --include ${cs_files[*]}"
+fi
+
+# --- lint -----------------------------------------------------------------------------------------
+# The analyzers and .editorconfig rules are build-enforced through Directory.Build.props, so the lint IS
+# the build with warnings promoted. Debug, because that is the configuration that compiles the editor
+# add-on and tests/Runtime — a Release-only check never sees either.
+echo "pre-commit: building (Debug, warnings as errors)..."
+dotnet build unturned-godot.sln -c Debug --nologo -v quiet -warnaserror \
+    || fail "the build failed, or an analyzer/style warning was raised."
+
+# --- tests ----------------------------------------------------------------------------------------
+if [[ "${SKIP_TESTS:-}" == "1" ]]; then
+    echo "pre-commit: SKIP_TESTS=1, skipping the suite."
+    exit 0
+fi
+
+# --no-build: the step above just built this exact configuration, and re-running it would add ~5 s for
+# nothing.
+echo "pre-commit: running the xUnit suite..."
+dotnet test tests/UnturnedGodot.Tests.csproj -c Debug --no-build --nologo -v quiet \
+    || fail "tests failed."
+
+# The Godot runtime suite is deliberately NOT here. It needs the engine binary, which not every checkout
+# has, and it costs another process launch. It runs in pre-push instead, where it is a better fit: the
+# question there is "is this fit to leave my machine", not "is this fit to be a local commit".
+echo "pre-commit: ok."

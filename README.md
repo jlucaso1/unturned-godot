@@ -245,6 +245,13 @@ dotnet format unturned-godot.sln                                   # auto-format
 # above references core/ alone and so cannot instantiate a Node; this is the half that can.
 ./scripts/run-godot-tests.sh
 
+# Run the format/lint/test gates locally, before the commit exists. Opt-in per checkout: git does not
+# run a fresh clone's hooks on its own, which is a security property worth keeping.
+#   pre-commit  format (staged files only) + build with warnings as errors + the xUnit suite  (~35 s)
+#   pre-push    the Godot runtime suite, skipped when the engine is not installed             (~3 s)
+# Escapes: SKIP_TESTS=1 git commit, SKIP_RUNTIME_TESTS=1 git push, or --no-verify for either.
+./scripts/install-git-hooks.sh
+
 # Boot-menu popup gate: exports a release build and drives the menu, because engine Popups only
 # misbehave there. Self-skips without Godot export templates, Xvfb or xdotool.
 ./scripts/check-menu-popup-errors.sh
