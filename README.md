@@ -241,6 +241,10 @@ dotnet format unturned-godot.sln                                   # auto-format
 # Coverage gate (excludes generated code; requires >95% for both lines and branches)
 ./scripts/check-coverage.sh
 
+# The tests that need a live engine (Node lifecycle, notification order) — headless, no GPU. The suite
+# above references core/ alone and so cannot instantiate a Node; this is the half that can.
+./scripts/run-godot-tests.sh
+
 # Boot-menu popup gate: exports a release build and drives the menu, because engine Popups only
 # misbehave there. Self-skips without Godot export templates, Xvfb or xdotool.
 ./scripts/check-menu-popup-errors.sh

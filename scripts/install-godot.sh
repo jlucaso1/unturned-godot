@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Install the Godot 4.7 .NET editor binary, plus what it needs to render on a machine with no GPU.
 #
-# Nothing in the test suite needs Godot: this is for actually running the game and, more usefully on a
+# The xUnit suite does not need Godot; the runtime suite does (./scripts/run-godot-tests.sh, which calls
+# this script for its binary). Beyond that, this is for actually running the game and, more usefully on a
 # headless box, for the benchmark tiers in docs/PROFILING.md. On a container with no GPU (agent
 # sandboxes, CI runners) Mesa's lavapipe provides a real Vulkan 1.4 device on the CPU and Xvfb provides
 # the window the GPU tier wants, so the tiers run — see the caveats in docs/PROFILING.md about which
