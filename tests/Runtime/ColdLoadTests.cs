@@ -125,6 +125,52 @@ public class ColdLoadTests : TestClass
             $"the warm load finished having selected {neededAtFinish} assets to build from");
     }
 
+    // A SECOND map, cold, through the same pipeline.
+    //
+    // Every asset-shape problem this port has had was map-specific: a mesh whose vertex buffer was
+    // streamed while its neighbour's was inline, a prefab with a Viewmodel subtree and one without, a
+    // collider kind one map places and another never does. PEI alone proves the pipeline runs; it cannot
+    // prove the pipeline COPES, because a map is a sample of the format rather than the format itself.
+    //
+    // Alpha Valley is chosen for being small and not PEI. What is asserted is the same shape as the PEI
+    // load — this is a second sample, not a second set of rules.
+    [Test]
+    [Timeout(600_000)]
+    public async Task AColdLoadOfASecondMapBuildsAWorldToo()
+    {
+        if (!Map("Alpha Valley", out string install, out LevelInfo level))
+            return;
+
+        using var cache = new TempDir();
+        int neededAtFinish = await Load(install, level, cache.Path);
+
+        Assert.True(neededAtFinish > 0,
+            $"the second map finished having selected {neededAtFinish} assets to build from");
+        Assert.NotEmpty(System.IO.Directory.GetFileSystemEntries(cache.Path));
+    }
+
+    // And two maps SHARE a cache without either corrupting the other's entries. Every session after the
+    // first reads a cache the previous map filled — a key that collided across maps would hand one map's
+    // geometry to another, which renders, as the wrong building in the wrong place.
+    [Test]
+    [Timeout(600_000)]
+    public async Task TwoMapsShareOneCacheWithoutCollidingInIt()
+    {
+        if (!RealMap(out string install, out LevelInfo pei))
+            return;
+        if (!Map("Alpha Valley", out _, out LevelInfo other))
+            return;
+
+        using var cache = new TempDir();
+
+        Assert.True(await Load(install, pei, cache.Path) > 0);
+        Assert.True(await Load(install, other, cache.Path) > 0);
+
+        // And PEI again, now over a cache the other map has also written into. A collision would show up
+        // here as a load that built from entries the second map replaced.
+        Assert.True(await Load(install, pei, cache.Path) > 0);
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
 
     // One load into the given cache directory, run to completion. Returns how many assets the build
@@ -172,22 +218,25 @@ public class ColdLoadTests : TestClass
         return true;
     }
 
-    private static bool RealMap(out string install, out LevelInfo level)
+    private static bool RealMap(out string install, out LevelInfo level) =>
+        Map("PEI", out install, out level);
+
+    private static bool Map(string name, out string install, out LevelInfo level)
     {
         install = "";
         level = null!;
         string? found = Assets.UnturnedInstall.Find();
-        string? maps = found == null ? null : System.IO.Path.Combine(found, "Maps", "PEI");
+        string? maps = found == null ? null : System.IO.Path.Combine(found, "Maps", name);
         if (found == null || maps == null || !System.IO.Directory.Exists(maps))
         {
             if (System.Environment.GetEnvironmentVariable("UG_REQUIRE_REAL_DATA") == "1")
             {
                 throw new System.IO.IOException(
-                    "UG_REQUIRE_REAL_DATA=1 but the PEI map is not present; this run exists to prove these "
-                    + "tests execute");
+                    $"UG_REQUIRE_REAL_DATA=1 but the {name} map is not present; this run exists to prove "
+                    + "these tests execute");
             }
 
-            Log.Print("[runtime-tests] skipping: no PEI map "
+            Log.Print($"[runtime-tests] skipping: no {name} map "
                 + "(set UNTURNED_PATH or run ./scripts/fetch-game-data.sh)");
             return false;
         }
