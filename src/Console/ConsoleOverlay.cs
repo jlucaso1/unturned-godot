@@ -129,8 +129,26 @@ public partial class ConsoleOverlay : CanvasLayer
         string flattened = ConsoleCommandLine.Flatten(clipboard);
         if (flattened.Length == 0)
             return false;
-        _prompt.InsertTextAtCaret(flattened);
+        InsertAtPrompt(flattened);
         return true;
+    }
+
+    // Puts text into the prompt the way a paste is expected to: at the caret, and OVER the selection if
+    // there is one. Replacing the selection is the LineEdit's job on its own paste path — paste_text()
+    // deletes it before inserting — and this does not go through paste_text. Without doing the same,
+    // pasting a recipe over a selected command kept both and ran the two welded together.
+    //
+    // Split out from PasteBlock so it is reachable without a clipboard: a headless session has none, so
+    // everything above the split refuses at the first guard and this would never be exercised.
+    internal void InsertAtPrompt(string text)
+    {
+        if (_prompt.HasSelection())
+        {
+            int from = _prompt.GetSelectionFromColumn();
+            _prompt.DeleteText(from, _prompt.GetSelectionToColumn());
+            _prompt.CaretColumn = from;
+        }
+        _prompt.InsertTextAtCaret(text);
     }
 
     // Godot only warns when the display server has no clipboard (headless, which is where the runtime

@@ -218,16 +218,62 @@ public class ConsoleTests : TestClass
         Release(console);
     }
 
+    // A paste REPLACES what is selected, which InsertTextAtCaret does not do on its own: the LineEdit
+    // deletes the selection first on its own paste path, and this one does not go through it. Pasting a
+    // recipe over a selected command used to keep both and run the two welded together.
+    [Test]
+    public async Task PastingOverASelectionReplacesItRatherThanAddingToIt()
+    {
+        ConsoleOverlay console = await Open();
+        console.Prompt.Text = "objects.trees.enabled 0";
+
+        console.Prompt.SelectAll();
+        console.InsertAtPrompt("terrain.enabled 0; perf");
+        Assert.Equal("terrain.enabled 0; perf", console.Prompt.Text);
+
+        // With nothing selected it is still an insert at the caret, not a replacement of the line.
+        console.Prompt.Deselect();
+        console.Prompt.CaretColumn = 0;
+        console.InsertAtPrompt("help; ");
+        Assert.Equal("help; terrain.enabled 0; perf", console.Prompt.Text);
+
+        Release(console);
+    }
+
     // A one-line clipboard is left to the LineEdit: its own paste already handles the selection, the
     // caret and the undo stack, and there is nothing about it to fix. Only a block it cannot hold —
     // one the newlines would be silently dropped from — is taken over.
+    //
+    // The clipboard is set rather than assumed, and put back afterwards. Read as it lies, this would
+    // pass on a session that has no clipboard at all (the guard refuses first, for a different reason)
+    // and fail on one whose clipboard happened to hold several lines.
     [Test]
     public async Task ASingleLineClipboardIsLeftToTheLineEdit()
     {
         ConsoleOverlay console = await Open();
+        if (!DisplayServer.HasFeature(DisplayServer.Feature.Clipboard))
+        {
+            // Headless: refused at the guard, which is the honest answer here rather than a green tick
+            // for a branch that never ran.
+            Assert.False(console.PasteBlock());
+            Release(console);
+            return;
+        }
 
-        Assert.False(console.PasteBlock());
+        string previous = DisplayServer.ClipboardGet();
+        try
+        {
+            DisplayServer.ClipboardSet("perf");
+            Assert.False(console.PasteBlock());
 
+            DisplayServer.ClipboardSet("terrain.enabled 0\nperf");
+            Assert.True(console.PasteBlock());
+            Assert.Equal("terrain.enabled 0; perf", console.Prompt.Text);
+        }
+        finally
+        {
+            DisplayServer.ClipboardSet(previous);
+        }
         Release(console);
     }
 

@@ -191,6 +191,32 @@ public class TerrainBuilderTests : TestClass
         Assert.Equal(Colors.Black with { A = 0f }, control.GetPixel(18, 9)); // an unpainted texel
     }
 
+    // Four weights fit an RGBA8 image, so a fifth painted layer is where a SECOND control texture has to
+    // appear and where slot 4's weight has to land in its red channel — the channel the generated shader
+    // multiplies layer4 by. Everything above only ever fills one control texture, which leaves the loop
+    // bound and the slot-to-channel mapping across the boundary untested.
+    [Test]
+    public void ATilePaintingMoreThanFourLayersGetsASecondControlTexture()
+    {
+        var layers = new ImageTexture[SplatmapTile.LAYERS];
+        for (int i = 0; i < layers.Length; i++)
+            layers[i] = Pixel();
+        // Layer 6 rather than 4, so a slot's index and its layer's index cannot be confused for one
+        // another: painted layer 6 has to arrive in slot 4, the first channel of the second control.
+        SplatmapTile splat = Painted((17, 9, 0, 10), (17, 9, 1, 20), (17, 9, 2, 30),
+            (17, 9, 3, 40), (17, 9, 6, 155));
+
+        ShaderMaterial material = SplatMaterial(splat, layers);
+
+        Assert.Same(layers[6], material.GetShaderParameter("layer4").As<ImageTexture>());
+        Color texel = material.GetShaderParameter("control1").As<ImageTexture>().GetImage().GetPixel(17, 9);
+        Assert.Equal(155, Mathf.RoundToInt(texel.R * 255f)); // slot 4 = layer 6
+        Assert.Equal(0, Mathf.RoundToInt(texel.G * 255f));   // and the three slots it does not fill
+        Assert.Equal(0, Mathf.RoundToInt(texel.B * 255f));
+        Assert.Equal(0, Mathf.RoundToInt(texel.A * 255f));
+        Assert.Null(material.GetShaderParameter("control2").As<ImageTexture>());
+    }
+
     // A tile whose splatmap is empty paints nothing. It still has to draw — the eight-way blend rendered
     // it black through its `total > 0.0` guard, and a zero-sampler shader would not even compile.
     [Test]
@@ -228,6 +254,30 @@ public class TerrainBuilderTests : TestClass
         // even though the render mode has disabled the direct lobe.
         Assert.DoesNotContain("textureGrad", code);
         Assert.Contains("SPECULAR = 0.0;", code);
+    }
+
+    // Pinning one count leaves the other seven to be found at runtime, where a malformed generator is a
+    // shader that fails to compile and a tile that draws untextured. PEI alone asks for six of the eight.
+    [Test]
+    public void EveryPaintedCountComesOutWellFormed()
+    {
+        for (int painted = 1; painted <= SplatmapTile.LAYERS; painted++)
+        {
+            string code = TerrainBuilder.SplatShaderCode(painted);
+            int controls = (painted + 3) / 4;
+
+            for (int slot = 0; slot < painted; slot++)
+                Assert.Contains($"uniform sampler2D layer{slot} :", code);
+            Assert.DoesNotContain($"uniform sampler2D layer{painted} :", code);
+            Assert.Contains($"uniform sampler2D control{controls - 1} :", code);
+            Assert.DoesNotContain($"uniform sampler2D control{controls} :", code);
+
+            // One guarded sample per painted layer, and a `total` that still sums every one of them —
+            // the two halves of "the normalized average is what the eight-way blend produced".
+            Assert.Equal(painted, code.Split("if (sample_unpainted || ").Length - 1);
+            string total = code.Split("float total = ")[1].Split(';')[0];
+            Assert.Equal(painted, total.Split('+').Length);
+        }
     }
 
     // --- helpers -------------------------------------------------------------------------------------

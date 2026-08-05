@@ -78,6 +78,20 @@ public class ConsoleCommandLineTests
         Assert.Equal(new[] { "echo \"a; b\"", "perf" },
             ConsoleCommandLine.Split(ConsoleCommandLine.Flatten("echo \"a; b\"\nperf")));
 
+    // The two separators disagree about quotes — a line break ends one, a `;` does not — so flattening
+    // has to close what the break closed. Joining naively gives `echo "open; perf`, where the separator
+    // is inside the quote and the second command has vanished: the newline rule undone by the step that
+    // exists to preserve it.
+    [Fact]
+    public void FlatteningClosesAQuoteTheLineBreakHadClosed()
+    {
+        Assert.Equal("echo \"open\"; perf", ConsoleCommandLine.Flatten("echo \"open\nperf"));
+        Assert.Equal(new[] { "echo \"open\"", "perf" },
+            ConsoleCommandLine.Split(ConsoleCommandLine.Flatten("echo \"open\nperf")));
+        // And closing it is free: an unterminated quote already ran to the end of its statement.
+        Assert.Equal(ConsoleCommandLine.Words("echo \"open"), ConsoleCommandLine.Words("echo \"open\""));
+    }
+
     [Fact]
     public void FlatteningNothingIsNothing() =>
         Assert.Equal("", ConsoleCommandLine.Flatten("\n  \n// only a note\n"));

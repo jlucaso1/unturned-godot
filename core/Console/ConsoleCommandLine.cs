@@ -71,7 +71,30 @@ public static class ConsoleCommandLine
     // arrived as `terrain.enabled 0perf` — two commands welded into a name that does not exist. Joining
     // on `;` instead means the paste runs as what it plainly reads as, with each line's comment dropped
     // alongside the line it annotated rather than swallowing every step under it.
-    public static string Flatten(string text) => string.Join("; ", Split(text));
+    //
+    // A quote left open on its line has to be closed on the way, because the two separators do not agree
+    // about it: a line break ends a quote and a `;` does not. Flattening `echo "open` + `perf` naively
+    // gives `echo "open; perf`, where the separator is now INSIDE the quote and the second command is
+    // gone — the newline rule above undone by the very step meant to preserve it. Closing it changes
+    // nothing else: Words reads an unterminated quote as running to the end of its statement, so
+    // `echo "open` and `echo "open"` are already the same two words.
+    public static string Flatten(string text)
+    {
+        var closed = new List<string>();
+        foreach (string statement in Split(text))
+            closed.Add(IsQuoteOpen(statement) ? statement + '"' : statement);
+        return string.Join("; ", closed);
+    }
+
+    // Counted the way Split counts, so the two never disagree about which statements end mid-quote.
+    private static bool IsQuoteOpen(string statement)
+    {
+        bool quoted = false;
+        foreach (char c in statement)
+            if (c == '"')
+                quoted = !quoted;
+        return quoted;
+    }
 
     private static void Flush(List<string> statements, StringBuilder current)
     {
