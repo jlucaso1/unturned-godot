@@ -79,13 +79,20 @@ show_files = os.environ.get("SRC_COVERAGE_FILES") == "1"
 def is_generated(name):
     return "Godot.SourceGenerators" in name or "/obj/" in name
 
+# The tests themselves compile into this same assembly (tests/Runtime, Debug only), so instrumenting it
+# instruments them too. A test file runs end to end by definition and scores ~100%, which would pad the
+# denominator with exactly the code that cannot be evidence of anything: adding a test file would raise
+# "src/ coverage" on its own, before it asserted a thing. Only src/ counts.
+def is_target(name):
+    return name.startswith("src/")
+
 per_file = collections.defaultdict(lambda: [0, 0, 0, 0])
 for pkg in ET.parse(report).getroot().iter("package"):
     if pkg.get("name") != "unturned-godot":
         continue
     for cls in pkg.iter("class"):
         name = cls.get("filename", "")
-        if is_generated(name):
+        if is_generated(name) or not is_target(name):
             continue
         entry = per_file[name]
         for line in cls.iter("line"):
