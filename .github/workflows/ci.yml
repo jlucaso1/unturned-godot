@@ -78,6 +78,49 @@ jobs:
         if: runner.os == 'Linux'
         run: ./scripts/check-coverage.sh --no-build --no-restore
 
+  godot-runtime-tests:
+    # The suite above references core/ alone and never loads the engine — that is what makes it fast,
+    # parallel and portable across the three runners, and it is also what puts Node lifecycle beyond it.
+    # Lifecycle is not a detail: a rig that kept its own _Process off was having it turned back on by the
+    # engine's NOTIFICATION_READY handler, and threw on the first frame of every cold load. No test that
+    # cannot instantiate a Node could have seen it. This job runs the half that can (tests/Runtime).
+    #
+    # Linux only, and separate from the matrix on purpose: it needs a Godot binary rather than just the
+    # .NET SDK, and none of what it checks is platform-specific — it is engine behaviour, identical
+    # wherever the same engine version runs.
+    name: godot runtime tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - uses: actions/cache@v6
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'Directory.Build.props', 'nuget.config') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      # The editor is a ~130 MB download. install-godot.sh pins the version and verifies its checksum, so
+      # keying on that script is keying on exactly which binary this restores.
+      - uses: actions/cache@v6
+        with:
+          path: build/tools
+          key: godot-${{ runner.os }}-${{ hashFiles('scripts/install-godot.sh') }}
+
+      # Also lays down lavapipe and Xvfb. The runtime tests are headless and need neither, but this is the
+      # one install path the repo has, and a second one would be a second thing to keep correct.
+      - name: Install Godot
+        run: ./scripts/install-godot.sh
+
+      # Builds Debug itself (tests/Runtime compiles in that configuration alone) and exits with the
+      # suite's own status.
+      - name: Run the runtime suite
+        run: ./scripts/run-godot-tests.sh
+
   format:
     name: format
     runs-on: ubuntu-latest
