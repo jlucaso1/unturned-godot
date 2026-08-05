@@ -8,7 +8,6 @@ namespace UnturnedGodot;
 
 // Loads the per-GUID collider caches ModelExtractor wrote (<guid>.collider) into memory, so ObjectsBuilder
 // can build each placed object's collision body without touching the masterbundle again.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class ColliderLibrary
 {
     // `only` — the GUIDs the map places — addresses the cache by name instead of scanning it, so the

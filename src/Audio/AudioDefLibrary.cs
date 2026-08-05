@@ -10,7 +10,6 @@ namespace UnturnedGodot;
 // audio today, gunshots and impacts tomorrow — resolves its definitions here, so a clip is decoded
 // once no matter how many emitters use it. Misses aren't cached: the one-time background extraction
 // may still be filling the cache.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed class AudioDefLibrary
 {
     public sealed record Entry(OneShotAudioDef Def, AudioStreamOggVorbis[] Clips);

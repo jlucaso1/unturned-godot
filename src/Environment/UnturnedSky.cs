@@ -11,7 +11,6 @@ namespace UnturnedGodot;
 // and _Time.y is t, hence the TIME factors. WITH_STARS / WITH_CLOUDS keywords become bool uniforms.
 // Colors authored in sRGB carry the source_color hint (Unity converts color properties and sRGB textures
 // to linear the same way); the clouds texture is authored linear (sRGBTexture: 0) and is sampled raw.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class UnturnedSky
 {
     private static readonly Shader SkyShader = new()

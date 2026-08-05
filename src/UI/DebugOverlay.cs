@@ -4,7 +4,6 @@ namespace UnturnedGodot;
 
 // Baseline performance HUD (FPS, frame time, memory, draw calls). On by default because the
 // project targets parity first, then performance — the numbers must always be in view. Toggle with F3.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class DebugOverlay : CanvasLayer
 {
     [Export] public Key ToggleKey = Key.F3;

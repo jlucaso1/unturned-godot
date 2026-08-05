@@ -5,7 +5,6 @@ namespace UnturnedGodot;
 // The boot loading screen: same sky backdrop as the main menu, a status line and a slim indeterminate
 // bar that keeps sweeping as long as frames render — the visible proof the app isn't frozen. Fades in
 // on show and out on Finish; the world builds behind it in stages that yield to the render loop.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class LoadingScreen : CanvasLayer
 {
     // The map being loaded, shown in the title. Set before the screen enters the tree.

@@ -14,7 +14,6 @@ namespace UnturnedGodot;
 //
 // A fixed pool of AudioStreamPlayer3D voices is reused round-robin with oldest-voice stealing, so
 // a firefight can't allocate unbounded audio nodes.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class OneShotAudio : Node3D
 {
     private const int MaxVoices = 24;

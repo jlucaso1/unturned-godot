@@ -121,6 +121,14 @@ jobs:
       - name: Run the runtime suite
         run: ./scripts/run-godot-tests.sh
 
+      # Reports, deliberately without a floor yet. src/ is being brought under measurement file by file,
+      # and a percentage gate would fight that: opting a large uncovered file in drops the rate before the
+      # tests for it land, so the gate would punish exactly the move it exists to encourage. It becomes a
+      # gate once src/ is fully opted in — at which point the second number it prints is zero and the
+      # first one is the whole story.
+      - name: Report src/ coverage
+        run: ./scripts/check-src-coverage.sh --files
+
   format:
     name: format
     runs-on: ubuntu-latest

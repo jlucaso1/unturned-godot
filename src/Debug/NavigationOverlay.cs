@@ -8,7 +8,6 @@ namespace UnturnedGodot;
 // Runtime-safe renderer shared by the editor navigation preview and automated screenshots. Keeping the
 // geometry here means an X-ray comparison is the same overlay with one material property changed, rather
 // than two diagnostic paths that can disagree about which triangles or rim edges exist.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class NavigationOverlay
 {
     public const float DefaultLift = 0.55f;

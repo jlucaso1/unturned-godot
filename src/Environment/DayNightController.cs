@@ -9,7 +9,6 @@ namespace UnturnedGodot;
 // fog and sea color — exactly as Unturned's LevelLighting.updateLighting does. Time advances one full day
 // per hour (LightingManager's cycle) starting from the time of day the map was saved at. TIME_OF_DAY=0..1
 // freezes the clock at a moment (screenshots); DAY_SPEED=N accelerates it.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class DayNightController : Node
 {
     // PEI's real midday values, used as a static fallback when a map ships no Lighting.dat.

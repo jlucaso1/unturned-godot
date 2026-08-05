@@ -3,7 +3,6 @@ using System.IO;
 
 namespace UnturnedGodot.Benchmark;
 
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class ProcessMemory
 {
     public static long RssBytes()

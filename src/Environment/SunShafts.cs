@@ -19,7 +19,6 @@ namespace UnturnedGodot;
 //
 // Unturned ships this OFF by default (GraphicsSettingsData.SunShaftsQuality = OFF), so it is opt-in here
 // too; SUN_SHAFTS=1 turns it on.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class SunShafts : Node3D
 {
     // Unity's SunShafts constants, kept as its own fields rather than the map's data: the map controls

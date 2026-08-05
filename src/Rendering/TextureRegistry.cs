@@ -10,7 +10,6 @@ namespace UnturnedGodot;
 // scene as they arrive (cold-load streaming): meshes show flat palette colors first, then textures fill
 // in. Building ImageTextures and assigning them is a main-thread operation, so the registry is only ever
 // touched from the main thread — background extraction just signals which keys became available.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed class TextureRegistry
 {
     private static readonly bool DeduplicateGpu = EnvFlag.IsOn(System.Environment.GetEnvironmentVariable("UG_DEDUP_GPU"), whenUnset: true);

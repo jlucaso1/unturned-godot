@@ -7,7 +7,6 @@ namespace UnturnedGodot;
 // StaticBody3D node per instance would explode the node count, and adding shapes to a StaticBody3D via the
 // server is wiped when the node syncs its (absent) CollisionShape3D children. So we own a raw static body:
 // created once in _Ready (in the tree, so a space exists), every instance's shape added by RID, freed on exit.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class InstancedStaticBody : Node3D
 {
     // The distinct shapes this body uses, kept referenced so their RIDs stay valid.

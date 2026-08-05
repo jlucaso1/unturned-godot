@@ -4,7 +4,6 @@ namespace UnturnedGodot;
 
 // The shared visual language of our menus, following Unturned's: flat olive/brown bars with a white
 // glyph plate on the left, a centered label, thin dark borders and subtle hover/pressed tints.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class UnturnedUi
 {
     public static readonly Color Olive = new(0.31f, 0.36f, 0.20f);
