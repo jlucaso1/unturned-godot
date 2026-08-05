@@ -29,7 +29,6 @@ namespace UnturnedGodot;
 //   REPRO_NOTE="..."        a line of description carried into the dump
 //   REPRO_GEOMETRY_RADIUS=16, REPRO_NAV_RADIUS=48, REPRO_GROUND_RADIUS=32
 //   REPRO_LOAD=path         load a dump into this session instead of capturing one
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed partial class ReproService : Node
 {
     private ZombieSystem _zombies = null!;

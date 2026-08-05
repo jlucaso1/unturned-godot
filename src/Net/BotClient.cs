@@ -13,6 +13,11 @@ namespace UnturnedGodot;
 public partial class BotClient : Node
 {
     private NetClient? _client;
+
+    // Whether the scripted run got in. The bot reports itself through the log and the exit status, which
+    // is right for an unattended check and useless to anything watching it in-process — a test can see a
+    // bot that was constructed but not one that was admitted, and those are the two halves of a join.
+    internal bool Joined => _client is { Joined: true };
     private ServerQuery _query = null!;
     private string _botName = "Bot";
     private IClientTransport _transport = null!;
@@ -83,7 +88,10 @@ public partial class BotClient : Node
         if (now - _started > _lifetime)
         {
             Log.Print("[bot] done");
-            GetTree().Quit();
+            // Through AppShutdown, like every other way out: the bot has nothing running to wait for, but
+            // a native SceneTree.Quit never returns to managed code, so a coverage run over the scripted
+            // client recorded zero lines however far it got.
+            AppShutdown.QuitNow(GetTree());
             return;
         }
 
@@ -94,7 +102,10 @@ public partial class BotClient : Node
             if (_query.State == EServerQueryState.TimedOut)
             {
                 Log.PrintErr("[bot] no server answered the level query; giving up");
-                GetTree().Quit(1);
+                // The same door the lifetime exit takes. This is the one a coverage run actually
+                // reaches — a bot pointed at a port with no listener times out long before its lifetime
+                // expires — and a native quit here records no hit counts at all.
+                AppShutdown.QuitNow(GetTree(), 1);
                 return;
             }
             if (_query.State != EServerQueryState.Answered)

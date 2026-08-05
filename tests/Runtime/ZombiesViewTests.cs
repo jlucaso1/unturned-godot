@@ -5,6 +5,7 @@ using Chickensoft.GoDotTest;
 using Godot;
 using UnturnedGodot.Data;
 using UnturnedGodot.Net;
+using UnturnedGodot.Zombies;
 using Xunit;
 
 namespace UnturnedGodot.RuntimeTests;
@@ -65,6 +66,57 @@ public class ZombiesViewTests : TestClass
         await harness.Draw();
     }
 
+    // --- a population that actually replicates -------------------------------------------------------
+
+    // Zombies the server spawned turn into avatars on the client. Nothing about a zombie is sent as an
+    // object: the server streams positions and states for a region, and the view builds and destroys the
+    // things that draw them.
+    [Test]
+    public async Task ReplicatedZombiesBecomeAvatars()
+    {
+        using var harness = new Harness(TestScene, withZombies: true);
+        await harness.Draw(ticks: 20);
+
+        Assert.True(harness.View.GetChildCount() > 0,
+            "the server spawned zombies and the client drew none of them");
+    }
+
+    // Leaving the region drops its avatars, without the server saying anything. ZombieManager does this
+    // on the LOCAL player's bound transition precisely so a client walking away stops paying for a city
+    // it can no longer see — the server independently notices the same transition and resends on return.
+    [Test]
+    public async Task WalkingOutOfTheRegionDropsItsAvatars()
+    {
+        using var harness = new Harness(TestScene, withZombies: true);
+        await harness.Draw(ticks: 20);
+        Assert.True(harness.View.GetChildCount() > 0, "nothing was drawn to begin with");
+
+        harness.LocalPosition = new Vector3(5000f, 0f, 5000f); // far outside every bound
+        await harness.Draw(ticks: 4);
+
+        Assert.Equal(0, harness.View.GetChildCount());
+    }
+
+    // A session reset forgets everything. Whatever answers the next Hello may be a restarted host, which
+    // numbers its zombies from zero again — so every id this view holds stops meaning anything, and
+    // keeping them would refuse the new session's zombies one by one.
+    [Test]
+    public async Task ASessionResetForgetsEveryZombie()
+    {
+        using var harness = new Harness(TestScene, withZombies: true);
+        await harness.Draw(ticks: 20);
+        Assert.True(harness.View.GetChildCount() > 0, "nothing was drawn to begin with");
+
+        harness.BreakTheSession();
+        await harness.Draw(ticks: 60);
+
+        // The zombies COME BACK. A child count is never negative, so the old assertion held whether the
+        // view forgot the session or refused every resent zombie one by one — which is the regression it
+        // was written to catch.
+        Assert.True(harness.View.GetChildCount() > 0,
+            "the view rejoined and drew nothing, so it is still refusing the old session's ids");
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
 
     private sealed class Harness : IDisposable
@@ -78,20 +130,55 @@ public class ZombiesViewTests : TestClass
         public NetClient Client { get; }
         public ZombiesView View { get; }
 
-        public Harness(Node testScene, string unturnedPath = "")
+        public Vector3 LocalPosition { get; set; }
+
+        public Harness(Node testScene, string unturnedPath = "", bool withZombies = false)
         {
             _testScene = testScene;
             _server = new NetServer(_transport,
                 new ServerSimulation(new HeightfieldMoveSolver(FlatGround)), new Vector3(0f, 10f, 0f), "PEI");
             Client = new NetClient(_transport.CreateClient(), "Local", "PEI");
-            View = ZombiesView.Create(Client, unturnedPath, null, Array.Empty<NavBound>(),
-                () => Vector3.Zero);
+
+            IReadOnlyList<NavBound> bounds = withZombies
+                ? new[] { new NavBound { Center = Vector3.Zero, Size = new Vector3(256f, 64f, 256f) } }
+                : Array.Empty<NavBound>();
+
+            View = ZombiesView.Create(Client, unturnedPath, null, bounds, () => LocalPosition);
             testScene.AddChild(View);
+
+            if (withZombies)
+                SpawnPopulation(bounds);
         }
 
-        public SignalAwaiter Draw()
+        // A small population inside one bound, hosted the way every session hosts one: the ZombieHost
+        // hooks the server's tick seams, so solo, LAN and dedicated all replicate through this path.
+        private void SpawnPopulation(IReadOnlyList<NavBound> bounds)
         {
-            for (int i = 0; i < 2; i++)
+            var tables = new List<ZombieTable> { new() { Name = "Normal", Health = 100, Damage = 10 } };
+            var zombies = new ZombieSystem(tables, bounds, FlatGround);
+
+            var spawns = new List<ZombieSpawnpointData>();
+            for (int i = 0; i < 8; i++)
+                spawns.Add(new ZombieSpawnpointData(0, new Vector3(i * 2f, 0f, i * 2f)));
+            zombies.Spawn(spawns, new Random(1));
+
+            Host = new ZombieHost(zombies, _server);
+        }
+
+        // Held only so it outlives the constructor: it drives itself off the server's tick seams, and a
+        // host nothing referenced would be collected out from under the session it is replicating.
+        public ZombieHost? Host { get; private set; }
+
+        // What a lost connection looks like from here: the client gives up and rejoins from scratch.
+        public void BreakTheSession()
+        {
+            _now += NetClient.StateTimeout + 1.0;
+            Client.Update(_now);
+        }
+
+        public SignalAwaiter Draw(int ticks = 2)
+        {
+            for (int i = 0; i < ticks; i++)
             {
                 _now += ServerSimulation.TickRate;
                 _server.Update(_now);

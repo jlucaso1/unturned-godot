@@ -17,7 +17,6 @@ namespace UnturnedGodot;
 // The ranges are tiny (~12 KB each, 29 of them across everything PEI places) but they sit deep inside a
 // stream node that only decodes forwards, so this is one pass over the bundle. It is worth it exactly
 // once: the meshes it completes are then cached per GUID like any other, and a warm cache never asks.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class VertexStreamReader
 {
     // One mesh's external vertex buffer, addressed the way the caller will want it back.

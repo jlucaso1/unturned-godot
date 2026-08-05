@@ -247,6 +247,11 @@ public sealed class ZombieNavigation
     private static readonly bool CaptureEnabled =
         EnvFlag.IsOn(OS.GetEnvironment("REPRO"), whenUnset: true);
 
+    // Whether DisabledFaces will hold anything at all. Read once at type load, so nothing can turn it on
+    // afterwards — which makes it the difference between "this pass pruned nothing" and "this build is
+    // not recording what it pruned", and those are the same empty dictionary to anyone reading it.
+    internal static bool RecordsDisabledFaces => CaptureEnabled;
+
     // Snapshot one flag's disabled set at the moment it is decided, keyed by position in _flags.
     //
     // An EMPTY set removes rather than skips. A partial cache is loaded into here and then, if partial

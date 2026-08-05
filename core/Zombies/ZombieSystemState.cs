@@ -149,16 +149,26 @@ public sealed partial class ZombieSystem
     public void RestoreState(ZombieSystemState state, ulong randomSeed = 0UL)
     {
         ArgumentNullException.ThrowIfNull(state);
+
+        // Checked BEFORE anything is cleared. This refusal is the guard against replaying a dump taken
+        // on another map, and a guard that fires halfway through has already destroyed what it was
+        // protecting: the session used to be left holding the leading records of the dump it rejected,
+        // which is neither the population it had nor the one the dump describes. Nobody is told, because
+        // from the caller's side the load simply reported that it declined.
+        foreach (ZombieInstance candidate in state.Zombies)
+        {
+            if (candidate.Bound >= _byBound.Length)
+                throw new ArgumentOutOfRangeException(nameof(state),
+                    $"zombie {candidate.Id} belongs to nav bound {candidate.Bound}, and this level has "
+                    + $"{_byBound.Length}: the dump was taken on another map.");
+        }
+
         _zombies.Clear();
         foreach (List<ZombieInstance> bound in _byBound)
             bound.Clear();
         _agro.Clear();
         foreach (ZombieInstance zombie in state.Zombies)
         {
-            if (zombie.Bound >= _byBound.Length)
-                throw new ArgumentOutOfRangeException(nameof(state),
-                    $"zombie {zombie.Id} belongs to nav bound {zombie.Bound}, and this level has "
-                    + $"{_byBound.Length}: the dump was taken on another map.");
             // A dump written before zombies had health carries none, and zero health is dead — a whole
             // restored population the very next tick would treat as corpses. The tables are right here,
             // so an unstated health is filled in as a fresh spawn's rather than being trusted.

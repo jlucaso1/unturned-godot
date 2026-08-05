@@ -25,7 +25,6 @@ namespace UnturnedGodot;
 // Hence: raise the flag, wait for the registered work to observe it, then quit. Workers poll
 // IsShuttingDown at their loop boundaries rather than being aborted, which keeps a half-written cache
 // file from ever being left behind.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class AppShutdown
 {
     // How long the quit will wait for background work before leaving regardless. A cold load's decode
@@ -59,8 +58,10 @@ public static class AppShutdown
         return task;
     }
 
-    // How many registered tasks are still running.
-    private static int StillRunning()
+    // How many registered tasks are still running. Internal rather than private so the pruning can be
+    // observed: the set itself is deliberately not exposed, and without this the only way to describe
+    // "finished work is dropped" is a comment.
+    internal static int StillRunning()
     {
         lock (Background)
         {
@@ -128,7 +129,7 @@ public static class AppShutdown
             Log.Print("[shutdown] leaving");
             // Deferred: never tear the tree down inside the signal handler that asked for it. The code is
             // read when the call runs, not when it is scheduled, so a failure raised in between still lands.
-            Callable.From(() => tree.Quit(ExitCode)).CallDeferred();
+            Callable.From(() => Leave(tree)).CallDeferred();
             return;
         }
 
@@ -149,6 +150,54 @@ public static class AppShutdown
         Log.Print(left == 0
             ? $"[shutdown] background work stopped after {waited.ElapsedMilliseconds} ms"
             : $"[shutdown] {left} background task(s) still busy after {waited.ElapsedMilliseconds} ms; leaving anyway");
+
+        Leave(tree);
+    }
+
+    // Leaving WITHOUT WAITING for background work — which is not the same as leaving without TELLING it.
+    //
+    // A loader that quits before it builds a session, a bot ending its scripted run, a failed join: none
+    // of them has a decode to drain, so RequestQuit's grace period would be a wait for nothing. What they
+    // do need is to leave through the same door, because a native SceneTree.Quit never returns to managed
+    // code and a coverage run records nothing at all for them.
+    //
+    // The cancellation is NOT optional even here. Every worker loop, and both guarded log channels, read
+    // IsShuttingDown to know the engine is going away — and under UG_COVERAGE the exit is
+    // Environment.Exit, which runs the unload hooks while those threads are still executing. Leaving that
+    // flag false would have a straggler call into an engine that is already being taken apart, on exactly
+    // the paths this door was added for. Signal, then go; the difference from RequestQuit is the WAIT.
+    public static void QuitNow(SceneTree tree, int exitCode = 0)
+    {
+        // Leaving mid-measurement IS a failed measurement, whoever asked to leave. RequestQuit enforces
+        // this; a second door out that skipped it would let the next caller passing 0 report a benchmark
+        // that never finished as a success.
+        if (exitCode == 0 && BenchmarkInFlight)
+            exitCode = 1;
+
+        if (exitCode != 0 && ExitCode == 0)
+            ExitCode = exitCode;
+
+        Source.Cancel();
+        Leave(tree);
+    }
+
+    // The one place the process actually ends.
+    //
+    // UG_COVERAGE=1 leaves through the RUNTIME rather than the engine, and that is the whole reason this
+    // method exists. SceneTree.Quit tears the process down without ever returning to managed code, so the
+    // module-unload hooks never run — and a coverage instrumenter records its hit counts in exactly those
+    // hooks. Measured that way, a complete game run reports zero lines covered, which is worse than no
+    // measurement: it reads as code nothing executes. GoDotTest carries its own flag for the same reason,
+    // and this is its equivalent for a session rather than a suite.
+    //
+    // Nothing sets this in production, and the exit code is the same either way.
+    private static void Leave(SceneTree tree)
+    {
+        if (EnvFlag.IsOn(OS.GetEnvironment("UG_COVERAGE"), whenUnset: false))
+        {
+            System.Environment.Exit(ExitCode);
+            return;
+        }
 
         tree.Quit(ExitCode);
     }

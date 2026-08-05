@@ -196,6 +196,110 @@ public class AudioExtractorTests : TestClass
         Assert.Empty(Directory.GetFiles(dir.Path, "def.bin", SearchOption.AllDirectories));
     }
 
+    // --- the whole pass ------------------------------------------------------------------------------
+
+    // The standalone extraction, run for real over the game's own bundle into a cache the test owns.
+    //
+    // This is the fallback path: what the cold load's own pass did not cover — an unstreamable bundle, a
+    // cancelled pass, or a load whose meshes were already cached and therefore ran no pass at all — still
+    // has to be fetched, and this is what fetches it. Every session that starts with a warm mesh cache
+    // and a cold audio cache takes exactly this road.
+    //
+    // What is asserted is that it PRODUCES something and that what it produced is complete: clips on disk
+    // and a def.bin beside them. That marker is the cache's only completeness signal, so an extraction
+    // that wrote clips without it would re-extract forever, and one that wrote it without clips would
+    // make every later boot skip the definition and play silence with nothing looking at it again.
+    [Test]
+    public void TheRealExtractionFillsTheCacheAndMarksItComplete()
+    {
+        if (!Available("the core masterbundle", MasterBundle, out string bundle))
+            return;
+
+        using var dir = new TempDir();
+
+        int served = AudioExtractor.Extract(bundle, "core", new List<string>(), dir.Path,
+            MovementAudioRequests.ZombieClipGroups);
+
+        if (served == 0)
+        {
+            // On a platform whose bundle genuinely lacks these clips this is an answer. On a run that
+            // exists to prove the real extraction works, it is the failure the test was written for —
+            // an Extract that writes clips without completing a marker returns zero as well.
+            if (System.Environment.GetEnvironmentVariable("UG_REQUIRE_REAL_DATA") == "1")
+                Assert.Fail("the real bundle completed no audio definitions at all");
+            return;
+        }
+
+        string[] markers = Directory.GetFiles(dir.Path, "def.bin", SearchOption.AllDirectories);
+        Assert.NotEmpty(markers);
+
+        // Per DEFINITION, not across the cache. Globbing the whole directory lets one group write the
+        // only .ogg while another completes a marker with nothing beside it — and that second group is
+        // silent for the rest of the game with nothing ever looking at it again, which is precisely the
+        // failure def.bin exists to prevent.
+        foreach (string marker in markers)
+        {
+            string defDir = Path.GetDirectoryName(marker)!;
+            string[] clips = Directory.GetFiles(defDir, "*.ogg");
+            Assert.True(clips.Length > 0, $"{defDir} was marked complete with no clips in it");
+            foreach (string clip in clips)
+                Assert.True(new FileInfo(clip).Length > 0, $"{clip} was written empty");
+        }
+    }
+
+    // And the second run over a full cache opens nothing at all. That is the whole point of the marker:
+    // an extraction that could not tell a finished cache from an empty one would decode a 110 MB bundle
+    // on every boot, behind a loading screen, for audio it already had.
+    [Test]
+    public void ASecondRunOverAFullCacheOpensNothing()
+    {
+        if (!Available("the core masterbundle", MasterBundle, out string bundle))
+            return;
+
+        using var dir = new TempDir();
+        if (AudioExtractor.Extract(bundle, "core", new List<string>(), dir.Path,
+                MovementAudioRequests.ZombieClipGroups) == 0)
+        {
+            return;
+        }
+
+        var request = new AudioExtractor.Request(bundle, "core", new List<string>(),
+            MovementAudioRequests.ZombieClipGroups, dir.Path);
+
+        Assert.True(AudioExtractor.IsSatisfied(request),
+            "a filled cache still reported work outstanding, so every boot would decode the bundle again");
+
+        // The second run is given a path that CANNOT be opened. Handing it the same readable bundle
+        // would let a regression that touches the file before checking the cache pass unnoticed; a run
+        // that opens this one throws, and that is the point.
+        Assert.Equal(0, AudioExtractor.Extract("/nonexistent-bundle", "core", new List<string>(),
+            dir.Path, MovementAudioRequests.ZombieClipGroups));
+    }
+
+    // An empty cache is never satisfied — the other side of the same question, and the one that decides
+    // whether a first boot fetches its audio at all.
+    [Test]
+    public void AnEmptyCacheIsNeverSatisfied()
+    {
+        using var dir = new TempDir();
+        var request = new AudioExtractor.Request("/nonexistent-bundle", "core", new List<string>(),
+            MovementAudioRequests.ZombieClipGroups, dir.Path);
+
+        Assert.False(AudioExtractor.IsSatisfied(request));
+    }
+
+    // A request that owes nothing does not open the bundle, however unreadable that bundle is. This is
+    // what keeps a session with a warm audio cache from paying for a decode it does not need — and the
+    // path is proven by handing it a bundle that could not possibly be read.
+    [Test]
+    public void ARequestThatOwesNothingNeverTouchesTheBundle()
+    {
+        using var dir = new TempDir();
+
+        Assert.Equal(0, AudioExtractor.Extract("/nonexistent-bundle", "core", new List<string>(),
+            dir.Path, System.Array.Empty<AudioExtractor.RawClipGroup>()));
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
 
     // A plan over the game's own zombie voices, or null on a platform whose bundle does not carry them.
@@ -244,7 +348,7 @@ public class AudioExtractorTests : TestClass
             {
                 Directory.Delete(Path, recursive: true);
             }
-            catch (IOException)
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {
                 // A leftover temp directory is not worth failing a test over.
             }

@@ -14,7 +14,6 @@ public readonly record struct FoliageStructuralChunk(ArrayMesh Mesh, int Count, 
 // Spatial owner for visual-only foliage. Core keeps a compact offset/bounds index; this node decodes and
 // uploads only the chunks whose existing visibility ranges approach the active camera, then retires their
 // RenderingServer resources on the main thread after a larger hysteresis radius.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class FoliageStreamingRenderer : Node3D
 {
     private sealed record Resident(Rid Instance, MultiMesh Mesh, int Count, long Bytes);

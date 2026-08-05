@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using Chickensoft.GoDotTest;
 using Godot;
@@ -132,6 +134,320 @@ public class NetworkManagerTests : TestClass
         Assert.Contains(NetMessages.ProtocolVersion.ToString(), protocol);
         Assert.Contains("full", full);
         Assert.NotEmpty(unknown); // even an unrecognised reason says something
+    }
+
+    // --- a session that runs -------------------------------------------------------------------------
+
+    // A solo session ticks its server and its client every physics frame, over loopback, and keeps
+    // running. This is the loop the whole port sits on: if it stopped, nothing in the world would move
+    // and nothing would say why.
+    [Test]
+    public async Task ASoloSessionKeepsTicking()
+    {
+        using var session = new Session(TestScene);
+        session.Net.StartSingleplayer("Player");
+
+        for (int i = 0; i < 30; i++)
+            await session.PhysicsFrame();
+
+        Assert.True(session.Net.IsActive);
+        Assert.NotNull(session.Net.Client);
+        Assert.NotNull(session.Net.Server);
+
+        // The client is ADMITTED, which is the only part of this the frame loop is responsible for.
+        // IsActive and the two fields are all assigned synchronously by StartSingleplayer, so without
+        // this a manager that stopped pumping Update entirely would still pass.
+        Assert.True(session.Net.Client!.Joined,
+            "thirty physics frames went by and the loopback client never joined, so nothing is pumping");
+    }
+
+    // Hosting zombies on a level that ships none is a warning, not a failure — plenty of maps have no
+    // zombie data — and the PUNCH host is deliberately not skipped with them. A level with no population
+    // still has trees and rubble standing on it and a player whose fists work, and the streamer hands
+    // its damage ledger to that host later regardless.
+    [Test]
+    public async Task ALevelWithNoZombiesStillGetsAPunchHost()
+    {
+        using var session = new Session(TestScene);
+        session.Net.StartSingleplayer("Player");
+        await session.PhysicsFrame();
+
+        session.Net.HostZombies("/nonexistent-map");
+
+        Assert.NotNull(session.Net.PunchDamage);
+    }
+
+    // Hosting zombies on a session that is not hosting does nothing at all. A client that joined someone
+    // else's server takes this path, and a population spawned there would be a second, invisible world
+    // running against the real one.
+    //
+    // The session is a real CLIENT rather than an idle manager, which is the distinction that matters: a
+    // regression gating on IsActive instead of on the server would skip an inactive manager and still
+    // host zombies on a joined client, and an idle-manager fixture cannot tell those apart.
+    [Test]
+    public async Task AClientDoesNotHostItsOwnZombies()
+    {
+        using var session = new Session(TestScene);
+        session.Net.JoinServer("127.0.0.1", RealData.FreePort(), "Player");
+        await session.PhysicsFrame();
+
+        Assert.True(session.Net.IsActive, "the fixture is not a client at all");
+        Assert.False(session.Net.IsHosting);
+
+        session.Net.HostZombies("/nonexistent-map");
+
+        Assert.Null(session.Net.PunchDamage);
+    }
+
+    // A session with no navmesh releases the collision geometry instead of holding it. That builder is
+    // the whole map's geometry, recorded during the load for one reconciliation pass — on a session that
+    // will never run one (a joined client, a map with no navmesh) it would otherwise sit in memory for
+    // the rest of the game with no consumer at all.
+    [Test]
+    public async Task ASessionThatWillNeverReconcileReleasesTheGeometry()
+    {
+        using var session = new Session(TestScene);
+        session.Net.StartSingleplayer("Player");
+        await session.PhysicsFrame();
+
+        var collision = new Data.CollisionFieldBuilder();
+        int shape = collision.AddBoxShape(new Vector3(1f, 1f, 1f));
+        collision.AddInstance(shape, Transform3D.Identity);
+        Assert.True(collision.ShapeCount > 0 && collision.InstanceCount > 0);
+
+        session.Net.ReconcileNavigation(new HashSet<System.Guid>(), collision);
+        await session.PhysicsFrame();
+
+        // Released, which is the whole point: an empty builder would make this indistinguishable from
+        // doing nothing, because every count is already zero before the call.
+        Assert.Equal(0, collision.ShapeCount);
+        Assert.Equal(0, collision.InstanceCount);
+    }
+
+    // Joining is refused while a session is already running, rather than leaving the player in two at
+    // once. The menu can send it: a click on a server in the browser while a solo world is up.
+    [Test]
+    public async Task JoiningIsRefusedWhileASessionIsRunning()
+    {
+        using var session = new Session(TestScene);
+        session.Net.StartSingleplayer("Player");
+        await session.PhysicsFrame();
+
+        NetServer? beforeServer = session.Net.Server;
+        NetClient? beforeClient = session.Net.Client;
+        session.Net.JoinServer("127.0.0.1", RealData.FreePort(), "Player");
+
+        // Both halves: replacing the CLIENT while leaving the server standing would have the local host
+        // player trying to join somebody else's world, and a server-only check cannot see that.
+        Assert.Same(beforeServer, session.Net.Server);
+        Assert.Same(beforeClient, session.Net.Client);
+    }
+
+    // And a join to nothing comes up as a client that is simply never answered. There is no server on
+    // that port; the session has to sit there waiting rather than refusing to start, because that is
+    // indistinguishable from a host that is slow.
+    [Test]
+    public async Task AJoinToNothingWaitsRatherThanRefusing()
+    {
+        using var session = new Session(TestScene);
+        session.Net.JoinServer("127.0.0.1", RealData.FreePort(), "Player");
+
+        for (int i = 0; i < 10; i++)
+            await session.PhysicsFrame();
+
+        Assert.True(session.Net.IsActive);
+        Assert.False(session.Net.IsHosting);
+
+        // And nobody answered, which is the case being sampled. Without this the test would pass just as
+        // well against a port something else happens to be listening on.
+        Assert.False(session.Net.Client!.Joined, "something answered on a port the OS said was free");
+    }
+
+    // --- the real map ---------------------------------------------------------------------------------
+
+    // Hosting the real map's zombies: the population loads, the physics queries attach, and the baked
+    // navmesh becomes the router they path with.
+    //
+    // This is the path a solo session takes on every start, and almost none of it is reachable without
+    // real content — the zombie tables, the spawnpoints and the navmesh all come off disk together, and a
+    // fixture that supplied one without the others would exercise a shape the game never has.
+    [Test]
+    public async Task HostingTheRealMapsZombiesBringsUpAPopulation()
+    {
+        if (!RealMap(out string levelDir))
+            return;
+
+        using var session = new Session(TestScene);
+        session.Net.StartSingleplayer("Player");
+        await session.PhysicsFrame();
+
+        session.Net.HostZombies(levelDir);
+
+        // The punch host is hooked whether or not the level had zombies; that it exists here says the
+        // hosting path ran to the end rather than returning early.
+        Assert.NotNull(session.Net.PunchDamage);
+
+        for (int i = 0; i < 20; i++)
+            await session.PhysicsFrame();
+
+        Assert.True(session.Net.IsActive);
+    }
+
+    // And reconciling that map's navmesh against the world runs rather than being skipped. The pass is
+    // what makes the baked graph agree with the objects standing on it; a session that skipped it would
+    // route zombies through every building on the map.
+    [Test]
+    public async Task ReconcilingTheRealMapsNavmeshRuns()
+    {
+        if (!RealMap(out string levelDir))
+            return;
+
+        using var session = new Session(TestScene);
+        session.Net.StartSingleplayer("Player");
+        await session.PhysicsFrame();
+        session.Net.HostZombies(levelDir);
+        await session.PhysicsFrame();
+
+        session.Net.ReconcileNavigation(new HashSet<System.Guid>());
+
+        // It runs across frames on the physics thread; what matters here is that asking for it neither
+        // throws nor leaves the session wedged, since it is started from a signal that fires mid-load.
+        for (int i = 0; i < 30; i++)
+            await session.PhysicsFrame();
+
+        Assert.True(session.Net.IsActive);
+    }
+
+    // PATH_PROBE logs the navmesh route between two points, which is the exact tool for "which opening
+    // does the zombie leave the house through". It exists because that question cannot be answered by
+    // watching: a zombie taking a strange route looks identical to one taking the only route there is.
+    //
+    // It retries for fifteen seconds rather than answering once, and that is the part worth keeping: the
+    // graph is not ready when a session starts — reconciliation publishes it after the world streams in —
+    // so a probe that answered immediately would report "no route" on every map, every time, and mean
+    // nothing.
+    [Test]
+    public async Task ThePathProbeWaitsForAGraphRatherThanAnsweringImmediately()
+    {
+        if (!RealMap(out string levelDir))
+            return;
+
+        // Coordinates nothing else uses, because Log.Tail is a fixed-size RING: in a full suite run the
+        // lines between a mark and a check scroll out of it, so a positional slice proves nothing. A
+        // string only this test can produce survives that.
+        using var probe = new EnvFlagScope("PATH_PROBE", "11,0,11>37,0,37");
+        using var session = new Session(TestScene);
+        session.Net.StartSingleplayer("Player");
+        await session.PhysicsFrame();
+
+        session.Net.HostZombies(levelDir);
+
+        // Long enough for the probe's first timer to fire and for at least one retry to be scheduled.
+        int before = Log.Tail().Count;
+        for (int i = 0; i < 150; i++)
+            await session.PhysicsFrame();
+
+        // The probe REPORTED, on the endpoints only this test asks for. IsActive is set synchronously by
+        // StartSingleplayer and nothing here clears it, so ending on that flag was a test that could only
+        // fail by crashing — while the thing being covered is a diagnostic that answers, retries until
+        // the graph exists, and says what it found.
+        Assert.Contains(Log.Tail(), line => line.Contains("(11, 0, 11)", StringComparison.Ordinal));
+    }
+
+    // A probe on a map with no navmesh is simply never armed. The flag is a diagnostic, and a diagnostic
+    // that crashed a session on a map it could not measure would be worse than no diagnostic.
+    [Test]
+    public async Task ThePathProbeIsNotArmedWithoutANavmesh()
+    {
+        // Coordinates nothing else uses, because Log.Tail is a fixed-size RING: in a full suite run the
+        // lines between a mark and a check scroll out of it, so a positional slice proves nothing. A
+        // string only this test can produce survives that.
+        using var probe = new EnvFlagScope("PATH_PROBE", "11,0,11>37,0,37");
+        using var session = new Session(TestScene);
+        session.Net.StartSingleplayer("Player");
+        await session.PhysicsFrame();
+
+        int before = Log.Tail().Count;
+        session.Net.HostZombies("/nonexistent-map");
+
+        for (int i = 0; i < 20; i++)
+            await session.PhysicsFrame();
+
+        // Never armed: these endpoints appear nowhere. HostZombies returns before the PATH_PROBE block
+        // when the level ships no zombie data, and a diagnostic that crashed a session it could not
+        // measure would be worse than no diagnostic — but so would one that quietly probed anyway, which
+        // is what asserting IsActive could not tell apart.
+        Assert.DoesNotContain(Log.Tail(), line => line.Contains("(13, 0, 13)", StringComparison.Ordinal));
+        Assert.True(session.Net.IsActive);
+    }
+
+    // An environment flag set for one test and put back afterwards: these are read once, where the
+    // session is brought up, and one left set would silently change every test after it in this process.
+    private sealed class EnvFlagScope : System.IDisposable
+    {
+        private readonly string _name;
+        private readonly string _previous;
+
+        public EnvFlagScope(string name, string value)
+        {
+            _name = name;
+            _previous = OS.GetEnvironment(name);
+            OS.SetEnvironment(name, value);
+        }
+
+        public void Dispose() => OS.SetEnvironment(_name, _previous);
+    }
+
+
+    private static bool RealMap(out string levelDir)
+    {
+        levelDir = "";
+        string? install = Assets.UnturnedInstall.Find();
+        string? maps = install == null ? null : System.IO.Path.Combine(install, "Maps", "PEI");
+        if (maps == null || !System.IO.Directory.Exists(maps))
+        {
+            if (System.Environment.GetEnvironmentVariable("UG_REQUIRE_REAL_DATA") == "1")
+            {
+                throw new System.IO.IOException(
+                    "UG_REQUIRE_REAL_DATA=1 but the PEI map is not present; this run exists to prove these "
+                    + "tests execute");
+            }
+
+            Log.Print("[runtime-tests] skipping: no PEI map "
+                + "(set UNTURNED_PATH or run ./scripts/fetch-game-data.sh)");
+            return false;
+        }
+
+        levelDir = maps;
+        return true;
+    }
+
+    // --- helpers -------------------------------------------------------------------------------------
+
+    // A manager in the tree, configured over flat ground, freed with the test. Freeing is what closes
+    // its transports: a session whose sockets outlived it would hold ports for the rest of the run.
+    private sealed class Session : System.IDisposable
+    {
+        private readonly Node _testScene;
+
+        public NetworkManager Net { get; }
+
+        public Session(Node testScene)
+        {
+            _testScene = testScene;
+            Net = new NetworkManager { LevelName = "PEI" };
+            testScene.AddChild(Net);
+            Net.Configure(new HeightmapSampler(System.Array.Empty<HeightmapTile>()), Vector3.Zero);
+        }
+
+        public SignalAwaiter PhysicsFrame() =>
+            _testScene.ToSignal(_testScene.GetTree(), SceneTree.SignalName.PhysicsFrame);
+
+        public void Dispose()
+        {
+            _testScene.RemoveChild(Net);
+            Net.Free(); // _ExitTree closes both transports and frees the navigation
+        }
     }
 
     private SignalAwaiter NextFrame() =>

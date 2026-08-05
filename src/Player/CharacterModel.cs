@@ -12,7 +12,6 @@ namespace UnturnedGodot;
 // in resources.assets.resS): the Player_Client body mesh, skinned to its 16-bone skeleton, built as a Godot
 // Skeleton3D + skinned MeshInstance3D. Bone rest poses and vertices convert Unity->Godot by the same Z-mirror
 // reflection, so the skinning stays consistent. Reuses the object mesh/texture pipeline.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class CharacterModel
 {
     private const int ClassSkinnedMeshRenderer = 137;

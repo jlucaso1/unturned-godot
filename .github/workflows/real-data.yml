@@ -332,8 +332,18 @@ jobs:
       # Reported, not gated. src/ is being brought under measurement file by file (see
       # check-src-coverage.sh), and this is the number with the content present — the hermetic job's
       # figure is the same measurement with every content-dependent test skipped.
+      #
+      # --with-game-run is only meaningful here: it measures ONE real session on top of the suite, which
+      # is the only way to see the parts of src/ that end the process rather than return (Main.cs, the
+      # benchmark tiers). It needs the content, so the hermetic job cannot ask for it.
+      #
+      # continue-on-error because the sentence above is the contract: this number is reported, not gated.
+      # --with-game-run adds real sessions on top of the suite, and a session that wedges or a mode that
+      # exits badly would otherwise fail a job whose actual subject — the structural metrics and the
+      # runtime suite — has already passed by the time this step runs.
       - name: Report src/ coverage with real content
+        continue-on-error: true
         env:
           UNTURNED_PATH: ${{ github.workspace }}/build/game-data
           UG_REQUIRE_REAL_DATA: '1'
-        run: ./scripts/check-src-coverage.sh --files
+        run: ./scripts/check-src-coverage.sh --files --with-game-run

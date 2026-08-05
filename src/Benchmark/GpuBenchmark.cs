@@ -12,7 +12,6 @@ namespace UnturnedGodot.Benchmark;
 // cherry-picked. Warmup ends when pipeline compilation counts stop moving (objective, not a guessed
 // frame count). Godot exposes no GPU-time API to C#, so frame time is wall-clock (median/p95 over
 // sampled frames) and draw calls / primitives / VRAM come from Performance monitors.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class GpuBenchmark
 {
     private const int WarmupMaxFrames = 40;
@@ -189,7 +188,11 @@ public static class GpuBenchmark
             // Every way out that does not reach Finish leaves no report behind. Quitting zero from here
             // would tell scripts/run-benchmark.sh — and anything automating it — that a measurement was
             // taken, so the wrapper would accept a run that measured nothing.
-            tree.Quit(failed ? 1 : 0);
+            //
+            // Through AppShutdown, like Tier 1 and Tier 3: the exit status is the same, but a native
+            // SceneTree.Quit never returns to managed code, so a coverage run over this tier recorded
+            // zero lines however completely it ran.
+            AppShutdown.QuitNow(tree, failed ? 1 : 0);
         }
     }
 
