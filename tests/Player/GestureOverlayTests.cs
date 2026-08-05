@@ -112,6 +112,26 @@ public class GestureOverlayTests
         Assert.False(overlay.IsPlaying);
     }
 
+    // Seeking is the off-line form of advancing, and answers on the same rule: inside the clip it just
+    // moves the playhead, at or past the end the gesture is over.
+    [Fact]
+    public void SeekToMovesThePlayheadAndEndsPastTheClip()
+    {
+        var overlay = new GestureOverlay();
+        overlay.Begin("Punch_Left", 0.6f, mask: null);
+
+        Assert.False(overlay.SeekTo(0.3f));
+        Assert.Equal(0.3f, overlay.Time, 3);
+        Assert.True(overlay.IsPlaying);
+
+        Assert.False(overlay.SeekTo(0.1f)); // backwards is fine too
+        Assert.Equal(0.1f, overlay.Time, 3);
+
+        Assert.True(overlay.SeekTo(0.6f));
+        Assert.False(overlay.IsPlaying);
+        Assert.False(overlay.SeekTo(0.2f)); // and there is nothing left to seek within
+    }
+
     [Fact]
     public void OvershootingTheLengthStillEndsExactlyOnce()
     {

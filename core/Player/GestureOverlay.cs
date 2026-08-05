@@ -57,11 +57,17 @@ public sealed class GestureOverlay
     //
     // Nothing is handed back when it ends, unlike the arrangement this replaced: the movement layer never
     // stopped, so there is no state to restore. The bones the mask covered simply take its pose again.
-    public bool Advance(float delta)
+    public bool Advance(float delta) => IsPlaying && SeekTo(_time + delta);
+
+    // Jumps the playhead to an absolute time, for the skeleton's own Seek — posing a named frame off-line
+    // rather than reaching it by playing. Returns true when that time is at or past the clip's end, which
+    // ends the gesture on exactly the rule Advance uses: a swing seeked past its length is over, and the
+    // rig should show what it would really be showing then, which is the movement layer.
+    public bool SeekTo(float time)
     {
         if (!IsPlaying)
             return false;
-        _time += delta;
+        _time = time;
         if (_time < _length)
             return false;
         Cancel();

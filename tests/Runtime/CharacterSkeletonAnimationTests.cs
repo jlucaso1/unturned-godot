@@ -326,6 +326,59 @@ public class CharacterSkeletonAnimationTests : TestClass
         rig.QueueFree();
     }
 
+    // A gesture armed before the rig is parented survives to be posed. The CHAR_GESTURE screenshot path
+    // does exactly this — PlayOnce and Seek run, THEN the rig is added to the scene — and a rig off the
+    // tree reports IsVisibleInTree false just as a hidden one does. Reading that as "stopped being drawn"
+    // threw the swing away and shot the stance instead, with PlayOnce still answering true.
+    [Test]
+    public void AGestureArmedBeforeTheRigIsParentedSurvives()
+    {
+        CharacterSkeleton rig = Rig(); // deliberately NOT added to the tree yet
+        rig.StoreClip("Idle_Stand", Turn(1f, Root));
+        rig.StoreClip("Punch_Right", Turn(1f, Arm));
+        rig.SetState(EPlayerStance.Stand, moving: false);
+
+        Assert.True(rig.PlayOnce("Punch_Right"));
+        Assert.True(rig.IsPlayingOnce);
+
+        TestScene.AddChild(rig);
+        Assert.True(rig.IsPlayingOnce, "entering the tree dropped the swing");
+
+        rig.QueueFree();
+    }
+
+    // Seek means "show the rig at time t", so it moves the gesture's playhead as well as the movement
+    // clip's. CHAR_ANIM_TIME=0.3 over a swing is a request for the swing AT 0.3 s; posing its opening
+    // frame however late the time asked for makes the screenshot path useless for reading a swing.
+    [Test]
+    public void SeekMovesTheGesturePlayheadToo()
+    {
+        CharacterSkeleton rig = PlayerRig();
+        rig.StoreClip("Idle_Stand", Still(4f, LeftArm));
+        rig.StoreClip("Punch_Left", Turn(4f, LeftArm)); // a quarter turn over four seconds
+        rig.MixAnimation("Punch_Left", mixLeftShoulder: true, mixRightShoulder: false);
+        rig.SetState(EPlayerStance.Stand, moving: false);
+        rig.PlayOnce("Punch_Left");
+
+        rig.Seek(0f);
+        Assert.True(rig.GetBonePoseRotation(LeftArm).AngleTo(Quaternion.Identity) < 0.001f,
+            "the swing did not start at its opening frame");
+
+        rig.Seek(2f); // half way: an eighth of a turn
+
+        float angle = rig.GetBonePoseRotation(LeftArm).AngleTo(Quaternion.Identity);
+        Assert.True(Mathf.Abs(angle - (Mathf.Pi * 0.25f)) < 0.02f,
+            $"the gesture stayed on its first key: the arm is {Mathf.RadToDeg(angle):0.0}° in");
+
+        // Past the clip the swing is over, and the idle underneath — which pins the arm — takes it back.
+        rig.Seek(4f);
+        Assert.False(rig.IsPlayingOnce);
+        Assert.True(rig.GetBonePoseRotation(LeftArm).AngleTo(Quaternion.Identity) < 0.001f,
+            "a swing seeked past its end still owned the arm");
+
+        rig.Free();
+    }
+
     // --- mixing transforms -----------------------------------------------------------------------------
 
     // The bug this arrangement exists for: Unturned's punch clips are authored over the WHOLE skeleton,

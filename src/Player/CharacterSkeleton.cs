@@ -211,9 +211,10 @@ public partial class CharacterSkeleton : Skeleton3D
             return false;
 
         // A gesture alone is reason enough to sample: a rig parked on no movement clip at all still has
-        // to run the swing.
+        // to run the swing. This can also drop the gesture again — a hidden rig does not swing — so the
+        // answer is whether one is actually playing rather than whether the clip was there.
         UpdateProcessing();
-        return true;
+        return _gesture.IsPlaying;
     }
 
     // True while a one-shot gesture is laid over the movement state.
@@ -249,15 +250,20 @@ public partial class CharacterSkeleton : Skeleton3D
         UpdateProcessing();
     }
 
-    // Jumps the movement clip to an absolute time and poses immediately (used to inspect a frame off-line;
-    // in play the animation advances by real delta in _Process). A gesture in flight is composed over the
-    // result at its own current time, which this does not move — the two layers have separate clocks.
+    // Jumps to an absolute time and poses immediately (used to inspect a frame off-line; in play the
+    // animation advances by real delta in _Process).
+    //
+    // BOTH playheads move, because this means "show the rig at time t" and a gesture armed just before it
+    // began at zero alongside the movement clip. Moving only the movement layer would answer CHAR_ANIM_TIME
+    // for a swing with the swing's opening frame however late the time asked for — the whole point of the
+    // CHAR_GESTURE screenshot path is to read a chosen frame OF the swing.
     public void Seek(float time)
     {
         if (_current.Length == 0 && !_gesture.IsPlaying)
             return; // nothing selected to seek within (a character that carries no clip at all)
         _time = time;
         _blend = 1f;
+        _gesture.SeekTo(time);
         Apply(Compose(_current.Length > 0 ? CurrentPose() : null));
     }
 
@@ -272,7 +278,12 @@ public partial class CharacterSkeleton : Skeleton3D
         // freeze and then thaw — replaying a stale punch from where it stopped the next time the rig is
         // shown. Drop it instead: a swing nobody can see need not finish, and the movement layer
         // underneath is already the pose it would have come back to.
-        if (!visible)
+        //
+        // "Stops being drawn" is the rule, and a rig that is not in the tree YET has not started: it is
+        // being set up, and IsVisibleInTree is false for that too. Cancelling there would throw away a
+        // gesture armed before the rig was parented — which is exactly what the CHAR_GESTURE screenshot
+        // path does, and it would silently shoot the stance instead of the swing.
+        if (IsInsideTree() && !visible)
             _gesture.Cancel();
         SetProcess(visible && (_current.Length > 0 || _gesture.IsPlaying));
         // A rig that was hidden froze its clock, so the pose it comes back with is the one it left.
