@@ -493,6 +493,21 @@ public class PhysicsBodyOrderTests
         // Opt out for A/B: the burst has to remain measurable against the pass that removes it.
         Assert.Contains("\"UG_FOLIAGE_PREWARM\"", source);
 
+        // The emergency path is priced per pass, not per chunk: every chunk in one plan's visible set is
+        // decoded and uploaded before that _Process returns, so the pass is the thing a frame budget is
+        // compared against. Timing each chunk separately reports the worst chunk in a burst and never the
+        // burst, which on PEI is the difference between 8 ms and 21 ms for the same stall.
+        Assert.Contains("if (plan.VisibleMissing.Count > 0)\n        {\n"
+            + "            long passStartedTicks = Stopwatch.GetTimestamp();", normalized);
+        Assert.Contains("_emergencyVisiblePasses++;", source);
+        // Still a finally: a pass that was cancelled or that failed partway spent the frame time it
+        // spent, and dropping those samples flatters the total the more often it goes wrong.
+        Assert.Contains("_maxEmergencyVisibleTicks = Math.Max(_maxEmergencyVisibleTicks, elapsed);",
+            source);
+        // And still one synchronous decode-and-upload per chunk, on the main thread, inside the plan
+        // that found it missing. Nothing here may be deferred — that is what the gate is.
+        Assert.Contains("Upload(index, _index.DecodeChunk(index, _lifetimeCancellation.Token));", source);
+
         if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is { } streamerPath)
         {
             string streamer = File.ReadAllText(streamerPath).Replace("\r\n", "\n");
