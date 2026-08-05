@@ -197,6 +197,8 @@ public partial class CharacterSkeleton : Skeleton3D
     // in play the animation advances by real delta in _Process).
     public void Seek(float time)
     {
+        if (_current.Length == 0)
+            return; // nothing selected to seek within (a character that carries no clip at all)
         _time = time;
         _blend = 1f;
         Apply(CurrentPose());
@@ -227,12 +229,31 @@ public partial class CharacterSkeleton : Skeleton3D
 
     public override void _Notification(int what)
     {
-        if (what == NotificationVisibilityChanged || what == NotificationEnterTree)
+        // READY is in this list because the engine turns _Process back ON there: Node's NOTIFICATION_READY
+        // handler calls set_process(true) for any script that overrides _process, silently undoing the
+        // SetProcess(false) the ENTER_TREE above had just made. The script's own notification runs after
+        // that, so reconciling here is what sticks.
+        //
+        // Without it, a rig that entered the tree with no clip selected sampled _clips[""] on its first
+        // drawn frame. Every Clone is such a rig — the clips travel with the copy but the playhead does
+        // not — and the first-person Viewmodel is the one that reached a frame that way: PlayerController
+        // attaches it in _Ready and only picks its clip from _PhysicsProcess, so a cold load, whose frames
+        // run while the world is still streaming in, lands a render frame in between.
+        if (what == NotificationVisibilityChanged || what == NotificationEnterTree || what == NotificationReady)
             UpdateProcessing();
     }
 
     public override void _Process(double delta)
     {
+        // No clip selected: there is nothing to sample. UpdateProcessing normally keeps _Process off for
+        // this state, so reaching it means something outside this class turned processing back on (the
+        // engine does exactly that at NOTIFICATION_READY). Settle it rather than index _clips[""].
+        if (_current.Length == 0)
+        {
+            SetProcess(false);
+            return;
+        }
+
         _time += (float)delta;
 
         // The swing is over: hand the rig back to the movement state. Done before posing so the frame
