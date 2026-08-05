@@ -10,7 +10,6 @@ namespace UnturnedGodot;
 //
 // Maps whose terrain this port cannot read yet (pre-Landscape "legacy ground") are listed but not
 // playable: hiding them would just raise the question of where they went.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class MapPicker : PanelContainer
 {
     private const int ListWidth = 360;
