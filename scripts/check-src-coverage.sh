@@ -110,6 +110,25 @@ if (( with_game_run )); then
         > "$result_dir/tier1.log" 2>&1 \
         || { echo "The structural benchmark failed; coverage was not measured:" >&2; tail -40 "$result_dir/tier1.log" >&2; exit 1; }
 
+    # The loader's own early exit: it reads the level, builds the world and leaves without ever starting
+    # a session. Nothing else reaches it, because every other run here goes on to be a session.
+    #
+    # The SCREENSHOT family that sits behind the same entry point is NOT driven, and cannot be from here:
+    # with --headless the display server is named "headless", and the loader takes this early-exit branch
+    # before any capture code is reached. Verified rather than assumed — running it with SCREENSHOT_PATH,
+    # PLAYER=1 and FREECAM=1 produced three identical measurements. Capturing needs a display (the repo's
+    # screenshot tooling wraps renders in gamescope), which is an infrastructure decision rather than a
+    # test one.
+    env UG_COVERAGE=1 \
+    dotnet coverlet "$assembly" \
+        --target "$godot" \
+        --targetargs "--headless --audio-driver Dummy --path $repo_dir" \
+        --merge-with "$result_dir/tier1.json" \
+        --format json --output "$result_dir/loader.json" --include-test-assembly \
+        > "$result_dir/loader.log" 2>&1 \
+        || { echo "The loader run failed; coverage was not measured:" >&2; \
+             tail -40 "$result_dir/loader.log" >&2; exit 1; }
+
     # Tier 3, the runtime tier: a real session measured over a few seconds of frames, which is the only
     # caller RuntimeBenchmark has. Kept short — what is being measured here is that the code runs, not
     # what it measured.
@@ -117,7 +136,7 @@ if (( with_game_run )); then
     dotnet coverlet "$assembly" \
         --target "$godot" \
         --targetargs "--headless --audio-driver Dummy --path $repo_dir" \
-        --merge-with "$result_dir/tier1.json" \
+        --merge-with "$result_dir/loader.json" \
         --format cobertura --output "$report" --include-test-assembly \
         > "$result_dir/tier3.log" 2>&1 \
         || { echo "The runtime benchmark failed; coverage was not measured:" >&2; tail -40 "$result_dir/tier3.log" >&2; exit 1; }

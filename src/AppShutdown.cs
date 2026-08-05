@@ -152,6 +152,19 @@ public static class AppShutdown
         Leave(tree);
     }
 
+    // Leaving WITHOUT waiting for background work: the callers that never started any.
+    //
+    // A loader that quits before it builds a session, the menu's own Quit button, a bot client ending its
+    // scripted run — none of them have workers to drain, so RequestQuit's grace period would be a wait
+    // for nothing. What they do need is to leave through the same door, because a native SceneTree.Quit
+    // never returns to managed code and a coverage run therefore records nothing at all for them.
+    public static void QuitNow(SceneTree tree, int exitCode = 0)
+    {
+        if (exitCode != 0 && ExitCode == 0)
+            ExitCode = exitCode;
+        Leave(tree);
+    }
+
     // The one place the process actually ends.
     //
     // UG_COVERAGE=1 leaves through the RUNTIME rather than the engine, and that is the whole reason this

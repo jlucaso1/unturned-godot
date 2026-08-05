@@ -270,7 +270,10 @@ public partial class Main : Node3D
             if (headless)
             {
                 Log.Print("[unturned-godot] Headless: data loaded, quitting.");
-                GetTree().Quit();
+                // QuitNow rather than the engine's own Quit: nothing is running to wait for here, but a
+                // native quit never returns to managed code, so a coverage run over this path — which is
+                // the whole screenshot and data-load family — would record nothing at all.
+                AppShutdown.QuitNow(GetTree());
                 return;
             }
 
