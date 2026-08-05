@@ -11,7 +11,6 @@ namespace UnturnedGodot;
 // (sun-disc thresholds, moon color and radius, cloud contrast params) plus the stars and clouds textures it
 // references (pixels in resources.assets.resS). resources.assets ships with its type trees stripped, so the
 // masterbundle's per-class trees decode it (same Unity build) — the same path CharacterModel takes.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed class SkyboxAssets
 {
     private const int ClassMaterial = 21;

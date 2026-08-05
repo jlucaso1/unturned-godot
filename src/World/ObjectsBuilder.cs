@@ -7,7 +7,6 @@ using UnturnedGodot.Unity;
 
 namespace UnturnedGodot;
 
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class ObjectsBuilder
 {
     // Collision layer bit for the bodies Unturned's RayMasks.BLOCK_VISION would hit (the LARGE and

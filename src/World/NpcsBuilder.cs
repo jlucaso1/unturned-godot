@@ -15,7 +15,6 @@ namespace UnturnedGodot;
 // populates a horde from two templates. What they do NOT get yet is their clothing: Shirt/Pants/Hat name
 // item assets whose meshes are a separate family this does not read, so every NPC currently stands in the
 // character's default look, facing the way the map author pointed it.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class NpcsBuilder
 {
     // What a standing character plays when it is doing nothing, which is all an NPC does here.

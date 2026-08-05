@@ -18,7 +18,6 @@ namespace UnturnedGodot;
 // worker and hot-swap them into the live materials as they land. A warm cache short-circuits to a normal
 // synchronous build. All Godot node/resource work happens on the main thread (via Callable.CallDeferred);
 // workers only do pure parsing/IO and hand texture keys back through a concurrent queue.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class ObjectStreamer : Node
 {
     [Signal] public delegate void MeshesReadyEventHandler(double elapsedMs);

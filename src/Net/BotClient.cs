@@ -10,7 +10,6 @@ namespace UnturnedGodot;
 // It asks the server which level it runs before saying Hello. A real client does that to BUILD the
 // right world; this one builds nothing, so it simply adopts the answer — which also makes every bot
 // run an end-to-end exercise of the pre-join query over real sockets.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class BotClient : Node
 {
     private NetClient? _client;
