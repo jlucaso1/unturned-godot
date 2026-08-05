@@ -6,7 +6,6 @@ namespace UnturnedGodot;
 // white glyph plate on the left, over the blurred live world (no panel, no pause — like Unturned,
 // the escape menu never stops the simulation). Escape toggles it; while open the mouse is released
 // and the player controller treats "mouse not captured" as no input, so movement and look stop.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class PauseMenu : CanvasLayer
 {
     private Control _root = null!;
