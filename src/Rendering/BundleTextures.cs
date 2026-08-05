@@ -12,7 +12,6 @@ namespace UnturnedGodot;
 // (all of the game's terrain layers); ExtractStreamed decodes forward through the bundle only as far as
 // the last texture it still owes; ExtractAll decodes the whole blob into memory and is the fallback for
 // bundles that are not the single-LZMA-block shape the streaming reader understands.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class BundleTextures
 {
     // Inline textures only: the caller already holds the decoded SerializedFile.

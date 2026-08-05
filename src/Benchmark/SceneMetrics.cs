@@ -7,7 +7,6 @@ namespace UnturnedGodot.Benchmark;
 // --headless and is fully deterministic. Geometry is counted once per unique Mesh resource (upload/VRAM
 // cost), while MultiMesh instance totals are tracked separately (draw scale). This is where the
 // terrain-indexing win (#1) and the giant-MultiMesh-AABB problem (#2) become visible without a GPU.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed class SceneMetricsResult
 {
     public int Nodes;
@@ -22,7 +21,6 @@ public sealed class SceneMetricsResult
     public double MaxMultiMeshSpread;
 }
 
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class SceneMetrics
 {
     public static SceneMetricsResult Collect(IEnumerable<Node> roots)
