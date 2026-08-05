@@ -6,7 +6,6 @@ namespace UnturnedGodot.Benchmark;
 
 // Opt-in subsystem timings for Tier 3. Production runs pay only a volatile boolean read; counters are
 // enabled after benchmark warmup and disabled before report generation.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class RuntimeCounters
 {
     public enum Counter

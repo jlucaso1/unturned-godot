@@ -11,7 +11,6 @@ namespace UnturnedGodot.Benchmark;
 // keeps churning — and that needs the timeline rather than the endpoint.
 //
 // Off unless the variable is set, so nothing samples /proc or forces a collection in a normal session.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public sealed partial class MemoryTrace : Node
 {
     private double _seconds;
