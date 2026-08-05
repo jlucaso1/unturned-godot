@@ -38,7 +38,14 @@ public static class WorldBuilder
     // follows the same source ownership, asset metadata, extraction and ObjectsBuilder policy as the
     // interactive world, then asks ObjectsBuilder to realise only bodies and ladder volumes.
     public static Node3D BuildObjectCollision(string unturnedPath, LevelInfo level,
-        out IReadOnlySet<Guid> selectedGuids, CollisionFieldBuilder? navigationField = null)
+        out IReadOnlySet<Guid> selectedGuids, CollisionFieldBuilder? navigationField = null) =>
+        BuildObjectCollision(unturnedPath, level, out selectedGuids, out _, navigationField);
+
+    // With the server's ledger of what those bodies can break into: the same placements and the same
+    // asset database, so a punch's hit and its collider are provably the same object.
+    public static Node3D BuildObjectCollision(string unturnedPath, LevelInfo level,
+        out IReadOnlySet<Guid> selectedGuids, out UnturnedGodot.Damage.DamageableWorld damageable,
+        CollisionFieldBuilder? navigationField = null)
     {
         IReadOnlyList<ContentSource> sources = ContentSource.Discover(unturnedPath);
         List<PlacedObject> objects = LevelObjects.Load(level.ObjectsDat);
@@ -74,10 +81,12 @@ public static class WorldBuilder
         }
 
         Dictionary<Guid, List<CachedCollider>> colliders = ColliderLibrary.Load(cacheDir, needed);
+        damageable = UnturnedGodot.Damage.DamageableWorldBuilder.Build(objects, db);
         Node3D root = ObjectsBuilder.Build(objects, db,
             new Dictionary<Guid, ArrayMesh>(), colliders, out _,
             navigationField: navigationField, label: "DedicatedObjects", renderGeometry: false);
         Log.Print($"[server] authoritative object collision: {colliders.Count}/{needed.Count} asset types");
+        Log.Print($"[server] breakable placements: {damageable.Count}");
         return root;
     }
 

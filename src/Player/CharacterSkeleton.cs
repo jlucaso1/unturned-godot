@@ -35,6 +35,16 @@ public partial class CharacterSkeleton : Skeleton3D
     private EPlayerStance _lastStateStance;
     private bool _lastStateMoving;
 
+    // Where the character looks from, read off the prefab rather than guessed: the bone that carries the
+    // eye and where the eye sits IN that bone's own frame. It is emphatically not the bone's origin —
+    // Skull sits at the neck, and the head's authored Spot child is most of half a metre further up.
+    private int _eyeBone = -1;
+    private Vector3 _eyeLocal;
+
+    // Set on the one rig that is looked THROUGH rather than at, with the operator's manual nudge.
+    private bool _anchorEye;
+    private Vector3 _eyeNudge;
+
     // The current clip is a FINISHED one-shot, parked on its last key rather than looping. Distinct from
     // the overlay's IsPlaying, which is already false by then: this covers the frames after a gesture
     // ends but before a movement clip has taken the rig back — one frame in the ordinary case, and
@@ -71,6 +81,39 @@ public partial class CharacterSkeleton : Skeleton3D
     {
         _spine = spine;
         _skull = skull;
+    }
+
+    public (int Spine, int Skull) PitchBones => (_spine, _skull);
+
+    // The eye this character looks from, as the prefab authors it (see CharacterModel: the Spot the game
+    // pairs with its first-person camera). `local` is the offset within `bone`'s own frame.
+    public void BindEye(int bone, Vector3 local)
+    {
+        _eyeBone = bone;
+        _eyeLocal = local;
+    }
+
+    // The binding, so a clone of this rig inherits it rather than losing the eye with the copy.
+    public (int Bone, Vector3 Local) Eye => (_eyeBone, _eyeLocal);
+
+    // Rides this rig on its own eye, the way Unturned parents the first-person camera under the
+    // viewmodel skeleton's head (ViewmodelAnchor has the reasoning). Re-applied after every pose,
+    // because the stance clips move the head and a bind-pose offset only agrees with one of them.
+    public void AnchorEyeToCamera(Vector3 nudge)
+    {
+        _anchorEye = true;
+        _eyeNudge = nudge;
+        AnchorEye();
+    }
+
+    // One skeleton read per posed frame, on the single rig the local player looks through — the
+    // interop budget this class otherwise guards is per-BONE, and this is per-rig.
+    private void AnchorEye()
+    {
+        if (!_anchorEye || _eyeBone < 0)
+            return;
+        Position = ViewmodelAnchor.RigPosition(
+            ViewmodelAnchor.Eye(GetBoneGlobalPose(_eyeBone), _eyeLocal), _eyeNudge);
     }
 
     // Godot pitch degrees (0 = horizon, + up, - down); the body leans toward where the player looks.
@@ -176,6 +219,10 @@ public partial class CharacterSkeleton : Skeleton3D
             active = _current.Length > 0 && IsVisibleInTree(); // the resume may have changed the clip
         }
         SetProcess(active);
+        // A rig that was hidden froze its clock, so the pose it comes back with is the one it left —
+        // and if the stance changed meanwhile, Resume just swapped the clip. Anchor before the first
+        // drawn frame rather than one frame into it.
+        AnchorEye();
     }
 
     public override void _Notification(int what)
@@ -305,6 +352,9 @@ public partial class CharacterSkeleton : Skeleton3D
         }
 
         (_written, _writing) = (_writing, _written);
+
+        // The pose has just moved the head; the eye follows it in the same frame it moved.
+        AnchorEye();
     }
 
     private Quaternion WithPitch(int bone, Quaternion sampled, float halfDegrees)

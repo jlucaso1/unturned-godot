@@ -120,6 +120,32 @@ public sealed class ZombieInstance
     public bool IsHyper; // the nav flag's hyperAgro, stamped at spawn
     public float VerticalAttackRange =>
         (IsHyper ? 3.5f : 2.1f) * (Speciality == EZombieSpeciality.Mega ? 1.5f : 1f);
+
+    // What is left of it. Zombie.askDamage subtracts from this and calls the zombie dead at zero, which
+    // is the ONE state in this class that something outside the brain writes — everything else here is
+    // decided by the tick. Filled at spawn from the map's own zombie table (see HealthFor).
+    public ushort Health;
+
+    // The value it started at, so a client — or a debug overlay — can show a fraction rather than a
+    // bare number, and so a respawn can put it back without re-deriving the table lookup.
+    public ushort MaxHealth;
+
+    public bool IsDead => Health == 0;
+
+    // Zombie.tellAlive's health assignment: the table's number, then the speciality's own adjustment.
+    // A crawler carries half again as much (it is harder to hit), a sprinter half as much (it is
+    // fragile), and a mega simply uses the table — the mega tables are already written with thousands.
+    // The bosses the original also lists have no spawner here, so their fixed numbers are not ported.
+    public static ushort HealthFor(ZombieTable table, EZombieSpeciality speciality)
+    {
+        ArgumentNullException.ThrowIfNull(table);
+        return speciality switch
+        {
+            EZombieSpeciality.Crawler => (ushort)(table.Health * 1.5f),
+            EZombieSpeciality.Sprinter => (ushort)(table.Health * 0.5f),
+            _ => table.Health,
+        };
+    }
 }
 
 // One player's zombie-relevant state for a tick, as the server simulation already knows it.
@@ -345,9 +371,13 @@ public sealed partial class ZombieSystem
         if (_ground(position.X, position.Z, out float y))
             position.Y = y;
 
+        ushort health = ZombieInstance.HealthFor(table, speciality);
+
         return new ZombieInstance
         {
             Id = id,
+            Health = health,
+            MaxHealth = health,
             Bound = bound,
             Type = spawn.Type,
             Speciality = speciality,
@@ -577,6 +607,62 @@ public sealed partial class ZombieSystem
     {
         _agro.TryGetValue(playerId, out int agro);
         _agro[playerId] = Math.Max(0, agro + delta);
+    }
+
+    public ZombieInstance? Find(ushort id)
+    {
+        for (int i = 0; i < _zombies.Count; i++)
+            if (_zombies[i].Id == id)
+                return _zombies[i];
+        return null;
+    }
+
+    // Zombie.askDamage plus the alert DamageTool.damageZombie asks for afterwards: take the health off,
+    // and — if it survived — turn it on whoever hit it.
+    //
+    // Being hit is the one way a zombie aggroes that has nothing to do with stealth: AlertPosition is
+    // set by the punch (PlayerEquipment passes the attacker's transform whenever the attacker is inside
+    // a nav region), and Zombie.alert is called with startle true, so a zombie punched from behind while
+    // it stands idle turns around whether or not it could have heard the attacker walking. Without it
+    // the only thing punching a zombie does is kill it silently, several swings later.
+    //
+    // Returns true when the zombie died on this hit. A dead one is removed from the population here, so
+    // the caller's next read of Zombies no longer contains it — that is what makes the death final for
+    // the brain; announcing it to the clients is the caller's job.
+    public bool Damage(ZombieInstance zombie, ushort amount, byte instigator,
+        IReadOnlyList<ZombiePlayerView> players)
+    {
+        ArgumentNullException.ThrowIfNull(zombie);
+        ArgumentNullException.ThrowIfNull(players);
+        if (amount == 0 || zombie.IsDead)
+            return false;
+
+        zombie.Health = UnturnedGodot.Damage.PunchDamageResolver.ApplyToHealth(zombie.Health, amount);
+        if (zombie.IsDead)
+        {
+            Remove(zombie);
+            return true;
+        }
+
+        if (instigator != byte.MaxValue && TryGetPlayer(players, instigator, out ZombiePlayerView attacker))
+            Alert(zombie, attacker, players);
+        return false;
+    }
+
+    // Takes a zombie out of the population. Its aggro claim goes back to the player it was holding —
+    // the tally decides how the next zombie to notice that player approaches them, and a dead zombie
+    // that keeps its claim inflates that number for the rest of the session.
+    public void Remove(ZombieInstance zombie)
+    {
+        ArgumentNullException.ThrowIfNull(zombie);
+        if (zombie.TargetPlayer != byte.MaxValue)
+        {
+            AdjustAgro(zombie.TargetPlayer, -1);
+            zombie.TargetPlayer = byte.MaxValue;
+        }
+        _zombies.Remove(zombie);
+        if (zombie.Bound < _byBound.Length)
+            _byBound[zombie.Bound].Remove(zombie);
     }
 
     private void Behave(ZombieInstance zombie, IReadOnlyList<ZombiePlayerView> players, float dt)

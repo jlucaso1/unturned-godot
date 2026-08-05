@@ -89,6 +89,24 @@ verify_content() {
         ok=0
     fi
 
+    # Either data-directory layout will do; see the filelist above. Checked here so a cache from before
+    # this file was fetched fails verification and is refilled, rather than quietly drawing placeholders.
+    #
+    # The headless pair is checked as a PAIR, because that is the one this script downloads and the two
+    # files land separately: a run interrupted between them leaves a tree that reads as complete while
+    # every texture whose pixels live in the stream — the skybox's stars and clouds — silently resolves
+    # to nothing. A client install is only ever pointed at by UNTURNED_PATH, is not this script's to
+    # complete, and lays its streams out differently, so it is judged on resources.assets alone.
+    if [[ -f "$1/Unturned_Headless_Data/resources.assets" ]]; then
+        if [[ ! -f "$1/Unturned_Headless_Data/resources.resource" ]]; then
+            echo "Missing: $1/Unturned_Headless_Data/resources.resource" >&2
+            ok=0
+        fi
+    elif [[ ! -f "$1/Unturned_Data/resources.assets" ]]; then
+        echo "Missing: $1/Unturned_Headless_Data/resources.assets" >&2
+        ok=0
+    fi
+
     if [[ "$maps" == "all" ]]; then
         if ! verify_all_maps "$1" "$require_all_receipt"; then
             ok=0
@@ -399,6 +417,12 @@ trap 'rm -f -- "$filelist"' EXIT
 {
     printf 'regex:^Bundles/.*\n'
     printf 'regex:^Localization/.*\n'
+    # The Unity data file holding the character prefabs — Player_Client with its Viewmodel subtree, the
+    # zombies, the ragdolls — and the skybox materials. The server build calls its data directory
+    # Unturned_Headless_Data where the retail client calls it Unturned_Data; both carry the same object
+    # graph, and UnturnedInstall.FindDataFile accepts either. ~31 MB, and without it the game draws a
+    # placeholder capsule instead of the real character.
+    printf 'regex:^Unturned_Headless_Data/resources\\.(assets|resource)$\n'
     if [[ "$maps" == "all" ]]; then
         printf 'regex:^Maps/.*\n'
     else

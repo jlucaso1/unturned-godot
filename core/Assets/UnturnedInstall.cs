@@ -199,6 +199,26 @@ public static class UnturnedInstall
         return Path.Combine(steamapps, "workshop", "content", WorkshopAppId);
     }
 
+    // The Unity data directories an Unturned install can keep resources.assets in. The retail client
+    // builds to "Unturned", the dedicated server to "Unturned_Headless" — and it is the SERVER that
+    // scripts/fetch-game-data.sh downloads, since that is the build Valve's anonymous account may have.
+    // Both carry the same prefab graph (Player_Client, its Viewmodel subtree, the zombies), so a check-out
+    // that only ever fetched the server can still draw the real character; looking under the client name
+    // alone is what silently left it on the placeholder figure.
+    private static readonly string[] DataDirectoryNames = { "Unturned_Data", "Unturned_Headless_Data" };
+
+    // Where this install keeps `name` (e.g. "resources.assets"), or null when no layout has it.
+    public static string? FindDataFile(string installRoot, string name)
+    {
+        foreach (string directory in DataDirectoryNames)
+        {
+            string candidate = Path.Combine(installRoot, directory, name);
+            if (File.Exists(candidate))
+                return candidate;
+        }
+        return null;
+    }
+
     // The masterbundle for this install, or null when it is missing (a partial/corrupt download, or
     // a path that is not an Unturned install at all).
     [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage] // selects on the running OS

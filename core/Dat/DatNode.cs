@@ -83,4 +83,23 @@ public sealed class DatDictionary : DatNode
     // Unturned writes its .dat floats with an invariant decimal point, so the parse is culture-fixed too.
     public bool TryGetSingle(string key, out float value) =>
         float.TryParse(GetString(key), NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+
+    // ParseUInt8. Separate from the 16-bit reader because the fields that use it — a blade id, a rewards
+    // count — are genuinely bytes, and reading one into a ushort would silently accept 300.
+    public bool TryGetByte(string key, out byte value) =>
+        byte.TryParse(GetString(key), NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
+
+    // ParseBool. Unturned's .dats carry booleans two ways: spelled out ("Causes_Fall_Damage False") and
+    // by bare presence ("No_Debris"), and its own reader accepts both — a key whose value does not parse
+    // as a bool is still a key that is there, which is what a bare flag is. `defaultValue` is what an
+    // ABSENT key means, and it is not always false: several fields default to true and are turned off by
+    // writing the word.
+    public bool GetBool(string key, bool defaultValue = false)
+    {
+        if (!TryGetString(key, out string raw))
+            return defaultValue;
+        return !bool.TryParse(raw, out bool value) || value;
+    }
+
+    public bool ContainsKey(string key) => _nodes.ContainsKey(key);
 }

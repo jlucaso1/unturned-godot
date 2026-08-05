@@ -89,6 +89,14 @@ public sealed record ReproZombieRecord
     public byte Gear { get; init; }
     public byte Move { get; init; }
     public byte Idle { get; init; }
+
+    // What is left of it, and what it started with. A dump taken mid-fight has to put a wounded zombie
+    // back wounded: restoring it at full health changes how many more swings the reporter's own recorded
+    // punches take to kill it, and a horde that dies on a different tick is a different simulation.
+    // An older dump carries neither, and a zombie restored at zero would be dead on arrival — so Health
+    // absent means "as new", which ReproZombieState resolves against MaxHealth.
+    public ushort Health { get; init; }
+    public ushort MaxHealth { get; init; }
     public float[] Home { get; init; } = Array.Empty<float>();
     public float[] Position { get; init; } = Array.Empty<float>();
     public float Yaw { get; init; }

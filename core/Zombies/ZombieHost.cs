@@ -21,6 +21,10 @@ public sealed class ZombieHost
     private readonly List<ZombiePlayerView> _views = new();
     private readonly List<(byte Player, ITransportConnection Connection)> _connections = new();
     private readonly Dictionary<ushort, EZombieState> _lastSent = new();
+    // Deaths waiting to go out, by the region the zombie belonged to. Filled by whatever damaged it —
+    // which runs on the same OnTick this does, and may run after it — and drained at the START of the
+    // next tick, so a kill is announced exactly once and never races the snapshot pass below.
+    private readonly Dictionary<byte, List<ushort>> _pendingKills = new();
     private readonly List<ZombieSnapshotState>[] _awakeByBound;
     private readonly List<ZombieListing> _chunk = new(ZombieNetMessages.ListChunkSize);
     private readonly System.Action<byte, PlayerMoveState, ITransportConnection> _collectPlayer; // cached closure
@@ -56,11 +60,29 @@ public sealed class ZombieHost
         _playerBounds[id] = newBound;
     }
 
+    // Announces a zombie's death to its region on the next tick, and forgets the state tracking that
+    // would otherwise keep an id alive in _lastSent for the rest of the session. The zombie is already
+    // out of the population by the time this is called — ZombieSystem.Damage removes it — so this is
+    // purely the replication half of the same event.
+    public void ReportKilled(ZombieInstance zombie)
+    {
+        System.ArgumentNullException.ThrowIfNull(zombie);
+        _lastSent.Remove(zombie.Id);
+        if (!_pendingKills.TryGetValue(zombie.Bound, out List<ushort>? ids))
+            _pendingKills[zombie.Bound] = ids = new List<ushort>();
+        ids.Add(zombie.Id);
+    }
+
     private void Tick(uint tick)
     {
         _views.Clear();
         _connections.Clear();
         _server.ForEachJoinedConnection(_collectPlayer);
+
+        // Deaths first, before this tick's simulation: the population no longer holds them, so nothing
+        // below would mention them again, and a client that hears the death before the tick's snapshots
+        // never renders one more frame of a zombie that is gone.
+        BroadcastKills();
 
         // Players that vanished from the roster disconnected: drop their region state.
         if (_playerBounds.Count > _connections.Count)
@@ -114,6 +136,29 @@ public sealed class ZombieHost
         }
     }
 
+    // One reliable payload per region that lost zombies, to that region's connections only — the same
+    // addressing the per-tick snapshots use, since a player who cannot see a region was never told the
+    // zombie existed.
+    private void BroadcastKills()
+    {
+        if (_pendingKills.Count == 0)
+            return;
+        foreach ((byte bound, List<ushort> ids) in _pendingKills)
+        {
+            if (ids.Count == 0)
+                continue;
+            byte[]? payload = null;
+            foreach ((byte player, ITransportConnection connection) in _connections)
+            {
+                if (_playerBounds.GetValueOrDefault(player, LevelNavigationData.NoBound) != bound)
+                    continue;
+                payload ??= ZombieNetMessages.WriteZombieKilled(bound, ids);
+                connection.Send(payload, ESendType.Reliable);
+            }
+            ids.Clear();
+        }
+    }
+
     // Forgets which region each player has been sent, so the next tick ships the current population
     // again. Loading a bug-repro dump replaces every zombie wholesale — ids, types, clothing, the lot —
     // and the per-tick state snapshots carry none of that: without this the client keeps rendering the
@@ -122,6 +167,9 @@ public sealed class ZombieHost
     {
         _playerBounds.Clear();
         _lastSent.Clear();
+        // The ids in here belong to the population being replaced. Announcing their deaths after the
+        // swap would name zombies the client is about to be told about afresh, under the same ids.
+        _pendingKills.Clear();
     }
 
     // SendZombies: the region's complete zombie list, reliable, to one connection, in MTU-sized chunks.

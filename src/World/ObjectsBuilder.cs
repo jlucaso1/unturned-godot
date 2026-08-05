@@ -647,12 +647,12 @@ public static class ObjectsBuilder
                 foreach (((int x, int z), List<(int Shape, Transform3D Transform)> inCell)
                     in buckets.Groups)
                 {
-                    AddCollisionBody(root, owner, ref bodyCount, $"Col_{guid:N}_{x}_{z}",
+                    AddCollisionBody(root, owner, ref bodyCount, ObjectCollisionNames.For(guid, x, z),
                         pool.Shapes, inCell, collisionLayer);
                 }
                 return;
             }
-            AddCollisionBody(root, owner, ref bodyCount, $"Col_{guid:N}", pool.Shapes,
+            AddCollisionBody(root, owner, ref bodyCount, ObjectCollisionNames.For(guid), pool.Shapes,
                 directFlat ?? buckets!.Flatten(), collisionLayer);
             return;
         }
@@ -674,7 +674,7 @@ public static class ObjectsBuilder
             if (bodyCount + cells.Count <= MaxObjectCollisionBodies)
             {
                 foreach (((int x, int z), List<(int Shape, Transform3D Transform)> inCell) in cells)
-                    AddCollisionBody(root, owner, ref bodyCount, $"Col_{guid:N}_{x}_{z}",
+                    AddCollisionBody(root, owner, ref bodyCount, ObjectCollisionNames.For(guid, x, z),
                         pool.Shapes, inCell, collisionLayer);
                 return;
             }
@@ -683,7 +683,7 @@ public static class ObjectsBuilder
         var bodyPlacements = new List<(int Shape, Transform3D Transform)>(placements.Count);
         foreach ((int shape, Transform3D transform, Vector3 _) in placements)
             bodyPlacements.Add((shape, transform));
-        AddCollisionBody(root, owner, ref bodyCount, $"Col_{guid:N}", pool.Shapes,
+        AddCollisionBody(root, owner, ref bodyCount, ObjectCollisionNames.For(guid), pool.Shapes,
             bodyPlacements, collisionLayer);
     }
 
