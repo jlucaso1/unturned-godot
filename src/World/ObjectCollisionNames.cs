@@ -11,7 +11,6 @@ namespace UnturnedGodot;
 //
 // One place for both halves so the writer and the reader cannot drift, which is exactly the failure that
 // would be invisible — a punch would simply stop damaging anything and look like a targeting bug.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class ObjectCollisionNames
 {
     private const string Prefix = "Col_";

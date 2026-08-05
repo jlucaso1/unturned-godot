@@ -13,7 +13,6 @@ namespace UnturnedGodot;
 // this cannot ride along in InstancedStaticBodies — same RID trick, different thing to look up.
 //
 // Ladders are rare enough for this to be free: 45 volumes on PEI, against ~4300 placed objects.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class LadderVolumes : Node3D
 {
     private readonly struct Pending
