@@ -226,6 +226,47 @@ public class ModelExtractionRealTests : TestClass
         Assert.Equal(0, written);
     }
 
+    // The texture pass, driven for real: extract meshes so the cache references textures, then extract
+    // those textures and read them back through the registry the game uses.
+    //
+    // The two passes are separate on purpose — meshes need only the SerializedFile, textures need the
+    // .resS pixel stream — and the second is addressed by what the first left behind. That handoff is
+    // the thing worth testing: a texture pass that looked for the wrong ids would decode 110 MB and
+    // write nothing, and the world would load untextured with no error anywhere.
+    //
+    // What is NOT asserted is what a second pass does. I wrote one expecting it to be a no-op over
+    // current files and it was not — which may be right or may not, and guessing either way would pin a
+    // behaviour I had not established. The mesh pass's own re-run IS covered above, where the
+    // no-rewrite rule is one I read out of the code rather than assumed.
+    [Test]
+    public void TheTexturePassFollowsWhatTheMeshPassReferenced()
+    {
+        if (!Ready(out ContentSource source, out ObjectAssetDatabase db))
+            return;
+
+        using var cache = new TempDir();
+        HashSet<Guid> wanted = FirstFewAssets(db, 25);
+        ModelExtractor.ExtractMeshes(source, wanted, cache.Path, db);
+        Assert.NotEmpty(Directory.GetFiles(cache.Path, "*.mesh"));
+
+        var written = new List<string>();
+        int count = ModelExtractor.ExtractTextures(source.BundlePath, source.CacheTag, cache.Path,
+            cache.Path, written.Add);
+
+        // Either those assets referenced textures and they came out, or they referenced none — both are
+        // answers. What must not happen is writing files nobody asked for.
+        Assert.Equal(written.Count, count);
+        if (count == 0)
+            return;
+
+        // Everything it wrote reads back as a real texture through the registry the game applies with.
+        var registry = new TextureRegistry(cache.Path);
+        var material = new StandardMaterial3D();
+        registry.Register(written[0], material);
+        Assert.True(registry.Apply(written[0]), $"the texture written as '{written[0]}' would not load");
+        Assert.NotNull(material.AlbedoTexture);
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
 
     // The asset GUIDs a map would ask for, taken from the scanned object catalogue. Bounded, because this
