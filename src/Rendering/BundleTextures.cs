@@ -100,7 +100,23 @@ public static class BundleTextures
         if (containerPaths.Count == 0)
             return result;
 
-        UnityBundle bundle = UnityBundle.Read(File.ReadAllBytes(bundlePath));
+        UnityBundle bundle;
+        try
+        {
+            bundle = UnityBundle.Read(File.ReadAllBytes(bundlePath));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            // Unreadable: the caller's materials lose these textures, exactly as they did before this
+            // path existed. VertexStreamReader — which does the same whole-blob fallback for vertex
+            // buffers — has always answered this way, on the stated grounds that a caller mid-level-build
+            // would rather lose one texture than the level. The two readers disagreed until now, which is
+            // a difference nobody chose.
+            Log.PrintErr($"[textures] {Path.GetFileName(bundlePath)} could not be read ({e.Message}); "
+                + "the assets it carries load untextured");
+            return result;
+        }
+
         foreach (KeyValuePair<string, byte[]> file in bundle.Files)
         {
             if (IsStreamNode(file.Key))

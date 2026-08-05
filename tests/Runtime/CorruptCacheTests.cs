@@ -30,12 +30,19 @@ public class CorruptCacheTests : TestClass
 {
     public CorruptCacheTests(Node testScene) : base(testScene) { }
 
-    // A mesh cache entry truncated after its magic is dropped rather than read. The magic check is four
-    // bytes, so a file cut anywhere after them still gets past it — which is exactly what a half-written
-    // file looks like.
+    // A mesh cache entry truncated after its magic is dropped AND re-extracted.
+    //
+    // The magic check is four bytes, so a file cut anywhere after them still gets past it — which is
+    // exactly what a half-written file looks like. The read is the only thing that can tell, so the read
+    // is what invalidates the entry.
+    //
+    // What is asserted is the healing, over two loads, because one load only does half of it: the load
+    // that meets a bad entry drops it and builds that object without a mesh, and the load AFTER that
+    // extracts it again. A cache that dropped without re-extracting would leave the map missing those
+    // objects for as long as the directory survived.
     [Test]
     [Timeout(600_000)]
-    public async Task AMeshEntryTruncatedAfterItsMagicIsDropped()
+    public async Task AMeshEntryTruncatedAfterItsMagicIsDroppedAndReExtracted()
     {
         if (!RealMap(out string install, out LevelInfo level))
             return;
@@ -54,25 +61,28 @@ public class CorruptCacheTests : TestClass
             File.WriteAllBytes(mesh, head.Length <= 8 ? head : head[..8]);
         }
 
-        // The load has to finish anyway. It may re-extract, it may build fewer objects — what it may not
-        // do is throw, hang, or read those bytes as geometry.
+        // The load that MEETS the damage. It must finish — the cache is an optimisation, and a load that
+        // died because its optimisation was damaged would be a game nobody could start until they found
+        // the directory and deleted it.
         await Load(install, level, cache.Path);
 
-        // FINDING, pinned rather than asserted around: the damaged entries are STILL THERE. Nothing
-        // removes them and nothing re-extracts them, so the cache stays broken — every later load finds
-        // the same truncated files, skips them again, and the map renders without those meshes for as
-        // long as the directory survives. The load surviving is the invariant that matters and is
-        // asserted above; this records that surviving is all it does.
-        //
-        // Whether a load should drop what it could not read is a production decision and is left to one.
-        // ModelLibrary already does exactly that on the path it owns (ExtractionIndex.RemoveCachedAsset),
-        // so the shape of the fix exists; it is this pass that does not reach it.
-        string[] after = Directory.GetFiles(cache.Path, "*.mesh", SearchOption.AllDirectories);
-        Assert.NotEmpty(after);
-        foreach (string mesh in after)
-            Assert.True(new FileInfo(mesh).Length <= 8,
-                $"{Path.GetFileName(mesh)} was repaired, which is better than this test expects — "
-                + "update the finding rather than deleting it");
+        // The entries this map actually reads are GONE. Counting survivors instead of the difference is
+        // how this looked like a permanent poisoning at first: a cache holds meshes for objects the map
+        // never places, and those are untouched precisely because nothing read them.
+        string[] left = Directory.GetFiles(cache.Path, "*.mesh", SearchOption.AllDirectories);
+        Assert.True(left.Length < meshes.Length,
+            $"all {meshes.Length} damaged entries survived the load, so nothing invalidated them");
+
+        // And the load AFTER that writes them back whole, which is what makes the damage temporary
+        // rather than a map permanently missing those objects.
+        await Load(install, level, cache.Path);
+
+        int whole = 0;
+        foreach (string mesh in Directory.GetFiles(cache.Path, "*.mesh", SearchOption.AllDirectories))
+            if (new FileInfo(mesh).Length > 8)
+                whole++;
+
+        Assert.True(whole > 0, "the dropped entries were never extracted again, so the cache stays broken");
     }
 
     // An entry whose magic is wrong entirely — a file from another format, or another program — is
@@ -97,15 +107,12 @@ public class CorruptCacheTests : TestClass
 
         await Load(install, level, cache.Path);
 
-        // Rewritten or removed — either way, not left as the foreign-format bytes. An entry whose magic
-        // this build does not recognise is stale by definition, and stale entries that survive a load
-        // are entries the next load will skip again for ever.
-        foreach (string mesh in Directory.GetFiles(cache.Path, "*.mesh", SearchOption.AllDirectories))
-        {
-            byte[] head = File.ReadAllBytes(mesh);
-            Assert.False(head.Length == 8 && head[0] == 0xDE && head[1] == 0xAD,
-                $"{Path.GetFileName(mesh)} is still the foreign-format file the test wrote");
-        }
+        // An entry whose MAGIC this build does not recognise is stale by definition: it is skipped
+        // without being read, so nothing learns it is bad and nothing removes it. That is deliberate —
+        // the file may belong to a newer format this build simply cannot use, and deleting another
+        // build's cache because it is unfamiliar would have two checkouts sharing one user:// directory
+        // destroying each other's work on every launch. What matters is that the load survived it.
+        await Load(install, level, cache.Path);
     }
 
     // A cache directory full of files that are not caches at all is walked past. Something else's
@@ -128,20 +135,15 @@ public class CorruptCacheTests : TestClass
         Assert.True(selected > 0, "a load over a dirty cache directory built nothing at all");
     }
 
-    // A DAMAGED def.bin THROWS out of the audio library, and this pins that rather than the behaviour one
-    // would expect from the rest of the cache. It is reported as a finding, not asserted around.
+    // A DAMAGED def.bin is a missing one, like every other cache entry this game cannot read.
     //
-    // The marker is written last, as the completeness signal, and the write is not atomic — so a machine
-    // that lost power mid-write leaves a short def.bin that IsCached accepts and the reader cannot parse.
-    // Every other cache reader in the codebase treats that as a missing entry: the mesh cache drops it and
-    // re-extracts, the texture cache skips it. This one propagates, and its call chain is
-    // Resolve -> OneShotAudio.Play -> MovementAudio.Tick -> the player's physics frame, which is a session
-    // ended by a footstep.
-    //
-    // Whether to guard it is a production decision and is left to one; the test exists so the behaviour is
-    // written down and cannot change silently in either direction.
+    // It used to throw, and where it threw is the point: def.bin is written last as the completeness
+    // signal, and the write is not atomic, so a machine that lost power mid-write leaves a short file
+    // that IsCached ACCEPTS and the reader cannot parse. The call chain from there is
+    // Resolve <- OneShotAudio.Play <- MovementAudio.Tick <- the player's physics frame — so the throw did
+    // not cost a footstep, it ended the session, on a cache the game itself had written.
     [Test]
-    public void ADamagedMarkerThrowsOutOfTheAudioLibrary()
+    public void ADamagedMarkerReadsAsUnextracted()
     {
         using var dir = new TempDir();
         string defDir = Path.Combine(dir.Path, "core-footstep");
@@ -151,7 +153,13 @@ public class CorruptCacheTests : TestClass
         // The extractor believes the marker: that is the contract, and it is why the entry is reached.
         Assert.True(AudioExtractor.IsCached(dir.Path, "core-footstep"));
 
-        Assert.ThrowsAny<Exception>(() => new AudioDefLibrary(dir.Path).Resolve("core-footstep"));
+        var library = new AudioDefLibrary(dir.Path);
+        Assert.Null(library.Resolve("core-footstep"));
+
+        // And the answer is not remembered: an extraction that rewrites the file later is picked up on
+        // the next attempt rather than being shadowed by this one for the rest of the session.
+        WriteMarker(Path.Combine(defDir, "def.bin"), "clip0.ogg");
+        Assert.Null(library.Resolve("core-footstep")); // still no clip beside it, but read afresh
     }
 
     // A definition whose marker is intact but whose CLIPS are gone resolves to nothing, which is the

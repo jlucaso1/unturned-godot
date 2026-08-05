@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using Godot;
@@ -29,8 +30,27 @@ public sealed class AudioDefLibrary
             return null; // extraction may still be running; retry on the next play attempt
 
         OneShotAudioDef def;
-        using (FileStream s = File.OpenRead(defPath))
+        try
+        {
+            using FileStream s = File.OpenRead(defPath);
             def = AudioDefCache.Read(s);
+        }
+        catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException)
+        {
+            // A DAMAGED marker is a missing one, which is the rule every other cache reader here follows.
+            //
+            // It has to be, because of where this runs. def.bin is written last, as the completeness
+            // signal, and the write is not atomic — so a machine that lost power mid-write leaves a short
+            // file that IsCached accepts and this cannot parse. The call chain from here is
+            // OneShotAudio.Play <- MovementAudio.Tick <- the player's physics frame, so the throw did not
+            // cost a footstep: it ended the session, on a cache the game itself wrote.
+            //
+            // Nulled rather than remembered, so a later extraction that rewrites the file is picked up
+            // on the next attempt instead of this answer being cached for the session.
+            Log.PrintErr($"[audio] '{defName}' has an unreadable def.bin ({e.Message}); "
+                + "treating it as unextracted");
+            return null;
+        }
 
         var clips = new List<AudioStreamOggVorbis>(def.ClipFiles.Count);
         foreach (string file in def.ClipFiles)

@@ -33,22 +33,20 @@ public class BundleTexturesTests : TestClass
         Assert.Empty(BundleTextures.ExtractAll("/nonexistent-bundle", nothing));
     }
 
-    // A bundle that is not there THROWS, and this pins that rather than asserting what one might expect.
+    // A bundle that is not there yields nothing, and does not throw.
     //
     // The streamed pass falls through to the whole-blob path for anything that is not a single LZMA
-    // block, and that path reads the file unguarded. Its sibling — VertexStreamReader, which does the
-    // same fallback for vertex buffers — catches IOException there and returns what it had, on the
-    // stated grounds that a caller mid-level-build would rather lose one mesh than the level.
-    //
-    // Whether the asymmetry matters is NOT settled here: in production these paths come from a directory
-    // scan, so a missing file would mean the bundle vanished mid-load. It is recorded because the two
-    // readers disagree about the same failure, and a later change to either should be a decision rather
-    // than a surprise.
+    // block, and that path used to read the file unguarded — while its sibling, VertexStreamReader,
+    // caught the same failure and returned what it had. The two readers disagreed about one failure, and
+    // nobody had chosen that: the caller is mid-level-build either way, and would rather lose one
+    // texture than the level.
     [Test]
-    public void ABundleThatIsNotThereThrowsRatherThanYieldingNothing()
+    public void ABundleThatIsNotThereYieldsNothing()
     {
-        Assert.ThrowsAny<System.IO.IOException>(() => BundleTextures.ExtractStreamed(
-            "/nonexistent-bundle", new[] { "assets/anything.png" }));
+        Assert.Empty(BundleTextures.ExtractStreamed("/nonexistent-bundle",
+            new[] { "assets/anything.png" }));
+        Assert.Empty(BundleTextures.ExtractAll("/nonexistent-bundle",
+            new[] { "assets/anything.png" }));
     }
 
     // The real bundle, asked for a container path it does not carry. A prefab naming a texture another
