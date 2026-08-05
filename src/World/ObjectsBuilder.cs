@@ -207,7 +207,7 @@ public static class ObjectsBuilder
             foreach (MergedRenderGroup group in submitted)
                 renderBatches += AddLevels(root, render, levels[group.Key.Level0],
                     group.Key.Level1 == RenderMeshKey.NoLevel ? null : levels[group.Key.Level1],
-                    group.Transforms, group.Category);
+                    group.Transforms, group.Category, drawnGroup);
             if (submitted.Count < partitioned.Count)
                 Log.Print($"[unturned-godot] {label} batch merge: {partitioned.Count} partitioned "
                     + $"batches share {submitted.Count} co-located mesh batches");
@@ -987,45 +987,56 @@ public static class ObjectsBuilder
     // placement nearest the player as well. It also bounds what this can buy: a batch only ever switches
     // as a whole, so the win comes from cells that are small next to their own switch distance.
     private static int AddLevels(Node3D root, MultiMeshRidRenderer? renderer, ArrayMesh mesh,
-        ArrayMesh? lodMesh, List<Transform3D> transforms, EObjectType category)
+        ArrayMesh? lodMesh, List<Transform3D> transforms, EObjectType category, string? drawnGroup)
     {
         BatchBounds bounds = BoundsOf(transforms);
         if (lodMesh == null)
         {
             AddRenderBatch(root, renderer, BuildMultiMesh(mesh, transforms, bounds.Centre), bounds.Centre,
-                category);
+                category, drawnGroup);
             return 1;
         }
         float switchDistance = SwitchDistanceFor(mesh, transforms) + bounds.Radius;
         AddRenderBatch(root, renderer, BuildMultiMesh(mesh, transforms, bounds.Centre), bounds.Centre,
-            category, visibilityEnd: switchDistance, visibilityMargin: LodFadeMargin);
+            category, drawnGroup, visibilityEnd: switchDistance, visibilityMargin: LodFadeMargin);
         AddRenderBatch(root, renderer, BuildMultiMesh(lodMesh, transforms, bounds.Centre), bounds.Centre,
-            category, visibilityBegin: switchDistance, visibilityMargin: LodFadeMargin);
+            category, drawnGroup, visibilityBegin: switchDistance, visibilityMargin: LodFadeMargin);
         return 2;
     }
 
     private static void AddRenderBatch(Node3D root, MultiMeshRidRenderer? renderer, MultiMesh multimesh,
-        Vector3 centre, EObjectType category, float visibilityEnd = 0f, float visibilityMargin = 0f,
-        float visibilityBegin = 0f)
+        Vector3 centre, EObjectType category, string? drawnGroup, float visibilityEnd = 0f,
+        float visibilityMargin = 0f, float visibilityBegin = 0f)
     {
         if (renderer != null)
+        {
             renderer.Add(multimesh, new Transform3D(Basis.Identity, centre), shadows: true, visibilityEnd,
                 visibilityMargin, visibilityBegin, category);
-        else
-            root.AddChild(new MultiMeshInstance3D
-            {
-                Multimesh = multimesh,
-                Position = centre,
-                VisibilityRangeBegin = visibilityBegin,
-                VisibilityRangeEnd = visibilityEnd,
-                VisibilityRangeBeginMargin = visibilityBegin > 0f ? visibilityMargin : 0f,
-                VisibilityRangeEndMargin = visibilityEnd > 0f ? visibilityMargin : 0f,
-                // Match the RID path: with no margin there is nothing to dither, and Self would still put
-                // the batch on the transparent pass.
-                VisibilityRangeFadeMode = visibilityMargin > 0f
-                    ? GeometryInstance3D.VisibilityRangeFadeModeEnum.Self
-                    : GeometryInstance3D.VisibilityRangeFadeModeEnum.Disabled,
-            });
+            return;
+        }
+
+        // UG_NODE_MULTIMESH=1: a batch is a node of its own rather than a RID this project owns, and it
+        // hangs directly off the root. The root is deliberately not in the group — the NPCs share it —
+        // so each wrapper has to join it itself, or the console's `objects.enabled 0` would take the
+        // placeholders away and leave every real batch drawing. A measurement mode whose measurements
+        // silently mean something else is worse than not having the mode.
+        var wrapper = new MultiMeshInstance3D
+        {
+            Multimesh = multimesh,
+            Position = centre,
+            VisibilityRangeBegin = visibilityBegin,
+            VisibilityRangeEnd = visibilityEnd,
+            VisibilityRangeBeginMargin = visibilityBegin > 0f ? visibilityMargin : 0f,
+            VisibilityRangeEndMargin = visibilityEnd > 0f ? visibilityMargin : 0f,
+            // Match the RID path: with no margin there is nothing to dither, and Self would still put
+            // the batch on the transparent pass.
+            VisibilityRangeFadeMode = visibilityMargin > 0f
+                ? GeometryInstance3D.VisibilityRangeFadeModeEnum.Self
+                : GeometryInstance3D.VisibilityRangeFadeModeEnum.Disabled,
+        };
+        if (drawnGroup != null)
+            wrapper.AddToGroup(drawnGroup);
+        root.AddChild(wrapper);
     }
 
     private static Node3D BuildFallbackBoxes(List<(Transform3D transform, Color color)> items, string label)

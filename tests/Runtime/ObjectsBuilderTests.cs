@@ -230,6 +230,40 @@ public class ObjectsBuilderTests : TestClass
         await NextFrame();
     }
 
+    // ...and the node-wrapper mode is grouped too. UG_NODE_MULTIMESH=1 is an A/B control for owning the
+    // RIDs directly, so its batches are nodes hanging off the root — which is exactly the root the group
+    // deliberately skips. Ungrouped, `objects.enabled 0` would take the placeholders away and leave every
+    // real batch drawing, in the one mode whose whole purpose is measurement.
+    [Test]
+    public async Task NodeWrapperBatchesJoinTheGroupTheRidRendererWouldHave()
+    {
+        string previous = OS.GetEnvironment("UG_NODE_MULTIMESH");
+        OS.SetEnvironment("UG_NODE_MULTIMESH", "1");
+        try
+        {
+            Guid asset = Guid.NewGuid();
+            var db = new ObjectAssetDatabase();
+            db.Add(Asset(asset, "Pine"));
+            var meshes = new Dictionary<Guid, ArrayMesh> { [asset] = Triangle() };
+
+            Node3D root = ObjectsBuilder.Build(new List<PlacedObject> { Place(asset, Vector3.Zero) }, db,
+                meshes, new Dictionary<Guid, List<CachedCollider>>(), out _);
+            TestScene.AddChild(root);
+            await NextFrame();
+
+            Node grouped = Assert.Single(TestScene.GetTree().GetNodesInGroup(SceneGroups.Objects));
+            Assert.IsType<MultiMeshInstance3D>(grouped);
+            Assert.False(root.IsInGroup(SceneGroups.Objects));
+
+            root.QueueFree();
+            await NextFrame();
+        }
+        finally
+        {
+            OS.SetEnvironment("UG_NODE_MULTIMESH", previous);
+        }
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
 
     private static int TotalInstances(Node parent)

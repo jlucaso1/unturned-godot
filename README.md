@@ -161,6 +161,7 @@ can actually do.
 | `objects` | `objects.enabled`, `.small.enabled`, `.medium.enabled`, `.large.enabled`, `.trees.enabled` (Unturned's RESOURCE family: trees, rocks, bushes), `.shadows.enabled` |
 | `foliage` | `foliage.enabled`, `foliage.range` (draw distance as a fraction of the built one; streaming is unchanged, so this isolates the cost of *drawing* it) |
 | world | `roads.enabled`, `water.enabled`, `vehicles.enabled`, `npcs.enabled`, `zombies.enabled`, `players.enabled` |
+| places | `locations.enabled` — the map's town and landmark names, floated over the world. Off by default (the game names a place when you reach it); one command brings them back |
 | sun | `sun.enabled`, `sun.shadows.enabled`, `sun.shadows.distance` |
 | environment | `env.sky.enabled`, `env.fog.enabled`, `env.volumetric.enabled`, `env.ssao.enabled`, `env.ssil.enabled`, `env.glow.enabled` |
 | renderer | `r.scale`, `r.msaa`, `r.taa.enabled`, `r.occlusion.enabled`, `r.lod.threshold`, `r.shadow.atlas`, `r.debug` (overdraw/wireframe), `r.vsync.enabled`, `r.fps.max` |

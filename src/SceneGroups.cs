@@ -25,6 +25,7 @@ public static class SceneGroups
     public const string Water = "ug_water";
     public const string Vehicles = "ug_vehicles";
     public const string Npcs = "ug_npcs";
+    public const string Locations = "ug_locations";
     public const string Zombies = "ug_zombies";
     public const string RemotePlayers = "ug_remote_players";
     public const string Lighting = "ug_lighting";

@@ -113,6 +113,11 @@ public static class RenderConsole
         console.Add(ConsoleVariable.Switch("vehicles.enabled",
             "Draw the vehicles the map's spawn tables placed.", true,
             Visibility(host, SceneGroups.Vehicles, "vehicle set")));
+        console.Add(ConsoleVariable.Switch("locations.enabled",
+            "Float the map's place names (towns, landmarks) over the world. Off by default: the game "
+            + "names a place when you reach it rather than hanging billboards over the island, so this "
+            + "is a view of the level's own data — useful while working on a map, not while playing one.",
+            false, Visibility(host, SceneGroups.Locations, "location set")));
         console.Add(ConsoleVariable.Switch("npcs.enabled",
             "Draw the NPC characters the map places. One skinned rig each — nothing batches them.",
             true, Visibility(host, SceneGroups.Npcs, "NPC set")));
