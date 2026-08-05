@@ -79,6 +79,38 @@ public class TerrainTests
     }
 
     [Fact]
+    public void Splatmap_ActiveLayerMask_ReportsOnlyPaintedLayers()
+    {
+        const int res = Landscape.SPLATMAP_RESOLUTION;
+        var bytes = new byte[res * res * SplatmapTile.LAYERS];
+        bytes[SplatmapTile.WeightIndex(0, 0, 5)] = 255;   // the first texel paints layer 5...
+        bytes[SplatmapTile.WeightIndex(200, 71, 2)] = 1;  // ...and one deep inside paints layer 2, barely
+
+        Assert.Equal((1 << 5) | (1 << 2), SplatmapTile.Parse(bytes, 0, 0).ActiveLayerMask());
+    }
+
+    [Fact]
+    public void Splatmap_ActiveLayerMask_UnpaintedTileIsEmpty()
+    {
+        const int res = Landscape.SPLATMAP_RESOLUTION;
+        var bytes = new byte[res * res * SplatmapTile.LAYERS];
+        Assert.Equal(0, SplatmapTile.Parse(bytes, 0, 0).ActiveLayerMask());
+    }
+
+    [Fact]
+    public void Splatmap_ActiveLayerMask_EveryLayerPaintedStopsEarly()
+    {
+        // The scan gives up as soon as all eight are accounted for; painting them all in the first texel
+        // proves the early exit reports the same answer the full walk would.
+        const int res = Landscape.SPLATMAP_RESOLUTION;
+        var bytes = new byte[res * res * SplatmapTile.LAYERS];
+        for (int layer = 0; layer < SplatmapTile.LAYERS; layer++)
+            bytes[SplatmapTile.WeightIndex(0, 0, layer)] = 32;
+
+        Assert.Equal(0xFF, SplatmapTile.Parse(bytes, 0, 0).ActiveLayerMask());
+    }
+
+    [Fact]
     public void Splatmap_TryRead_MissingFile_ReturnsNull()
     {
         Assert.Null(SplatmapTile.TryRead("/no/such.splatmap", 0, 0));

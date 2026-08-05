@@ -157,7 +157,7 @@ can actually do.
 
 | Namespace | Variables |
 |---|---|
-| `terrain` | `terrain.enabled` |
+| `terrain` | `terrain.enabled`, `terrain.splat.unpainted.enabled` (sample the splat layers a pixel gives no weight to — off by default, so this is the A/B control for the skip that makes the ground cheap; the image is the same either way) |
 | `objects` | `objects.enabled`, `.small.enabled`, `.medium.enabled`, `.large.enabled`, `.trees.enabled` (Unturned's RESOURCE family: trees, rocks, bushes), `.shadows.enabled` |
 | `foliage` | `foliage.enabled`, `foliage.range` (draw distance as a fraction of the built one; streaming is unchanged, so this isolates the cost of *drawing* it) |
 | world | `roads.enabled`, `water.enabled`, `vehicles.enabled`, `npcs.enabled`, `zombies.enabled`, `players.enabled` |

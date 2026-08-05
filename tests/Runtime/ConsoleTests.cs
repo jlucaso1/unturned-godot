@@ -197,6 +197,41 @@ public class ConsoleTests : TestClass
         Release(console);
     }
 
+    // The splat toggle does not hide anything — it reaches into the shading of the tiles that stay on
+    // screen. It also has to tell "no terrain at all" apart from "terrain wearing the flat fallback
+    // material", because on a map whose layer textures could not be read there is nothing to skip and a
+    // silent no-op would read as a measurement.
+    [Test]
+    public async Task TheSplatToggleReachesTheTileMaterialsAndSaysWhenThereAreNone()
+    {
+        ConsoleOverlay console = await Attached();
+        var terrain = new Node3D { Name = "Terrain" };
+        terrain.AddToGroup(SceneGroups.Terrain);
+        var flat = new MeshInstance3D { Name = "Tile_flat", Mesh = new BoxMesh() };
+        flat.Mesh.SurfaceSetMaterial(0, new StandardMaterial3D());
+        terrain.AddChild(flat);
+        TestScene.AddChild(terrain);
+
+        console.Submit("terrain.splat.unpainted.enabled 1", echo: false);
+        Assert.Contains("flat-colour fallback material", console.Output.GetParsedText());
+
+        var material = new ShaderMaterial
+        {
+            Shader = new Shader { Code = TerrainBuilder.SplatShaderCode(1) },
+        };
+        var splat = new MeshInstance3D { Name = "Tile_0_0", Mesh = new BoxMesh() };
+        splat.Mesh.SurfaceSetMaterial(0, material);
+        terrain.AddChild(splat);
+
+        console.Submit("terrain.splat.unpainted.enabled 1", echo: false);
+        Assert.True(material.GetShaderParameter("sample_unpainted").AsBool());
+        console.Submit("terrain.splat.unpainted.enabled 0", echo: false);
+        Assert.False(material.GetShaderParameter("sample_unpainted").AsBool());
+
+        Discard(terrain);
+        Release(console);
+    }
+
     // The map-load contract, which is the reason the values live at process scope: a toggle set while
     // nothing is loaded is kept, said out loud, and pushed at the world that appears next.
     [Test]

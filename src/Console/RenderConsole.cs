@@ -76,6 +76,12 @@ public static class RenderConsole
         console.Add(ConsoleVariable.Switch("terrain.enabled",
             "Draw the landscape tiles. Collision stays: the player still stands on ground they cannot see.",
             true, Visibility(host, SceneGroups.Terrain, "terrain")));
+        console.Add(ConsoleVariable.Switch("terrain.splat.unpainted.enabled",
+            "Sample the splat layers a pixel gives no weight to. Off (the default) skips them, which is "
+            + "what makes the ground cost one or two texture fetches per pixel instead of the whole "
+            + "painted set. On is the A/B control for that skip — the image is identical either way, so "
+            + "the only difference between the two frames is the fetches.",
+            false, SplatUnpainted(host)));
 
         console.Add(ConsoleVariable.Switch("objects.enabled",
             "Draw every placed object — buildings, props, trees and their authored lower levels.",
@@ -256,6 +262,38 @@ public static class RenderConsole
         return shown > 0
             ? null
             : $"No {what} is loaded right now; the value is kept and applied to the next world.";
+    };
+
+    // Reaches into the splat material of every landscape tile. Tiles whose layer textures could not be
+    // resolved wear the flat fallback material instead and have no such parameter, so they are counted
+    // apart: "nothing changed" on a flat-colour map is an answer, not a silent no-op.
+    private static ConsoleApply SplatUnpainted(Func<Node?> host) => value =>
+    {
+        int splat = 0;
+        int flat = 0;
+        foreach (Node root in AllLocated(host, SceneGroups.Terrain))
+        {
+            foreach (Node child in root.GetChildren())
+            {
+                if (child is not MeshInstance3D { Mesh: { } mesh } || mesh.GetSurfaceCount() == 0)
+                    continue;
+                if (mesh.SurfaceGetMaterial(0) is ShaderMaterial material)
+                {
+                    material.SetShaderParameter("sample_unpainted", value.AsBool);
+                    splat++;
+                }
+                else
+                {
+                    flat++;
+                }
+            }
+        }
+        if (splat > 0)
+            return null;
+        return flat > 0
+            ? "This map's terrain wears the flat-colour fallback material, which has no splat layers to "
+              + "skip; the value is kept and applied to the next world."
+            : "No terrain is loaded right now; the value is kept and applied to the next world.";
     };
 
     private static ConsoleApply Category(Func<Node?> host, EObjectType category, string what) => value =>
