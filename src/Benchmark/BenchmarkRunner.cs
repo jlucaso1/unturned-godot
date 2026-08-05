@@ -9,7 +9,6 @@ namespace UnturnedGodot.Benchmark;
 // deterministic structural metrics, print a report, and diff against a committed baseline. Runs in one
 // process under `godot --headless -- --benchmark`; add `--write-baseline` to (re)capture the baseline.
 // Shared report plumbing (environment, baseline write/diff) is reused by the Tier-2 GPU benchmark.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public static class BenchmarkRunner
 {
     private const string BaselineDir = "res://bench/baseline";
