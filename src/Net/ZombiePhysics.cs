@@ -8,7 +8,6 @@ namespace UnturnedGodot.Net;
 // One authoritative set of zombie/world queries for hosted and standalone servers. Keeping the closures
 // here prevents the dedicated path from silently degrading to heightmap-only movement when the windowed
 // host gains a new collision rule.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 internal static class ZombiePhysics
 {
     public static void Attach(ZombieSystem zombies, Func<World3D?> resolveWorld, GroundSampler ground)

@@ -8,7 +8,6 @@ namespace UnturnedGodot;
 // Standalone dedicated server: `godot --headless -- --server [--port=27015]`. Loads only what the
 // authoritative movement sim needs (heightfields plus placed-object collision) and runs NetServer over
 // raw UDP — no rendering and no local player.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class DedicatedServer : Node
 {
     private NetServer _server = null!;
