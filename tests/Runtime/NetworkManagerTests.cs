@@ -290,6 +290,69 @@ public class NetworkManagerTests : TestClass
         Assert.True(session.Net.IsActive);
     }
 
+    // PATH_PROBE logs the navmesh route between two points, which is the exact tool for "which opening
+    // does the zombie leave the house through". It exists because that question cannot be answered by
+    // watching: a zombie taking a strange route looks identical to one taking the only route there is.
+    //
+    // It retries for fifteen seconds rather than answering once, and that is the part worth keeping: the
+    // graph is not ready when a session starts — reconciliation publishes it after the world streams in —
+    // so a probe that answered immediately would report "no route" on every map, every time, and mean
+    // nothing.
+    [Test]
+    public async Task ThePathProbeWaitsForAGraphRatherThanAnsweringImmediately()
+    {
+        if (!RealMap(out string levelDir))
+            return;
+
+        using var probe = new EnvFlagScope("PATH_PROBE", "0,0,0>32,0,32");
+        using var session = new Session(TestScene);
+        session.Net.StartSingleplayer("Player");
+        await session.PhysicsFrame();
+
+        session.Net.HostZombies(levelDir);
+
+        // Long enough for the probe's first timer to fire and for at least one retry to be scheduled.
+        for (int i = 0; i < 150; i++)
+            await session.PhysicsFrame();
+
+        Assert.True(session.Net.IsActive, "the probe took the session down with it");
+    }
+
+    // A probe on a map with no navmesh is simply never armed. The flag is a diagnostic, and a diagnostic
+    // that crashed a session on a map it could not measure would be worse than no diagnostic.
+    [Test]
+    public async Task ThePathProbeIsNotArmedWithoutANavmesh()
+    {
+        using var probe = new EnvFlagScope("PATH_PROBE", "0,0,0>32,0,32");
+        using var session = new Session(TestScene);
+        session.Net.StartSingleplayer("Player");
+        await session.PhysicsFrame();
+
+        session.Net.HostZombies("/nonexistent-map");
+
+        for (int i = 0; i < 20; i++)
+            await session.PhysicsFrame();
+
+        Assert.True(session.Net.IsActive);
+    }
+
+    // An environment flag set for one test and put back afterwards: these are read once, where the
+    // session is brought up, and one left set would silently change every test after it in this process.
+    private sealed class EnvFlagScope : System.IDisposable
+    {
+        private readonly string _name;
+        private readonly string _previous;
+
+        public EnvFlagScope(string name, string value)
+        {
+            _name = name;
+            _previous = OS.GetEnvironment(name);
+            OS.SetEnvironment(name, value);
+        }
+
+        public void Dispose() => OS.SetEnvironment(_name, _previous);
+    }
+
     private static bool RealMap(out string levelDir)
     {
         levelDir = "";
