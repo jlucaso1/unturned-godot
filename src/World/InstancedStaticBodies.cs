@@ -6,7 +6,6 @@ namespace UnturnedGodot;
 // One lifecycle node for many independent PhysicsServer bodies. Spatial partitioning still creates the
 // same RIDs with the same shapes, layers and transforms; only the otherwise-empty Node3D wrapper per body
 // disappears. The RID/name table preserves collision diagnostics without changing query ownership.
-[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 public partial class InstancedStaticBodies : Node3D
 {
     private sealed class Definition
