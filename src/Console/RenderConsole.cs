@@ -180,10 +180,11 @@ public static class RenderConsole
         return console;
     }
 
-        // Resolved through a provider rather than a captured node, and re-resolved on every call. Both halves
-    // matter: the registry is built once per process so a configuration survives a return to the menu and
-    // the load of another map, and the nodes it drives do not survive that at all — every one of them is
-    // freed and rebuilt. A binding that held a Node would be holding a freed one by the second map.
+    // Resolved through a provider rather than a captured node, and re-resolved on every call. Both
+    // halves matter: the registry is built once per process so a configuration survives a return to the
+    // menu and the load of another map, and the nodes it drives do not survive that at all — every one
+    // of them is freed and rebuilt. A binding that held a Node would be holding a freed one by the
+    // second map.
     private static Node? Located(Func<Node?> host, string group)
     {
         Node? anchor = host();
