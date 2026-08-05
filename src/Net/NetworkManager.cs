@@ -61,7 +61,22 @@ public partial class NetworkManager : Node
         return true;
     }
 
-    public static double Now => Time.GetTicksMsec() / 1000.0;
+    // The session clock, in seconds since the engine started.
+    //
+    // Injectable so a test can drive a session deterministically. Everything that reads this — snapshot
+    // interpolation, the remote-player views, the zombie interpolation — samples it every frame against
+    // whatever the server was ticked with, so a test driving a server on a simulated clock while these
+    // read the real one disagrees by however long the run took to reach the assertion. That is not a
+    // difference a test can assert around; it has to be removed.
+    //
+    // Production never sets this. The setter exists for tests, and resetting it to null restores the
+    // engine clock, which is what a test must do when it is done.
+    private static System.Func<double>? Clock;
+
+    public static double Now => Clock?.Invoke() ?? (Time.GetTicksMsec() / 1000.0);
+
+    // Replaces the session clock for the caller's lifetime. Pass null to hand it back to the engine.
+    internal static void OverrideClockForTests(System.Func<double>? clock) => Clock = clock;
 
     public void Configure(HeightmapSampler heights, Vector3 spawn)
     {
