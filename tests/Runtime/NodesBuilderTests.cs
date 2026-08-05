@@ -17,9 +17,31 @@ namespace UnturnedGodot.RuntimeTests;
 //
 // A label that reverted any of those would still be in the scene and still say the right word, which is
 // why they are asserted rather than left to be noticed.
+//
+// They are also BUILT HIDDEN. The game names a place when you arrive somewhere rather than hanging a
+// permanent set of billboards over the island, so this is a view of the level's data; `locations.enabled 1`
+// in the console brings it back.
 public class NodesBuilderTests : TestClass
 {
     public NodesBuilderTests(Node testScene) : base(testScene) { }
+
+    [Test]
+    public void ThePlaceNamesAreBuiltHiddenAndReachableByName()
+    {
+        using var dir = new TempDir();
+        dir.WriteNodes(("Belfast", new Vector3(10f, 20f, 30f)));
+
+        Node3D root = NodesBuilder.Build(dir.Path);
+        TestScene.AddChild(root);
+
+        // Hidden, but built: the labels exist and the console switch is what shows them, so turning them
+        // on costs nothing and reveals the same set the level shipped.
+        Assert.False(root.Visible);
+        Assert.Single(root.GetChildren());
+        Assert.True(root.IsInGroup(SceneGroups.Locations));
+
+        root.QueueFree();
+    }
 
     [Test]
     public void EachNamedPlaceGetsALabelAboveIt()

@@ -230,6 +230,45 @@ public class ObjectsBuilderTests : TestClass
         await NextFrame();
     }
 
+    // ...and the node-wrapper mode is grouped too. UG_NODE_MULTIMESH=1 is an A/B control for owning the
+    // RIDs directly, so its batches are nodes hanging off the root — which is exactly the root the group
+    // deliberately skips. Ungrouped, `objects.enabled 0` would take the placeholders away and leave every
+    // real batch drawing, in the one mode whose whole purpose is measurement.
+    [Test]
+    public async Task NodeWrapperBatchesJoinTheGroupTheRidRendererWouldHave()
+    {
+        Guid asset = Guid.NewGuid();
+        var db = new ObjectAssetDatabase();
+        db.Add(Asset(asset, "Pine"));
+        var meshes = new Dictionary<Guid, ArrayMesh> { [asset] = Triangle() };
+
+        // The flag is process-wide and read only while Build runs, so it is restored before this test
+        // yields a frame. Holding it across the await would leave any other builder that ran in the
+        // meantime silently in the A/B mode — which is the mode this test exists to keep honest.
+        Node3D root;
+        string previous = OS.GetEnvironment("UG_NODE_MULTIMESH");
+        OS.SetEnvironment("UG_NODE_MULTIMESH", "1");
+        try
+        {
+            root = ObjectsBuilder.Build(new List<PlacedObject> { Place(asset, Vector3.Zero) }, db,
+                meshes, new Dictionary<Guid, List<CachedCollider>>(), out _);
+        }
+        finally
+        {
+            OS.SetEnvironment("UG_NODE_MULTIMESH", previous);
+        }
+
+        TestScene.AddChild(root);
+        await NextFrame();
+
+        Node grouped = Assert.Single(TestScene.GetTree().GetNodesInGroup(SceneGroups.Objects));
+        Assert.IsType<MultiMeshInstance3D>(grouped);
+        Assert.False(root.IsInGroup(SceneGroups.Objects));
+
+        root.QueueFree();
+        await NextFrame();
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
 
     private static int TotalInstances(Node parent)
