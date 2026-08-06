@@ -454,10 +454,20 @@ public class ConsoleTests : TestClass
         string text = console.Output.GetParsedText();
         double frameMs = Measured(text, "ms frame");
         double cpuMs = Measured(text, "ms cpu");
-        double gpuWaitMs = Measured(text, "ms gpu wait");
-        Assert.Equal(Math.Max(0d, frameMs - cpuMs), gpuWaitMs, 2);
-        Assert.True(frameMs > 0d, $"the frame interval should be a real delta, got {frameMs}");
-        Assert.True(Measured(text, "ms physics") >= 0d);
+        double physicsMs = Measured(text, "ms physics");
+        // Whichever name the remainder earned — the arithmetic behind it is the same either way, and which
+        // one appears depends on whether this machine's test window happens to be running vsync.
+        double idleMs = text.Contains("ms gpu wait")
+            ? Measured(text, "ms gpu wait")
+            : Measured(text, "ms idle");
+
+        // A tolerance, not equality: the four values are each rounded to 2dp independently before printing,
+        // so the printed remainder can legitimately differ from the printed operands' difference by the
+        // accumulated half-ulp. Equality here would fail on formatting rather than on the calculation.
+        Assert.True(Math.Abs(Math.Max(0d, frameMs - cpuMs - physicsMs) - idleMs) <= 0.02d,
+            $"idle should be frame - cpu - physics clamped at zero, got {idleMs} from "
+            + $"{frameMs} - {cpuMs} - {physicsMs}");
+        Assert.True(frameMs > 0d, $"the frame interval should be a measured delta, got {frameMs}");
         Assert.True(Measured(text, "ms navigation") >= 0d);
         Assert.True(Measured(text, "MB vram") >= 0d);
         Release(console);

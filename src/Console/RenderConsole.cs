@@ -260,8 +260,10 @@ public static class RenderConsole
 
         console.Add("perf", "The numbers the F3 HUD shows, into the scrollback — so a measurement is "
             + "recorded next to the command that produced it. The second line says where the frame goes: "
-            + "'gpu wait' is derived (frame minus cpu), so at 0.00 with vsync off the CPU is the "
-            + "bottleneck and no amount of GPU work removed will move the frame. Godot reports the "
+            + "its first number is frame minus cpu minus physics, and it is only a GPU reading when the "
+            + "frame ran flat out — so it reads 'gpu wait' uncapped (0.00 means the CPU is the bottleneck "
+            + "and removing GPU work will not move the frame) and 'idle' under vsync or r.fps.max, where "
+            + "it is the limiter sleeping rather than the GPU. Godot reports the "
             + "monitors of the LAST COMPLETED frame, so `foo 0; perf` on one line prices the frame "
             + "BEFORE the change — put perf on its own line. 'fps' is the last SECOND averaged, so it and "
             + "'frame' describe different windows and lag each other while something is changing.",
@@ -406,24 +408,24 @@ public static class RenderConsole
         return null;
     };
 
-    // The second line is the one that decides what to optimize next, and it is derived rather than
-    // measured: Godot exposes no GPU-time monitor, so what is reportable is the CPU's WAIT on the GPU —
-    // wall-clock frame minus the main thread's own work. Rendering is submitted on the main thread and
-    // does not block on the GPU, so this stays ~0 while the CPU is the bottleneck (even at full GPU
-    // utilisation) and only opens up once the GPU is genuinely behind, or under VSync.
+    // The second line is the one that decides what to optimize next, and every hard part of it is in what
+    // the leading number is allowed to be CALLED.
     //
-    // It is therefore NOT a GPU cost. `0.00 ms gpu wait` with vsync off means shaving GPU work will not
-    // move the frame — the answer is on the CPU — and that is a different conclusion from a small one.
-    // For real GPU frame time an external tool (MangoHud, radeontop, PIX) is still the instrument; draw
-    // calls and primitives are the workload proxies here.
+    // Godot exposes no GPU-time monitor, so nothing here measures the GPU. What is computable is the time
+    // in the frame that the engine did not report as CPU work: wall clock minus the idle step minus the
+    // physics step. That remainder is only the CPU's wait on the GPU when the frame was allowed to run
+    // flat out — rendering is submitted on the main thread and does not block, so it sits at ~0 while the
+    // CPU is the bottleneck (even at full GPU utilisation) and opens up once the GPU is genuinely behind.
     //
-    // The wall clock in that subtraction is the node's own process delta, NOT 1000/fps, and the two are
-    // not interchangeable: TimeFps counts the frames rendered in the last SECOND and is refreshed once a
-    // second, while TimeProcess describes ONE frame. Subtracting a per-frame value from a per-second
-    // average is wrong in exactly the workflow this line is for — a `perf` typed within a second of a
-    // toggle reads a stale fps, which invents a GPU wait after a speedup and hides a real one after a
-    // slowdown, pointing at the wrong bottleneck both times. GetProcessDeltaTime is the interval of the
-    // frame the other per-frame counters on line one already describe.
+    // Under vsync or a frame cap the same remainder is mostly the limiter sleeping, and calling that a GPU
+    // wait points at the wrong bottleneck. The console owns both limiters, so it checks them and renames
+    // the number instead of leaving the reader to remember. `0.00 ms gpu wait` uncapped is therefore an
+    // ANSWER — shaving GPU work will not move this frame — while `idle (vsync)` is a non-answer, and the
+    // two used to be indistinguishable. For real GPU frame time an external tool (MangoHud, radeontop,
+    // PIX) is still the instrument; draw calls and primitives are the workload proxies here.
+    //
+    // The wall clock is FrameClock's monotonic interval rather than 1000/fps or a process delta, because
+    // both of those are the wrong quantity in exactly the workflow this line exists for — see FrameClock.
     //
     // `fps` stays the one-second average, because that is what an fps readout means and a single frame's
     // reciprocal is too jittery to read. So `fps` and `frame` deliberately describe different windows and
@@ -432,13 +434,32 @@ public static class RenderConsole
     {
         double fps = Performance.GetMonitor(Performance.Monitor.TimeFps);
         double cpuMs = Performance.GetMonitor(Performance.Monitor.TimeProcess) * 1000d;
-        // No host in the tree (the unit-test harness) leaves only the average to report the frame with.
-        double frameMs = host() is { } anchor && anchor.IsInsideTree()
-            ? anchor.GetProcessDeltaTime() * 1000d
+        // The averaged frame is the fallback, not the reading: nothing has ticked the clock when there is
+        // no overlay in the tree (the unit-test harness), and a wrong-window number beats none at all only
+        // because the alternative is a blank column.
+        double frameMs = FrameClock.LastFrameMs > 0d ? FrameClock.LastFrameMs
             : fps > 0d ? 1000d / fps : 0d;
         double physicsMs = Performance.GetMonitor(Performance.Monitor.TimePhysicsProcess) * 1000d;
         double navigationMs = Performance.GetMonitor(Performance.Monitor.TimeNavigationProcess) * 1000d;
-        double gpuWaitMs = Mathf.Max(0d, frameMs - cpuMs);
+        // Physics comes out too. TimeProcess is the idle step ALONE — the physics step is a separate
+        // monitor, printed on the next line — so a frame that ran physics leaves that work in the
+        // remainder, where a heavier rigid-body load would read as the GPU falling behind.
+        double idleMs = Mathf.Max(0d, frameMs - cpuMs - physicsMs);
+
+        // What the remainder MEANS depends on whether the frame was allowed to run flat out, and the
+        // console knows because both limiters are its own variables. Under vsync or a frame cap the
+        // remainder is mostly the deliberate sleep, and reading that as "the GPU is behind" is exactly
+        // backwards — worse here than elsewhere, because r.fps.max's own help recommends a cap while
+        // measuring. So the diagnosis is withheld and the idle time named for what is causing it.
+        bool vsync = DisplayServer.WindowGetVsyncMode() != DisplayServer.VSyncMode.Disabled;
+        bool capped = Engine.MaxFps > 0;
+        string idleLabel = (vsync, capped) switch
+        {
+            (true, true) => "idle (vsync + cap, not a gpu reading)",
+            (true, false) => "idle (vsync, not a gpu reading)",
+            (false, true) => "idle (fps cap, not a gpu reading)",
+            _ => "gpu wait (derived)",
+        };
         double drawCalls = Performance.GetMonitor(Performance.Monitor.RenderTotalDrawCallsInFrame);
         double primitives = Performance.GetMonitor(Performance.Monitor.RenderTotalPrimitivesInFrame);
         double objects = Performance.GetMonitor(Performance.Monitor.RenderTotalObjectsInFrame);
@@ -449,9 +470,8 @@ public static class RenderConsole
             + "{5:0} render objects   {6:0.0} MB rss",
             fps, frameMs, cpuMs, drawCalls, primitives, objects, rssMb));
         yield return ConsoleLine.Reply(string.Format(CultureInfo.InvariantCulture,
-            "{0:0.00} ms gpu wait (derived)   {1:0.00} ms physics   {2:0.00} ms navigation   "
-            + "{3:0.0} MB vram",
-            gpuWaitMs, physicsMs, navigationMs, vramMb));
+            "{0:0.00} ms {1}   {2:0.00} ms physics   {3:0.00} ms navigation   {4:0.0} MB vram",
+            idleMs, idleLabel, physicsMs, navigationMs, vramMb));
     }
 
     private static IEnumerable<ConsoleLine> Copy(Func<Node?> host, IReadOnlyList<string> arguments)

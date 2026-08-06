@@ -172,10 +172,16 @@ can I turn off about shadows", Tab completes names, and Up/Down walk what you al
 carry several statements: `foliage.enabled 0; objects.trees.enabled 0; perf`.
 
 `perf` answers two different questions, one per line. The first is the workload — draw calls, primitives,
-render objects. The second is where the frame actually goes, and `gpu wait` is the number to read first:
-it is wall-clock frame minus the CPU's own work, so with vsync off **0.00 means the CPU is the
-bottleneck** and removing GPU work will not move the frame. Godot has no GPU-time monitor, so this is a
-derived wait rather than a cost; MangoHud or PIX is still the instrument for true GPU frame time.
+render objects. The second is where the frame actually goes, and its leading number is the one to read
+first: wall-clock frame minus the idle step minus physics, i.e. the part of the frame the engine did not
+report as CPU work.
+
+That remainder only means "waiting on the GPU" when the frame was allowed to run flat out, so the line
+names it for what it is. Uncapped and with vsync off it reads `gpu wait`, and **0.00 means the CPU is the
+bottleneck** — removing GPU work will not move the frame. Under vsync or `r.fps.max` it reads
+`idle (vsync)` / `idle (fps cap)` instead, because there the remainder is mostly the limiter sleeping and
+says nothing about the GPU. Worth knowing when following `r.fps.max`'s own advice to cap while measuring.
+Godot has no GPU-time monitor either way; MangoHud or PIX is still the instrument for true GPU frame time.
 
 One trap worth knowing, because it silently reports the wrong frame: the monitors describe the **last
 completed** frame, so `terrain.enabled 0; perf` on a single line prices the frame *before* the change.
