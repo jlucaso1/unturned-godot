@@ -34,8 +34,15 @@ public partial class SunShafts : Node3D
 
     // Unity blurs on a downsampled buffer (sunShaftsResolution) across three iterations, which is what
     // makes its shafts soft. One full-resolution pass cannot match that, but sampling a lower mip of the
-    // screen costs nothing and blurs the source the same way — without it a sun peeking round a cloud is
-    // a hard-edged fan of streaks rather than a glow.
+    // screen blurs the source the same way — without it a sun peeking round a cloud is a hard-edged fan
+    // of streaks rather than a glow.
+    //
+    // Cheap, not free: `filter_linear_mipmap` on a hint_screen_texture is what makes Godot build the
+    // screen's mip chain ("Godot will automatically calculate the blurred texture for you"), and it does
+    // that every frame this pass draws. Blurring by hand instead costs far MORE, not less. The loop below
+    // takes one screen tap per sample, so replacing each with a 4-tap box on mip 0 adds 3 extra taps x
+    // Samples x every pixel on screen — ~100M taps at 1600x900, against the ~0.5M pixels a mip chain
+    // writes (the levels below the first sum to about a third of the frame). Keep the mip.
     private const float SourceMip = 1.0f;
 
     // Unity's SunShafts subtracts a threshold before blurring, so only what is BRIGHTER than the sky
@@ -139,6 +146,7 @@ public partial class SunShafts : Node3D
     // only what the depth buffer says is sky, with a geometric falloff per step. Godot's depth buffer is
     // reversed (0 at the far plane), so "sky" is depth at (or extremely near) zero.
     private static readonly string ShaderCode = $$"""
+    #pragma disable_preprocessor
     shader_type spatial;
     render_mode unshaded, blend_add, depth_test_disabled, depth_draw_never, cull_disabled, fog_disabled;
 

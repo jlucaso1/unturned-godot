@@ -41,6 +41,7 @@ public partial class PauseMenu : CanvasLayer
             Shader = new Shader
             {
                 Code = """
+                #pragma disable_preprocessor
                 shader_type canvas_item;
                 uniform sampler2D screen : hint_screen_texture, filter_linear_mipmap;
                 void fragment() {

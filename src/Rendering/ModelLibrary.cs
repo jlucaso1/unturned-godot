@@ -424,20 +424,28 @@ public static class ModelLibrary
     // deliberately up-bent foliage normals downward on every card's reverse side (dark inner blades). This
     // spatial shader undoes that flip, matching Unity's surface-shader behavior. Two variants only differ
     // in the sampler filter, mirroring the texture's own Unity filter mode.
+    // While the texture is still streaming the sampler is unassigned, and `hint_default_white` is what
+    // makes that state drawable: texture() then reads opaque white, so the tint comes through alone and
+    // the scissor keeps the card. Keep the hint even though an unassigned sampler measures white without
+    // it — that default is not documented, and a transparent one would scissor away every cutout the
+    // streamer has not reached yet.
     private static Shader CutoutShader(string filterHint, string cullMode) => new()
     {
         Code = $$"""
+        #pragma disable_preprocessor
         shader_type spatial;
         render_mode {{cullMode}}, specular_disabled;
         uniform vec4 tint : source_color = vec4(1.0);
-        uniform sampler2D albedo_texture : source_color, {{filterHint}};
-        uniform bool has_texture = false;
+        uniform sampler2D albedo_texture : source_color, hint_default_white, {{filterHint}};
         void fragment() {
-            vec4 c = (has_texture ? texture(albedo_texture, UV) : vec4(1.0)) * tint;
+            vec4 c = texture(albedo_texture, UV) * tint;
             ALBEDO = c.rgb;
             ALPHA = c.a;
             ALPHA_SCISSOR_THRESHOLD = 0.5;
             ROUGHNESS = 1.0;
+            SPECULAR = 0.0; // the render mode above drops the direct lobe; this drops the f0 the sky's
+                            // indirect specular reads, which the foliage-family shaders do not have
+
             if (!FRONT_FACING) {
                 NORMAL = -NORMAL;
             }
@@ -509,6 +517,10 @@ public static class ModelLibrary
             SpecularMode = matte
                 ? BaseMaterial3D.SpecularModeEnum.Disabled
                 : BaseMaterial3D.SpecularModeEnum.SchlickGgx,
+            // Disabling the mode is only half of it: it guards direct light, while the sky's indirect
+            // specular reads f0 either way, so leaving MetallicSpecular at its 0.5 default keeps a 4%
+            // reflection on surfaces meant to have none. Same pairing as the terrain splat shader.
+            MetallicSpecular = matte ? 0f : 0.5f,
             // The shader-authored culling, straight from the bundle data: the Standard family (nearly
             // every prop) back-face culls exactly like the game; only foliage/card/flag shaders author
             // Cull Off, and decal projectors author Cull Front.

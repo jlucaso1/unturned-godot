@@ -122,7 +122,6 @@ public sealed class TextureRegistry
                     if (filterMode == 0)
                         cutout.Shader = ModelLibrary.CutoutAsNearest(cutout.Shader);
                     cutout.SetShaderParameter("albedo_texture", tex);
-                    cutout.SetShaderParameter("has_texture", true);
                     break;
             }
         }

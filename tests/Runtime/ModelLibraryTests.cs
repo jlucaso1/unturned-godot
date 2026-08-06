@@ -182,6 +182,25 @@ public class ModelLibraryTests : TestClass
         Assert.NotNull(library[guid].SurfaceGetMaterial(0));
     }
 
+    // A cutout material spends the whole cold load with its sampler unassigned, and what keeps it drawable
+    // is the hint: texture() on an unassigned sampler reads opaque white, so the tint comes through and the
+    // 0.5 alpha scissor keeps the card. Godot happens to default to white without the hint too — but that
+    // is undocumented, and `hint_default_transparent` semantics would scissor away every cutout the
+    // streamer has not reached yet, so the hint is the part worth pinning.
+    [Test]
+    public void TheCutoutSamplerDefaultsToOpaqueWhiteWhileItsTextureIsStillStreaming()
+    {
+        foreach (EShaderCull cull in new[] { EShaderCull.Back, EShaderCull.Front, EShaderCull.TwoSided })
+            foreach (bool nearest in new[] { false, true })
+            {
+                string code = ModelLibrary.CutoutVariant(nearest, cull).Code;
+
+                Assert.Contains("hint_default_white", code, StringComparison.Ordinal);
+                Assert.Contains("vec4 c = texture(albedo_texture, UV) * tint;", code, StringComparison.Ordinal);
+                Assert.Contains("ALPHA_SCISSOR_THRESHOLD = 0.5;", code, StringComparison.Ordinal);
+            }
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
 
     private static TextureRegistry Registry(TempDir dir) => new(dir.Path);
