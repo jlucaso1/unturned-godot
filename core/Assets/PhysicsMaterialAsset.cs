@@ -17,17 +17,27 @@ public sealed class PhysicsMaterialAsset
     public Guid Fallback { get; }
     public IReadOnlyDictionary<string, string> AudioDefs { get; } // event key -> masterbundle .asset path
 
+    // WipDoNotUseTemp_BulletImpactEffect: the EffectAsset a hit on this surface spawns, by GUID. Named
+    // exactly that in the shipped assets — Nelson's own note that the field is provisional — and it is
+    // what PhysicMaterialCustomData.WipDoNotUseTemp_GetBulletImpactEffect reads, which a punch reaches
+    // through ReceiveSpawnLegacyImpact.
+    //
+    // Guid.Empty for a surface that names none, and about half of them do not. That is not a gap: those
+    // surfaces leave no mark in the game either.
+    public Guid ImpactEffect { get; }
+
     // The directory this asset was scanned from. The audio it names lives in the bundle of whichever
     // content source owns that directory, which is not always the game's own.
     public string Directory { get; internal set; } = string.Empty;
 
     private PhysicsMaterialAsset(Guid guid, List<string> unityNames, Guid fallback,
-        Dictionary<string, string> audioDefs)
+        Dictionary<string, string> audioDefs, Guid impactEffect)
     {
         Guid = guid;
         UnityNames = unityNames;
         Fallback = fallback;
         AudioDefs = audioDefs;
+        ImpactEffect = impactEffect;
     }
 
     public static bool TryParse(DatDictionary root, [MaybeNullWhen(false)] out PhysicsMaterialAsset asset)
@@ -56,7 +66,9 @@ public sealed class PhysicsMaterialAsset
                 if (defs.GetString(key) is { Length: > 0 } path)
                     audioDefs[key] = path;
 
-        asset = new PhysicsMaterialAsset(guid, names, fallback, audioDefs);
+        data.TryGetGuid("WipDoNotUseTemp_BulletImpactEffect", out Guid impactEffect);
+
+        asset = new PhysicsMaterialAsset(guid, names, fallback, audioDefs, impactEffect);
         return true;
     }
 }
@@ -144,6 +156,24 @@ public sealed class PhysicsMaterialBank
     private static bool TryParseFile(DatDictionary parsed,
         [MaybeNullWhen(false)] out PhysicsMaterialAsset asset) =>
         PhysicsMaterialAsset.TryParse(parsed, out asset);
+
+    // PhysicMaterialCustomData.WipDoNotUseTemp_GetBulletImpactEffect: the same fallback walk the audio
+    // takes, for the effect a hit on this surface spawns. Guid.Empty when the name is unknown or nothing
+    // along the chain names an effect — a surface that leaves no mark.
+    public Guid FindImpactEffect(string materialName)
+    {
+        if (!_byName.TryGetValue(materialName, out PhysicsMaterialAsset? asset))
+            return Guid.Empty;
+        for (int hops = 0; asset != null && hops < 8; hops++) // hop cap guards a fallback cycle
+        {
+            if (asset.ImpactEffect != Guid.Empty)
+                return asset.ImpactEffect;
+            asset = asset.Fallback != Guid.Empty && _byGuid.TryGetValue(asset.Fallback, out PhysicsMaterialAsset? fb)
+                ? fb
+                : null;
+        }
+        return Guid.Empty;
+    }
 
     // PhysicMaterialCustomData.GetAudioDef: resolve the material by name, then walk the fallback chain
     // until some asset defines the event key. Null when the name is unknown or nothing defines the key.

@@ -948,7 +948,7 @@ public partial class Main : Node3D
         AddChild(zombiesView);
         zombiesView.WarmupTemplates(); // still behind LoadingScreen; never import on a city-entry packet
         if (_impactAudio != null)
-            AddChild(ImpactView.Create(network.Client, _impactAudio));
+            AddChild(ImpactView.Create(network.Client, _impactAudio, _impactDecals));
     }
 
     // One MovementAudio per character; remote avatars get theirs from this factory (RemotePlayersView).
@@ -958,6 +958,74 @@ public partial class Main : Node3D
     // What a fist landing on a surface sounds like. Shares the bank and the voice pool with the footsteps
     // — the same PhysicsMaterialAssets answer both questions.
     private ImpactAudio? _impactAudio;
+
+    // The mark a fist leaves. Held so a session that starts later can hand it to the impact view.
+    private ImpactDecals? _impactDecals;
+
+    // What the deferred extraction still owes the decal cache. Runs beside the audio's, for the same
+    // reason: both open the same bundle, and doing it once is the whole point of planning it up front.
+    private System.Collections.Generic.List<ImpactDecalExtractor.Request> _decalRequests = new();
+
+    // The decal side of the impact: which effect each surface names, and where that effect's textures
+    // live. Scanned from the Bundles/Effects .dat tree — a few hundred small files — rather than from the
+    // master bundle, because the .dat is what carries the GUID a PhysicsMaterialAsset points at.
+    private void BuildImpactDecals(System.Collections.Generic.IReadOnlyList<ContentSource> sources,
+        PhysicsMaterialBank bank, string coreBundlePath)
+    {
+        var effectSources = new System.Collections.Generic.List<(string, string)>(sources.Count);
+        var bundleBySource = new System.Collections.Generic.Dictionary<string, ContentSource>(
+            System.StringComparer.Ordinal);
+        foreach (ContentSource source in sources)
+        {
+            // A source's Root IS its bundles directory: the game's own is <install>/Bundles, and a
+            // workshop item's is the folder its MasterBundle.dat sits in.
+            string prefix = MasterBundleConfig.Load(source.Root)?.AssetPrefix ?? string.Empty;
+            effectSources.Add((source.Root, prefix));
+            if (prefix.Length > 0)
+                bundleBySource[prefix.ToLowerInvariant()] = source;
+        }
+
+        ImpactEffectBank effects = ImpactEffectBank.ScanSources(effectSources);
+
+        // An effect's textures are packaged in the bundle of whichever source shipped the effect, which is
+        // exactly what its container path's prefix names — so the lookup is the prefix, not the surface
+        // that pointed at it. A workshop surface falling back to a core effect therefore reads the core
+        // bundle, as the audio does.
+        ContentSource? SourceOf(ImpactEffectAsset effect)
+        {
+            foreach ((string prefix, ContentSource source) in bundleBySource)
+                if (effect.BundleDirectory.StartsWith(prefix, System.StringComparison.Ordinal))
+                    return source;
+            return null;
+        }
+
+        // The extraction and the runtime have to agree about the cache key, so BOTH take the tag through
+        // this one lookup. A key written under one tag and read under another is a texture that exists on
+        // disk and is never found.
+        string TagForBundle(string bundlePath)
+        {
+            foreach (ContentSource source in sources)
+                if (string.Equals(source.BundlePath, bundlePath, System.StringComparison.Ordinal))
+                    return source.CacheTag;
+            return UnturnedGodot.Unity.TextureKey.TagFor(
+                System.IO.Path.GetFileNameWithoutExtension(coreBundlePath));
+        }
+
+        string BundleFor(ImpactEffectAsset effect) => SourceOf(effect)?.BundlePath ?? coreBundlePath;
+
+        string cacheDirectory = ProjectSettings.GlobalizePath("user://decal_cache");
+        _impactDecals = new ImpactDecals(bank, effects,
+            effect => TagForBundle(BundleFor(effect)), cacheDirectory);
+        AddChild(_impactDecals);
+
+        _decalRequests = new System.Collections.Generic.List<ImpactDecalExtractor.Request>();
+        foreach ((string bundlePath, System.Collections.Generic.HashSet<string> paths) in
+            ImpactDecalPlan.TexturesByBundle(bank, effects, BundleFor))
+        {
+            _decalRequests.Add(new ImpactDecalExtractor.Request(bundlePath, TagForBundle(bundlePath),
+                paths, cacheDirectory));
+        }
+    }
 
     // Movement audio infrastructure: the physics-material bank + terrain splat sampler resolve WHICH
     // definition a step plays; the shared AudioDefLibrary + positional OneShotAudio pool play it. The
@@ -1031,6 +1099,21 @@ public partial class Main : Node3D
                 }
             }
 
+            // The impact decals ride along, on the same thread and after the same wait. They read the same
+            // bundles the definitions above came from, and a second deferred pass would open those bundles
+            // a second time for a couple of dozen small textures.
+            foreach (ImpactDecalExtractor.Request request in _decalRequests)
+            {
+                if (AppShutdown.IsShuttingDown)
+                    break;
+                if (ImpactDecalExtractor.IsSatisfied(request))
+                    continue;
+                decoded = true;
+                int written = ImpactDecalExtractor.Extract(request);
+                if (written > 0)
+                    Log.Print($"[impact] cached {written} decal texture(s) from {request.BundleTag}");
+            }
+
             // A whole-bundle decode here lands AFTER the streamer has already compacted the load's heap,
             // so nothing else ever gives its transient back: the collector keeps the segments it grew for
             // it, and RSS stays hundreds of megabytes above a warm session's for the rest of the game.
@@ -1052,6 +1135,7 @@ public partial class Main : Node3D
         // Built here rather than in AttachSession because this is where the bank and the bundle-tag
         // lookup exist; a session that starts later takes the finished thing.
         _impactAudio = new ImpactAudio(bank, oneShot, BundleTagOfDirectory);
+        BuildImpactDecals(sources, bank, bundlePath);
 
         MovementAudio Factory(bool startGrounded) =>
             new(bank, landscape, splat, oneShot, startGrounded, BundleTagOfDirectory);

@@ -16,6 +16,7 @@ public sealed partial class ImpactView : Node
 {
     private NetClient? _client;
     private ImpactAudio? _audio;
+    private ImpactDecals? _decals;
 
     // Datagrams whose bytes did not decode. Read by the diagnostics overlay, same as the zombie view's.
     public int MalformedPacketsDropped { get; private set; }
@@ -26,11 +27,17 @@ public sealed partial class ImpactView : Node
     // whose extraction did not run.
     public int SilentImpacts { get; private set; }
 
-    public static ImpactView Create(NetClient client, ImpactAudio audio)
+    public static ImpactView Create(NetClient client, ImpactAudio audio, ImpactDecals? decals = null)
     {
         ArgumentNullException.ThrowIfNull(client);
         ArgumentNullException.ThrowIfNull(audio);
-        var view = new ImpactView { Name = "ImpactView", _client = client, _audio = audio };
+        var view = new ImpactView
+        {
+            Name = "ImpactView",
+            _client = client,
+            _audio = audio,
+            _decals = decals,
+        };
         client.OnUnhandledMessage += view.Handle;
         return view;
     }
@@ -56,5 +63,9 @@ public sealed partial class ImpactView : Node
 
         if (!_audio!.Play(impact.Surface, impact.Point))
             SilentImpacts++;
+
+        // The mark is independent of the sound. Several surfaces define one and not the other — Foliage
+        // and Snow name a particles-only effect but do have impact audio — so neither gates the other.
+        _decals?.Mark(impact.Surface, impact.Point, impact.Normal);
     }
 }
