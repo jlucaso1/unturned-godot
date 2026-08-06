@@ -212,6 +212,11 @@ public class TextureRegistryTests : TestClass
         var cutout = new ShaderMaterial { Shader = ModelLibrary.CutoutVariant(nearest: false, EShaderCull.Back) };
         registry.Register("leaves", cutout);
 
+        // Registered and drawable, but not yet textured: this is the window the whole cold load spends,
+        // and the sampler really being unassigned here is what makes `hint_default_white` load-bearing
+        // rather than decorative. ModelLibraryTests pins the hint; this pins the state it covers.
+        Assert.Null(cutout.GetShaderParameter("albedo_texture").As<Texture2D>());
+
         Assert.True(registry.Apply("leaves"));
 
         Assert.NotNull(cutout.GetShaderParameter("albedo_texture").As<Texture2D>());
