@@ -432,6 +432,47 @@ public class ConsoleTests : TestClass
         Release(console);
     }
 
+    // The line that decides what to optimize next. "gpu wait" is frame minus cpu, so it reads 0 while the
+    // CPU is the bottleneck — which is the answer, not a missing measurement, and the reason it ships next
+    // to the workload counters rather than instead of them.
+    [Test]
+    public async Task PerfSaysWhetherTheFrameIsWaitingOnTheGpu()
+    {
+        ConsoleOverlay console = await Attached();
+
+        console.Submit("perf", echo: false);
+
+        string text = console.Output.GetParsedText();
+        Assert.Contains("gpu wait", text);
+        Assert.Contains("ms physics", text);
+        Assert.Contains("ms navigation", text);
+        Assert.Contains("MB vram", text);
+        Release(console);
+    }
+
+    // Both shadow knobs reach a DirectionalLight3D that only exists once a world is loaded. With no
+    // lighting in the tree they must still take the value and say why nothing moved — the same contract
+    // every other Lighting-bound variable keeps, so `reset all` and the next map both behave.
+    [Test]
+    public async Task ShadowCascadeKnobsHoldTheirValueWithNoWorldLoaded()
+    {
+        ConsoleOverlay console = await Attached();
+        try
+        {
+            console.Submit("sun.shadows.cascades 1", echo: false);
+            console.Submit("sun.shadows.blend 0", echo: false);
+
+            Assert.Equal(1, RenderConsole.Console.Variable("sun.shadows.cascades")!.AsInt);
+            Assert.False(RenderConsole.Console.Variable("sun.shadows.blend")!.AsBool);
+            Assert.Contains("No lighting is loaded", console.Output.GetParsedText());
+        }
+        finally
+        {
+            RenderConsole.Console.Execute("reset all");
+            Release(console);
+        }
+    }
+
     // UG_CONSOLE is how a benchmark, a screenshot or a bug report makes the same change a person would
     // have made by hand, with nobody there to make it.
     [Test]

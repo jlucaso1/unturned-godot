@@ -146,6 +146,23 @@ public static class RenderConsole
             + "pass has to draw; the world keeps its lighting either way.",
             64f, 1f, 1024f, Lighting(host,
                 (cycle, value) => cycle.Sun.DirectionalShadowMaxDistance = value.AsFloat)));
+        console.Add(ConsoleVariable.Whole("sun.shadows.cascades",
+            "How many times the shadow distance is split: 1, 2 or 4. Every split is another pass over the "
+            + "casters in its slice, so this is the shadow pass's geometry cost. Fewer splits spread the "
+            + "same map over more ground, and that IS visible up close — at 64 m over one 2048 cascade a "
+            + "texel is ~62 mm everywhere, against the ~3 mm a screen pixel covers at 5 m.",
+            2, 1, 4, Lighting(host, (cycle, value) => cycle.Sun.DirectionalShadowMode = value.AsInt switch
+            {
+                1 => DirectionalLight3D.ShadowMode.Orthogonal,
+                4 => DirectionalLight3D.ShadowMode.Parallel4Splits,
+                _ => DirectionalLight3D.ShadowMode.Parallel2Splits,
+            })));
+        console.Add(ConsoleVariable.Switch("sun.shadows.blend",
+            "Cross-fade the seam between cascades. On (the default here, though not Godot's) every pixel "
+            + "in the blend band takes a SECOND shadow lookup; off makes the band one lookup again and "
+            + "leaves a visible line where the cascades meet — at the split, ~16 m out.",
+            true, Lighting(host,
+                (cycle, value) => cycle.Sun.DirectionalShadowBlendSplits = value.AsBool)));
 
         console.Add(ConsoleVariable.Switch("env.sky.enabled",
             "Draw the ported Unturned skybox. Off replaces it with a flat clear colour.",
@@ -238,8 +255,12 @@ public static class RenderConsole
                 return null;
             }));
 
-        console.Add("perf", "One line of the numbers the F3 HUD shows, into the scrollback — so a "
-            + "measurement is recorded next to the command that produced it.", "perf", Snapshot);
+        console.Add("perf", "The numbers the F3 HUD shows, into the scrollback — so a measurement is "
+            + "recorded next to the command that produced it. The second line says where the frame goes: "
+            + "'gpu wait' is derived (frame minus cpu), so at 0.00 with vsync off the CPU is the "
+            + "bottleneck and no amount of GPU work removed will move the frame. Godot reports the "
+            + "monitors of the LAST COMPLETED frame, so `foo 0; perf` on one line prices the frame "
+            + "BEFORE the change — put perf on its own line.", "perf", Snapshot);
         console.Add("copy", "Put the whole scrollback on the clipboard as plain text — the transcript a "
             + "bug report wants. Ctrl+C copies just what you have selected, when something is.",
             "copy", arguments => Copy(host, arguments));
@@ -380,19 +401,38 @@ public static class RenderConsole
         return null;
     };
 
+    // The second line is the one that decides what to optimize next, and it is derived rather than
+    // measured: Godot exposes no GPU-time monitor, so what is reportable is the CPU's WAIT on the GPU —
+    // wall-clock frame minus the main thread's own work. Rendering is submitted on the main thread and
+    // does not block on the GPU, so this stays ~0 while the CPU is the bottleneck (even at full GPU
+    // utilisation) and only opens up once the GPU is genuinely behind, or under VSync.
+    //
+    // It is therefore NOT a GPU cost. `0.00 ms gpu wait` with vsync off means shaving GPU work will not
+    // move the frame — the answer is on the CPU — and that is a different conclusion from a small one.
+    // For real GPU frame time an external tool (MangoHud, radeontop, PIX) is still the instrument; draw
+    // calls and primitives are the workload proxies here. Same reading as the F3 HUD, which derives it
+    // the same way, so a `perf` line pasted into a report says what the HUD said.
     private static IEnumerable<ConsoleLine> Snapshot(IReadOnlyList<string> arguments)
     {
         double fps = Performance.GetMonitor(Performance.Monitor.TimeFps);
         double frameMs = fps > 0d ? 1000d / fps : 0d;
         double cpuMs = Performance.GetMonitor(Performance.Monitor.TimeProcess) * 1000d;
+        double physicsMs = Performance.GetMonitor(Performance.Monitor.TimePhysicsProcess) * 1000d;
+        double navigationMs = Performance.GetMonitor(Performance.Monitor.TimeNavigationProcess) * 1000d;
+        double gpuWaitMs = Mathf.Max(0d, frameMs - cpuMs);
         double drawCalls = Performance.GetMonitor(Performance.Monitor.RenderTotalDrawCallsInFrame);
         double primitives = Performance.GetMonitor(Performance.Monitor.RenderTotalPrimitivesInFrame);
         double objects = Performance.GetMonitor(Performance.Monitor.RenderTotalObjectsInFrame);
+        double vramMb = Performance.GetMonitor(Performance.Monitor.RenderVideoMemUsed) / (1024d * 1024d);
         double rssMb = Benchmark.ProcessMemory.RssBytes() / (1024d * 1024d);
         yield return ConsoleLine.Reply(string.Format(CultureInfo.InvariantCulture,
             "{0:0} fps   {1:0.00} ms frame   {2:0.00} ms cpu   {3:0} draw calls   {4:0} primitives   "
             + "{5:0} render objects   {6:0.0} MB rss",
             fps, frameMs, cpuMs, drawCalls, primitives, objects, rssMb));
+        yield return ConsoleLine.Reply(string.Format(CultureInfo.InvariantCulture,
+            "{0:0.00} ms gpu wait (derived)   {1:0.00} ms physics   {2:0.00} ms navigation   "
+            + "{3:0.0} MB vram",
+            gpuWaitMs, physicsMs, navigationMs, vramMb));
     }
 
     private static IEnumerable<ConsoleLine> Copy(Func<Node?> host, IReadOnlyList<string> arguments)

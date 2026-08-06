@@ -162,7 +162,7 @@ can actually do.
 | `foliage` | `foliage.enabled`, `foliage.range` (draw distance as a fraction of the built one; streaming is unchanged, so this isolates the cost of *drawing* it) |
 | world | `roads.enabled`, `water.enabled`, `vehicles.enabled`, `npcs.enabled`, `zombies.enabled`, `players.enabled` |
 | places | `locations.enabled` — the map's town and landmark names, floated over the world. Off by default (the game names a place when you reach it); one command brings them back |
-| sun | `sun.enabled`, `sun.shadows.enabled`, `sun.shadows.distance` |
+| sun | `sun.enabled`, `sun.shadows.enabled`, `sun.shadows.distance`, `sun.shadows.cascades` (1/2/4 — each split is another pass over its slice of the casters), `sun.shadows.blend` (cross-fade the cascade seam; on costs a second shadow lookup in the band) |
 | environment | `env.sky.enabled`, `env.fog.enabled`, `env.volumetric.enabled`, `env.ssao.enabled`, `env.ssil.enabled`, `env.glow.enabled` |
 | renderer | `r.scale`, `r.msaa`, `r.taa.enabled`, `r.occlusion.enabled`, `r.lod.threshold`, `r.shadow.atlas` (positional), `r.shadow.directional` (the sun's shadow map edge — cleared and written every frame, so it is memory bandwidth first), `r.shadow.filter` (taps per shadowed pixel), `r.debug` (overdraw/wireframe), `r.vsync.enabled`, `r.fps.max` |
 | commands | `help`, `list`, `find <text>`, `reset <name\|all>`, `perf`, `copy`, `clear`, `quit` |
@@ -170,6 +170,16 @@ can actually do.
 `help` and `list` are the authority — the table above is a map, not a manual. `find shadow` answers "what
 can I turn off about shadows", Tab completes names, and Up/Down walk what you already typed. A line may
 carry several statements: `foliage.enabled 0; objects.trees.enabled 0; perf`.
+
+`perf` answers two different questions, one per line. The first is the workload — draw calls, primitives,
+render objects. The second is where the frame actually goes, and `gpu wait` is the number to read first:
+it is wall-clock frame minus the CPU's own work, so with vsync off **0.00 means the CPU is the
+bottleneck** and removing GPU work will not move the frame. Godot has no GPU-time monitor, so this is a
+derived wait rather than a cost; MangoHud or PIX is still the instrument for true GPU frame time.
+
+One trap worth knowing, because it silently reports the wrong frame: the monitors describe the **last
+completed** frame, so `terrain.enabled 0; perf` on a single line prices the frame *before* the change.
+Put `perf` on its own line.
 
 Recipes travel by clipboard, so both directions work. **Pasting** a block written a command per line —
 the shape one is written in here, in a note or in an issue — lands in the prompt as those commands in
