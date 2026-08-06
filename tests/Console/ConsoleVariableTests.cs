@@ -1,3 +1,4 @@
+using System;
 using UnturnedGodot.DevConsole;
 using Xunit;
 
@@ -132,6 +133,16 @@ public class ConsoleVariableTests
         Assert.Contains("outside", outside);
 
         Assert.Equal(0, applied); // TrySet stores; the registry is what applies
+    }
+
+    // The registration mistake the refusal above cannot catch: a default nothing can ever set it back to.
+    [Fact]
+    public void AChoiceRefusesADefaultOutsideItsOwnValues()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            ConsoleVariable.Choice("sun.shadows.cascades", "Splits.", 3, new[] { 1, 2, 4 }, _ => null));
+        Assert.Throws<ArgumentException>(() =>
+            ConsoleVariable.Choice("sun.shadows.cascades", "Splits.", 2, Array.Empty<int>(), _ => null));
     }
 
     [Fact]

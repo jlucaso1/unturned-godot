@@ -229,11 +229,6 @@ public partial class ConsoleOverlay : CanvasLayer
 
     public override void _Process(double delta)
     {
-        // This node is in the tree for the whole session whether or not the console is open, which makes
-        // it the one reliable per-frame hook `perf` can measure a frame against. The `delta` above is not
-        // that measurement — see FrameClock.
-        FrameClock.Tick();
-
         int moved = 0;
         while (moved < LinesPerFrame && _pending.TryDequeue(out (LogSeverity Severity, string Text) line))
         {

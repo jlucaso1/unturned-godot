@@ -75,6 +75,12 @@ public sealed class ConsoleVariable
     {
         if (allowed.Length == 0)
             throw new ArgumentException("A choice needs at least one allowed value.", nameof(allowed));
+        // A default outside the set would be a value TrySet refuses and `reset` restores, so the variable
+        // could only reach it by never being touched. That is a registration mistake rather than input,
+        // hence a throw: the console has no way to report it and no honest value to fall back on.
+        if (Array.IndexOf(allowed, value) < 0)
+            throw new ArgumentOutOfRangeException(nameof(value),
+                $"{value} is not one of {name}'s values ({string.Join("/", allowed)}).");
         int minimum = allowed[0];
         int maximum = allowed[0];
         foreach (int option in allowed)

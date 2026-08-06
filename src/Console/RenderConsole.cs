@@ -43,10 +43,24 @@ public static class RenderConsole
     // every one that overshot slightly.
     private const double CapSlackMs = 0.5d;
 
+    private static Node? HostNode;
+
     // Whichever node the console currently speaks through — the overlay in a normal session, the
     // benchmark's own context node in a run that has no overlay to open. Bindings resolve the world
     // from it, so it must be a node that is IN the tree the world was built into.
-    public static Node? Host { get; set; }
+    //
+    // Setting it also starts the frame clock, which is why this is not an auto-property: `perf` measures
+    // frames from a node of its own, and the benchmark host is the one that most needs it.
+    public static Node? Host
+    {
+        get => HostNode;
+        set
+        {
+            HostNode = value;
+            if (value != null)
+                FrameClock.EnsureTicking(value);
+        }
+    }
 
     // Built once per process, so a configuration survives the menu and the next map load. See
     // ConsoleVariable for why the values live here rather than in the nodes they drive.
@@ -435,13 +449,30 @@ public static class RenderConsole
     // `fps` stays the one-second average, because that is what an fps readout means and a single frame's
     // reciprocal is too jittery to read. So `fps` and `frame` deliberately describe different windows and
     // will not agree during a change — the averaged one is the steady state, the frame is the last one.
+    // Whether the present path made this frame wait. Enabled always does — a frame slower than the refresh
+    // still ends on a refresh boundary, so the sleep is there either way. Adaptive only does while the
+    // frame is keeping up; past the refresh period it tears rather than waits. Mailbox never does.
+    private static bool Blocking(DisplayServer.VSyncMode mode, double frameMs)
+    {
+        double refreshHz = DisplayServer.ScreenGetRefreshRate();
+        double refreshMs = refreshHz > 0d ? 1000d / refreshHz : 0d;
+        return mode switch
+        {
+            DisplayServer.VSyncMode.Disabled or DisplayServer.VSyncMode.Mailbox => false,
+            // An unknown refresh rate leaves nothing to compare, so the conservative reading stands.
+            DisplayServer.VSyncMode.Adaptive =>
+                refreshMs <= 0d || frameMs <= refreshMs + CapSlackMs,
+            _ => true,
+        };
+    }
+
     private static IEnumerable<ConsoleLine> Snapshot(Func<Node?> host, IReadOnlyList<string> arguments)
     {
         double fps = Performance.GetMonitor(Performance.Monitor.TimeFps);
         double cpuMs = Performance.GetMonitor(Performance.Monitor.TimeProcess) * 1000d;
-        // The averaged frame is the fallback, not the reading: nothing has ticked the clock when there is
-        // no overlay in the tree (the unit-test harness), and a wrong-window number beats none at all only
-        // because the alternative is a blank column.
+        // The averaged frame is the fallback, not the reading: the clock has nothing yet before the second
+        // rendered frame of a session, and a wrong-window number beats none at all only because the
+        // alternative is a blank column.
         double frameMs = FrameClock.LastFrameMs > 0d ? FrameClock.LastFrameMs
             : fps > 0d ? 1000d / fps : 0d;
         double navigationMs = Performance.GetMonitor(Performance.Monitor.TimeNavigationProcess) * 1000d;
@@ -449,16 +480,21 @@ public static class RenderConsole
         // monitor, printed on the next line — so a frame that ran physics leaves that work in the
         // remainder, where a heavier rigid-body load would read as the GPU falling behind.
         //
-        // And it comes out once PER STEP. Below the physics tick rate the engine runs several steps
-        // between two rendered frames while the monitor still prices one, so subtracting a single step at
-        // 30 fps against 60 Hz physics leaves half the physics bill behind — in the remainder, under a
-        // GPU label, in exactly the physics-bound session least able to afford the wrong diagnosis.
+        // And it comes out once PER STEP, summed as the steps happened. Below the physics tick rate the
+        // engine runs several steps between two rendered frames while the monitor prices one, so
+        // subtracting a single sample at 30 fps against 60 Hz physics leaves half the physics bill behind
+        // — in the remainder, under a GPU label, in exactly the physics-bound session least able to afford
+        // the wrong diagnosis. Multiplying that sample by the step count would only trade the error for an
+        // assumption that every step cost the same, which is least true on the frames that have several:
+        // what makes a step expensive arrives in bursts. FrameClock adds up what each step reported.
+        //
         // A measured 0 is kept as 0: above the physics tick rate most rendered frames run no physics step
         // at all, and billing them one would eat a real GPU wait out of the high-FPS frame where that is
-        // the entire question. Only an unmeasured clock falls back to one step.
+        // the entire question. Only an unmeasured clock falls back to the monitor's single sample.
         int steps = FrameClock.HasMeasured ? FrameClock.LastPhysicsSteps : 1;
-        double physicsStepMs = Performance.GetMonitor(Performance.Monitor.TimePhysicsProcess) * 1000d;
-        double physicsMs = physicsStepMs * steps;
+        double physicsMs = FrameClock.HasMeasured
+            ? FrameClock.LastPhysicsMs
+            : Performance.GetMonitor(Performance.Monitor.TimePhysicsProcess) * 1000d;
         double idleMs = Mathf.Max(0d, frameMs - cpuMs - physicsMs);
 
         // What the remainder MEANS depends on whether the frame was allowed to run flat out, and the
@@ -474,7 +510,13 @@ public static class RenderConsole
         // would be satisfied by every frame slower than the cap, which is most of them — the limiter
         // cannot make a frame shorter than its period, so "not meaningfully longer than it" is the whole
         // condition.
-        bool vsync = DisplayServer.WindowGetVsyncMode() != DisplayServer.VSyncMode.Disabled;
+        //
+        // Not every vsync mode blocks, so the mode is classified rather than compared against Disabled.
+        // Mailbox presents from a queue and imposes no refresh cap at all, and Adaptive is vsync only
+        // while the frame keeps up — below the refresh it tears instead of waiting, which is the same
+        // "flat out" the reading needs. Treating those two as blocking would hide the diagnosis on
+        // precisely the slow frames they were selected to keep responsive.
+        bool vsync = Blocking(DisplayServer.WindowGetVsyncMode(), frameMs);
         bool capBinding = Engine.MaxFps > 0 && frameMs <= (1000d / Engine.MaxFps) + CapSlackMs;
         string idleLabel = (vsync, capBinding) switch
         {
