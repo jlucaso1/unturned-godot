@@ -139,6 +139,7 @@ public partial class SunShafts : Node3D
     // only what the depth buffer says is sky, with a geometric falloff per step. Godot's depth buffer is
     // reversed (0 at the far plane), so "sky" is depth at (or extremely near) zero.
     private static readonly string ShaderCode = $$"""
+    #pragma disable_preprocessor
     shader_type spatial;
     render_mode unshaded, blend_add, depth_test_disabled, depth_draw_never, cull_disabled, fog_disabled;
 

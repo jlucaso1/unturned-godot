@@ -16,6 +16,7 @@ public static class UnturnedSky
     private static readonly Shader SkyShader = new()
     {
         Code = """
+        #pragma disable_preprocessor
         shader_type sky;
 
         uniform vec3 sky_color : source_color;       // SKY_SKY

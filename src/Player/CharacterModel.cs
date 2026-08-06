@@ -113,6 +113,7 @@ public static class CharacterModel
     private static readonly Shader BodyShader = new()
     {
         Code = """
+        #pragma disable_preprocessor
         shader_type spatial;
         uniform sampler2D face_albedo : source_color, filter_nearest;
         uniform vec3 skin_color : source_color;

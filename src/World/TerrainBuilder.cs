@@ -77,6 +77,8 @@ public static partial class TerrainBuilder
     {
         int controls = (painted + 3) / 4;
         var code = new System.Text.StringBuilder();
+        // No shader here uses a preprocessor directive, so the pass has nothing to do but read the text.
+        code.Append("#pragma disable_preprocessor\n");
         code.Append("shader_type spatial;\n");
         code.Append("render_mode cull_back, specular_disabled;\n");
         for (int slot = 0; slot < painted; slot++)

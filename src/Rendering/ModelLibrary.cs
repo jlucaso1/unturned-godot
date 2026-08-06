@@ -427,6 +427,7 @@ public static class ModelLibrary
     private static Shader CutoutShader(string filterHint, string cullMode) => new()
     {
         Code = $$"""
+        #pragma disable_preprocessor
         shader_type spatial;
         render_mode {{cullMode}}, specular_disabled;
         uniform vec4 tint : source_color = vec4(1.0);

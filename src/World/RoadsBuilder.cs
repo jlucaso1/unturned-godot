@@ -19,6 +19,7 @@ public static class RoadsBuilder
     private static readonly Shader RoadShader = new()
     {
         Code = """
+        #pragma disable_preprocessor
         shader_type spatial;
         render_mode cull_back; // Standard/Diffuse (the road shader) serializes Cull Back
         uniform bool paved = true;
