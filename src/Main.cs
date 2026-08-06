@@ -234,6 +234,7 @@ public partial class Main : Node3D
         {
             // Complete synchronous build — headless validation, or a screenshot that must be finished.
             WorldBuildResult world = WorldBuilder.Build(unturnedPath, _mapName);
+            _objectAssets = world.Assets;
             AddChild(world.Terrain);
             AddChild(world.Objects);
             AddChild(world.Vehicles);
@@ -888,6 +889,18 @@ public partial class Main : Node3D
         (player.Footsteps, _movementAudioFactory) = BuildMovementAudio(unturnedPath);
         player.Sounds = _oneShotAudio; // BuildMovementAudio created the pool; gestures share it
         AddChild(player);
+
+        // The crosshair, and the local raycast behind its hit marks. Both come from BuildMovementAudio's
+        // pass — it is what discovers the content sources and plans the icon extraction — so they are
+        // attached after it rather than in the initializer above.
+        if (_hudIcons != null)
+        {
+            var hud = new PlayerHud(_hudIcons);
+            AddChild(hud);
+            player.Hud = hud;
+            player.Hitmark = new PunchHitmark(_objectAssets,
+                () => GetNodeOrNull<ZombiesView>("Zombies"), () => GetViewport()?.World3D);
+        }
         _dayNight?.AttachCamera(player.Camera);
 
         string playerName = OS.GetEnvironment("PLAYER_NAME") is { Length: > 0 } pn ? pn : "Player";
@@ -962,6 +975,14 @@ public partial class Main : Node3D
     // The mark a fist leaves. Held so a session that starts later can hand it to the impact view.
     private ImpactDecals? _impactDecals;
 
+    // The crosshair's textures, once extracted. Null on a session that found no core bundle, which draws
+    // no crosshair rather than a stand-in.
+    private HudIconSet? _hudIcons;
+
+    // The object/tree assets this world was built from, kept so the crosshair's hit test can ask whether
+    // a fist can hurt what it is pointed at without scanning several thousand .dat files a second time.
+    private ObjectAssetDatabase? _objectAssets;
+
     // What the deferred extraction still owes the decal cache. Runs beside the audio's, for the same
     // reason: both open the same bundle, and doing it once is the whole point of planning it up front.
     private System.Collections.Generic.List<ImpactDecalExtractor.Request> _decalRequests = new();
@@ -1024,6 +1045,23 @@ public partial class Main : Node3D
         {
             _decalRequests.Add(new ImpactDecalExtractor.Request(bundlePath, TagForBundle(bundlePath),
                 paths, cacheDirectory));
+        }
+
+        // The crosshair's own icons ride the same cache and the same extraction. They are only ever in
+        // the game's core bundle — StaticIconRef resolves them through its Resources folder, which is
+        // what the core bundle carries — so this asks the core source specifically rather than whichever
+        // source happens to be first.
+        foreach (ContentSource source in sources)
+        {
+            if (!source.IsCore)
+                continue;
+            string prefix = MasterBundleConfig.Load(source.Root)?.AssetPrefix ?? string.Empty;
+            if (prefix.Length == 0 || source.BundlePath.Length == 0)
+                break;
+            string tag = TagForBundle(source.BundlePath);
+            _hudIcons = new HudIconSet(cacheDirectory, tag, prefix);
+            _decalRequests.Add(HudIcons.RequestFor(source.BundlePath, tag, prefix, cacheDirectory));
+            break;
         }
     }
 

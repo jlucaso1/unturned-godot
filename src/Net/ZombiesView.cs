@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Godot;
+using UnturnedGodot.Damage;
 using UnturnedGodot.Data;
 using UnturnedGodot.Net;
 using UnturnedGodot.Zombies;
@@ -97,6 +98,55 @@ public partial class ZombiesView : Node3D
         foreach (ZombieAvatar avatar in _avatars.Values)
             avatar.Root.QueueFree();
         _avatars.Clear();
+    }
+
+    // Reused rather than allocated per query: a hitscan runs on a swing, but the population it walks is
+    // the whole visible region, and building one of these per zombie per swing is pure garbage.
+    private readonly ZombieInstance _probe = new();
+
+    // Stands an avatar at a position with nothing else attached, so the hitscan above can be tested
+    // without a session, a network or a character import behind it. The body it walks is the capsule,
+    // and the capsule comes from the position and the speciality alone.
+    internal void PlantForTest(Vector3 position, EZombieSpeciality speciality = EZombieSpeciality.Normal)
+    {
+        var root = new Node3D { Position = position };
+        AddChild(root);
+        _avatars[(ushort)(_avatars.Count + 1)] = new ZombieAvatar
+        {
+            Root = root,
+            Speciality = speciality,
+            KnownPosition = position,
+        };
+    }
+
+    // The nearest zombie AVATAR the ray enters, and which limb it entered at.
+    //
+    // This is the client's own copy of PlayerEquipment.punch's raycast, and it exists for one reason: the
+    // hitmarker. The original raycasts locally and flashes the mark before the server has heard about the
+    // swing, because a mark that waits a round trip does not read as feedback. The damage is decided by
+    // the server regardless, so a disagreement here costs a wrong mark and nothing else.
+    //
+    // Against the rendered avatars rather than the authoritative population, which is the point — this is
+    // what the player can SEE.
+    public bool RaycastAvatars(Vector3 origin, Vector3 direction, float maxDistance, out ELimb limb)
+    {
+        limb = ELimb.Spine;
+        bool found = false;
+        float nearest = maxDistance;
+        foreach (ZombieAvatar avatar in _avatars.Values)
+        {
+            _probe.Position = avatar.KnownPosition;
+            _probe.Yaw = avatar.AppliedYaw;
+            _probe.Speciality = avatar.Speciality;
+            if (!ZombieHitbox.Raycast(_probe, origin, direction, nearest, out float distance,
+                    out ELimb candidate, out _))
+                continue;
+            nearest = distance;
+            limb = candidate;
+            found = true;
+        }
+
+        return found;
     }
 
     public override void _ExitTree()

@@ -83,7 +83,7 @@ internal static class PunchPhysics
     // collider is its own InstancedStaticBody node, and then the node's own name is the answer. Reading
     // only the batched form left every breakable unpunchable in the other mode — the hit came back
     // unnamed, so the ledger refused it as terrain.
-    private static System.Guid AssetOf(Godot.Collections.Dictionary hit)
+    internal static System.Guid AssetOf(Godot.Collections.Dictionary hit)
     {
         if (!hit.TryGetValue("collider", out Variant colliderValue))
             return System.Guid.Empty;

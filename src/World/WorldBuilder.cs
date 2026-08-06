@@ -23,7 +23,11 @@ public sealed record WorldBuildResult(
     int ObjectsWithMesh,
     int UniqueMeshCount,
     double TerrainMs,
-    double ObjectsMs);
+    double ObjectsMs,
+    // The object/tree asset database this build scanned. Handed back rather than rebuilt by whoever needs
+    // it next: the scan walks several thousand .dat files, and the crosshair's own hit test asks it the
+    // same question the placement did — whether a fist can hurt this asset.
+    ObjectAssetDatabase Assets);
 
 public static class WorldBuilder
 {
@@ -130,12 +134,13 @@ public static class WorldBuilder
         terrainSw.Stop();
 
         var objectsSw = Stopwatch.StartNew();
-        (Node3D objects, Node3D foliage, Node3D vehicles, int placed, int withMesh, int unique) =
-            BuildObjects(level, unturnedPath);
+        (Node3D objects, Node3D foliage, Node3D vehicles, int placed, int withMesh, int unique,
+            ObjectAssetDatabase assets) = BuildObjects(level, unturnedPath);
         objectsSw.Stop();
 
         return new WorldBuildResult(terrain, heights, objects, foliage, vehicles, tileCount, placed,
-            withMesh, unique, terrainSw.Elapsed.TotalMilliseconds, objectsSw.Elapsed.TotalMilliseconds);
+            withMesh, unique, terrainSw.Elapsed.TotalMilliseconds, objectsSw.Elapsed.TotalMilliseconds,
+            assets);
     }
 
     // Interactive-load variant of BuildTerrain: the pure-CPU tile/LOD generation runs on the thread pool
@@ -242,7 +247,7 @@ public static class WorldBuilder
         return layers;
     }
 
-    private static (Node3D root, Node3D foliage, Node3D vehicles, int placed, int withMesh, int unique)
+    private static (Node3D root, Node3D foliage, Node3D vehicles, int placed, int withMesh, int unique, ObjectAssetDatabase assets)
         BuildObjects(LevelInfo level, string unturnedPath)
     {
         // The game's bundle plus any workshop mod that ships one: a workshop map places objects whose
@@ -378,7 +383,7 @@ public static class WorldBuilder
         // NPCs are counted back in: they left `objects` to be built differently, not to stop being
         // placements, and a rendered total that includes them over one that does not reads as nonsense.
         return (objectsRoot, foliageRoot, vehiclesRoot, objects.Count + npcs.Count, withMesh,
-            meshLibrary.Count);
+            meshLibrary.Count, db);
     }
 
     // Shared by both build paths so a vehicle is batched exactly like a placed object. The collider
