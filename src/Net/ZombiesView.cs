@@ -28,7 +28,14 @@ public partial class ZombiesView : Node3D
         public EZombieState State;
         public byte Bound;         // the zombie's home region (from its ZombieList header)
         public bool Streaming;     // any ZombieStates received yet (idle zombies never stream)
-        public double StartleUntil; // while set, the wake-up roar plays before the state clip
+        // A one-shot clip owns the rig until this instant: the wake-up roar, or a stagger. One field for
+        // both, because "something is playing and the state clip must wait" is one fact — two fields
+        // meant deciding which won every time they overlapped, which is the bug this replaced.
+        //
+        // They still differ in one way, and only one: a stagger INTERRUPTS whatever is playing, while a
+        // startle only starts when nothing is. That is a line at each call site rather than a state
+        // machine. See PlayOneShot.
+        public double HoldUntil;
         public double NextGroan;    // Zombie.cs's groan loop clock
         public Vector3 TargetPosition; // Zombie.tellState's interpolation target
         public float TargetYaw;
@@ -117,6 +124,31 @@ public partial class ZombiesView : Node3D
             Speciality = speciality,
             KnownPosition = position,
         };
+    }
+
+    // Which clip owns an avatar's rig, and for how much longer. The three one-shot sources (a stagger, a
+    // wake-up roar, a swing) arrive from different places and used to race for it, so this is what the
+    // runtime tests assert against — the field itself, at a time they choose, without a frame loop.
+    internal double HoldRemainingForTest(ushort id, double now) =>
+        _avatars.TryGetValue(id, out ZombieAvatar? avatar) && avatar.HoldUntil > now
+            ? avatar.HoldUntil - now
+            : 0.0;
+
+    internal EZombieState StateForTest(ushort id) =>
+        _avatars.TryGetValue(id, out ZombieAvatar? avatar) ? avatar.State : EZombieState.Idle;
+
+    internal void StunForTest(ushort id, byte clip, double now)
+    {
+        if (_avatars.TryGetValue(id, out ZombieAvatar? avatar))
+            PlayOneShot(avatar, $"Stun_{clip}", now, interrupt: true, ZombieStun.DurationSeconds);
+    }
+
+    internal void PushStateForTest(ushort id, EZombieState state, double now)
+    {
+        if (!_avatars.TryGetValue(id, out ZombieAvatar? avatar))
+            return;
+        avatar.Streaming = true;
+        Push(new ZombieSnapshotState { Id = id, Position = avatar.KnownPosition, State = state }, now);
     }
 
     // The nearest zombie AVATAR the ray enters, and which limb it entered at.
@@ -264,23 +296,36 @@ public partial class ZombiesView : Node3D
     private static readonly System.Func<byte[], (byte Bound, List<(ushort Id, byte Clip)> Stuns)>
         ReadZombieStunned = ZombieNetMessages.ReadZombieStunned;
 
-    // Zombie.askStun: play the reel, and hold the rest of the animation off it while it runs.
+    // Plays a clip that owns the rig until it finishes. `interrupt` is the whole difference between the
+    // two callers: a stagger takes the rig from whatever was playing, a wake-up roar waits its turn.
     //
-    // The clip's own length is what the client waits, NOT the server's one second — the two are
+    // The clip's own length is what the hold lasts, NOT the server's stun duration — the two are
     // deliberately independent in the original, where the server counts a flat second and the client
-    // simply plays a reel. Reusing StartleUntil is not a shortcut: it is the same mechanism (a one-shot
-    // that suppresses the state clip until it finishes), and having two would mean deciding which wins.
-    private void Stun(ushort id, byte clip)
+    // simply plays a reel. `fallback` covers a rig that does not carry the clip.
+    private static void PlayOneShot(ZombieAvatar avatar, string clip, double now, bool interrupt,
+        double fallback)
     {
-        if (!_avatars.TryGetValue(id, out ZombieAvatar? avatar) || avatar.Rig == null)
+        if (!interrupt && avatar.HoldUntil > now)
             return;
 
-        string name = $"Stun_{clip}";
-        avatar.Rig.Replay(name);
-        avatar.StartleUntil = NetworkManager.Now
-            + (avatar.Rig.Clips.TryGetValue(name, out var length) && length.Length > 0f
+        // The HOLD is a fact about the avatar, not about the rig: an avatar whose character has not
+        // finished importing is still staggered, and must still not have a state clip picked for it the
+        // moment one arrives. So the hold is taken either way and only the playback is conditional.
+        avatar.Rig?.Replay(clip);
+        avatar.HoldUntil = now + (avatar.Rig != null
+            && avatar.Rig.Clips.TryGetValue(clip, out var length) && length.Length > 0f
                 ? length.Length
-                : ZombieStun.DurationSeconds);
+                : fallback);
+    }
+
+    // Zombie.askStun: play the stagger reel, taking the rig from whatever was on it.
+    private void Stun(ushort id, byte clip)
+    {
+        if (_avatars.TryGetValue(id, out ZombieAvatar? avatar))
+        {
+            PlayOneShot(avatar, $"Stun_{clip}", NetworkManager.Now, interrupt: true,
+                ZombieStun.DurationSeconds);
+        }
     }
 
     // ZombieManager's death: the avatar goes. Unturned plays a ragdoll here (Zombie.askDamage hands
@@ -368,31 +413,33 @@ public partial class ZombiesView : Node3D
         avatar.TargetYaw = NetAngles.DequantizeYaw(state.Yaw);
         avatar.Streaming = true;
 
-        if (state.State != avatar.State)
+        if (state.State == avatar.State)
+            return;
+
+        // The state is recorded whatever is playing: it is what the rig returns to when a one-shot ends.
+        bool wokeUp = avatar.State == EZombieState.Idle && state.State == EZombieState.Chase;
+        avatar.State = state.State;
+
+        if (wokeUp)
         {
-            bool wokeUp = avatar.State == EZombieState.Idle && state.State == EZombieState.Chase;
-            avatar.State = state.State;
-            if (wokeUp && avatar.Rig is { } rig)
-            {
-                // Zombie.alert's startle: the wake-up roar plays first (the body already moves —
-                // the server never pauses for it), then the state clip takes over.
-                string startle = StartleClip(avatar);
-                rig.Play(startle);
-                avatar.StartleUntil = now
-                    + (rig.Clips.TryGetValue(startle, out var clip) && clip.Length > 0f ? clip.Length : 0.5f);
+            // Zombie.alert's startle: the wake-up roar plays first (the body already moves — the server
+            // never pauses for it), then the state clip takes over. It waits its turn, so a stagger
+            // already on the rig keeps it.
+            PlayOneShot(avatar, StartleClip(avatar), now, interrupt: false, fallback: 0.5f);
+            if (avatar.HoldUntil > now)
                 PlayVoice(avatar, "ZombieRoars");
-            }
-            else if (avatar.StartleUntil <= 0)
-            {
-                if (avatar.State == EZombieState.Attack)
-                {
-                    avatar.Rig?.Replay(AttackClip(avatar));
-                    avatar.NextSwing = now + 1.0;
-                    PlayVoice(avatar, "ZombieRoars"); // askAttack's swing roar
-                }
-                // Chase/Return/Idle clips are picked per-frame from the rendered motion.
-            }
+            return;
         }
+
+        // A swing announced while something is playing is not queued: the server keeps sending Attack,
+        // so the per-frame loop starts one as soon as the rig is free.
+        if (avatar.State == EZombieState.Attack && avatar.HoldUntil <= now && avatar.Rig != null)
+        {
+            avatar.Rig.Replay(AttackClip(avatar));
+            avatar.NextSwing = now + 1.0;
+            PlayVoice(avatar, "ZombieRoars"); // askAttack's swing roar
+        }
+        // Chase/Return/Idle clips are picked per-frame from the rendered motion.
     }
 
     public override void _Process(double delta)
@@ -442,12 +489,12 @@ public partial class ZombiesView : Node3D
                 }
             }
 
-            if (avatar.StartleUntil > 0 && now >= avatar.StartleUntil)
+            if (avatar.HoldUntil > 0 && now >= avatar.HoldUntil)
             {
-                avatar.StartleUntil = 0;
-                avatar.Rig?.Play(ClipFor(avatar, visiblyMoving)); // the roar ended: current clip
+                avatar.HoldUntil = 0;
+                avatar.Rig?.Play(ClipFor(avatar, visiblyMoving)); // the one-shot ended: current clip
             }
-            else if (avatar.StartleUntil <= 0 && avatar.Rig != null && avatar.Streaming)
+            else if (avatar.HoldUntil <= 0 && avatar.Rig != null && avatar.Streaming)
             {
                 if (avatar.State == EZombieState.Attack)
                 {

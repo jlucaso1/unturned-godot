@@ -192,6 +192,119 @@ public class ZombieStunBehaviourTests
             Assert.Contains(clip, ZombieStun.CrawlerClips);
     }
 
+    // ---- The three races a stun used to lose -------------------------------------------------------
+
+    // A zombie staggered mid-attack must leave the Attack state. The state is REPLICATED, and a zombie
+    // left in Attack for the second it spends staggered has every client re-triggering its swing
+    // animation off that state — the body plays the stagger and then snaps into a swing it is not
+    // making. This is `isAttacking = false`, seen from the wire.
+    [Fact]
+    public void AStunTakesTheZombieOutOfTheAttackState()
+    {
+        ZombieSystem system = Brain();
+        ZombieInstance zombie = Plant(system);
+        zombie.State = EZombieState.Attack;
+
+        system.Stun(zombie);
+
+        Assert.Equal(EZombieState.Chase, zombie.State);
+    }
+
+    // And the swing clock goes back to zero. Without it, a zombie interrupted late in its cooldown swings
+    // the instant the stagger ends — the stun becomes a delay rather than a reprieve, which is exactly
+    // what a player staggering it was trying to buy.
+    [Fact]
+    public void AStunResetsTheSwingClockRatherThanFreezingIt()
+    {
+        ZombieSystem system = Brain();
+        ZombieInstance zombie = Plant(system);
+        zombie.SinceSwing = 10f; // long overdue for a swing
+
+        system.Stun(zombie);
+
+        Assert.Equal(0f, zombie.SinceSwing);
+    }
+
+    // The aggro race: being damaged both stuns and alerts, and the alert runs afterwards. It may retarget
+    // the zombie and put it back into Chase — what it must NOT do is undo the stagger.
+    [Fact]
+    public void BeingAlertedByTheSameHitDoesNotUndoTheStun()
+    {
+        ZombieSystem system = Brain();
+        ZombieInstance zombie = Plant(system);
+        zombie.State = EZombieState.Attack;
+        var players = new[]
+        {
+            new ZombiePlayerView(7, new Vector3(1f, 0f, 0f), UnturnedGodot.Player.EPlayerStance.Stand, moving: false),
+        };
+
+        system.Damage(zombie, 30, 7, players);
+
+        Assert.True(zombie.IsStunned);
+        Assert.Equal(7, zombie.TargetPlayer);           // the alert landed
+        Assert.True(zombie.PendingHit < 0f);            // and did not restore the swing
+        Assert.Equal(0f, zombie.SinceSwing);
+    }
+
+    // A zombie alerted WHILE staggered — a second player shooting it, or the detect scan noticing someone
+    // — keeps staggering. The alert changes who it is angry at, not whether it can move.
+    [Fact]
+    public void BeingAlertedDuringAStunKeepsTheZombieDown()
+    {
+        ZombieSystem system = Brain();
+        ZombieInstance zombie = Plant(system);
+        var players = new[]
+        {
+            new ZombiePlayerView(7, new Vector3(1f, 0f, 0f), UnturnedGodot.Player.EPlayerStance.Stand, moving: false),
+        };
+        system.Stun(zombie);
+        Vector3 before = zombie.Position;
+
+        // A second, weaker hit from another player: alerts, does not stun.
+        system.Damage(zombie, 5, 7, players);
+        for (int i = 0; i < 5; i++)
+            system.Tick(players, 0.08f);
+
+        Assert.True(zombie.IsStunned);
+        Assert.Equal(before, zombie.Position);
+    }
+
+    // Two stuns in a row do not stack into two seconds; the second restarts the clock, as a fresh
+    // askStun does. A player landing three heavy hits should not freeze a zombie for three seconds.
+    [Fact]
+    public void ASecondStunRestartsTheClockRatherThanStacking()
+    {
+        ZombieSystem system = Brain();
+        ZombieInstance zombie = Plant(system);
+
+        system.Stun(zombie);
+        system.Tick(NoPlayers, 0.5f);
+        system.Stun(zombie);
+
+        Assert.Equal(ZombieStun.DurationSeconds, zombie.StunRemaining, 3);
+    }
+
+    // A zombie whose stun expires goes back to being an ordinary zombie: it moves again on the very next
+    // tick rather than needing another event to release it.
+    [Fact]
+    public void AfterTheStunTheZombieHuntsAgain()
+    {
+        ZombieSystem system = Brain();
+        ZombieInstance zombie = Plant(system);
+        var players = new[]
+        {
+            new ZombiePlayerView(7, new Vector3(6f, 0f, 0f), UnturnedGodot.Player.EPlayerStance.Stand, moving: false),
+        };
+        system.Damage(zombie, 30, 7, players);
+        Assert.True(zombie.IsStunned);
+
+        for (int i = 0; i < 40; i++)
+            system.Tick(players, 0.08f);
+
+        Assert.False(zombie.IsStunned);
+        Assert.True(zombie.SinceSwing > 0f, "the swing clock never restarted after the stagger");
+    }
+
     [Fact]
     public void StunningADeadZombieDoesNothing()
     {

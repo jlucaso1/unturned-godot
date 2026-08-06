@@ -676,9 +676,19 @@ public sealed partial class ZombieSystem
     // Zombie.stun: the body stops where it stands, drops the swing it was in the middle of, and plays one
     // of its speciality's reels.
     //
-    // The in-progress swing is CANCELLED rather than paused — stun() sets isAttacking false, and a
-    // PendingHit left counting down would land its damage a moment after the stagger began, which is the
-    // hit the stun exists to prevent.
+    // Three things go, and each is a bug if it stays:
+    //
+    // The in-progress swing (PendingHit) is CANCELLED rather than paused. stun() sets isAttacking false,
+    // and a hit left counting down would land its damage a moment INTO the stagger — which is precisely
+    // the hit the player staggered the zombie to avoid.
+    //
+    // The ATTACK STATE goes with it, back to Chase. It is replicated, and a zombie left in Attack for the
+    // second it spends staggered has every client re-triggering its swing animation off that state: the
+    // body plays the stagger and then snaps into a swing it is not making. Leaving is the same
+    // `isAttacking = false`, seen from the wire.
+    //
+    // And the swing CLOCK is reset. Without it, a zombie interrupted late in its cooldown swings the
+    // instant the stagger ends, which turns the stun from a reprieve into a delay.
     public void Stun(ZombieInstance zombie)
     {
         ArgumentNullException.ThrowIfNull(zombie);
@@ -687,6 +697,9 @@ public sealed partial class ZombieSystem
 
         zombie.StunRemaining = ZombieStun.DurationSeconds;
         zombie.PendingHit = -1f;
+        zombie.SinceSwing = 0f;
+        if (zombie.State == EZombieState.Attack)
+            zombie.State = EZombieState.Chase;
         Stunned?.Invoke(zombie, ZombieStun.ClipFor(zombie.Speciality, _random.NextSingle()));
     }
 
