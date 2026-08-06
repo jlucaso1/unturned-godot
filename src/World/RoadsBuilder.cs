@@ -20,7 +20,11 @@ public static class RoadsBuilder
     {
         Code = """
         shader_type spatial;
-        render_mode cull_back; // Standard/Diffuse (the road shader) serializes Cull Back
+        // Standard/Diffuse (the road shader) serializes Cull Back, and being *Diffuse* has no specular
+        // response at all. Both halves of that are needed, for the reason TerrainBuilder's splat shader
+        // spells out: the render mode drops the direct Schlick-GGX lobe, but the sky's indirect specular
+        // reads f0 regardless, and SPECULAR's 0.5 default is what it reads unless the fragment writes 0.
+        render_mode cull_back, specular_disabled;
         uniform bool paved = true;
         void fragment() {
             vec3 asphalt = vec3(0.11, 0.11, 0.12);
@@ -36,6 +40,7 @@ public static class RoadsBuilder
                 ALBEDO = dirt;
             }
             ROUGHNESS = 1.0;
+            SPECULAR = 0.0;
         }
         """,
     };

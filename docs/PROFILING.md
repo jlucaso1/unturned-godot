@@ -406,6 +406,45 @@ Every count reproduced bit-for-bit: draw calls, primitives and render objects pe
 and texture bytes, pipeline compilations, and even the foliage streaming counters. Only the clock moved.
 That is what `scripts/check-structural-metrics.sh` gates in CI, and it is why it gates nothing timed.
 
+**That ±2.5% is the best case, and the default run is not it.** Repeating the same pair on another
+GPU-less 4-vCPU container, changing nothing, the per-pose timings drifted far wider than the aggregate
+suggests — and two counters the paragraph above calls reproducible did not reproduce either:
+
+| | `gpu.frameMs.median` | worst pose | `foliage.residentInstancesUnsettled` |
+|---|---:|---:|---:|
+| default run | −0.7% | **+38%** (`tight`) | 131,604 → 127,588 |
+| `foliage.enabled 0`, `TIME_OF_DAY` frozen | −1.2% | +3.7% (`overhead`) | — (foliage off) |
+
+Both drifts have the same cause, and it is the one the next paragraph names: the foliage streamer never
+settles here, so each run samples whatever residency it happened to reach. The frames then differ in how
+much grass is in them, which moves both the timing and the residency counters. The day/night clock adds
+a second, smaller wobble — it advances a full day per hour, so a run whose load took longer samples a
+different sun angle.
+
+So before differencing any *timing* on a GPU-less box, take both variables out:
+
+```sh
+TIME_OF_DAY=0.5 UG_CONSOLE="foliage.enabled 0" ./scripts/run-benchmark.sh gpu
+```
+
+That leaves every non-timing metric bit-identical between runs and the per-pose noise floor at ±3.7%,
+which is the number a change has to beat to mean anything. It also keeps the cutout/alpha-clip shaders in
+frame — tree canopies are static objects, not streamed foliage — so a foliage-shader change is still
+exercised. Read anything smaller than that floor as nothing, however clean the story behind it.
+
+**Sanity-check the floor with a control that must move.** A run that shows no effect proves nothing until
+the harness is known to be sensitive to the kind of change being tested. `terrain.splat.unpainted.enabled`
+exists for exactly that: switching it on removes the splat shader's per-pixel skip, which *must* cost.
+Under the deterministic recipe above it does, unmistakably:
+
+```
+gpu.frameMs.median          291.9 -> 342.8   +17.4%   (noise ±1.9%)
+gpu.frameMs.median.ground   376.5 -> 543.0   +44.2%   (noise ±2.2%)
+```
+
+A fragment-shader change worth having lands like that. If a candidate change disappears into the floor
+while this control does not, the floor is real and the candidate is not.
+
 **What the numbers do not mean.** A lavapipe `gpu.frameMs` is a CPU rasterizing, so it neither predicts a
 real GPU's frame time nor ranks changes the way a GPU would — shading, bandwidth and overdraw all price
 differently there. Its VRAM figures are system memory. And comparing against a baseline recorded on real
