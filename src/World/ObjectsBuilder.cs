@@ -480,6 +480,10 @@ public static class ObjectsBuilder
     private sealed class CollisionShapePool
     {
         public readonly List<Shape3D> Shapes = new();
+
+        // Shared by every body this builder uploads, so the per-body table is a byte array and the names
+        // themselves are stored once.
+        public readonly SurfaceTable Surfaces = new();
         public readonly Dictionary<(List<CachedCollider>, int, long, long, long), int> Primitives = new();
         public readonly Dictionary<(List<CachedCollider>, int), int> Meshes = new();
         private readonly Dictionary<PrimitiveShapeIdentity, int> _finalPrimitives = new();
@@ -615,12 +619,11 @@ public static class ObjectsBuilder
         bool directBuckets = EnvFlag.IsOn(OS.GetEnvironment("UG_DIRECT_COLLISION_BUCKETS"), whenUnset: true);
         bool mayChunk = CollisionChunkMetres > 0f
             && (long)instances.Count * (primitives.Count + meshes.Count) >= MinChunkedCollisionShapes;
-        SpatialBuckets<(int Shape, Transform3D Transform)>? buckets = directBuckets && mayChunk
-            ? new SpatialBuckets<(int, Transform3D)>(CollisionChunkMetres) : null;
-        List<(int Shape, Transform3D Transform)>? directFlat = directBuckets && !mayChunk
-            ? new List<(int, Transform3D)>() : null;
-        List<(int Shape, Transform3D Transform, Vector3 WorldOrigin)>? legacy = directBuckets
-            ? null : new List<(int, Transform3D, Vector3)>();
+        SpatialBuckets<CollisionPlacement>? buckets = directBuckets && mayChunk
+            ? new SpatialBuckets<CollisionPlacement>(CollisionChunkMetres) : null;
+        List<CollisionPlacement>? directFlat = directBuckets && !mayChunk ? new List<CollisionPlacement>() : null;
+        List<(CollisionPlacement Placement, Vector3 WorldOrigin)>? legacy = directBuckets
+            ? null : new List<(CollisionPlacement, Vector3)>();
 
         // Only the bodies a navmesh probe can hit are worth mirroring: that probe masks
         // CollisionLayers.World, so MEDIUM furniture — which deliberately sits off it — is skipped here
@@ -628,15 +631,21 @@ public static class ObjectsBuilder
         CollisionFieldBuilder? field =
             (collisionLayer & CollisionLayers.World) != 0 ? pool.Field : null;
 
-        void AddPlacement(int shape, Transform3D transform, Vector3 origin)
+        // The surface index rides with the placement rather than with the SHAPE, because shapes are shared:
+        // ShapeFor pools one per (collider, scale) and the final dedup pass aliases identical dimensions
+        // across assets outright, so the same BoxShape3D backs a wooden crate and a metal locker. The
+        // placement is the finest thing that still knows which collider it came from, and it is also what
+        // BodyAddShape consumes in order — which is exactly the index a raycast hands back.
+        void AddPlacement(int shape, Transform3D transform, Vector3 origin, byte material)
         {
             field?.AddInstance(pool.MirrorOf(shape), transform);
+            var placement = new CollisionPlacement(shape, transform, material);
             if (buckets != null)
-                buckets.Add(origin.X, origin.Z, (shape, transform));
+                buckets.Add(origin.X, origin.Z, placement);
             else if (directFlat != null)
-                directFlat.Add((shape, transform));
+                directFlat.Add(placement);
             else
-                legacy!.Add((shape, transform, origin));
+                legacy!.Add((placement, origin));
         }
 
         // One shape per (collider, scale) rather than per instance: the scale is baked into the shape, and
@@ -700,7 +709,10 @@ public static class ObjectsBuilder
                     continue;
                 int index = ShapeFor(i, world.Basis.Scale);
                 if (index >= 0)
-                    AddPlacement(index, world.Orthonormalized(), world.Origin);
+                {
+                    AddPlacement(index, world.Orthonormalized(), world.Origin,
+                        pool.Surfaces.IndexOf(primitives[i].Collider.MaterialName));
+                }
             }
 
             if (IsDegenerate(instance.Basis))
@@ -711,14 +723,15 @@ public static class ObjectsBuilder
                 && Mathf.IsEqualApprox(sc.Y, 1f, 0.001f) && Mathf.IsEqualApprox(sc.Z, 1f, 0.001f);
             for (int m = 0; m < meshes.Count; m++)
             {
+                byte surface = pool.Surfaces.IndexOf(meshes[m].Collider.MaterialName);
                 if (unscaled && sharedMesh[m] >= 0)
-                    AddPlacement(sharedMesh[m], instance, instance.Origin);
+                    AddPlacement(sharedMesh[m], instance, instance.Origin, surface);
                 else
                 {
                     int baked = pool.AddMesh(meshes[m].Collider,
                         instance * UnityMath.ReflectZ(meshes[m].Collider.LocalToRoot));
                     if (baked >= 0)
-                        AddPlacement(baked, Transform3D.Identity, instance.Origin);
+                        AddPlacement(baked, Transform3D.Identity, instance.Origin, surface);
                 }
             }
         }
@@ -730,63 +743,62 @@ public static class ObjectsBuilder
             if (buckets != null && count >= MinChunkedCollisionShapes
                 && bodyCount + buckets.Groups.Count <= MaxObjectCollisionBodies)
             {
-                foreach (((int x, int z), List<(int Shape, Transform3D Transform)> inCell)
-                    in buckets.Groups)
+                foreach (((int x, int z), List<CollisionPlacement> inCell) in buckets.Groups)
                 {
                     AddCollisionBody(root, owner, ref bodyCount, ObjectCollisionNames.For(guid, x, z),
-                        pool.Shapes, inCell, collisionLayer);
+                        pool, inCell, collisionLayer);
                 }
                 return;
             }
-            AddCollisionBody(root, owner, ref bodyCount, ObjectCollisionNames.For(guid), pool.Shapes,
+            AddCollisionBody(root, owner, ref bodyCount, ObjectCollisionNames.For(guid), pool,
                 directFlat ?? buckets!.Flatten(), collisionLayer);
             return;
         }
 
-        List<(int Shape, Transform3D Transform, Vector3 WorldOrigin)> placements = legacy!;
+        List<(CollisionPlacement Placement, Vector3 WorldOrigin)> placements = legacy!;
         if (placements.Count == 0) return;
 
         if (CollisionChunkMetres > 0f && placements.Count >= MinChunkedCollisionShapes)
         {
-            var cells = new Dictionary<(int X, int Z), List<(int Shape, Transform3D Transform)>>();
-            foreach ((int shape, Transform3D transform, Vector3 origin) in placements)
+            var cells = new Dictionary<(int X, int Z), List<CollisionPlacement>>();
+            foreach ((CollisionPlacement placement, Vector3 origin) in placements)
             {
                 var cell = (Mathf.FloorToInt(origin.X / CollisionChunkMetres),
                     Mathf.FloorToInt(origin.Z / CollisionChunkMetres));
-                if (!cells.TryGetValue(cell, out List<(int Shape, Transform3D Transform)>? inCell))
-                    cells[cell] = inCell = new List<(int, Transform3D)>();
-                inCell.Add((shape, transform));
+                if (!cells.TryGetValue(cell, out List<CollisionPlacement>? inCell))
+                    cells[cell] = inCell = new List<CollisionPlacement>();
+                inCell.Add(placement);
             }
             if (bodyCount + cells.Count <= MaxObjectCollisionBodies)
             {
-                foreach (((int x, int z), List<(int Shape, Transform3D Transform)> inCell) in cells)
+                foreach (((int x, int z), List<CollisionPlacement> inCell) in cells)
                     AddCollisionBody(root, owner, ref bodyCount, ObjectCollisionNames.For(guid, x, z),
-                        pool.Shapes, inCell, collisionLayer);
+                        pool, inCell, collisionLayer);
                 return;
             }
         }
 
-        var bodyPlacements = new List<(int Shape, Transform3D Transform)>(placements.Count);
-        foreach ((int shape, Transform3D transform, Vector3 _) in placements)
-            bodyPlacements.Add((shape, transform));
-        AddCollisionBody(root, owner, ref bodyCount, ObjectCollisionNames.For(guid), pool.Shapes,
+        var bodyPlacements = new List<CollisionPlacement>(placements.Count);
+        foreach ((CollisionPlacement placement, Vector3 _) in placements)
+            bodyPlacements.Add(placement);
+        AddCollisionBody(root, owner, ref bodyCount, ObjectCollisionNames.For(guid), pool,
             bodyPlacements, collisionLayer);
     }
 
     private static void AddCollisionBody(Node3D root, InstancedStaticBodies? owner, ref int bodyCount,
-        string name, IReadOnlyList<Shape3D> shapes,
-        IReadOnlyList<(int Shape, Transform3D Transform)> placements, uint collisionLayer)
+        string name, CollisionShapePool pool, IReadOnlyList<CollisionPlacement> placements, uint collisionLayer)
     {
         bodyCount++;
         if (owner != null)
-            owner.Add(name, shapes, placements, collisionLayer);
+            owner.Add(name, pool.Shapes, placements, collisionLayer, pool.Surfaces.Names);
         else
             root.AddChild(new InstancedStaticBody
             {
                 Name = name,
-                Shapes = shapes,
+                Shapes = pool.Shapes,
                 Placements = placements,
                 CollisionLayer = collisionLayer,
+                SurfaceNames = pool.Surfaces.Names,
             });
     }
 

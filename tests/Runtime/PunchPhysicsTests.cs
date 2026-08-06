@@ -70,7 +70,7 @@ public class PunchPhysicsTests : TestClass
         var bodies = new InstancedStaticBodies { Name = "ObjectCollision" };
         bodies.Add(ObjectCollisionNames.For(asset),
             new Shape3D[] { new BoxShape3D { Size = Vector3.One * 2f } },
-            new[] { (0, new Transform3D(Basis.Identity, new Vector3(0f, 0f, -4f))) },
+            new[] { new CollisionPlacement(0, new Transform3D(Basis.Identity, new Vector3(0f, 0f, -4f)), 0) },
             CollisionLayers.World);
         TestScene.AddChild(bodies);
         await NextPhysicsFrame();
@@ -98,7 +98,7 @@ public class PunchPhysicsTests : TestClass
         {
             Name = ObjectCollisionNames.For(asset),
             Shapes = new Shape3D[] { new BoxShape3D { Size = Vector3.One * 2f } },
-            Placements = new[] { (0, new Transform3D(Basis.Identity, new Vector3(0f, 0f, -4f))) },
+            Placements = new[] { new CollisionPlacement(0, new Transform3D(Basis.Identity, new Vector3(0f, 0f, -4f)), 0) },
             CollisionLayer = CollisionLayers.World,
         };
         TestScene.AddChild(body);

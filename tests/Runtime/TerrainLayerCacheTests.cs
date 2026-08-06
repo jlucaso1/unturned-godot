@@ -140,10 +140,10 @@ public class TerrainLayerCacheTests : TestClass
         Guid first = Guid.NewGuid(), second = Guid.NewGuid();
         var pool = new Shape3D[] { new BoxShape3D { Size = Vector3.One * 2f } };
         bodies.Add(ObjectCollisionNames.For(first), pool,
-            new[] { (0, new Transform3D(Basis.Identity, new Vector3(0f, 0f, -4f))) },
+            new[] { new CollisionPlacement(0, new Transform3D(Basis.Identity, new Vector3(0f, 0f, -4f)), 0) },
             CollisionLayers.World);
         bodies.Add(ObjectCollisionNames.For(second), pool,
-            new[] { (0, new Transform3D(Basis.Identity, new Vector3(0f, 0f, 4f))) },
+            new[] { new CollisionPlacement(0, new Transform3D(Basis.Identity, new Vector3(0f, 0f, 4f)), 0) },
             CollisionLayers.World);
         Assert.Equal(2, bodies.BodyCount); // counted from the pending definitions
 
@@ -165,7 +165,7 @@ public class TerrainLayerCacheTests : TestClass
     {
         var bodies = new InstancedStaticBodies { Name = "ObjectCollision" };
         bodies.Add("Col_whatever", new Shape3D[] { new BoxShape3D() },
-            new[] { (0, Transform3D.Identity) }, CollisionLayers.World);
+            new[] { new CollisionPlacement(0, Transform3D.Identity, 0) }, CollisionLayers.World);
         TestScene.AddChild(bodies);
         await NextPhysicsFrame();
 

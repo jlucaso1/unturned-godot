@@ -74,6 +74,100 @@ public class ColliderCacheTests
         Assert.Equal(2f, read[3].Height);
     }
 
+    // The physics material is what an impact resolves its sound and its mark through, so it has to survive
+    // the round trip on every kind — and the EMPTY name has to survive as empty, because that is the
+    // original's null sharedMaterial and it means "no impact effect" rather than "unknown".
+    [Fact]
+    public void RoundTrips_ThePhysicsMaterialName()
+    {
+        var colliders = new List<CachedCollider>
+        {
+            CachedCollider.Box(Pose, Vector3.Zero, Vector3.One, materialName: "Wood_Static"),
+            CachedCollider.Sphere(Pose, Vector3.Zero, 1f),                       // no material
+            CachedCollider.Capsule(Pose, Vector3.Zero, 0.5f, 2f, 1, materialName: "Metal_Static"),
+            CachedCollider.Mesh(Pose, new[] { Vector3.Zero }, new[] { 0 },
+                materialName: "Wood_Static"),                                    // repeats the first
+            CachedCollider.Box(Pose, Vector3.Zero, Vector3.One, isLadder: true,
+                materialName: "Concrete_Static"),                                // rides beside the flag
+        };
+
+        using var ms = new MemoryStream();
+        ColliderCache.Write(ms, colliders);
+        ms.Position = 0;
+        List<CachedCollider> read = ColliderCache.Read(ms);
+
+        Assert.Equal(new[] { "Wood_Static", "", "Metal_Static", "Wood_Static", "Concrete_Static" },
+            read.ConvertAll(c => c.MaterialName).ToArray());
+        Assert.True(read[4].IsLadder);
+        Assert.Equal(2f, read[2].Height);
+    }
+
+    // A repeated name is written to the table once, so the file grows by a byte per collider rather than
+    // by a string per collider. Ten copies of one name must not cost ten copies of it.
+    [Fact]
+    public void RepeatedMaterialNames_AreWrittenOnce()
+    {
+        var many = new List<CachedCollider>();
+        for (int i = 0; i < 10; i++)
+            many.Add(CachedCollider.Sphere(Pose, Vector3.Zero, 1f, materialName: "Wood_Static"));
+
+        using var repeated = new MemoryStream();
+        ColliderCache.Write(repeated, many);
+
+        var bare = new List<CachedCollider>();
+        for (int i = 0; i < 10; i++)
+            bare.Add(CachedCollider.Sphere(Pose, Vector3.Zero, 1f));
+        using var plain = new MemoryStream();
+        ColliderCache.Write(plain, bare);
+
+        // One length-prefixed "Wood_Static" (12 bytes) and nothing else.
+        Assert.Equal(12, repeated.Length - plain.Length);
+    }
+
+    // An index past the table is corruption, but the benign kind: the collider still has its shape, so it
+    // reads as "no material" rather than failing the whole file — which would leave the object with no
+    // collision at all, a far worse outcome than a silent punch.
+    [Fact]
+    public void Read_MaterialIndexPastTheTable_ReadsAsNoMaterial()
+    {
+        using var ms = new MemoryStream();
+        ColliderCache.Write(ms, new List<CachedCollider>
+        {
+            CachedCollider.Sphere(Pose, Vector3.Zero, 1f, materialName: "Wood_Static"),
+        });
+        byte[] bytes = ms.ToArray();
+
+        // header(8) + count(4) + table count(4) + "Wood_Static"(12) + kind(1) + flags(1) => the material.
+        bytes[8 + 4 + 4 + 12 + 2] = 9;
+
+        using var corrupt = new MemoryStream(bytes);
+        Assert.Equal(string.Empty, ColliderCache.Read(corrupt)[0].MaterialName);
+    }
+
+    [Fact]
+    public void Read_ImplausibleMaterialTableCount_FailsWithoutAllocating()
+    {
+        byte[] bytes = OneSphere();
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(12), int.MaxValue);
+
+        using var ms = new MemoryStream(bytes);
+        Assert.Throws<InvalidDataException>(() => ColliderCache.Read(ms));
+    }
+
+    // "UGC2" files carry no material table at all, so reading one here would take the table count out of
+    // the first collider's bytes. The magic is the version: an old file has to read as stale.
+    [Fact]
+    public void ACacheFromTheUnmaterialedFormatIsStaleRatherThanMisparsed()
+    {
+        byte[] bytes = OneSphere();
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes, 0x32434755); // "UGC2"
+
+        using var dir = new Helpers.TempDir();
+        Assert.False(ColliderCache.IsCurrent(dir.Write("ugc2.collider", bytes)));
+        using var ms = new MemoryStream(bytes);
+        Assert.Throws<InvalidDataException>(() => ColliderCache.Read(ms));
+    }
+
     [Fact]
     public void RoundTrips_EmptyList()
     {
@@ -219,9 +313,9 @@ public class ColliderCacheTests
         });
         byte[] bytes = ms.ToArray();
 
-        // header(8) + count(4) + kind(1) + flags(1) + transform(48) = 62; vertex count, then 3 vertices,
-        // then indices.
-        int offset = vertices ? 62 : 62 + 4 + (3 * 12);
+        // header(8) + count(4) + material-table count(4) + kind(1) + flags(1) + material(1) +
+        // transform(48) = 67; vertex count, then 3 vertices, then indices.
+        int offset = vertices ? 67 : 67 + 4 + (3 * 12);
         System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(offset), int.MaxValue);
 
         using var corrupt = new MemoryStream(bytes);

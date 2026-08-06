@@ -64,7 +64,7 @@ public class WorldPhysicsBodiesTests : TestClass
         {
             Name = ObjectCollisionNames.For(Guid.NewGuid()),
             Shapes = new Shape3D[] { shape },
-            Placements = new[] { (0, new Transform3D(Basis.Identity, new Vector3(0f, 0f, 0f))) },
+            Placements = new[] { new CollisionPlacement(0, new Transform3D(Basis.Identity, new Vector3(0f, 0f, 0f)), 0) },
         };
         TestScene.AddChild(body);
         await NextPhysicsFrame();
@@ -93,7 +93,7 @@ public class WorldPhysicsBodiesTests : TestClass
         var body = new InstancedStaticBody
         {
             Shapes = new Shape3D[] { new BoxShape3D() },
-            Placements = new[] { (0, Transform3D.Identity), (0, Transform3D.Identity) },
+            Placements = new[] { new CollisionPlacement(0, Transform3D.Identity, 0), new CollisionPlacement(0, Transform3D.Identity, 0) },
         };
         TestScene.AddChild(body);
         await NextFrame();
@@ -113,7 +113,7 @@ public class WorldPhysicsBodiesTests : TestClass
             var body = new InstancedStaticBody
             {
                 Shapes = new Shape3D[] { new BoxShape3D() },
-                Placements = new[] { (0, Transform3D.Identity) },
+                Placements = new[] { new CollisionPlacement(0, Transform3D.Identity, 0) },
             };
             TestScene.AddChild(body);
             await NextFrame();
@@ -136,7 +136,7 @@ public class WorldPhysicsBodiesTests : TestClass
         {
             Name = "Col_leak_check",
             Shapes = new Shape3D[] { new BoxShape3D { Size = Vector3.One } },
-            Placements = new[] { (0, Transform3D.Identity) },
+            Placements = new[] { new CollisionPlacement(0, Transform3D.Identity, 0) },
         };
         TestScene.AddChild(body);
         await NextPhysicsFrame();
