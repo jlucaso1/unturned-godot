@@ -38,6 +38,11 @@ public static class RenderConsole
     private static ConsoleRegistry? Shared;
     private static bool StartupTaken;
 
+    // How far under the frame cap's period still counts as hitting it. The limiter lands a fraction of a
+    // millisecond either side of its target, so exact comparison would call a capped frame uncapped on the
+    // ones that came in a hair early.
+    private const double CapSlackMs = 0.5d;
+
     // Whichever node the console currently speaks through — the overlay in a normal session, the
     // benchmark's own context node in a run that has no overlay to open. Bindings resolve the world
     // from it, so it must be a node that is IN the tree the world was built into.
@@ -412,8 +417,8 @@ public static class RenderConsole
     // the leading number is allowed to be CALLED.
     //
     // Godot exposes no GPU-time monitor, so nothing here measures the GPU. What is computable is the time
-    // in the frame that the engine did not report as CPU work: wall clock minus the idle step minus the
-    // physics step. That remainder is only the CPU's wait on the GPU when the frame was allowed to run
+    // in the frame that the engine did not report as CPU work: wall clock minus the idle step minus every
+    // physics step that ran inside it. That remainder is only the CPU's wait on the GPU when it ran
     // flat out — rendering is submitted on the main thread and does not block, so it sits at ~0 while the
     // CPU is the bottleneck (even at full GPU utilisation) and opens up once the GPU is genuinely behind.
     //
@@ -439,21 +444,32 @@ public static class RenderConsole
         // because the alternative is a blank column.
         double frameMs = FrameClock.LastFrameMs > 0d ? FrameClock.LastFrameMs
             : fps > 0d ? 1000d / fps : 0d;
-        double physicsMs = Performance.GetMonitor(Performance.Monitor.TimePhysicsProcess) * 1000d;
         double navigationMs = Performance.GetMonitor(Performance.Monitor.TimeNavigationProcess) * 1000d;
         // Physics comes out too. TimeProcess is the idle step ALONE — the physics step is a separate
         // monitor, printed on the next line — so a frame that ran physics leaves that work in the
         // remainder, where a heavier rigid-body load would read as the GPU falling behind.
+        //
+        // And it comes out once PER STEP. Below the physics tick rate the engine runs several steps
+        // between two rendered frames while the monitor still prices one, so subtracting a single step at
+        // 30 fps against 60 Hz physics leaves half the physics bill behind — in the remainder, under a
+        // GPU label, in exactly the physics-bound session least able to afford the wrong diagnosis.
+        int steps = Mathf.Max(1, FrameClock.LastPhysicsSteps);
+        double physicsStepMs = Performance.GetMonitor(Performance.Monitor.TimePhysicsProcess) * 1000d;
+        double physicsMs = physicsStepMs * steps;
         double idleMs = Mathf.Max(0d, frameMs - cpuMs - physicsMs);
 
         // What the remainder MEANS depends on whether the frame was allowed to run flat out, and the
-        // console knows because both limiters are its own variables. Under vsync or a frame cap the
-        // remainder is mostly the deliberate sleep, and reading that as "the GPU is behind" is exactly
-        // backwards — worse here than elsewhere, because r.fps.max's own help recommends a cap while
-        // measuring. So the diagnosis is withheld and the idle time named for what is causing it.
+        // console knows because both limiters are its own variables. Under vsync the remainder is mostly
+        // the deliberate sleep, and reading that as "the GPU is behind" is exactly backwards.
+        //
+        // A frame cap only distorts while it BINDS, which is the difference between the cap being set and
+        // the cap being reached: a 120 cap over a 45 fps workload never sleeps, and suppressing there
+        // would withhold the diagnosis from the slow frame that most needs it — while r.fps.max's own help
+        // recommends a cap during measurement, so that case is the norm rather than the exception. The
+        // frame is compared against the cap's period to tell the two apart.
         bool vsync = DisplayServer.WindowGetVsyncMode() != DisplayServer.VSyncMode.Disabled;
-        bool capped = Engine.MaxFps > 0;
-        string idleLabel = (vsync, capped) switch
+        bool capBinding = Engine.MaxFps > 0 && frameMs >= (1000d / Engine.MaxFps) - CapSlackMs;
+        string idleLabel = (vsync, capBinding) switch
         {
             (true, true) => "idle (vsync + cap, not a gpu reading)",
             (true, false) => "idle (vsync, not a gpu reading)",
@@ -469,9 +485,12 @@ public static class RenderConsole
             "{0:0} fps   {1:0.00} ms frame   {2:0.00} ms cpu   {3:0} draw calls   {4:0} primitives   "
             + "{5:0} render objects   {6:0.0} MB rss",
             fps, frameMs, cpuMs, drawCalls, primitives, objects, rssMb));
+        // The step count is printed only when it is not 1, because that is the case where the physics
+        // number stops being the monitor's own reading and the reader deserves to know why.
+        string physicsSteps = steps > 1 ? $" ({steps} steps)" : "";
         yield return ConsoleLine.Reply(string.Format(CultureInfo.InvariantCulture,
-            "{0:0.00} ms {1}   {2:0.00} ms physics   {3:0.00} ms navigation   {4:0.0} MB vram",
-            idleMs, idleLabel, physicsMs, navigationMs, vramMb));
+            "{0:0.00} ms {1}   {2:0.00} ms physics{3}   {4:0.00} ms navigation   {5:0.0} MB vram",
+            idleMs, idleLabel, physicsMs, physicsSteps, navigationMs, vramMb));
     }
 
     private static IEnumerable<ConsoleLine> Copy(Func<Node?> host, IReadOnlyList<string> arguments)

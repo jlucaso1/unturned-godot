@@ -173,15 +173,18 @@ carry several statements: `foliage.enabled 0; objects.trees.enabled 0; perf`.
 
 `perf` answers two different questions, one per line. The first is the workload — draw calls, primitives,
 render objects. The second is where the frame actually goes, and its leading number is the one to read
-first: wall-clock frame minus the idle step minus physics, i.e. the part of the frame the engine did not
-report as CPU work.
+first: wall-clock frame minus the idle step minus every physics step inside it, i.e. the part of the frame
+the engine did not report as CPU work. Below the physics tick rate several steps run per rendered frame,
+and the line says so (`2.10 ms physics (2 steps)`) because the number is then a sum rather than a reading.
 
 That remainder only means "waiting on the GPU" when the frame was allowed to run flat out, so the line
 names it for what it is. Uncapped and with vsync off it reads `gpu wait`, and **0.00 means the CPU is the
-bottleneck** — removing GPU work will not move the frame. Under vsync or `r.fps.max` it reads
-`idle (vsync)` / `idle (fps cap)` instead, because there the remainder is mostly the limiter sleeping and
-says nothing about the GPU. Worth knowing when following `r.fps.max`'s own advice to cap while measuring.
-Godot has no GPU-time monitor either way; MangoHud or PIX is still the instrument for true GPU frame time.
+bottleneck** — removing GPU work will not move the frame. Under vsync, or under an `r.fps.max` the frame
+is actually *reaching*, it reads `idle (vsync)` / `idle (fps cap)` instead, because there the remainder is
+mostly the limiter sleeping and says nothing about the GPU. A cap set well above what the workload can
+reach never sleeps, so it does not suppress the reading — which matters when following `r.fps.max`'s own
+advice to cap while measuring. Godot has no GPU-time monitor either way; MangoHud or PIX is still the
+instrument for true GPU frame time.
 
 One trap worth knowing, because it silently reports the wrong frame: the monitors describe the **last
 completed** frame, so `terrain.enabled 0; perf` on a single line prices the frame *before* the change.
