@@ -157,7 +157,7 @@ can actually do.
 
 | Namespace | Variables |
 |---|---|
-| `terrain` | `terrain.enabled` |
+| `terrain` | `terrain.enabled`, `terrain.splat.unpainted.enabled` (sample the splat layers a pixel gives no weight to — off by default, so this is the A/B control for the skip that makes the ground cheap; the image is the same either way) |
 | `objects` | `objects.enabled`, `.small.enabled`, `.medium.enabled`, `.large.enabled`, `.trees.enabled` (Unturned's RESOURCE family: trees, rocks, bushes), `.shadows.enabled` |
 | `foliage` | `foliage.enabled`, `foliage.range` (draw distance as a fraction of the built one; streaming is unchanged, so this isolates the cost of *drawing* it) |
 | world | `roads.enabled`, `water.enabled`, `vehicles.enabled`, `npcs.enabled`, `zombies.enabled`, `players.enabled` |
@@ -165,11 +165,19 @@ can actually do.
 | sun | `sun.enabled`, `sun.shadows.enabled`, `sun.shadows.distance` |
 | environment | `env.sky.enabled`, `env.fog.enabled`, `env.volumetric.enabled`, `env.ssao.enabled`, `env.ssil.enabled`, `env.glow.enabled` |
 | renderer | `r.scale`, `r.msaa`, `r.taa.enabled`, `r.occlusion.enabled`, `r.lod.threshold`, `r.shadow.atlas` (positional), `r.shadow.directional` (the sun's shadow map edge — cleared and written every frame, so it is memory bandwidth first), `r.shadow.filter` (taps per shadowed pixel), `r.debug` (overdraw/wireframe), `r.vsync.enabled`, `r.fps.max` |
-| commands | `help`, `list`, `find <text>`, `reset <name\|all>`, `perf`, `clear`, `quit` |
+| commands | `help`, `list`, `find <text>`, `reset <name\|all>`, `perf`, `copy`, `clear`, `quit` |
 
 `help` and `list` are the authority — the table above is a map, not a manual. `find shadow` answers "what
 can I turn off about shadows", Tab completes names, and Up/Down walk what you already typed. A line may
 carry several statements: `foliage.enabled 0; objects.trees.enabled 0; perf`.
+
+Recipes travel by clipboard, so both directions work. **Pasting** a block written a command per line —
+the shape one is written in here, in a note or in an issue — lands in the prompt as those commands in
+order, comments and all, and Enter runs them: the prompt holds one line, so the block is flattened onto
+the `;` above rather than welded into a name that does not exist. Nothing runs until you press it, which
+is what lets you read back what you are about to do. **Ctrl+C** copies whatever you have selected in the
+scrollback, and `copy` puts the whole of it on the clipboard as plain text — the transcript a bug report
+wants, and what dragging a selection across hundreds of scrolling lines cannot practically produce.
 
 `UG_CONSOLE="foliage.enabled 0; sun.shadows.enabled 0"` runs a line at startup, so a benchmark tier, a
 screenshot or a bug report can be given the same configuration a person would have typed; `SHOW_CONSOLE=1`

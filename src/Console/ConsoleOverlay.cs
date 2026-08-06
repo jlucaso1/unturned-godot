@@ -98,6 +98,69 @@ public partial class ConsoleOverlay : CanvasLayer
 
     public void ClearScrollback() => _output.Clear();
 
+    // What is selected in the scrollback, onto the clipboard. False means there was nothing selected,
+    // which is the caller's cue to leave the keystroke to the prompt.
+    internal bool CopySelection()
+    {
+        string selected = _output.GetSelectedText();
+        return selected.Length > 0 && PutOnClipboard(selected);
+    }
+
+    // The whole scrollback as plain text — no BBCode, no colours — which is what a bug report wants and
+    // what dragging a selection across a few hundred scrolling lines cannot practically produce.
+    internal bool CopyScrollback() => PutOnClipboard(_output.GetParsedText());
+
+    // A multi-line paste, taken from the LineEdit because a LineEdit cannot hold one: it drops the
+    // newlines, and a recipe copied a command per line arrived as one welded-together word. Flattened
+    // onto the console's own `;` grammar it runs as the four commands it reads as, in order.
+    //
+    // False leaves the keystroke alone, which is what a one-line clipboard wants: the LineEdit's own
+    // paste already handles the selection, the caret and the undo stack correctly, and there is nothing
+    // to fix about it.
+    internal bool PasteBlock()
+    {
+        if (!DisplayServer.HasFeature(DisplayServer.Feature.Clipboard))
+            return false;
+        string clipboard = DisplayServer.ClipboardGet();
+        if (!clipboard.Contains('\n', StringComparison.Ordinal)
+            && !clipboard.Contains('\r', StringComparison.Ordinal))
+            return false;
+
+        string flattened = ConsoleCommandLine.Flatten(clipboard);
+        if (flattened.Length == 0)
+            return false;
+        InsertAtPrompt(flattened);
+        return true;
+    }
+
+    // Puts text into the prompt the way a paste is expected to: at the caret, and OVER the selection if
+    // there is one. Replacing the selection is the LineEdit's job on its own paste path — paste_text()
+    // deletes it before inserting — and this does not go through paste_text. Without doing the same,
+    // pasting a recipe over a selected command kept both and ran the two welded together.
+    //
+    // Split out from PasteBlock so it is reachable without a clipboard: a headless session has none, so
+    // everything above the split refuses at the first guard and this would never be exercised.
+    internal void InsertAtPrompt(string text)
+    {
+        if (_prompt.HasSelection())
+        {
+            int from = _prompt.GetSelectionFromColumn();
+            _prompt.DeleteText(from, _prompt.GetSelectionToColumn());
+            _prompt.CaretColumn = from;
+        }
+        _prompt.InsertTextAtCaret(text);
+    }
+
+    // Godot only warns when the display server has no clipboard (headless, which is where the runtime
+    // suite runs), so ask first and let the caller say so rather than appearing to have worked.
+    private static bool PutOnClipboard(string text)
+    {
+        if (text.Length == 0 || !DisplayServer.HasFeature(DisplayServer.Feature.Clipboard))
+            return false;
+        DisplayServer.ClipboardSet(text);
+        return true;
+    }
+
     // Runs a line as though it had been typed. Public for the runtime suite and for UG_CONSOLE.
     public void Submit(string line, bool echo)
     {
@@ -142,6 +205,19 @@ public partial class ConsoleOverlay : CanvasLayer
                 break;
             case Key.Tab:
                 Complete();
+                break;
+            case Key.C when key.IsCommandOrControlPressed():
+                // RichTextLabel has a copy shortcut of its own, and it never fires here: it only runs
+                // when the label is focused, and the label is deliberately never focused (FocusMode is
+                // None below, so typing always reaches the prompt). Selecting the log and pressing the
+                // key that copies it everywhere else did nothing at all — the event went to the LineEdit,
+                // which copied its own empty selection. So the key is taken here instead.
+                if (!CopySelection())
+                    return; // nothing selected in the log: the prompt's own copy is what was meant
+                break;
+            case Key.V when key.IsCommandOrControlPressed():
+                if (!PasteBlock())
+                    return; // one line, or no clipboard: the LineEdit's own paste is already right
                 break;
             default:
                 // Enter is deliberately absent: letting it through is what makes LineEdit emit

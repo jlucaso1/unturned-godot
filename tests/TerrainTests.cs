@@ -78,60 +78,36 @@ public class TerrainTests
         Assert.Throws<IOException>(() => SplatmapTile.Parse(new byte[10], 0, 0));
     }
 
-    // What the renderer builds its shader from. A layer nobody painted is not drawn, and the whole point
-    // is that this is a fact about the tile rather than a threshold: "somewhere above zero" is the test,
-    // so a layer painted on a single texel at weight 1/255 still counts.
     [Fact]
-    public void Splatmap_Coverage_NamesOnlyTheLayersTheTilePaints()
+    public void Splatmap_ActiveLayerMask_ReportsOnlyPaintedLayers()
     {
         const int res = Landscape.SPLATMAP_RESOLUTION;
         var bytes = new byte[res * res * SplatmapTile.LAYERS];
-        for (int texel = 0; texel < res * res; texel++)
-            bytes[(texel * SplatmapTile.LAYERS) + 5] = 255;
-        bytes[(((7 * res) + 9) * SplatmapTile.LAYERS) + 2] = 1; // one texel, the smallest weight there is
+        bytes[SplatmapTile.WeightIndex(0, 0, 5)] = 255;   // the first texel paints layer 5...
+        bytes[SplatmapTile.WeightIndex(200, 71, 2)] = 1;  // ...and one deep inside paints layer 2, barely
 
-        SplatmapTile.SplatCoverage coverage = SplatmapTile.Parse(bytes, 0, 0).Coverage();
-
-        Assert.Equal((1 << 2) | (1 << 5), coverage.UsedMask);
-        Assert.Equal(2, coverage.UsedCount);
-        Assert.Equal(new[] { 2, 5 }, coverage.UsedLayers()); // ascending: the packing order
-        Assert.True(coverage.Uses(5));
-        Assert.False(coverage.Uses(0));
-        Assert.True(coverage.Covered); // layer 5 paints every texel
+        Assert.Equal((1 << 5) | (1 << 2), SplatmapTile.Parse(bytes, 0, 0).ActiveLayerMask());
     }
 
-    // A texel no layer paints is what the blend's "total is zero" branch exists for, so the coverage has
-    // to report it rather than let the renderer divide by it.
     [Fact]
-    public void Splatmap_Coverage_ReportsAnUnpaintedTexel()
+    public void Splatmap_ActiveLayerMask_UnpaintedTileIsEmpty()
     {
         const int res = Landscape.SPLATMAP_RESOLUTION;
         var bytes = new byte[res * res * SplatmapTile.LAYERS];
-        for (int texel = 1; texel < res * res; texel++) // texel 0 left at zero on every layer
-            bytes[(texel * SplatmapTile.LAYERS) + 3] = 128;
-
-        SplatmapTile.SplatCoverage coverage = SplatmapTile.Parse(bytes, 0, 0).Coverage();
-
-        Assert.Equal(1 << 3, coverage.UsedMask);
-        Assert.False(coverage.Covered);
+        Assert.Equal(0, SplatmapTile.Parse(bytes, 0, 0).ActiveLayerMask());
     }
 
     [Fact]
-    public void Splatmap_Coverage_EmptyTilePaintsNothing()
+    public void Splatmap_ActiveLayerMask_EveryLayerPaintedStopsEarly()
     {
+        // The scan gives up as soon as all eight are accounted for; painting them all in the first texel
+        // proves the early exit reports the same answer the full walk would.
         const int res = Landscape.SPLATMAP_RESOLUTION;
-        SplatmapTile.SplatCoverage coverage =
-            SplatmapTile.Parse(new byte[res * res * SplatmapTile.LAYERS], 0, 0).Coverage();
+        var bytes = new byte[res * res * SplatmapTile.LAYERS];
+        for (int layer = 0; layer < SplatmapTile.LAYERS; layer++)
+            bytes[SplatmapTile.WeightIndex(0, 0, layer)] = 32;
 
-        Assert.Equal(0, coverage.UsedMask);
-        Assert.Empty(coverage.UsedLayers());
-        Assert.False(coverage.Covered);
-    }
-
-    [Fact]
-    public void Splatmap_Coverage_ShortBuffer_Throws()
-    {
-        Assert.Throws<IOException>(() => SplatmapTile.CoverageOf(new byte[10]));
+        Assert.Equal(0xFF, SplatmapTile.Parse(bytes, 0, 0).ActiveLayerMask());
     }
 
     [Fact]

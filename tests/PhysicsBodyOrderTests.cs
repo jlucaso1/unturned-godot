@@ -1538,9 +1538,15 @@ public class PhysicsBodyOrderTests
             Assert.True(
                 CountOccurrences(body, "if ./scripts/fetch-game-data.sh --verify 2> /dev/null; then") == 1,
                 $"job '{name}' does not verify what the cache handed back");
-            Assert.True(CountOccurrences(body, "uses: actions/cache/restore@v6") == 1,
+            // Matched with the path, for the same reason the consumer filter above is: the subject is the
+            // content tree, not the action. A job may legitimately cache something else -- src-coverage
+            // restores the extracted-asset directory as well -- and counting bare `restore@v6` would read
+            // that as a second content restore and fail a job whose contract is intact.
+            Assert.True(CountOccurrences(body,
+                    "uses: actions/cache/restore@v6\n        with:\n          path: build/game-data") == 1,
                 $"job '{name}' does not restore the content cache exactly once");
-            Assert.True(CountOccurrences(body, "uses: actions/cache/save@v6") == 1,
+            Assert.True(CountOccurrences(body,
+                    "uses: actions/cache/save@v6\n        with:\n          path: build/game-data") == 1,
                 $"job '{name}' does not save the content cache exactly once, so a repair would be discarded");
             Assert.True(CountOccurrences(body,
                     "key: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-${{ github.run_id }}-${{ github.job }}") == 1,

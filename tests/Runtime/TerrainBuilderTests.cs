@@ -146,88 +146,162 @@ public class TerrainBuilderTests : TestClass
         tile.QueueFree();
     }
 
-    // The splat shader is generated for the number of layers the tile paints, and the eight-layer form is
-    // the maximum rather than the norm. What has to hold is that the pruned program is the SAME blend:
-    // a weighted average over the layers that are there, divided by their total.
+    // A tile's material carries the layers the tile PAINTS, not the eight it names. The terrain fills the
+    // screen, so every sampler bound here is paid at every ground pixel; a tile that paints three needs
+    // three layer textures and ONE control texture, not eight and two.
     [Test]
-    public void TheSplatShaderSamplesOnlyTheLayersTheTilePaints()
+    public void ATileBindsOnlyTheLayersItPaints()
     {
-        string three = TerrainBuilder.SplatShaderCode(3, covered: true);
+        var layers = new ImageTexture[SplatmapTile.LAYERS];
+        for (int i = 0; i < layers.Length; i++)
+            layers[i] = Pixel();
+        SplatmapTile splat = Painted((0, 0, 2, 200), (0, 0, 5, 55), (17, 9, 7, 255));
 
-        Assert.Contains("uniform sampler2D layer2", three);
-        Assert.DoesNotContain("layer3", three);      // the five it does not paint cost it no fetch
-        Assert.Contains("uniform sampler2D control0", three);
-        Assert.DoesNotContain("control1", three);    // nor does the second half of the weights
-        Assert.Contains("albedo / total", three);
+        ShaderMaterial material = SplatMaterial(splat, layers);
 
-        string eight = TerrainBuilder.SplatShaderCode(8, covered: false);
-        Assert.Contains("uniform sampler2D layer7", eight);
-        Assert.Contains("uniform sampler2D control1", eight);
-        Assert.Contains("c1.a", eight);              // layer 7's weight, in the last channel of the second
-        // A tile with an unpainted texel keeps the guard the eight-layer blend always had.
-        Assert.Contains("total > 0.0", eight);
+        // Layers 2, 5 and 7 in that order, and nothing bound past the third slot.
+        Assert.Same(layers[2], material.GetShaderParameter("layer0").As<ImageTexture>());
+        Assert.Same(layers[5], material.GetShaderParameter("layer1").As<ImageTexture>());
+        Assert.Same(layers[7], material.GetShaderParameter("layer2").As<ImageTexture>());
+        Assert.Null(material.GetShaderParameter("layer3").As<ImageTexture>());
+        Assert.NotNull(material.GetShaderParameter("control0").As<ImageTexture>());
+        Assert.Null(material.GetShaderParameter("control1").As<ImageTexture>());
     }
 
-    // One layer painted over the whole tile is `layer * w / w`. The weights cancel, so the tile needs no
-    // control texture at all — three of PEI's sixteen are exactly this.
+    // The weights have to follow the layers into their new slots. Layer 5's weight belongs in the channel
+    // that multiplies layer 5's texture, and the slots the tile does not fill must read zero so they add
+    // nothing to the blend OR to the total it is normalized by.
     [Test]
-    public void ASingleFullyPaintedLayerNeedsNoControlTexture()
+    public void TheControlTextureCarriesEachPaintedLayersWeightInItsOwnSlot()
     {
-        string code = TerrainBuilder.SplatShaderCode(1, covered: true);
+        var layers = new ImageTexture[SplatmapTile.LAYERS];
+        for (int i = 0; i < layers.Length; i++)
+            layers[i] = Pixel();
+        SplatmapTile splat = Painted((17, 9, 2, 200), (17, 9, 5, 55), (17, 9, 7, 128));
 
-        Assert.Contains("ALBEDO = texture(layer0, layer_uv).rgb;", code);
-        Assert.DoesNotContain("control", code);
-        Assert.DoesNotContain("total", code);
+        ShaderMaterial material = SplatMaterial(splat, layers);
+        Image control = material.GetShaderParameter("control0").As<ImageTexture>().GetImage();
 
-        // Not painted everywhere, though, and the weight no longer cancels: the blend comes back.
-        Assert.Contains("control0", TerrainBuilder.SplatShaderCode(1, covered: false));
+        // Image pixel (x, y) carries splat texel [x, y] — the same texel UV2 lands on.
+        Color texel = control.GetPixel(17, 9);
+        Assert.Equal(200, Mathf.RoundToInt(texel.R * 255f)); // slot 0 = layer 2
+        Assert.Equal(55, Mathf.RoundToInt(texel.G * 255f));  // slot 1 = layer 5
+        Assert.Equal(128, Mathf.RoundToInt(texel.B * 255f)); // slot 2 = layer 7
+        Assert.Equal(0, Mathf.RoundToInt(texel.A * 255f));   // unfilled slot: contributes nothing
+        Assert.Equal(Colors.Black with { A = 0f }, control.GetPixel(18, 9)); // an unpainted texel
     }
 
-    // A splatmap that paints nothing produced black out of the eight-layer blend (a zero numerator over a
-    // zero total). It still does, without sampling anything to get there.
+    // Four weights fit an RGBA8 image, so a fifth painted layer is where a SECOND control texture has to
+    // appear and where slot 4's weight has to land in its red channel — the channel the generated shader
+    // multiplies layer4 by. Everything above only ever fills one control texture, which leaves the loop
+    // bound and the slot-to-channel mapping across the boundary untested.
     [Test]
-    public void ATileThatPaintsNothingDrawsBlackWithoutSampling()
+    public void ATilePaintingMoreThanFourLayersGetsASecondControlTexture()
     {
-        string code = TerrainBuilder.SplatShaderCode(0, covered: false);
+        var layers = new ImageTexture[SplatmapTile.LAYERS];
+        for (int i = 0; i < layers.Length; i++)
+            layers[i] = Pixel();
+        // Layer 6 rather than 4, so a slot's index and its layer's index cannot be confused for one
+        // another: painted layer 6 has to arrive in slot 4, the first channel of the second control.
+        SplatmapTile splat = Painted((17, 9, 0, 10), (17, 9, 1, 20), (17, 9, 2, 30),
+            (17, 9, 3, 40), (17, 9, 6, 155));
 
-        Assert.Contains("ALBEDO = vec3(0.0);", code);
-        Assert.DoesNotContain("texture(", code);
+        ShaderMaterial material = SplatMaterial(splat, layers);
+
+        Assert.Same(layers[6], material.GetShaderParameter("layer4").As<ImageTexture>());
+        Color texel = material.GetShaderParameter("control1").As<ImageTexture>().GetImage().GetPixel(17, 9);
+        Assert.Equal(155, Mathf.RoundToInt(texel.R * 255f)); // slot 4 = layer 6
+        Assert.Equal(0, Mathf.RoundToInt(texel.G * 255f));   // and the three slots it does not fill
+        Assert.Equal(0, Mathf.RoundToInt(texel.B * 255f));
+        Assert.Equal(0, Mathf.RoundToInt(texel.A * 255f));
+        Assert.Null(material.GetShaderParameter("control2").As<ImageTexture>());
     }
 
-    // End to end on the main thread: the material a painted tile gets binds the layers it paints, in the
-    // compacted order the shader indexes them by, and nothing else.
+    // A tile whose splatmap is empty paints nothing. It still has to draw — the eight-way blend rendered
+    // it black through its `total > 0.0` guard, and a zero-sampler shader would not even compile.
     [Test]
-    public void TheMaterialBindsThePaintedLayersInPackedOrder()
+    public void ATileThatPaintsNothingStillDraws()
     {
-        const int res = Landscape.SPLATMAP_RESOLUTION;
-        var weights = new byte[res * res * SplatmapTile.LAYERS];
-        for (int texel = 0; texel < res * res; texel++)
-        {
-            weights[(texel * SplatmapTile.LAYERS) + 2] = 100; // layers 2 and 5, both over the whole tile
-            weights[(texel * SplatmapTile.LAYERS) + 5] = 155;
-        }
-        SplatmapTile splat = SplatmapTile.Parse(weights, 0, 0);
         var layers = new ImageTexture[SplatmapTile.LAYERS];
         for (int i = 0; i < layers.Length; i++)
             layers[i] = Pixel();
 
-        TerrainBuilder.TileMesh built = TerrainBuilder.BuildTileMesh(Flat(0, 0, 0.5f), splat, textured: true);
-        MeshInstance3D tile = TerrainBuilder.FinishTile(built, layers);
-        TestScene.AddChild(tile);
+        ShaderMaterial material = SplatMaterial(Painted(), layers);
 
-        var material = (ShaderMaterial)tile.Mesh.SurfaceGetMaterial(0);
-        Assert.Equal(layers[2].GetRid(), material.GetShaderParameter("layer0").As<ImageTexture>().GetRid());
-        Assert.Equal(layers[5].GetRid(), material.GetShaderParameter("layer1").As<ImageTexture>().GetRid());
-        Assert.NotNull(material.GetShaderParameter("control0").As<ImageTexture>());
-        Assert.Null(material.GetShaderParameter("control1").As<ImageTexture>());
-        // Two layers ride in two channels, not the four the eight-layer packing always uploaded.
-        Assert.Equal(Image.Format.Rg8, material.GetShaderParameter("control0")
-            .As<ImageTexture>().GetImage().GetFormat());
+        Assert.Same(layers[0], material.GetShaderParameter("layer0").As<ImageTexture>());
+        Assert.Null(material.GetShaderParameter("layer1").As<ImageTexture>());
+    }
 
-        tile.QueueFree();
+    // The generated shader is what the per-pixel saving actually rides on, and it is assembled from a
+    // count rather than written out, so the shape is worth pinning: one branch per painted layer, guarded
+    // by that layer's own weight channel, and a `total` that still sums every one of them so the
+    // normalized average matches the unconditional blend exactly.
+    [Test]
+    public void TheGeneratedShaderGuardsEverySampleAndStillSumsEveryWeight()
+    {
+        string code = TerrainBuilder.SplatShaderCode(5);
+
+        Assert.Contains("render_mode cull_back, specular_disabled;", code);
+        Assert.Contains("uniform sampler2D layer4 :", code);
+        Assert.DoesNotContain("uniform sampler2D layer5 :", code);
+        Assert.Contains("uniform sampler2D control1 :", code); // a fifth layer needs a second control
+        Assert.Contains("if (sample_unpainted || c1.r > 0.0)", code);
+        Assert.Contains("texture(layer4, uv).rgb * c1.r", code);
+        Assert.Contains("float total = c0.r + c0.g + c0.b + c0.a + c1.r;", code);
+        Assert.Contains("ALBEDO = total > 0.0 ? albedo / total : albedo;", code);
+        // The sample inside the branch keeps its implicit LOD — textureGrad measurably lost the
+        // anisotropic taps — and SPECULAR stays written, because the sky's indirect specular reads f0
+        // even though the render mode has disabled the direct lobe.
+        Assert.DoesNotContain("textureGrad", code);
+        Assert.Contains("SPECULAR = 0.0;", code);
+    }
+
+    // Pinning one count leaves the other seven to be found at runtime, where a malformed generator is a
+    // shader that fails to compile and a tile that draws untextured. PEI alone asks for six of the eight.
+    [Test]
+    public void EveryPaintedCountComesOutWellFormed()
+    {
+        for (int painted = 1; painted <= SplatmapTile.LAYERS; painted++)
+        {
+            string code = TerrainBuilder.SplatShaderCode(painted);
+            int controls = (painted + 3) / 4;
+
+            for (int slot = 0; slot < painted; slot++)
+                Assert.Contains($"uniform sampler2D layer{slot} :", code);
+            Assert.DoesNotContain($"uniform sampler2D layer{painted} :", code);
+            Assert.Contains($"uniform sampler2D control{controls - 1} :", code);
+            Assert.DoesNotContain($"uniform sampler2D control{controls} :", code);
+
+            // One guarded sample per painted layer, and a `total` that still sums every one of them —
+            // the two halves of "the normalized average is what the eight-way blend produced".
+            Assert.Equal(painted, code.Split("if (sample_unpainted || ").Length - 1);
+            string total = code.Split("float total = ")[1].Split(';')[0];
+            Assert.Equal(painted, total.Split('+').Length);
+        }
     }
 
     // --- helpers -------------------------------------------------------------------------------------
+
+    // A splatmap painted only at the given (x, y, layer, weight) texels.
+    private static SplatmapTile Painted(params (int X, int Y, int Layer, byte Weight)[] texels)
+    {
+        const int res = Landscape.SPLATMAP_RESOLUTION;
+        var bytes = new byte[res * res * SplatmapTile.LAYERS];
+        foreach ((int x, int y, int layer, byte weight) in texels)
+            bytes[SplatmapTile.WeightIndex(x, y, layer)] = weight;
+        return SplatmapTile.Parse(bytes, 0, 0);
+    }
+
+    // The splat material a textured tile carrying this splatmap ends up wearing.
+    private ShaderMaterial SplatMaterial(SplatmapTile splat, ImageTexture[] layers)
+    {
+        TerrainBuilder.TileMesh built = TerrainBuilder.BuildTileMesh(Flat(0, 0, 0.5f), splat, textured: true);
+        MeshInstance3D tile = TerrainBuilder.FinishTile(built, layers);
+        TestScene.AddChild(tile);
+        var material = (ShaderMaterial)tile.Mesh.SurfaceGetMaterial(0);
+        tile.QueueFree();
+        return material;
+    }
 
     private static StaticBody3D? FindBody(Node parent)
     {
