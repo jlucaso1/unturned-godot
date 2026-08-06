@@ -328,8 +328,9 @@ dotnet format unturned-godot.sln                                   # auto-format
 # Run the format/lint/test gates locally, before the commit exists. Opt-in per checkout: git does not
 # run a fresh clone's hooks on its own, which is a security property worth keeping.
 #   pre-commit  format (staged files only) + build with warnings as errors + the xUnit suite  (~35 s)
-#   pre-push    the Godot runtime suite, skipped when the engine is not installed             (~3 s)
-# Escapes: SKIP_TESTS=1 git commit, SKIP_RUNTIME_TESTS=1 git push, or --no-verify for either.
+# There is no pre-push hook: the runtime suite above takes minutes and ci.yml runs it on every pull
+# request, so the hook only made pushing slower. Run it yourself when a change touches node lifecycle.
+# Escapes: SKIP_TESTS=1 git commit, or --no-verify.
 ./scripts/install-git-hooks.sh
 
 # Boot-menu popup gate: exports a release build and drives the menu, because engine Popups only

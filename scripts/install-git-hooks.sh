@@ -33,11 +33,13 @@ git config core.hooksPath .githooks
 
 echo "Hooks installed (core.hooksPath -> .githooks):"
 echo "  pre-commit  format (staged files) + build with warnings as errors + the xUnit suite"
-echo "  pre-push    the Godot runtime suite, skipped when the engine is not installed"
+echo
+echo "There is deliberately no pre-push hook: the Godot runtime suite takes minutes, and ci.yml runs it"
+echo "on every pull request, so paying for it locally only bought a slower push. Run it yourself when a"
+echo "change touches node lifecycle: ./scripts/run-godot-tests.sh (--run-tests=Name for one class)."
 echo
 echo "A C# commit costs roughly 35-40 s, most of it 'dotnet test' host startup. Escapes:"
 echo "  SKIP_TESTS=1 git commit ...          format and build only"
-echo "  SKIP_RUNTIME_TESTS=1 git push ...    skip the runtime suite"
-echo "  git commit/push --no-verify ...      skip the hook entirely"
+echo "  git commit --no-verify ...           skip the hook entirely"
 echo
 echo "Undo with ./scripts/install-git-hooks.sh --uninstall."
