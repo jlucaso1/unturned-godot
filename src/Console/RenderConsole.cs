@@ -518,6 +518,13 @@ public static class RenderConsole
         // session that does heavy work in _Process can do the same. So the overflow is named instead.
         bool cpuOverflows = cpuMs + physicsMs > frameMs + AttributionSlackMs;
 
+        // And the frame may not have been measured at all yet, which is not the same as being measured
+        // badly. A tier-2 run given `perf` through UG_CONSOLE executes the line before its first rendered
+        // frame — the ticker is added deferred, so no interval exists — and that session has no pane to
+        // type it again in. Falling back to the averaged fps is the right column to print, but presenting
+        // a derived attribution on top of it would be a conclusion drawn from a number of the wrong kind.
+        bool unmeasured = !FrameClock.HasMeasured;
+
         // What the remainder MEANS depends on whether the frame was allowed to run flat out, and the
         // console knows because both limiters are its own variables. Under vsync the remainder is mostly
         // the deliberate sleep, and reading that as "the GPU is behind" is exactly backwards.
@@ -539,13 +546,15 @@ public static class RenderConsole
         // precisely the slow frames they were selected to keep responsive.
         bool vsync = Blocking(DisplayServer.WindowGetVsyncMode(), frameMs);
         bool capBinding = Engine.MaxFps > 0 && ReachedPeriod(frameMs, 1000d / Engine.MaxFps);
-        string idleLabel = (cpuOverflows, vsync, capBinding) switch
+        string idleLabel = (unmeasured, cpuOverflows, vsync, capBinding) switch
         {
-            // The overflow wins over both limiters: nothing downstream of it is worth qualifying.
-            (true, _, _) => "unattributed (cpu exceeds the frame, not a gpu reading)",
-            (false, true, true) => "idle (vsync + cap, not a gpu reading)",
-            (false, true, false) => "idle (vsync, not a gpu reading)",
-            (false, false, true) => "idle (fps cap, not a gpu reading)",
+            // Both disqualifications win over the limiters: nothing downstream is worth qualifying when
+            // the subtraction's own inputs are unusable.
+            (true, _, _, _) => "unattributed (frame not measured yet, averaged)",
+            (false, true, _, _) => "unattributed (cpu exceeds the frame, not a gpu reading)",
+            (false, false, true, true) => "idle (vsync + cap, not a gpu reading)",
+            (false, false, true, false) => "idle (vsync, not a gpu reading)",
+            (false, false, false, true) => "idle (fps cap, not a gpu reading)",
             _ => "gpu wait (derived)",
         };
         double drawCalls = Performance.GetMonitor(Performance.Monitor.RenderTotalDrawCallsInFrame);

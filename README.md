@@ -169,7 +169,8 @@ can actually do.
 
 `help` and `list` are the authority — the table above is a map, not a manual. `find shadow` answers "what
 can I turn off about shadows", Tab completes names, and Up/Down walk what you already typed. A line may
-carry several statements: `foliage.enabled 0; objects.trees.enabled 0; perf`.
+carry several statements: `foliage.enabled 0; objects.trees.enabled 0`. Measure on the NEXT line, never
+appended to that one — see the trap below.
 
 `perf` answers two different questions, one per line. The first is the workload — draw calls, primitives,
 render objects. The second is where the frame actually goes, and its leading number is the one to read
