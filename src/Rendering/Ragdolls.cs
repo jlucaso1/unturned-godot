@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Godot;
+using UnturnedGodot.Player;
 
 namespace UnturnedGodot;
 
@@ -12,11 +13,10 @@ namespace UnturnedGodot;
 // lifetime — is the same code three times. This is that shared half, and it takes a body someone else
 // already built.
 //
-// What it is NOT is a skeletal ragdoll. The original throws a prefab with a Rigidbody per bone; here the
-// body keeps the pose it died in and tumbles as one piece. That is a deliberate stop: per-bone physics
-// needs a PhysicalBoneSimulator3D built against each skeleton, which is a subsystem rather than a detail,
-// and the thing a player reads — the corpse flying off in the direction it was hit, further for a harder
-// hit — is entirely in the impulse.
+// Two ways a body can fall, and the pool picks whichever it can. With a RagdollDefinition read out of the
+// game — the Ragdoll_* prefab's per-bone bodies, colliders and joint limits — the corpse falls a limb at a
+// time (SkeletalRagdoll). Without one, it keeps the pose it died in and tumbles as a single capsule, which
+// is what a session with no readable install gets.
 public sealed partial class Ragdolls : Node3D
 {
     // GraphicsSettings.effect at HIGH: Random.Range(40, 56) seconds before the debris is destroyed.
@@ -39,8 +39,25 @@ public sealed partial class Ragdolls : Node3D
     // from the game's own arithmetic.
     public const float ImpulseScale = 0.02f;
 
+    // The skinned skeleton under a corpse, if it has one. The rig is what a skeletal ragdoll drives.
+    private static Skeleton3D? FindSkeleton(Node node)
+    {
+        if (node is Skeleton3D skeleton)
+            return skeleton;
+        foreach (Node child in node.GetChildren())
+            if (FindSkeleton(child) is { } found)
+                return found;
+        return null;
+    }
+
     private readonly RandomNumberGenerator _rng = new();
-    private readonly List<(RigidBody3D Body, double Expiry)> _bodies = new();
+    // Whatever is standing in for a corpse: a single rigid body, or a whole skeletal simulator. Held as
+    // Node3D because the pool only ever frees them.
+    private readonly List<(Node3D Body, double Expiry)> _bodies = new();
+
+    // The per-bone ragdoll the game describes, when the install could be read. Null falls back to the
+    // single tumbling capsule below.
+    public RagdollDefinition? Definition { get; set; }
 
     public Ragdolls() => Name = "Ragdolls";
 
@@ -54,6 +71,29 @@ public sealed partial class Ragdolls : Node3D
         ArgumentNullException.ThrowIfNull(body);
 
         Retire();
+
+        // A skinned rig plus a definition is a corpse that falls apart properly. Tried first, and it
+        // reports whether the two actually met — a rig missing the prefab's bones falls back rather than
+        // standing a body up with no limbs.
+        if (Definition is { } definition && FindSkeleton(body) is { } skeleton)
+        {
+            var skeletal = new SkeletalRagdoll();
+            AddChild(skeletal);
+            body.GetParent()?.RemoveChild(body);
+            skeletal.AddChild(body);
+            if (skeletal.Begin(skeleton, definition, impulse))
+            {
+                _bodies.Add((skeletal, (Time.GetTicksMsec() / 1000.0) + LifetimeSeconds
+                    + _rng.RandfRange(-LifetimeSpread, LifetimeSpread)));
+                return;
+            }
+
+            // It did not fit: unwrap and fall through to the capsule, rather than leaving a corpse
+            // parented to a simulator that is not simulating.
+            skeletal.RemoveChild(body);
+            AddChild(body);
+            skeletal.QueueFree();
+        }
 
         // Read BEFORE anything is reparented, and applied AFTER the body joins the tree: GlobalTransform
         // is meaningless on a node that is not in one, so setting it in the initializer silently dropped

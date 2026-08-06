@@ -969,7 +969,12 @@ public partial class Main : Node3D
         // Where killed bodies are thrown. Its own node rather than a child of the zombie view, because
         // a corpse outlives the avatar it came from — and because animals and players will want the
         // same pool when they can die.
-        var ragdolls = new Ragdolls();
+        var ragdolls = new Ragdolls
+        {
+            // The game's own Ragdoll_Zombie: per-bone bodies, colliders and joint limits. Null when the
+            // install cannot be read, and then a corpse tumbles as one piece instead.
+            Definition = RagdollExtractor.Read(unturnedPath, RagdollExtractor.ZombiePrefab),
+        };
         AddChild(ragdolls);
         zombiesView.AttachRagdolls(ragdolls);
         AddChild(zombiesView);
