@@ -248,7 +248,39 @@ public partial class ZombiesView : Node3D
                 foreach (ushort id in killed.Ids)
                     Kill(id);
                 break;
+            case ENetMessage.ZombieStunned:
+                if (!MalformedPacket.TryDecode(payload, ReadZombieStunned, out var stunned))
+                {
+                    MalformedPacketsDropped++;
+                    break;
+                }
+
+                foreach ((ushort id, byte clip) in stunned.Stuns)
+                    Stun(id, clip);
+                break;
         }
+    }
+
+    private static readonly System.Func<byte[], (byte Bound, List<(ushort Id, byte Clip)> Stuns)>
+        ReadZombieStunned = ZombieNetMessages.ReadZombieStunned;
+
+    // Zombie.askStun: play the reel, and hold the rest of the animation off it while it runs.
+    //
+    // The clip's own length is what the client waits, NOT the server's one second — the two are
+    // deliberately independent in the original, where the server counts a flat second and the client
+    // simply plays a reel. Reusing StartleUntil is not a shortcut: it is the same mechanism (a one-shot
+    // that suppresses the state clip until it finishes), and having two would mean deciding which wins.
+    private void Stun(ushort id, byte clip)
+    {
+        if (!_avatars.TryGetValue(id, out ZombieAvatar? avatar) || avatar.Rig == null)
+            return;
+
+        string name = $"Stun_{clip}";
+        avatar.Rig.Replay(name);
+        avatar.StartleUntil = NetworkManager.Now
+            + (avatar.Rig.Clips.TryGetValue(name, out var length) && length.Length > 0f
+                ? length.Length
+                : ZombieStun.DurationSeconds);
     }
 
     // ZombieManager's death: the avatar goes. Unturned plays a ragdoll here (Zombie.askDamage hands

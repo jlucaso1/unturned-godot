@@ -191,6 +191,43 @@ public static class ZombieNetMessages
         return (bound, ids);
     }
 
+    // ZombieManager.sendZombieStun: which zombies staggered, and which reel each plays.
+    //
+    // Reliable, like a kill, and for the same reason: a dropped stun leaves a body standing still on the
+    // server while the client keeps walking it, and nothing later says otherwise. Unlike a kill, though,
+    // a stun is not final — the next state snapshot will move the zombie again — so this is bounded by
+    // the same one-byte count and addressed to the same region.
+    public static byte[] WriteZombieStunned(byte bound, IReadOnlyList<(ushort Id, byte Clip)> stuns)
+    {
+        ArgumentNullException.ThrowIfNull(stuns);
+        if (stuns.Count > byte.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(stuns),
+                $"a ZombieStunned payload carries at most {byte.MaxValue} zombies, not {stuns.Count}");
+
+        var payload = new byte[3 + (stuns.Count * 3)];
+        payload[0] = (byte)ENetMessage.ZombieStunned;
+        payload[1] = bound;
+        payload[2] = (byte)stuns.Count;
+        for (int i = 0; i < stuns.Count; i++)
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(3 + (i * 3)), stuns[i].Id);
+            payload[5 + (i * 3)] = stuns[i].Clip;
+        }
+
+        return payload;
+    }
+
+    public static (byte Bound, List<(ushort Id, byte Clip)> Stuns) ReadZombieStunned(byte[] payload)
+    {
+        using BinaryReader r = Reader(payload);
+        byte bound = r.ReadByte();
+        int count = r.ReadByte();
+        var stuns = new List<(ushort, byte)>(count);
+        for (int i = 0; i < count; i++)
+            stuns.Add((r.ReadUInt16(), r.ReadByte()));
+        return (bound, stuns);
+    }
+
     private static BinaryReader Reader(byte[] payload)
     {
         var r = new BinaryReader(new MemoryStream(payload));

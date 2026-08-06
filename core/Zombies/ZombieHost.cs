@@ -37,6 +37,11 @@ public sealed class ZombieHost
         for (int i = 0; i < _awakeByBound.Length; i++)
             _awakeByBound[i] = new List<ZombieSnapshotState>();
         _collectPlayer = CollectPlayer;
+        // Subscribed here rather than left to the caller: a stun that the brain decides on and nobody
+        // replicates is a zombie frozen on the server and walking on every client, which is worse than no
+        // stun at all. Wiring it to the host that already owns the zombie wire is what makes that
+        // impossible to forget.
+        system.Stunned += ReportStunned;
         server.OnTick += Tick;
         // A (re)admitted player starts from scratch: the self-healing rejoin implies the client lost
         // state (and dropped its avatars), so clearing our tracking makes the next tick resend the
@@ -73,6 +78,19 @@ public sealed class ZombieHost
         ids.Add(zombie.Id);
     }
 
+    // Zombies staggered since the last tick, by region. Collected from ZombieSystem.Stunned rather than
+    // polled, because a stun is an EVENT — the state snapshots carry position and behaviour state, and a
+    // zombie that stands still for a second is indistinguishable in them from one that simply stopped.
+    public void ReportStunned(ZombieInstance zombie, byte clip)
+    {
+        System.ArgumentNullException.ThrowIfNull(zombie);
+        if (!_pendingStuns.TryGetValue(zombie.Bound, out List<(ushort, byte)>? stuns))
+            _pendingStuns[zombie.Bound] = stuns = new List<(ushort, byte)>();
+        stuns.Add((zombie.Id, clip));
+    }
+
+    private readonly Dictionary<byte, List<(ushort Id, byte Clip)>> _pendingStuns = new();
+
     private void Tick(uint tick)
     {
         _views.Clear();
@@ -83,6 +101,7 @@ public sealed class ZombieHost
         // below would mention them again, and a client that hears the death before the tick's snapshots
         // never renders one more frame of a zombie that is gone.
         BroadcastKills();
+        BroadcastStuns();
 
         // Players that vanished from the roster disconnected: drop their region state.
         if (_playerBounds.Count > _connections.Count)
@@ -159,6 +178,28 @@ public sealed class ZombieHost
         }
     }
 
+    // The stuns of one tick, to the region they happened in — the same addressing the kills use, since a
+    // player who cannot see a region was never told those zombies existed.
+    private void BroadcastStuns()
+    {
+        if (_pendingStuns.Count == 0)
+            return;
+        foreach ((byte bound, List<(ushort Id, byte Clip)> stuns) in _pendingStuns)
+        {
+            if (stuns.Count == 0)
+                continue;
+            byte[]? payload = null;
+            foreach ((byte player, ITransportConnection connection) in _connections)
+            {
+                if (_playerBounds.GetValueOrDefault(player, LevelNavigationData.NoBound) != bound)
+                    continue;
+                payload ??= ZombieNetMessages.WriteZombieStunned(bound, stuns);
+                connection.Send(payload, ESendType.Reliable);
+            }
+            stuns.Clear();
+        }
+    }
+
     // Forgets which region each player has been sent, so the next tick ships the current population
     // again. Loading a bug-repro dump replaces every zombie wholesale — ids, types, clothing, the lot —
     // and the per-tick state snapshots carry none of that: without this the client keeps rendering the
@@ -170,6 +211,8 @@ public sealed class ZombieHost
         // The ids in here belong to the population being replaced. Announcing their deaths after the
         // swap would name zombies the client is about to be told about afresh, under the same ids.
         _pendingKills.Clear();
+        // Same reasoning for the stuns: they name zombies of the population being replaced.
+        _pendingStuns.Clear();
     }
 
     // SendZombies: the region's complete zombie list, reliable, to one connection, in MTU-sized chunks.
