@@ -21,7 +21,11 @@ public static class RoadsBuilder
         Code = """
         #pragma disable_preprocessor
         shader_type spatial;
-        render_mode cull_back; // Standard/Diffuse (the road shader) serializes Cull Back
+        // Standard/Diffuse (the road shader) serializes Cull Back. `specular_disabled` and the SPECULAR
+        // write are the pair TerrainBuilder.cs:58 explains: the render mode drops the direct Schlick-GGX
+        // lobe, the write drops f0 so the sky's indirect specular stops adding to it. Asphalt at
+        // ROUGHNESS 1 is the case that pairing was written for, and the textured road below now matches.
+        render_mode cull_back, specular_disabled;
         uniform bool paved = true;
         void fragment() {
             vec3 asphalt = vec3(0.11, 0.11, 0.12);
@@ -37,6 +41,7 @@ public static class RoadsBuilder
                 ALBEDO = dirt;
             }
             ROUGHNESS = 1.0;
+            SPECULAR = 0.0;
         }
         """,
     };
@@ -141,6 +146,12 @@ public static class RoadsBuilder
         {
             AlbedoTexture = texture,
             Roughness = 1f,
+            // Same fully-rough dielectric as the procedural fallback above and as every matte object
+            // material: no direct lobe, and f0 zeroed so the sky's indirect specular does not put a sheen
+            // on asphalt. Both road paths have to agree — which of them draws depends only on whether the
+            // map shipped a texture.
+            SpecularMode = BaseMaterial3D.SpecularModeEnum.Disabled,
+            MetallicSpecular = 0f,
             // Standard/Diffuse — the shader RoadMaterial instantiates — serializes Cull Back in the
             // game data, and the RoadMesh port keeps the source winding, so back-face culling is exact.
             CullMode = BaseMaterial3D.CullModeEnum.Back,

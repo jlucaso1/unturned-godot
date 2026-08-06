@@ -16,8 +16,10 @@ public static partial class TerrainBuilder
         CullMode = BaseMaterial3D.CullModeEnum.Back,
         Roughness = 1.0f,
         // Fully-rough dielectric: the GGX specular lobe contributes nothing visible, so skip its
-        // per-fragment ALU over the terrain's screen-dominating fill.
+        // per-fragment ALU over the terrain's screen-dominating fill. Specular is zeroed as well as
+        // disabled, because the render mode guards direct light alone — see the splat shader below.
         SpecularMode = BaseMaterial3D.SpecularModeEnum.Disabled,
+        MetallicSpecular = 0f,
     };
 
     // Blends a tile's splat layers per pixel: the control textures carry the layer weights (sampled by
@@ -59,7 +61,10 @@ public static partial class TerrainBuilder
     // Schlick-GGX lobe, so the render mode drops ALU that was multiplying out to nothing. SPECULAR still
     // has to be WRITTEN — the render mode only guards direct light, while the sky's indirect specular
     // reads f0 all the same, and leaving SPECULAR at its 0.5 default lit the ground measurably brighter.
-    // Both halves are what the flat fallback material below has always done.
+    // Both halves are what the flat fallback material above does — though only since the
+    // `MetallicSpecular = 0f` beside its render mode. `SpecularModeEnum.Disabled` is the render mode
+    // alone; Godot's own docs say it "does not affect specular reflections from the sky", so every
+    // material that set it without zeroing MetallicSpecular kept the 4% f0 this paragraph is about.
     private static readonly Dictionary<int, Shader> SplatShaders = new();
 
     private static Shader SplatShaderFor(int painted)

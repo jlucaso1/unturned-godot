@@ -514,6 +514,10 @@ public static class ModelLibrary
             SpecularMode = matte
                 ? BaseMaterial3D.SpecularModeEnum.Disabled
                 : BaseMaterial3D.SpecularModeEnum.SchlickGgx,
+            // Disabling the mode is only half of it: it guards direct light, while the sky's indirect
+            // specular reads f0 either way, so leaving MetallicSpecular at its 0.5 default keeps a 4%
+            // reflection on surfaces meant to have none. Same pairing as the terrain splat shader.
+            MetallicSpecular = matte ? 0f : 0.5f,
             // The shader-authored culling, straight from the bundle data: the Standard family (nearly
             // every prop) back-face culls exactly like the game; only foliage/card/flag shaders author
             // Cull Off, and decal projectors author Cull Front.
