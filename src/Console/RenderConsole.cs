@@ -38,10 +38,21 @@ public static class RenderConsole
     private static ConsoleRegistry? Shared;
     private static bool StartupTaken;
 
-    // How far past the frame cap's period still counts as hitting it. The limiter lands a fraction of a
-    // millisecond either side of its target, so an exact comparison would call a capped frame uncapped on
-    // every one that overshot slightly.
-    private const double CapSlackMs = 0.5d;
+    // How far past a limiter's period still counts as hitting it, as a FRACTION of that period rather than
+    // a fixed millisecond count. The limiter lands either side of its target, so an exact comparison would
+    // call a capped frame uncapped on every one that overshot slightly — but a fixed slack means something
+    // different at every cap: half a millisecond is 6% of a 120 fps period and 50% of a 1000 fps one, so
+    // it grows more permissive exactly as the target tightens, and starts calling genuinely uncapped
+    // frames "capped".
+    private const double PeriodSlack = 0.05d;
+
+    private static bool ReachedPeriod(double frameMs, double periodMs) =>
+        periodMs > 0d && frameMs <= periodMs * (1d + PeriodSlack);
+
+    // How much the reported CPU work may exceed the frame before the attribution is called broken rather
+    // than jittery. The monitors and the frame clock are read at slightly different instants, so a small
+    // overshoot is ordinary sampling skew; a large one means they are describing different frames.
+    private const double AttributionSlackMs = 1d;
 
     private static Node? HostNode;
 
@@ -460,8 +471,7 @@ public static class RenderConsole
         {
             DisplayServer.VSyncMode.Disabled or DisplayServer.VSyncMode.Mailbox => false,
             // An unknown refresh rate leaves nothing to compare, so the conservative reading stands.
-            DisplayServer.VSyncMode.Adaptive =>
-                refreshMs <= 0d || frameMs <= refreshMs + CapSlackMs,
+            DisplayServer.VSyncMode.Adaptive => refreshMs <= 0d || ReachedPeriod(frameMs, refreshMs),
             _ => true,
         };
     }
@@ -497,6 +507,17 @@ public static class RenderConsole
             : Performance.GetMonitor(Performance.Monitor.TimePhysicsProcess) * 1000d;
         double idleMs = Mathf.Max(0d, frameMs - cpuMs - physicsMs);
 
+        // The clamp above hides the one case that must not be hidden. If the CPU work does not FIT in the
+        // frame, the monitors and the clock are describing different frames, and the subtraction has no
+        // meaning — but it still yields 0.00, which is the exact output that means "the CPU is the
+        // bottleneck, GPU work will not move this frame". A broken reading and a real answer become
+        // indistinguishable, and the wrong one is the confident-sounding one.
+        //
+        // It is not hypothetical: a tier-2 pose measured 105 ms of TimeProcess inside a 4.7 ms frame,
+        // because the harness's own per-pose work lands in the idle step the monitor then reports. Any
+        // session that does heavy work in _Process can do the same. So the overflow is named instead.
+        bool cpuOverflows = cpuMs + physicsMs > frameMs + AttributionSlackMs;
+
         // What the remainder MEANS depends on whether the frame was allowed to run flat out, and the
         // console knows because both limiters are its own variables. Under vsync the remainder is mostly
         // the deliberate sleep, and reading that as "the GPU is behind" is exactly backwards.
@@ -517,12 +538,14 @@ public static class RenderConsole
         // "flat out" the reading needs. Treating those two as blocking would hide the diagnosis on
         // precisely the slow frames they were selected to keep responsive.
         bool vsync = Blocking(DisplayServer.WindowGetVsyncMode(), frameMs);
-        bool capBinding = Engine.MaxFps > 0 && frameMs <= (1000d / Engine.MaxFps) + CapSlackMs;
-        string idleLabel = (vsync, capBinding) switch
+        bool capBinding = Engine.MaxFps > 0 && ReachedPeriod(frameMs, 1000d / Engine.MaxFps);
+        string idleLabel = (cpuOverflows, vsync, capBinding) switch
         {
-            (true, true) => "idle (vsync + cap, not a gpu reading)",
-            (true, false) => "idle (vsync, not a gpu reading)",
-            (false, true) => "idle (fps cap, not a gpu reading)",
+            // The overflow wins over both limiters: nothing downstream of it is worth qualifying.
+            (true, _, _) => "unattributed (cpu exceeds the frame, not a gpu reading)",
+            (false, true, true) => "idle (vsync + cap, not a gpu reading)",
+            (false, true, false) => "idle (vsync, not a gpu reading)",
+            (false, false, true) => "idle (fps cap, not a gpu reading)",
             _ => "gpu wait (derived)",
         };
         double drawCalls = Performance.GetMonitor(Performance.Monitor.RenderTotalDrawCallsInFrame);

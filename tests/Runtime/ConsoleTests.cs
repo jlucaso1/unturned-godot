@@ -1,5 +1,6 @@
 using System;
 using System.Globalization;
+using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Chickensoft.GoDotTest;
@@ -455,11 +456,13 @@ public class ConsoleTests : TestClass
         double frameMs = Measured(text, "ms frame");
         double cpuMs = Measured(text, "ms cpu");
         double physicsMs = Measured(text, "ms physics");
-        // Whichever name the remainder earned — the arithmetic behind it is the same either way, and which
-        // one appears depends on whether this machine's test window happens to be running vsync.
-        double idleMs = text.Contains("ms gpu wait")
-            ? Measured(text, "ms gpu wait")
-            : Measured(text, "ms idle");
+        // Whichever name the remainder earned — the arithmetic behind it is the same in all three cases,
+        // and which one appears depends on this machine: whether the test window runs vsync, and whether
+        // the harness's own work in _Process pushes the CPU monitor past the frame it is measured against.
+        // The last is the ordinary case HERE, which is why all three are accepted rather than pinned.
+        string idleLabel = new[] { "ms gpu wait", "ms idle", "ms unattributed" }
+            .FirstOrDefault(text.Contains) ?? "ms gpu wait";
+        double idleMs = Measured(text, idleLabel);
 
         // A tolerance, not equality: the four values are each rounded to 2dp independently before printing,
         // so the printed remainder can legitimately differ from the printed operands' difference by the

@@ -186,6 +186,13 @@ reach never sleeps, so it does not suppress the reading — which matters when f
 advice to cap while measuring. Godot has no GPU-time monitor either way; MangoHud or PIX is still the
 instrument for true GPU frame time.
 
+The third name is the one to watch for: `unattributed (cpu exceeds the frame)`. It means the CPU monitor
+reported more work than the frame it is being subtracted from, so the two are describing different frames
+and nothing can be concluded. A benchmark pose measured 105 ms of `TimeProcess` inside a 4.7 ms frame
+because the harness's own per-pose work lands in the idle step the monitor reports — any session doing
+heavy work in `_Process` can do it. Without the name it would print `0.00`, which is exactly what a real
+CPU-bound answer prints.
+
 One trap worth knowing, because it silently reports the wrong frame: the monitors describe the **last
 completed** frame, so `terrain.enabled 0; perf` on a single line prices the frame *before* the change.
 Put `perf` on its own line. `fps` is the one exception on the line — it is the last *second* averaged,

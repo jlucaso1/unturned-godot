@@ -20,6 +20,8 @@ internal static class FrameClock
     private static int MeasuredSteps;
     private static double AccumulatedPhysicsMs;
     private static double MeasuredPhysicsMs;
+    private static int StepsThisFrame;
+    private static bool SkippedCarriedSample;
     private static FrameClockTicker? Ticker;
 
     // Puts the per-frame tick in the tree, once per process, wherever the console is speaking from.
@@ -54,9 +56,16 @@ internal static class FrameClock
         {
             MeasuredMs = (now - PreviousUsec) / 1000d;
             MeasuredSteps = (int)(physicsFrames - PreviousPhysicsFrames);
+            // The frame's last step is only priced once it has finished, which is now: the monitor holds
+            // it here and held the one before it at each physics tick. Skipped when no step ran, or this
+            // frame would be billed for a step that belongs to an earlier one.
+            if (StepsThisFrame > 0)
+                AccumulatedPhysicsMs += PhysicsMonitorMs();
             MeasuredPhysicsMs = AccumulatedPhysicsMs;
         }
         AccumulatedPhysicsMs = 0d;
+        StepsThisFrame = 0;
+        SkippedCarriedSample = false;
         PreviousUsec = now;
         PreviousPhysicsFrames = physicsFrames;
     }
@@ -67,10 +76,24 @@ internal static class FrameClock
     // ones where that is least true, since what makes a step expensive (an AI pass, a collision burst)
     // arrives in bursts. Reading the monitor at each step and adding it up drops the assumption.
     //
-    // The reading lags by one step: inside a step, the monitor still describes the one before it. Over a
-    // frame that shifts which steps are counted, not how many, which is what the subtraction needs.
-    public static void TickPhysics() =>
-        AccumulatedPhysicsMs += Performance.GetMonitor(Performance.Monitor.TimePhysicsProcess) * 1000d;
+    // The monitor lags by one step — inside a step it still describes the one before it — and that lag
+    // crosses frame boundaries, so simply summing here would charge this frame for the previous frame's
+    // last step and lose its own. The first sample of each frame is therefore dropped (it belongs to the
+    // frame that just ended, which was already billed for it in Tick), and each later one prices the step
+    // before it. Between the two, every step is counted exactly once, against the frame that ran it.
+    public static void TickPhysics()
+    {
+        StepsThisFrame++;
+        if (!SkippedCarriedSample)
+        {
+            SkippedCarriedSample = true;
+            return;
+        }
+        AccumulatedPhysicsMs += PhysicsMonitorMs();
+    }
+
+    private static double PhysicsMonitorMs() =>
+        Performance.GetMonitor(Performance.Monitor.TimePhysicsProcess) * 1000d;
 
     // Whether a full interval has been observed yet. Callers need this to tell an unmeasured frame from a
     // measured one, because 0 is a legitimate answer for the step count below and a meaningless one for a
