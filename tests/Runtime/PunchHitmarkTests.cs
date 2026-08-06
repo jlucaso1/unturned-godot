@@ -85,7 +85,7 @@ public class PunchHitmarkTests : TestClass
     }
 
     private PunchHitmark Probe(ObjectAssetDatabase? assets, ZombiesView? zombies, Node3D? world) =>
-        new(assets, () => zombies, () => world?.GetWorld3D());
+        new(() => assets, () => zombies, () => world?.GetWorld3D());
 
     // A body in a wall-less world: entity, and critical when the ray enters the skull band.
     [Test]

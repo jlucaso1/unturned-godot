@@ -25,9 +25,7 @@ public static class ImpactNetMessages
 
     public static byte[] WriteImpact(in PunchImpact impact)
     {
-        byte[] surface = Encoding.UTF8.GetBytes(impact.Surface ?? string.Empty);
-        if (surface.Length > MaxSurfaceBytes)
-            surface = surface[..MaxSurfaceBytes];
+        byte[] surface = Encoding.UTF8.GetBytes(Clamp(impact.Surface ?? string.Empty));
 
         var payload = new byte[HeaderBytes + surface.Length];
         payload[0] = (byte)ENetMessage.Impact;
@@ -56,6 +54,33 @@ public static class ImpactNetMessages
 
         return new PunchImpact(playerId, point, normal,
             Encoding.UTF8.GetString(payload, HeaderBytes, length));
+    }
+
+    // A surface name too long for the wire, cut on a CHARACTER boundary rather than a byte one.
+    //
+    // Slicing the encoded bytes was the obvious thing and was wrong: it can split a multi-byte character,
+    // and the reader then decodes a replacement character — a name that resolves to nothing in the
+    // material bank, so the surface goes silent rather than merely being truncated. The shipped names are
+    // ASCII and never reach this, but a workshop material can be named anything.
+    private static string Clamp(string surface)
+    {
+        if (Encoding.UTF8.GetByteCount(surface) <= MaxSurfaceBytes)
+            return surface;
+
+        int bytes = 0;
+        int kept = 0;
+        var elements = System.Globalization.StringInfo.GetTextElementEnumerator(surface);
+        while (elements.MoveNext())
+        {
+            var element = (string)elements.Current;
+            int size = Encoding.UTF8.GetByteCount(element);
+            if (bytes + size > MaxSurfaceBytes)
+                break;
+            bytes += size;
+            kept += element.Length;
+        }
+
+        return surface[..kept];
     }
 
     private static void WriteVector3(Span<byte> destination, Vector3 value)

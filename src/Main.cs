@@ -898,7 +898,10 @@ public partial class Main : Node3D
             var hud = new PlayerHud(_hudIcons);
             AddChild(hud);
             player.Hud = hud;
-            player.Hitmark = new PunchHitmark(_objectAssets,
+            // Both lookups are per swing: the asset scan finishes seconds after the player exists on
+            // the streaming path, and the zombie view is attached when a session starts.
+            player.Hitmark = new PunchHitmark(
+                () => _objectAssets ?? GetNodeOrNull<ObjectStreamer>("ObjectStreamer")?.Assets,
                 () => GetNodeOrNull<ZombiesView>("Zombies"), () => GetViewport()?.World3D);
         }
         _dayNight?.AttachCamera(player.Camera);
@@ -1153,9 +1156,19 @@ public partial class Main : Node3D
                 if (ImpactDecalExtractor.IsSatisfied(request))
                     continue;
                 decoded = true;
-                int written = ImpactDecalExtractor.Extract(request);
-                if (written > 0)
-                    Log.Print($"[impact] cached {written} decal texture(s) from {request.BundleTag}");
+                try
+                {
+                    int written = ImpactDecalExtractor.Extract(request);
+                    if (written > 0)
+                        Log.Print($"[impact] cached {written} decal texture(s) from {request.BundleTag}");
+                }
+                catch (System.Exception e) when (e is System.IO.IOException
+                    or System.UnauthorizedAccessException or System.IO.InvalidDataException)
+                {
+                    // Per bundle, like the audio above: one truncated workshop bundle must not stop the
+                    // game's own impacts from being extracted.
+                    Log.PrintErr($"[impact] {request.BundlePath} could not be extracted: {e.Message}");
+                }
             }
 
             // A whole-bundle decode here lands AFTER the streamer has already compacted the load's heap,

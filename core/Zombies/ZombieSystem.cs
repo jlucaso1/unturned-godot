@@ -471,6 +471,11 @@ public sealed partial class ZombieSystem
             for (int i = 0; i < count && granted < MaxRepathsPerTick; i++)
             {
                 ZombieInstance z = _zombies[(_repathCursor + i) % count];
+                // A staggered body will not run Move this tick, so a token spent on it is a token the
+                // hunters behind it in the queue do not get — and the budget is what keeps a blocked
+                // horde from stalling the tick.
+                if (z.IsStunned)
+                    continue;
                 if (z.State is EZombieState.Chase or EZombieState.Return && z.RepathTimer - dt <= 0f)
                 {
                     z.RepathGranted = true;

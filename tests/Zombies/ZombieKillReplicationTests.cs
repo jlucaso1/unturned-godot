@@ -48,8 +48,8 @@ public class ZombieKillReplicationTests
     [Fact]
     public void WireLayoutIsExact()
     {
-        byte[] payload = ZombieNetMessages.WriteZombieKilled(7, new ushort[] { 0x0201 },
-            new[] { new Godot.Vector3(1f, 0f, -2f) });
+        byte[] payload = ZombieNetMessages.WriteZombieKilled(7,
+            new (ushort, Godot.Vector3)[] { (0x0201, new Godot.Vector3(1f, 0f, -2f)) });
 
         // type, bound, count, then the id and the shove that threw the body.
         Assert.Equal(new byte[]
@@ -64,7 +64,8 @@ public class ZombieKillReplicationTests
 
     [Fact]
     public void WriteRejectsANullList() =>
-        Assert.Throws<ArgumentNullException>(() => ZombieNetMessages.WriteZombieKilled(0, null!));
+        Assert.Throws<ArgumentNullException>(() =>
+            ZombieNetMessages.WriteZombieKilled(0, (IReadOnlyList<ushort>)null!));
 
     // A truncated datagram is a dropped datagram, not a crash: the client's decoder guard is what turns
     // it into a MalformedPacketsDropped tick.

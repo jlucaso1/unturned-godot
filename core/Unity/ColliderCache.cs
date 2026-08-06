@@ -157,7 +157,22 @@ public static class ColliderCache
         Dictionary<string, int> materialIndices = BuildMaterialTable(colliders, out List<string> names);
         w.Write(names.Count);
         foreach (string name in names)
-            w.Write(name);
+        {
+            // A one-byte length and raw UTF-8, rather than BinaryWriter.Write(string): that writes a
+            // 7-bit-encoded length a corrupt file can inflate to 2 GB, and ReadString would allocate it
+            // before any bound here could look. A physics-material name is a Unity object name — the
+            // longest the game ships is 30-odd characters — so a byte is generous and, more to the
+            // point, unable to describe an allocation worth guarding against.
+            byte[] utf8 = System.Text.Encoding.UTF8.GetBytes(name);
+            if (utf8.Length > byte.MaxValue)
+            {
+                throw new InvalidDataException(
+                    $"A physics-material name is longer than {byte.MaxValue} bytes: {name}");
+            }
+
+            w.Write((byte)utf8.Length);
+            w.Write(utf8);
+        }
 
         foreach (CachedCollider c in colliders)
         {
@@ -291,9 +306,9 @@ public static class ColliderCache
         return result;
     }
 
-    // The file's physics-material names. Bounded the same way every other length prefix here is: a name is
-    // at least its own one-byte length prefix, so a count past the bytes remaining is corruption rather
-    // than an allocation to attempt.
+    // The file's physics-material names. Bounded twice: the COUNT against the bytes remaining (a name
+    // costs at least its own length prefix), and each name's own length against them again — a single
+    // enormous name is the shape a bounded count alone would let through.
     private static string[] ReadMaterialTable(BinaryReader r, Stream stream)
     {
         int count = r.ReadInt32();
@@ -308,7 +323,21 @@ public static class ColliderCache
 
         var names = new string[count];
         for (int i = 0; i < count; i++)
-            names[i] = r.ReadString();
+        {
+            int length = r.ReadByte();
+            if (stream.CanSeek && length > stream.Length - stream.Position)
+            {
+                throw new InvalidDataException(
+                    $"Collider cache declares a {length}-byte material name with "
+                    + $"{stream.Length - stream.Position} bytes left.");
+            }
+
+            byte[] utf8 = r.ReadBytes(length);
+            if (utf8.Length != length)
+                throw new EndOfStreamException("Collider cache ended inside a material name.");
+            names[i] = System.Text.Encoding.UTF8.GetString(utf8);
+        }
+
         return names;
     }
 

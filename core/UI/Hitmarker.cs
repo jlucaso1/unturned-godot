@@ -36,10 +36,23 @@ public static class Hitmarker
     public const int ImageSize = 16;
     public const int HalfImageSize = ImageSize / 2;
 
-    // PlayAnimation: the wedges start a tenth of the way out and finish half the way out, in screen
-    // fractions from the centre.
+    // PlayerLifeUI.NewHitmarker: the mark is a 128 px box centred on the crosshair (PositionOffset -64,
+    // SizeOffset 128). Everything below is a fraction OF THAT BOX, not of the screen — SleekHitmarker's
+    // images are children of it, and PositionScale in the original is relative to the parent element.
+    //
+    // Reading those fractions as screen fractions is a mistake that looks plausible right up until it
+    // runs: the wedges fly to the corners of the display instead of opening 64 px around the crosshair.
+    public const int ElementSize = 128;
+
+    // PlayAnimation: the wedges start a tenth of the way out and finish half the way out, as fractions
+    // of the element above.
     public const float StartOffset = 0.1f;
     public const float EndOffset = 0.5f;
+
+    // One wedge's offset from the crosshair, in PIXELS — which is what a caller actually places it by.
+    // `position` is a point from Animated, whose origin is the element's centre at (0.5, 0.5).
+    public static Vector2 ToPixels(Vector2 position) =>
+        (position - new Vector2(0.5f, 0.5f)) * ElementSize;
 
     // The randomized tilt, in degrees. Small — it stops repeated hits stamping an identical mark.
     public const float MaxAngleJitterDegrees = 3f;

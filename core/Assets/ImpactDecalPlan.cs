@@ -56,7 +56,15 @@ public static class ImpactDecalPlan
     {
         ArgumentNullException.ThrowIfNull(bundleTag);
         ArgumentNullException.ThrowIfNull(containerPath);
-        Span<char> safe = stackalloc char[containerPath.Length];
+
+        // The path is bundle metadata — a parsed string of whatever length the file claimed — so the
+        // buffer is only taken from the stack while it is small. A container path is well under this in
+        // the shipped content; the heap path exists so a hostile or corrupt one cannot overflow a stack.
+        const int MaxStackChars = 256;
+        char[]? rented = containerPath.Length > MaxStackChars ? new char[containerPath.Length] : null;
+        Span<char> safe = rented ?? stackalloc char[MaxStackChars];
+        safe = safe[..containerPath.Length];
+
         for (int i = 0; i < containerPath.Length; i++)
         {
             char c = containerPath[i];

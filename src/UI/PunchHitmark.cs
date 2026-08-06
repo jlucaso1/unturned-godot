@@ -18,7 +18,10 @@ namespace UnturnedGodot;
 // makes a sound and leaves a decal, because the crosshair is telling you whether you HURT something.
 public sealed class PunchHitmark
 {
-    private readonly ObjectAssetDatabase? _assets;
+    // Resolved per swing rather than captured. The hit test is built with the player, and on the
+    // streaming path the asset scan finishes several seconds later — a value captured at construction is
+    // null for the whole session, and the crosshair never marks a breakable.
+    private readonly Func<ObjectAssetDatabase?> _assets;
     private readonly Func<ZombiesView?> _zombies;
     private readonly Func<World3D?> _world;
 
@@ -31,9 +34,10 @@ public sealed class PunchHitmark
         CollisionMask = PunchPhysics.DamageMask,
     };
 
-    public PunchHitmark(ObjectAssetDatabase? assets, Func<ZombiesView?> zombies, Func<World3D?> world)
+    public PunchHitmark(Func<ObjectAssetDatabase?> assets, Func<ZombiesView?> zombies,
+        Func<World3D?> world)
     {
-        _assets = assets;
+        _assets = assets ?? throw new ArgumentNullException(nameof(assets));
         _zombies = zombies ?? throw new ArgumentNullException(nameof(zombies));
         _world = world ?? throw new ArgumentNullException(nameof(world));
     }
@@ -71,7 +75,7 @@ public sealed class PunchHitmark
         // Otherwise the world hit is a mark only if a fist could hurt what it struck. The asset's own
         // gates are the same ones PunchDamageResolver applies: a resource has to opt in through
         // Vulnerable_To_Fists, and an object's rubble has to want no blade and not be invulnerable.
-        if (!struckWorld || asset == Guid.Empty || _assets?.ResolveByGuid(asset) is not { } placed)
+        if (!struckWorld || asset == Guid.Empty || _assets()?.ResolveByGuid(asset) is not { } placed)
             return EPlayerHit.None;
 
         return CanFistDamage(placed) ? EPlayerHit.Build : EPlayerHit.None;

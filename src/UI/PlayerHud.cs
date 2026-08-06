@@ -42,7 +42,12 @@ public sealed partial class PlayerHud : CanvasLayer
     public bool DotVisible
     {
         get => _dot?.Visible ?? false;
-        set { if (_dot != null) _dot.Visible = value; }
+        set
+        {
+            _dotWanted = value;
+            if (_dot != null)
+                _dot.Visible = value;
+        }
     }
 
     public PlayerHud(HudIconSet icons)
@@ -63,17 +68,33 @@ public sealed partial class PlayerHud : CanvasLayer
         _root.SetAnchorsPreset(Control.LayoutPreset.FullRect);
         AddChild(_root);
 
-        // Crosshair.centerDotImage: 8 px, centred, tinted and half transparent.
-        _dot = NewIcon(HudIcons.Dot, 8);
-        if (_dot != null)
-        {
-            _dot.Modulate = Hitmarker.CrosshairColor;
-            _dot.AnchorLeft = _dot.AnchorRight = _dot.AnchorTop = _dot.AnchorBottom = 0.5f;
-            _dot.OffsetLeft = _dot.OffsetTop = -4;
-            _dot.OffsetRight = _dot.OffsetBottom = 4;
-            _root.AddChild(_dot);
-        }
+        TryBuildDot();
     }
+
+    // Crosshair.centerDotImage: 8 px, centred, tinted and half transparent.
+    //
+    // Retried until it succeeds, because the icons are extracted on the deferred pass — several seconds
+    // after this node exists. Building it once in _Ready left a cold-cache session with no crosshair at
+    // all, and nothing to notice that it was missing.
+    private void TryBuildDot()
+    {
+        if (_dot != null || _root == null)
+            return;
+        _dot = NewIcon(HudIcons.Dot, 8);
+        if (_dot == null)
+            return;
+
+        _dot.Modulate = Hitmarker.CrosshairColor;
+        _dot.AnchorLeft = _dot.AnchorRight = _dot.AnchorTop = _dot.AnchorBottom = 0.5f;
+        _dot.OffsetLeft = _dot.OffsetTop = -4;
+        _dot.OffsetRight = _dot.OffsetBottom = 4;
+        _dot.Visible = _dotWanted;
+        _root.AddChild(_dot);
+    }
+
+    // What DotVisible was set to before the icon existed, so a caller that turned the dot off during the
+    // load does not have it appear when the texture finally arrives.
+    private bool _dotWanted = true;
 
     // Flashes a mark. Silently does nothing for EPlayerHit.None, which is what a swing that found nothing
     // reports — PlayerUI.hitmark is simply never called in that case.
@@ -107,6 +128,7 @@ public sealed partial class PlayerHud : CanvasLayer
 
     public override void _Process(double delta)
     {
+        TryBuildDot();
         for (int i = 0; i < _marks.Count; i++)
         {
             Mark mark = _marks[i];
@@ -136,31 +158,28 @@ public sealed partial class PlayerHud : CanvasLayer
             Hitmarker.Animated((float)(mark.Elapsed / Hitmarker.LifetimeSeconds), mark.Jitter,
                 positions, rotations);
             for (int i = 0; i < 4; i++)
-            {
-                TextureRect wedge = mark.Wedges[i];
-                // Screen fractions become anchors, so the mark tracks the window rather than a fixed
-                // resolution — the original places them the same way (PositionScale).
-                wedge.AnchorLeft = wedge.AnchorRight = positions[i].X;
-                wedge.AnchorTop = wedge.AnchorBottom = positions[i].Y;
-                wedge.OffsetLeft = wedge.OffsetTop = -Hitmarker.HalfImageSize;
-                wedge.OffsetRight = wedge.OffsetBottom = Hitmarker.HalfImageSize;
-                wedge.RotationDegrees = rotations[i];
-            }
-
+                Place(mark.Wedges[i], Hitmarker.ToPixels(positions[i]), rotations[i]);
             return;
         }
 
         Hitmarker.Classic(positions, rotations);
         for (int i = 0; i < 4; i++)
-        {
-            TextureRect wedge = mark.Wedges[i];
-            wedge.AnchorLeft = wedge.AnchorRight = wedge.AnchorTop = wedge.AnchorBottom = 0.5f;
-            wedge.OffsetLeft = positions[i].X - Hitmarker.HalfImageSize;
-            wedge.OffsetTop = positions[i].Y - Hitmarker.HalfImageSize;
-            wedge.OffsetRight = positions[i].X + Hitmarker.HalfImageSize;
-            wedge.OffsetBottom = positions[i].Y + Hitmarker.HalfImageSize;
-            wedge.RotationDegrees = rotations[i];
-        }
+            Place(mark.Wedges[i], positions[i], rotations[i]);
+    }
+
+    // One wedge, `offset` pixels from the centre of the screen.
+    //
+    // Pixels rather than screen fractions, because that is what the original's own numbers are: the mark
+    // is a 128 px box centred on the crosshair, and its images are placed as fractions OF THAT BOX. Read
+    // as fractions of the display they would send the wedges to the corners of the screen.
+    private static void Place(TextureRect wedge, Vector2 offset, float rotationDegrees)
+    {
+        wedge.AnchorLeft = wedge.AnchorRight = wedge.AnchorTop = wedge.AnchorBottom = 0.5f;
+        wedge.OffsetLeft = offset.X - Hitmarker.HalfImageSize;
+        wedge.OffsetTop = offset.Y - Hitmarker.HalfImageSize;
+        wedge.OffsetRight = offset.X + Hitmarker.HalfImageSize;
+        wedge.OffsetBottom = offset.Y + Hitmarker.HalfImageSize;
+        wedge.RotationDegrees = rotationDegrees;
     }
 
     // The next mark to use: a free one, else a fresh one, else the one that has been up longest.
@@ -175,8 +194,14 @@ public sealed partial class PlayerHud : CanvasLayer
             var wedges = new TextureRect[4];
             for (int i = 0; i < 4; i++)
             {
+                // The fallback exists for a rig whose icon has not been extracted yet; it still has to
+                // ignore the mouse, or an invisible 16 px square sits over the crosshair eating clicks.
                 TextureRect wedge = NewIcon(HudIcons.HitEntity, Hitmarker.ImageSize)
-                    ?? new TextureRect { Visible = false };
+                    ?? new TextureRect
+                    {
+                        Visible = false,
+                        MouseFilter = Control.MouseFilterEnum.Ignore,
+                    };
                 wedge.PivotOffset = new Vector2(Hitmarker.HalfImageSize, Hitmarker.HalfImageSize);
                 wedge.Visible = false;
                 _root!.AddChild(wedge);

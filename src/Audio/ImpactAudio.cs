@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Godot;
 using UnturnedGodot.Assets;
 
@@ -11,11 +12,9 @@ namespace UnturnedGodot;
 // which clip that plays is decided by the PhysicsMaterialAsset that claims the name, walking its Fallback
 // chain until something defines the event. Nothing here knows that concrete sounds like concrete.
 //
-// The event key is MeleeImpact with LegacyImpact behind it, in that order. The original tries them the
-// same way round for a melee hit and the other way round for the legacy impact a punch spawns — but a
-// punch reaches ReceiveSpawnLegacyImpact, whose audio is the legacy one, and the shipped materials
-// overwhelmingly define both to the same asset. The pair is what matters; a surface that defines only one
-// of them still sounds.
+// Which keys, and in which order, is MovementAudioPlan.ImpactEventKeys — the same array the extraction
+// plans from. Two copies of that list would fail silently: a key planned but never played, or played but
+// never extracted, is a surface with no impact sound and no error anywhere.
 public sealed class ImpactAudio
 {
     // PlayMeleeImpactAudio: 0.6 times the definition's own multiplier, which OneShotAudio applies.
@@ -25,8 +24,8 @@ public sealed class ImpactAudio
     // original's curve with an inverse-distance one — this is the distance at which it goes silent.
     public const float MaxDistance = 16f;
 
-    // Tried in order; the first that resolves is what plays.
-    public static readonly string[] EventKeys = { "MeleeImpact", "LegacyImpact" };
+    // Tried in order; the first that resolves is what plays. One list, shared with the extraction.
+    public static IReadOnlyList<string> EventKeys => MovementAudioPlan.ImpactEventKeys;
 
     private readonly PhysicsMaterialBank _bank;
     private readonly OneShotAudio _audio;

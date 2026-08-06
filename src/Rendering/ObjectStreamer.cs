@@ -62,6 +62,11 @@ public partial class ObjectStreamer : Node
     // they join the same needed set, extraction plan and mesh library — only their scene root is separate.
     private List<PlacedObject> _vehicles = new();
     private ObjectAssetDatabase _db = null!;
+
+    // The object/tree assets this load scanned, once it has. Null until the scan finishes, which is why
+    // the crosshair's hit test takes a callback rather than a value: it is built with the player, several
+    // seconds before this exists, and asking it again per swing costs a field read.
+    public ObjectAssetDatabase? Assets => _db;
     private Dictionary<Guid, FoliageAsset.Owned> _foliageAssets = new();
     private LevelFoliageChunks? _foliage;
     private FoliageResidencyIndex? _foliageIndex;

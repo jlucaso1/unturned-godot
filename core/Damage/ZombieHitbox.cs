@@ -106,7 +106,13 @@ public static class ZombieHitbox
                 zombie.Radius, out distance, out Vector3 point))
             return false;
         limb = LimbAt(zombie, point);
-        normal = NormalAt(zombie, point, direction);
+        // A swing thrown from INSIDE the capsule enters at distance zero with the point still at the
+        // eyes: there is no surface there to be outward from, whatever the axis says, so it faces back
+        // down the swing. Deciding that here rather than inside NormalAt keeps NormalAt answering the
+        // geometric question it is named for.
+        normal = distance <= 0f && direction != Vector3.Zero
+            ? -direction.Normalized()
+            : NormalAt(zombie, point, direction);
         return true;
     }
 

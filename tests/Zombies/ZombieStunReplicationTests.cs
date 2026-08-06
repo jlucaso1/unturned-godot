@@ -41,8 +41,26 @@ public class ZombieStunReplicationTests
     }
 
     [Fact]
-    public void ReadingNothingIsRefused() =>
+    public void WriteRejectsANullList() =>
         Assert.Throws<ArgumentNullException>(() => ZombieNetMessages.WriteZombieStunned(0, null!));
+
+    // Little-endian ids each followed by their reel, behind a type/bound/count header — the same shape
+    // every other zombie payload uses. Pinned byte for byte, because a layout change that both ends
+    // agree on still breaks every client running the older build, and the protocol version is what has
+    // to move with it.
+    [Fact]
+    public void WireLayoutIsExact()
+    {
+        byte[] payload = ZombieNetMessages.WriteZombieStunned(7,
+            new (ushort, byte)[] { (0x0201, 4), (0x0403, 9) });
+
+        Assert.Equal(new byte[]
+        {
+            (byte)ENetMessage.ZombieStunned, 7, 2,
+            0x01, 0x02, 4,
+            0x03, 0x04, 9,
+        }, payload);
+    }
 
     // Every truncation has to read as a bad datagram rather than as an escaping exception: this decodes
     // inside the client's receive loop.

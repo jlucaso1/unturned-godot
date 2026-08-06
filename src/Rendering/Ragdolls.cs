@@ -54,9 +54,14 @@ public sealed partial class Ragdolls : Node3D
         ArgumentNullException.ThrowIfNull(body);
 
         Retire();
+
+        // Read BEFORE anything is reparented, and applied AFTER the body joins the tree: GlobalTransform
+        // is meaningless on a node that is not in one, so setting it in the initializer silently dropped
+        // the corpse at the origin.
+        Transform3D pose = body.GlobalTransform;
+
         var rigid = new RigidBody3D
         {
-            GlobalTransform = body.GlobalTransform,
             // Corpses collide with the world and with nothing else. The original's debris is on its own
             // layer for the same reason: a pile of them must not push a player around or block a shot.
             CollisionLayer = 0,
@@ -68,13 +73,17 @@ public sealed partial class Ragdolls : Node3D
             Position = new Vector3(0f, BodyHeight * 0.5f, 0f),
         });
         AddChild(rigid);
+        // The BASIS carries the avatar's scale (a mega is half again as large, and every zombie has a
+        // rolled band), which belongs to the body rather than to the rigid body wrapping it. Taking the
+        // whole transform here and leaving the body's own scale on would apply it twice.
+        rigid.GlobalPosition = pose.Origin;
+        rigid.GlobalBasis = pose.Basis.Orthonormalized();
 
         // Reparented rather than copied: it is already the right mesh in the right pose, and building a
         // second one would mean importing the character again to throw it away in a minute.
         body.GetParent()?.RemoveChild(body);
         rigid.AddChild(body);
-        body.Position = Vector3.Zero;
-        body.Rotation = Vector3.Zero;
+        body.Transform = new Transform3D(Basis.Identity.Scaled(pose.Basis.Scale), Vector3.Zero);
 
         if (impulse != Vector3.Zero)
             rigid.ApplyImpulse(impulse * ImpulseScale, new Vector3(0f, BodyHeight * 0.5f, 0f));
@@ -83,9 +92,26 @@ public sealed partial class Ragdolls : Node3D
             + _rng.RandfRange(-LifetimeSpread, LifetimeSpread)));
     }
 
-    // Frees whatever has outstayed its lifetime, then the oldest bodies until the pool is inside its
-    // bound. Called on each throw rather than every frame: nothing changes in between.
-    private void Retire()
+    // Corpses go when their time is up, not when the next thing dies. Retiring only on Throw left the
+    // last few bodies of a fight lying there indefinitely — a player who stops fighting is exactly the
+    // player who has time to look at them.
+    //
+    // Once a second rather than every frame: the pool is two dozen entries and nothing about it changes
+    // faster than that.
+    public override void _Process(double delta)
+    {
+        _sinceSweep += delta;
+        if (_sinceSweep < SweepSeconds)
+            return;
+        _sinceSweep = 0;
+        Expire();
+    }
+
+    private const double SweepSeconds = 1.0;
+    private double _sinceSweep;
+
+    // Frees whatever has outstayed its lifetime.
+    private void Expire()
     {
         double now = Time.GetTicksMsec() / 1000.0;
         for (int i = _bodies.Count - 1; i >= 0; i--)
@@ -95,6 +121,14 @@ public sealed partial class Ragdolls : Node3D
             _bodies[i].Body.QueueFree();
             _bodies.RemoveAt(i);
         }
+    }
+
+    // The same, plus enough of the oldest to make room for one more. The bound is enforced HERE rather
+    // than in the sweep: a pool sitting at its limit is fine, and quietly deleting a corpse a second
+    // after it landed because the pool happens to be full would look like bodies vanishing at random.
+    private void Retire()
+    {
+        Expire();
 
         // The list is in throw order, so the front is the oldest.
         while (_bodies.Count >= MaxBodies)

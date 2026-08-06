@@ -119,22 +119,34 @@ public sealed partial class ImpactDecals : Node3D
             return null;
 
         string tag = _bundleTagOf(effect);
-        // Every candidate is tried, starting at a random one, so a gore effect varies between its four
-        // splatters and a hard surface — which offers exactly one real texture among its candidates —
-        // still finds it whichever index the roll started at.
-        int count = effect.DecalTextureCandidates.Count;
-        if (count == 0)
-            return null;
-        int start = _rng.RandiRange(0, count - 1);
-        for (int i = 0; i < count; i++)
+
+        // Gathered first, THEN chosen from — rather than starting at a random candidate and taking the
+        // first that loads, which was the first attempt and is not uniform: most candidates do not exist
+        // (both folder shapes are offered for every effect), so whichever real texture follows the most
+        // dead entries wins far more often than the others. A gore effect has four real splatters and
+        // should show all four evenly.
+        //
+        // The list is cached per effect: a punch is rare, but this walks nine candidate paths and there
+        // is no reason to do it twice for the same surface.
+        if (!_resolved.TryGetValue(effect.Guid, out List<Texture2D>? textures))
         {
-            string candidate = effect.DecalTextureCandidates[(start + i) % count];
-            if (Load(ImpactDecalPlan.CacheKey(tag, candidate)) is { } texture)
-                return texture;
+            textures = new List<Texture2D>();
+            foreach (string candidate in effect.DecalTextureCandidates)
+                if (Load(ImpactDecalPlan.CacheKey(tag, candidate)) is { } texture)
+                    textures.Add(texture);
+
+            // Only cached once something resolved: until the deferred extraction has run, every candidate
+            // misses, and caching that would leave the surface unmarked for the session.
+            if (textures.Count == 0)
+                return null;
+            _resolved[effect.Guid] = textures;
         }
 
-        return null;
+        return textures[_rng.RandiRange(0, textures.Count - 1)];
     }
+
+    // The textures each effect actually has, once any of them has been found.
+    private readonly Dictionary<Guid, List<Texture2D>> _resolved = new();
 
     private Texture2D? Load(string cacheKey)
     {
@@ -142,7 +154,9 @@ public sealed partial class ImpactDecals : Node3D
             return cached;
 
         Texture2D? texture = null;
-        string path = Path.Combine(_cacheDirectory, cacheKey + ".tex");
+        // Through the extractor's own path builder, so a cache written under one layout can never be
+        // looked for under another.
+        string path = ImpactDecalExtractor.PathFor(_cacheDirectory, cacheKey);
         if (File.Exists(path) && TextureCache.IsCurrent(path))
         {
             try
@@ -157,9 +171,12 @@ public sealed partial class ImpactDecals : Node3D
             }
         }
 
-        // Cached either way, misses included: a surface whose extraction has not run yet must not send
-        // every subsequent swing back to the filesystem.
-        _textures[cacheKey] = texture;
+        // A HIT is cached; a miss is not. The textures are extracted on the deferred pass, several
+        // seconds after the first punch is possible, so caching a miss would leave those surfaces
+        // unmarked for the rest of the session. Punches are rare enough that the retry costs nothing —
+        // and once a surface has resolved once, it never touches the filesystem again.
+        if (texture != null)
+            _textures[cacheKey] = texture;
         return texture;
     }
 

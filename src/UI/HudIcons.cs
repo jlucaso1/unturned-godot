@@ -59,8 +59,14 @@ public sealed class HudIconSet
         _assetPrefix = assetPrefix ?? throw new ArgumentNullException(nameof(assetPrefix));
     }
 
-    // One icon, or null when the extraction has not produced it. Null is drawn as nothing rather than as
-    // a placeholder: a missing crosshair is better than a wrong one.
+    // One icon, or null when the extraction has not produced it yet. Null is drawn as nothing rather
+    // than as a placeholder: a missing crosshair is better than a wrong one.
+    //
+    // A MISS is not cached, and that is the whole reason this is a method rather than a field read. The
+    // icons are extracted on the deferred pass, several seconds after the HUD is built, so on a cold
+    // cache every lookup during the load misses — caching those would leave the crosshair absent for the
+    // rest of the session, with nothing to notice it. A hit is cached, and after four of them this never
+    // touches the filesystem again.
     public Texture2D? Get(string file)
     {
         if (_textures.TryGetValue(file, out Texture2D? cached))
@@ -83,7 +89,8 @@ public sealed class HudIconSet
             }
         }
 
-        _textures[file] = texture;
+        if (texture != null)
+            _textures[file] = texture;
         return texture;
     }
 }

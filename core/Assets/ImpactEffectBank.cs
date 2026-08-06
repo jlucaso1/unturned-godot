@@ -132,8 +132,11 @@ public sealed class ImpactEffectBank
         if (relative.StartsWith("..", StringComparison.Ordinal) || relative == ".")
             return string.Empty;
 
-        return $"{assetPrefix}/{relative.Replace(Path.DirectorySeparatorChar, '/')}"
-            .ToLowerInvariant();
+        // The prefix comes out of MasterBundle.dat, so it is whatever an author typed: a trailing slash
+        // or a Windows separator would produce a container path with a double slash in it, which matches
+        // nothing in the bundle's table and silently loses the mark.
+        string prefix = assetPrefix.Replace('\\', '/').TrimEnd('/');
+        return $"{prefix}/{relative.Replace(Path.DirectorySeparatorChar, '/')}".ToLowerInvariant();
     }
 
     // Every container path the folder's mark could be at. Both shapes are offered for every effect: only

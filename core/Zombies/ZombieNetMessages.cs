@@ -167,37 +167,42 @@ public static class ZombieNetMessages
     // with the weapon, and any fixed-point scale that resolved a punch would saturate on something
     // heavier. Deaths are rare — a handful per tick at most, against the per-tick snapshot stream beside
     // them — so six bytes a corpse is not worth a range limit to save.
-    public static byte[] WriteZombieKilled(byte bound, IReadOnlyList<ushort> ids) =>
-        WriteZombieKilled(bound, ids, null);
-
-    // `ragdolls`, when given, carries the shove each corpse takes with it, in the same order as `ids`. A
-    // null list writes zeroes, which is a body that simply drops — what a kill with no direction behind it
-    // (a burn, a despawn) does in the original too.
-    public static byte[] WriteZombieKilled(byte bound, IReadOnlyList<ushort> ids,
-        IReadOnlyList<Vector3>? ragdolls)
+    // Ids alone: every corpse simply drops, which is what a kill with no direction behind it (a burn, a
+    // despawn) does in the original too.
+    public static byte[] WriteZombieKilled(byte bound, IReadOnlyList<ushort> ids)
     {
         ArgumentNullException.ThrowIfNull(ids);
+        var kills = new List<(ushort, Vector3)>(ids.Count);
+        foreach (ushort id in ids)
+            kills.Add((id, Vector3.Zero));
+        return WriteZombieKilled(bound, kills);
+    }
+
+    // Each corpse with the shove its killing blow gave it. One list of PAIRS rather than two collections
+    // that a caller has to keep in step: a mismatch there would throw a body with another body's blow.
+    public static byte[] WriteZombieKilled(byte bound, IReadOnlyList<(ushort Id, Vector3 Ragdoll)> kills)
+    {
+        ArgumentNullException.ThrowIfNull(kills);
         // The count header is one byte, and a silent truncation here would be the worst possible
         // failure: a payload advertising zero ids that the reader believes, leaving every one of those
         // corpses standing forever. A region cannot hold more than 255 zombies, so this can only fire
         // on a caller that has already gone wrong somewhere else.
-        if (ids.Count > byte.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(ids),
-                $"a ZombieKilled payload carries at most {byte.MaxValue} ids, not {ids.Count}");
+        if (kills.Count > byte.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(kills),
+                $"a ZombieKilled payload carries at most {byte.MaxValue} ids, not {kills.Count}");
         // id (2) + the shove (3 x 4).
         const int PerZombie = 2 + (3 * 4);
-        var payload = new byte[3 + (ids.Count * PerZombie)];
+        var payload = new byte[3 + (kills.Count * PerZombie)];
         payload[0] = (byte)ENetMessage.ZombieKilled;
         payload[1] = bound;
-        payload[2] = (byte)ids.Count;
-        for (int i = 0; i < ids.Count; i++)
+        payload[2] = (byte)kills.Count;
+        for (int i = 0; i < kills.Count; i++)
         {
             Span<byte> entry = payload.AsSpan(3 + (i * PerZombie));
-            BinaryPrimitives.WriteUInt16LittleEndian(entry, ids[i]);
-            Vector3 ragdoll = ragdolls != null && i < ragdolls.Count ? ragdolls[i] : Vector3.Zero;
-            BinaryPrimitives.WriteSingleLittleEndian(entry[2..], ragdoll.X);
-            BinaryPrimitives.WriteSingleLittleEndian(entry[6..], ragdoll.Y);
-            BinaryPrimitives.WriteSingleLittleEndian(entry[10..], ragdoll.Z);
+            BinaryPrimitives.WriteUInt16LittleEndian(entry, kills[i].Id);
+            BinaryPrimitives.WriteSingleLittleEndian(entry[2..], kills[i].Ragdoll.X);
+            BinaryPrimitives.WriteSingleLittleEndian(entry[6..], kills[i].Ragdoll.Y);
+            BinaryPrimitives.WriteSingleLittleEndian(entry[10..], kills[i].Ragdoll.Z);
         }
 
         return payload;

@@ -16,11 +16,19 @@ public static class MovementAudioPlan
     // without one falls back through the chain the bank walks.
     public static readonly string[] EventKeys = { "FootstepWalk", "FootstepRun", "BipedLand" };
 
-    // What a fist landing on that same surface resolves through. A different moment entirely, planned in
-    // the same pass because it is the same question asked of the same assets: a bundle opened once should
-    // give up everything its surfaces owe, and a definition discovered later costs a second whole-bundle
-    // decode. See ImpactAudio for which of the two keys wins at play time.
-    public static readonly string[] ImpactEventKeys = { "MeleeImpact", "LegacyImpact" };
+    // What a fist landing on that same surface resolves through, IN THE ORDER THEY ARE TRIED. A punch
+    // reaches DamageTool.ReceiveSpawnLegacyImpact, whose PlayLegacyImpactAudio asks for LegacyImpact
+    // first and falls back to MeleeImpact — the opposite order to PlayMeleeImpactAudio, which a swung
+    // weapon reaches. The shipped materials mostly define both to the same asset, so the two orders
+    // usually agree; where they do not, this is the one a fist takes.
+    //
+    // Planned in the same pass as the footsteps because it is the same question asked of the same
+    // assets: a bundle opened once should give up everything its surfaces owe, and a definition
+    // discovered later costs a second whole-bundle decode.
+    //
+    // ImpactAudio plays from this array rather than declaring its own. A key planned but never played,
+    // or played but never extracted, is a silent surface with no error anywhere — so there is one list.
+    public static readonly string[] ImpactEventKeys = { "LegacyImpact", "MeleeImpact" };
 
     // Every surface event the extraction plans for, in one sequence.
     public static IEnumerable<string> AllEventKeys

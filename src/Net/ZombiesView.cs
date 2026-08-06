@@ -12,7 +12,8 @@ namespace UnturnedGodot;
 // cloned), positioned from the server's ZombieList and interpolated through the same snapshot buffer the
 // remote players use. Animation follows Zombie.cs exactly: Move_{move}/Idle_{idle} variants with the
 // crawler (Move_4/Idle_3) and sprinter (Move_5/Idle_4) overrides, Attack_0..4 swings, and the replicated
-// per-zombie scale band (megas 1.45-1.55, everyone else 0.95-1.05).
+// per-zombie scale band (megas 1.45-1.55, everyone else 0.95-1.05). A killed body is handed to the
+// ragdoll pool rather than freed, so the corpse falls where the blow sent it.
 public partial class ZombiesView : Node3D
 {
     private const float AnimateWithin = 100f;  // skeletons past this stop sampling (Unturned's far
@@ -319,6 +320,12 @@ public partial class ZombiesView : Node3D
     }
 
     // Zombie.askStun: play the stagger reel, taking the rig from whatever was on it.
+    //
+    // A stagger for a zombie this client has not been told about yet is DROPPED rather than remembered.
+    // Both messages are reliable, so the region list is coming; but a stagger is a moment, and by the
+    // time the avatar exists the second the server counted has largely run out — playing it then would
+    // stagger a body the server has already released. A death is remembered (see _killed) precisely
+    // because it is the opposite: final, and wrong to miss.
     private void Stun(ushort id, byte clip)
     {
         if (_avatars.TryGetValue(id, out ZombieAvatar? avatar))
@@ -328,9 +335,9 @@ public partial class ZombiesView : Node3D
         }
     }
 
-    // ZombieManager's death: the avatar goes. Unturned plays a ragdoll here (Zombie.askDamage hands
-    // askDamage's force to the ragdoll and the body falls); there is no ragdoll in this port, so the
-    // body is simply freed, which is what its own dead-zombie cleanup does once the ragdoll expires.
+    // ZombieManager's death: the avatar leaves the population and becomes debris. Zombie.askDamage hands
+    // its force to the ragdoll and the body falls; here it goes to the pool, which owns it until the
+    // debris timer runs out — the same lifetime the original gives it.
     // `ragdoll` is the shove the killing blow gave the body, straight off the wire. Zero drops it where
     // it stood, which is what a death with no direction behind it does.
     private void Kill(ushort id, Vector3 ragdoll = default)
