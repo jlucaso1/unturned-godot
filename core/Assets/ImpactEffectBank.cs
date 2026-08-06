@@ -132,12 +132,19 @@ public sealed class ImpactEffectBank
         if (relative.StartsWith("..", StringComparison.Ordinal) || relative == ".")
             return string.Empty;
 
-        // The prefix comes out of MasterBundle.dat, so it is whatever an author typed: a trailing slash
-        // or a Windows separator would produce a container path with a double slash in it, which matches
-        // nothing in the bundle's table and silently loses the mark.
-        string prefix = assetPrefix.Replace('\\', '/').TrimEnd('/');
-        return $"{prefix}/{relative.Replace(Path.DirectorySeparatorChar, '/')}".ToLowerInvariant();
+        return $"{NormalizePrefix(assetPrefix)}/{relative.Replace(Path.DirectorySeparatorChar, '/')}"
+            .ToLowerInvariant();
     }
+
+    // An Asset_Prefix as the container table spells it. The value comes out of MasterBundle.dat, so it is
+    // whatever an author typed: a trailing slash or a Windows separator would produce a container path
+    // with a double slash in it, which matches nothing and silently loses the mark.
+    //
+    // Public because anything that KEYS by a prefix has to key by the same normalised form the paths are
+    // built from — a raw key and a normalised path do not match, and the effect quietly resolves to the
+    // wrong bundle.
+    public static string NormalizePrefix(string assetPrefix) =>
+        assetPrefix.Replace('\\', '/').TrimEnd('/').ToLowerInvariant();
 
     // Every container path the folder's mark could be at. Both shapes are offered for every effect: only
     // the bundle knows which exist, and asking for a path that is not there costs the extractor nothing.

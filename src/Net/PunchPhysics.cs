@@ -27,13 +27,13 @@ internal static class PunchPhysics
         // thrower included. Unreliable, exactly as the original sends it — an impact that arrives late is
         // worse than one that never arrives, and the next swing is half a second away.
         //
-        // Sent to EVERY connection rather than to those within EffectManager.SMALL of the point: this
-        // port's server has no per-connection relevance filter yet, and one datagram per swing is far
-        // below the per-tick state stream it rides beside. The client is what decides audibility, through
-        // the sound's own 16 m rolloff.
+        // Sent only to connections within EffectManager.SMALL of the point, which is
+        // GatherOwnerAndClientConnectionsWithinSphere. Broadcasting to everyone was the first version and
+        // is worse than wasteful: the client's audio voices and decal slots are both bounded pools, so a
+        // fight on the far side of the map would quietly steal the sounds and overwrite the marks of the
+        // one in front of the player.
         if (server != null)
-            host.Impacted += impact => server.Broadcast(ImpactNetMessages.WriteImpact(impact),
-                UnturnedGodot.Net.ESendType.Unreliable);
+            host.Impacted += impact => BroadcastImpact(server, impact);
 
         // Resolved on every swing rather than cached for the host's lifetime, which is what the zombie
         // brain does — its queries run per zombie per tick and cannot pay a lookup each time. A punch is
@@ -71,6 +71,24 @@ internal static class PunchPhysics
         // no object collision. Where the cast above works, it already shortens the punch to whatever
         // solid thing it met first, so a zombie behind a wall is out of reach rather than merely
         // occluded, and a second query would only be another chance to disagree with the first.
+    }
+
+    // EffectManager.SMALL: how far an impact effect is relevant. Kept squared, which is the comparison.
+    public const float RelevantDistance = 64f;
+    private const float RelevantDistanceSquared = RelevantDistance * RelevantDistance;
+
+    private static void BroadcastImpact(UnturnedGodot.Net.NetServer server, PunchImpact impact)
+    {
+        byte[]? payload = null;
+        server.ForEachJoinedConnection((byte _, UnturnedGodot.Net.PlayerMoveState state,
+            UnturnedGodot.Net.ITransportConnection connection) =>
+        {
+            if (state.Position.DistanceSquaredTo(impact.Point) > RelevantDistanceSquared)
+                return;
+            // Built once, and only if somebody is close enough to be told.
+            payload ??= ImpactNetMessages.WriteImpact(impact);
+            connection.Send(payload, UnturnedGodot.Net.ESendType.Unreliable);
+        });
     }
 
     // Which asset the body a ray struck belongs to, so the punch damages the thing it hit rather than

@@ -1011,8 +1011,12 @@ public partial class Main : Node3D
             // workshop item's is the folder its MasterBundle.dat sits in.
             string prefix = MasterBundleConfig.Load(source.Root)?.AssetPrefix ?? string.Empty;
             effectSources.Add((source.Root, prefix));
+            // Normalised the SAME way ImpactEffectBank builds its container paths: an author who typed
+            // backslashes or a trailing slash would otherwise leave this key unable to match the paths
+            // built from it, and every workshop effect would fall back to the core bundle — extracted
+            // and looked for under the wrong tag, so the mark never appears.
             if (prefix.Length > 0)
-                bundleBySource[prefix.ToLowerInvariant()] = source;
+                bundleBySource[ImpactEffectBank.NormalizePrefix(prefix)] = source;
         }
 
         ImpactEffectBank effects = ImpactEffectBank.ScanSources(effectSources);

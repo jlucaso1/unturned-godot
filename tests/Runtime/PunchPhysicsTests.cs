@@ -39,6 +39,15 @@ public class PunchPhysicsTests : TestClass
         Assert.Equal(0u, PunchPhysics.DamageMask & CollisionLayers.Player);
     }
 
+    // EffectManager.SMALL, which is what GatherOwnerAndClientConnectionsWithinSphere gathers within.
+    //
+    // Not a detail: the client's audio voices and decal slots are both bounded pools, so broadcasting
+    // every punch to every connection would let a fight on the far side of the map steal the sounds and
+    // overwrite the marks of the one in front of the player.
+    [Test]
+    public void TheImpactRelevanceRadiusIsTheOriginals() =>
+        Assert.Equal(64f, PunchPhysics.RelevantDistance);
+
     [Test]
     public void AttachingToNothingIsRefused()
     {

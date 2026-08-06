@@ -310,7 +310,15 @@ public partial class PlayerController : CharacterBody3D
         _rig?.SetPitch(_pitch);          // bends the upper body toward the look
         // The arms follow the same movement state so they idle and bob like the body; the camera already
         // carries the look, so they take no pitch bend of their own.
-        _viewmodel?.SetState(_stance, moving);
+        //
+        // EXCEPT while a gesture is playing on them, when they stand up for its duration — see
+        // ViewmodelState, which is where the rule and the reason for it live.
+        if (_viewmodel is { } arms)
+        {
+            (EPlayerStance armStance, bool armsMoving) =
+                ViewmodelState.For(_stance, moving, arms.IsPlayingOnce);
+            arms.SetState(armStance, armsMoving);
+        }
 
         float speed = PlayerConfig.SpeedFor(_stance);
         bool wasOnFloor = IsOnFloor();

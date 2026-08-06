@@ -151,6 +151,35 @@ public class ImpactEffectBankTests
         Assert.Equal(string.Empty,
             ImpactEffectBank.ContainerDirectory("/elsewhere/Effects/X", "/bundles", "Assets/X"));
 
+    // An Asset_Prefix is whatever an author typed. Anything that KEYS by a prefix has to key by the same
+    // normalised form the container paths are built from, or a workshop effect resolves to the wrong
+    // bundle — extracted under one tag and looked for under another, so the mark never appears.
+    [Theory]
+    [InlineData("Assets/CoreMasterBundle")]
+    [InlineData("Assets/CoreMasterBundle/")]
+    [InlineData("Assets\\CoreMasterBundle")]
+    [InlineData("ASSETS/CoreMasterBundle")]
+    public void EveryShapeOfPrefixNormalisesToOne(string prefix) =>
+        Assert.Equal("assets/coremasterbundle", ImpactEffectBank.NormalizePrefix(prefix));
+
+    // And a container path built from any of them is the same path, with no doubled separator.
+    [Theory]
+    [InlineData("Assets/CoreMasterBundle")]
+    [InlineData("Assets/CoreMasterBundle/")]
+    [InlineData("Assets\\CoreMasterBundle")]
+    public void EveryShapeOfPrefixBuildsTheSameContainerPath(string prefix)
+    {
+        using var dir = new TempDir();
+        (string bundles, string _) = Source(dir, "Wood_WithDecal_NoAudio", WoodEffect);
+
+        ImpactEffectAsset asset = ImpactEffectBank.ScanDirectory(bundles, prefix)
+            .Find(Guid.Parse("b2bbae34370e493fb03f9042dd6a6acf"))!;
+
+        Assert.Equal("assets/coremasterbundle/effects/impacts/wood_withdecal_noaudio",
+            asset.BundleDirectory);
+        Assert.DoesNotContain("//", asset.BundleDirectory, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void NoAssetPrefixNamesNoContainerPath() =>
         Assert.Equal(string.Empty,

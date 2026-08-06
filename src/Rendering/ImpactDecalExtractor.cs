@@ -21,19 +21,28 @@ public static class ImpactDecalExtractor
     public static string PathFor(string cacheDirectory, string cacheKey) =>
         Path.Combine(cacheDirectory, cacheKey + ".tex");
 
-    // True when every texture this request could produce is already cached — which, because most requests
-    // ask for paths the bundle does not have, is not the same as "every path is on disk".
+    // True when this request has already produced something usable — which, because most requests ask
+    // for paths the bundle does not have, is not the same as "every path is on disk".
     //
-    // The test is deliberately weak: a bundle is only opened when NOTHING it was asked for is present.
-    // Asking whether a specific candidate exists would mean opening the bundle to find out, which is the
-    // whole cost this is here to avoid, and a decal that never arrives leaves a surface unmarked rather
-    // than breaking anything.
+    // The test is deliberately weak in one direction: a bundle is only opened when NOTHING it was asked
+    // for is present. Asking whether a specific candidate exists would mean opening the bundle to find
+    // out, which is the whole cost this exists to avoid.
+    //
+    // It is NOT weak about the file being readable. Existence alone was the first version and was wrong:
+    // a .tex left by an older cache format exists, so extraction was skipped, and then the readers
+    // rejected that same file through TextureCache.IsCurrent — the icon or decal stayed missing on every
+    // subsequent run until someone deleted the cache by hand. A stale file has to read as "not yet".
     public static bool IsSatisfied(Request request)
     {
         ArgumentNullException.ThrowIfNull(request);
         foreach (string path in request.ContainerPaths)
-            if (File.Exists(PathFor(request.CacheDirectory, ImpactDecalPlan.CacheKey(request.BundleTag, path))))
+        {
+            string file = PathFor(request.CacheDirectory,
+                ImpactDecalPlan.CacheKey(request.BundleTag, path));
+            if (File.Exists(file) && TextureCache.IsCurrent(file))
                 return true;
+        }
+
         return false;
     }
 
