@@ -33,12 +33,18 @@ internal static class FrameClock
         PreviousPhysicsFrames = physicsFrames;
     }
 
+    // Whether a full interval has been observed yet. Callers need this to tell an unmeasured frame from a
+    // measured one, because 0 is a legitimate answer for the step count below and a meaningless one for a
+    // clock that has only ticked once.
+    public static bool HasMeasured => PreviousUsec != 0UL && MeasuredMs > 0d;
+
     // 0 before the second tick — no overlay in the tree, or the very first frame after one appears.
     public static double LastFrameMs => MeasuredMs;
 
-    // How many physics steps ran inside that frame, which is not always one and is 0 before the clock has
-    // measured anything. Below the physics tick rate the engine runs several steps between two rendered
-    // frames, and TimePhysicsProcess prices ONE of them — so the frame's physics bill is the step times
-    // this, and counting it as a single step leaves the rest of the work unattributed.
+    // How many physics steps ran inside that frame, which is not always one. Below the physics tick rate
+    // the engine runs several steps between two rendered frames while TimePhysicsProcess prices ONE of
+    // them, so the frame's physics bill is the step times this. Above the tick rate it is legitimately
+    // ZERO on most frames — those frames ran no physics at all, and charging them a step would eat real
+    // GPU wait out of exactly the high-FPS frame where that reading is the whole question.
     public static int LastPhysicsSteps => MeasuredSteps;
 }

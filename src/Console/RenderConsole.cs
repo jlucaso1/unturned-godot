@@ -38,9 +38,9 @@ public static class RenderConsole
     private static ConsoleRegistry? Shared;
     private static bool StartupTaken;
 
-    // How far under the frame cap's period still counts as hitting it. The limiter lands a fraction of a
-    // millisecond either side of its target, so exact comparison would call a capped frame uncapped on the
-    // ones that came in a hair early.
+    // How far past the frame cap's period still counts as hitting it. The limiter lands a fraction of a
+    // millisecond either side of its target, so an exact comparison would call a capped frame uncapped on
+    // every one that overshot slightly.
     private const double CapSlackMs = 0.5d;
 
     // Whichever node the console currently speaks through — the overlay in a normal session, the
@@ -453,7 +453,10 @@ public static class RenderConsole
         // between two rendered frames while the monitor still prices one, so subtracting a single step at
         // 30 fps against 60 Hz physics leaves half the physics bill behind — in the remainder, under a
         // GPU label, in exactly the physics-bound session least able to afford the wrong diagnosis.
-        int steps = Mathf.Max(1, FrameClock.LastPhysicsSteps);
+        // A measured 0 is kept as 0: above the physics tick rate most rendered frames run no physics step
+        // at all, and billing them one would eat a real GPU wait out of the high-FPS frame where that is
+        // the entire question. Only an unmeasured clock falls back to one step.
+        int steps = FrameClock.HasMeasured ? FrameClock.LastPhysicsSteps : 1;
         double physicsStepMs = Performance.GetMonitor(Performance.Monitor.TimePhysicsProcess) * 1000d;
         double physicsMs = physicsStepMs * steps;
         double idleMs = Mathf.Max(0d, frameMs - cpuMs - physicsMs);
@@ -465,10 +468,14 @@ public static class RenderConsole
         // A frame cap only distorts while it BINDS, which is the difference between the cap being set and
         // the cap being reached: a 120 cap over a 45 fps workload never sleeps, and suppressing there
         // would withhold the diagnosis from the slow frame that most needs it — while r.fps.max's own help
-        // recommends a cap during measurement, so that case is the norm rather than the exception. The
-        // frame is compared against the cap's period to tell the two apart.
+        // recommends a cap during measurement, so that case is the norm rather than the exception.
+        //
+        // Binding means the frame landed AT the cap's period, so the test is an upper bound. A lower one
+        // would be satisfied by every frame slower than the cap, which is most of them — the limiter
+        // cannot make a frame shorter than its period, so "not meaningfully longer than it" is the whole
+        // condition.
         bool vsync = DisplayServer.WindowGetVsyncMode() != DisplayServer.VSyncMode.Disabled;
-        bool capBinding = Engine.MaxFps > 0 && frameMs >= (1000d / Engine.MaxFps) - CapSlackMs;
+        bool capBinding = Engine.MaxFps > 0 && frameMs <= (1000d / Engine.MaxFps) + CapSlackMs;
         string idleLabel = (vsync, capBinding) switch
         {
             (true, true) => "idle (vsync + cap, not a gpu reading)",
