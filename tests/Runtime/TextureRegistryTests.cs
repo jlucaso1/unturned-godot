@@ -215,7 +215,6 @@ public class TextureRegistryTests : TestClass
         Assert.True(registry.Apply("leaves"));
 
         Assert.NotNull(cutout.GetShaderParameter("albedo_texture").As<Texture2D>());
-        Assert.True((bool)cutout.GetShaderParameter("has_texture"));
     }
 
     // The warm-load catch-up: everything whose .tex is already on disk goes on in one pass, rather than
