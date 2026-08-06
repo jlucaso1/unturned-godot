@@ -115,6 +115,12 @@ public static class CharacterModel
         Code = """
         #pragma disable_preprocessor
         shader_type spatial;
+        // SPECULAR is written 0 below, which makes f0 zero and the Schlick-GGX lobe multiply out to
+        // nothing, so the render mode drops ALU that could not have changed a pixel — rendering the two
+        // side by side under a sky and a sun gives the same value at the centre and at the grazing rim.
+        // The write stays: the render mode only guards direct light, and the sky's indirect specular
+        // reads f0 either way (TerrainBuilder says the same thing about the ground).
+        render_mode specular_disabled;
         uniform sampler2D face_albedo : source_color, filter_nearest;
         uniform vec3 skin_color : source_color;
         void fragment() {
