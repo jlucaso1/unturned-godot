@@ -57,7 +57,7 @@ public class PunchPhysicsTests : TestClass
         PunchPhysics.Attach(harness.Punches, () => null);
 
         Assert.False(harness.Punches.WorldRaycast!(Vector3.Zero, Vector3.Forward, 4f,
-            out _, out _, out _));
+            out _, out _, out _, out _, out _));
     }
 
     // The batched body: one InstancedStaticBodies owns every collider, and the query's RID is what says
@@ -77,7 +77,7 @@ public class PunchPhysicsTests : TestClass
 
         PunchPhysics.Attach(harness.Punches, () => bodies.GetWorld3D());
         bool hit = harness.Punches.WorldRaycast!(Vector3.Zero, Vector3.Forward, 8f,
-            out Vector3 point, out float distance, out Guid struck);
+            out Vector3 point, out _, out float distance, out Guid struck, out _);
 
         Assert.True(hit, "the ray never reached the batched body");
         Assert.Equal(asset, struck);
@@ -107,7 +107,7 @@ public class PunchPhysicsTests : TestClass
         PunchPhysics.Attach(harness.Punches, () => body.GetWorld3D());
 
         Assert.True(harness.Punches.WorldRaycast!(Vector3.Zero, Vector3.Forward, 8f,
-            out _, out _, out Guid struck));
+            out _, out _, out _, out Guid struck, out _));
         Assert.Equal(asset, struck);
 
         body.QueueFree();
@@ -128,7 +128,7 @@ public class PunchPhysicsTests : TestClass
         PunchPhysics.Attach(harness.Punches, () => terrain.GetWorld3D());
 
         Assert.True(harness.Punches.WorldRaycast!(Vector3.Zero, Vector3.Forward, 8f,
-            out _, out _, out Guid struck));
+            out _, out _, out _, out Guid struck, out _));
         Assert.Equal(Guid.Empty, struck);
 
         terrain.QueueFree();
@@ -147,7 +147,7 @@ public class PunchPhysicsTests : TestClass
         PunchPhysics.Attach(harness.Punches, () => far.GetWorld3D());
 
         Assert.False(harness.Punches.WorldRaycast!(new Vector3(0f, 500f, 0f), Vector3.Up, 4f,
-            out Vector3 point, out float distance, out Guid struck));
+            out Vector3 point, out _, out float distance, out Guid struck, out _));
         Assert.Equal(Vector3.Zero, point);
         Assert.Equal(0f, distance);
         Assert.Equal(Guid.Empty, struck);

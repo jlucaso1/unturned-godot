@@ -281,10 +281,12 @@ public class PunchDamageHostTests
         var world = new DamageableWorld();
         world.Add(DamageableInstance.Object(new Vector3(0, 10f, -1f), GarbagePile()));
         Harness h = Joined(world,
-            (Vector3 origin, Vector3 direction, float maxDistance, out Vector3 point, out float distance,
-                out Guid asset) =>
+            (Vector3 origin, Vector3 direction, float maxDistance, out Vector3 point, out Vector3 normal,
+                out float distance, out Guid asset, out string surface) =>
             {
                 point = new Vector3(0, 10.5f, -1f);
+                normal = Vector3.Up;
+                surface = string.Empty;
                 distance = 1f;
                 asset = GarbagePile().Guid;
                 return direction.Z < -0.5f; // only when actually looking that way
@@ -310,10 +312,12 @@ public class PunchDamageHostTests
         var world = new DamageableWorld();
         world.Add(DamageableInstance.Object(new Vector3(0, 10f, -40f), GarbagePile()));
         Harness h = Joined(world,
-            (Vector3 origin, Vector3 direction, float maxDistance, out Vector3 point, out float distance,
-                out Guid asset) =>
+            (Vector3 origin, Vector3 direction, float maxDistance, out Vector3 point, out Vector3 normal,
+                out float distance, out Guid asset, out string surface) =>
             {
                 point = new Vector3(0, 10f, -40f); // forty metres away, claimed as one
+                normal = Vector3.Up;
+                surface = string.Empty;
                 distance = 1f;
                 asset = GarbagePile().Guid;
                 return true;
@@ -331,10 +335,12 @@ public class PunchDamageHostTests
     public void AWorldHitWithNoLedgerDamagesNothing()
     {
         Harness h = Joined(world: null,
-            (Vector3 origin, Vector3 direction, float maxDistance, out Vector3 point, out float distance,
-                out Guid asset) =>
+            (Vector3 origin, Vector3 direction, float maxDistance, out Vector3 point, out Vector3 normal,
+                out float distance, out Guid asset, out string surface) =>
             {
                 point = origin + (direction * 0.5f);
+                normal = Vector3.Up;
+                surface = string.Empty;
                 distance = 0.5f;
                 asset = Guid.Empty; // terrain
                 return true;
@@ -356,10 +362,12 @@ public class PunchDamageHostTests
         var world = new DamageableWorld();
         world.Add(DamageableInstance.Object(new Vector3(0, 10f, -1f), GarbagePile()));
         var h = new Harness(world,
-            (Vector3 origin, Vector3 direction, float maxDistance, out Vector3 point, out float distance,
-                out Guid asset) =>
+            (Vector3 origin, Vector3 direction, float maxDistance, out Vector3 point, out Vector3 normal,
+                out float distance, out Guid asset, out string surface) =>
             {
                 point = new Vector3(0, 10.5f, -1f);
+                normal = Vector3.Up;
+                surface = string.Empty;
                 distance = 1f;
                 asset = GarbagePile().Guid;
                 return direction.Z < -0.5f;

@@ -947,11 +947,17 @@ public partial class Main : Node3D
             navBounds, () => player.GlobalPosition);
         AddChild(zombiesView);
         zombiesView.WarmupTemplates(); // still behind LoadingScreen; never import on a city-entry packet
+        if (_impactAudio != null)
+            AddChild(ImpactView.Create(network.Client, _impactAudio));
     }
 
     // One MovementAudio per character; remote avatars get theirs from this factory (RemotePlayersView).
     private System.Func<MovementAudio>? _movementAudioFactory;
     private OneShotAudio? _oneShotAudio; // the shared positional voice pool (zombie roars use it too)
+
+    // What a fist landing on a surface sounds like. Shares the bank and the voice pool with the footsteps
+    // — the same PhysicsMaterialAssets answer both questions.
+    private ImpactAudio? _impactAudio;
 
     // Movement audio infrastructure: the physics-material bank + terrain splat sampler resolve WHICH
     // definition a step plays; the shared AudioDefLibrary + positional OneShotAudio pool play it. The
@@ -1042,6 +1048,10 @@ public partial class Main : Node3D
         string BundleTagOfDirectory(string directory) =>
             SourceForAssetDirectory(sources, directory)?.CacheTag
             ?? UnturnedGodot.Unity.TextureKey.TagFor(System.IO.Path.GetFileNameWithoutExtension(bundlePath));
+
+        // Built here rather than in AttachSession because this is where the bank and the bundle-tag
+        // lookup exist; a session that starts later takes the finished thing.
+        _impactAudio = new ImpactAudio(bank, oneShot, BundleTagOfDirectory);
 
         MovementAudio Factory(bool startGrounded) =>
             new(bank, landscape, splat, oneShot, startGrounded, BundleTagOfDirectory);

@@ -152,7 +152,7 @@ public class ZombieHitboxTests
     public void RaycastFindsTheChest()
     {
         Assert.True(ZombieHitbox.Raycast(Zombie(), new Vector3(0, 1.2f, 1f), new Vector3(0, 0, -1),
-            PunchDamageData.Reach, out float distance, out ELimb limb));
+            PunchDamageData.Reach, out float distance, out ELimb limb, out _));
         Assert.Equal(ELimb.Spine, limb);
         Assert.Equal(0.6f, distance, 3);
     }
@@ -160,14 +160,14 @@ public class ZombieHitboxTests
     [Fact]
     public void RaycastRespectsReach() =>
         Assert.False(ZombieHitbox.Raycast(Zombie(), new Vector3(0, 1.2f, 4f), new Vector3(0, 0, -1),
-            PunchDamageData.Reach, out _, out _));
+            PunchDamageData.Reach, out _, out _, out _));
 
     // Aiming up at a zombie's head from close in: the ray enters the skull band.
     [Fact]
     public void RaycastCanFindTheHead()
     {
         Assert.True(ZombieHitbox.Raycast(Zombie(), new Vector3(0, 1.7f, 1f), new Vector3(0, 0, -1),
-            PunchDamageData.Reach, out _, out ELimb limb));
+            PunchDamageData.Reach, out _, out ELimb limb, out _));
         Assert.Equal(ELimb.Skull, limb);
     }
 }

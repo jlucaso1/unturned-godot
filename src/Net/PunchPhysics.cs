@@ -15,12 +15,25 @@ internal static class PunchPhysics
 {
     public const uint DamageMask = CollisionLayers.World | CollisionLayers.MediumFurniture;
 
-    public static void Attach(PunchDamageHost host, Func<World3D?> resolveWorld)
+    public static void Attach(PunchDamageHost host, Func<World3D?> resolveWorld,
+        UnturnedGodot.Net.NetServer? server = null)
     {
         ArgumentNullException.ThrowIfNull(host);
         ArgumentNullException.ThrowIfNull(resolveWorld);
 
         host.Resolved += LogPunch;
+
+        // DamageTool.ServerSpawnLegacyImpact: the server is what tells everyone a fist met a surface, the
+        // thrower included. Unreliable, exactly as the original sends it — an impact that arrives late is
+        // worse than one that never arrives, and the next swing is half a second away.
+        //
+        // Sent to EVERY connection rather than to those within EffectManager.SMALL of the point: this
+        // port's server has no per-connection relevance filter yet, and one datagram per swing is far
+        // below the per-tick state stream it rides beside. The client is what decides audibility, through
+        // the sound's own 16 m rolloff.
+        if (server != null)
+            host.Impacted += impact => server.Broadcast(ImpactNetMessages.WriteImpact(impact),
+                UnturnedGodot.Net.ESendType.Unreliable);
 
         // Resolved on every swing rather than cached for the host's lifetime, which is what the zombie
         // brain does — its queries run per zombie per tick and cannot pay a lookup each time. A punch is
@@ -29,11 +42,14 @@ internal static class PunchPhysics
         var ray = new PhysicsRayQueryParameters3D { CollisionMask = DamageMask };
 
         host.WorldRaycast = (Vector3 origin, Vector3 direction, float maxDistance,
-            out Vector3 point, out float distance, out System.Guid asset) =>
+            out Vector3 point, out Vector3 normal, out float distance, out System.Guid asset,
+            out string surface) =>
         {
             point = Vector3.Zero;
+            normal = Vector3.Up;
             distance = 0f;
             asset = System.Guid.Empty;
+            surface = string.Empty;
             PhysicsDirectSpaceState3D? space = resolveWorld()?.DirectSpaceState;
             if (space == null)
                 return false;
@@ -43,8 +59,10 @@ internal static class PunchPhysics
             if (hit.Count == 0)
                 return false;
             point = (Vector3)hit["position"];
+            normal = (Vector3)hit["normal"];
             distance = (point - origin).Length();
             asset = AssetOf(hit);
+            surface = SurfaceOf(hit);
             return true;
         };
 
@@ -78,6 +96,35 @@ internal static class PunchPhysics
             _ => string.Empty,
         };
         return ObjectCollisionNames.TryParseGuid(name, out System.Guid guid) ? guid : System.Guid.Empty;
+    }
+
+    // What the struck surface is made of — PhysicsTool.GetColliderSharedPhysicsMaterialName. The shape
+    // index the query reports is what picks the collider out of the body, since one body carries every
+    // collider of a building and they are rarely all the same stuff.
+    //
+    // Two shapes of body again, for the same reason AssetOf reads both. Terrain and anything else the
+    // builders did not give a surface answer with the empty string, which is a punch that makes no sound
+    // and leaves no mark — the original's own behaviour for a collider with no PhysicMaterial.
+    //
+    // The TERRAIN is a known gap: PhysicsTool.GetMaterialName answers a "Ground" collider from the splat
+    // map rather than from the collider, and the splat sampler lives on the client. Punching the ground
+    // is silent here until that is wired through.
+    private static string SurfaceOf(Godot.Collections.Dictionary hit)
+    {
+        if (!hit.TryGetValue("collider", out Variant colliderValue)
+            || !hit.TryGetValue("shape", out Variant shapeValue))
+        {
+            return string.Empty;
+        }
+
+        int shape = shapeValue.As<int>();
+        return colliderValue.As<Node>() switch
+        {
+            InstancedStaticBodies owner when hit.TryGetValue("rid", out Variant rid) =>
+                owner.MaterialFor(rid.As<Rid>(), shape),
+            InstancedStaticBody body => body.MaterialFor(shape),
+            _ => string.Empty,
+        };
     }
 
     // PUNCH_LOG=1 prints what every swing found. The damage model has no HUD in front of it yet — no hit
