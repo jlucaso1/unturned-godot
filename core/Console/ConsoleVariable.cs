@@ -24,11 +24,13 @@ public delegate string? ConsoleApply(ConsoleVariable variable);
 public sealed class ConsoleVariable
 {
     private readonly ConsoleApply _apply;
+    private readonly int[]? _allowed; // set only by Choice; null means the whole range is accepted
     private double _value;
 
     private ConsoleVariable(string name, string summary, ConsoleValueKind kind, double value,
-        double minimum, double maximum, ConsoleApply apply)
+        double minimum, double maximum, ConsoleApply apply, int[]? allowed = null)
     {
+        _allowed = allowed;
         Name = name;
         Summary = summary;
         Kind = kind;
@@ -61,6 +63,35 @@ public sealed class ConsoleVariable
         ConsoleApply apply) =>
         new(name, summary, ConsoleValueKind.Whole, value, minimum, maximum, apply);
 
+    // A whole number drawn from a discrete set rather than a range: shadow cascade counts are 1, 2 or 4,
+    // and nothing sensible happens at 3.
+    //
+    // Without this the range is the only guard, and a gap inside it lands on whatever the binding's switch
+    // falls through to — the console would then echo and remember a 3 while the renderer ran 2, which is
+    // the same "what you typed is not what you measured" failure the refusal below exists to prevent. It
+    // is worse than a clamp, in fact, because the transcript records the number that was never applied.
+    public static ConsoleVariable Choice(string name, string summary, int value, int[] allowed,
+        ConsoleApply apply)
+    {
+        if (allowed.Length == 0)
+            throw new ArgumentException("A choice needs at least one allowed value.", nameof(allowed));
+        // A default outside the set would be a value TrySet refuses and `reset` restores, so the variable
+        // could only reach it by never being touched. That is a registration mistake rather than input,
+        // hence a throw: the console has no way to report it and no honest value to fall back on.
+        if (Array.IndexOf(allowed, value) < 0)
+            throw new ArgumentOutOfRangeException(nameof(value),
+                $"{value} is not one of {name}'s values ({string.Join("/", allowed)}).");
+        int minimum = allowed[0];
+        int maximum = allowed[0];
+        foreach (int option in allowed)
+        {
+            minimum = Math.Min(minimum, option);
+            maximum = Math.Max(maximum, option);
+        }
+        return new ConsoleVariable(name, summary, ConsoleValueKind.Whole, value, minimum, maximum, apply,
+            (int[])allowed.Clone());
+    }
+
     // A real number inside a closed range: a resolution scale, a distance, a screen-space error.
     public static ConsoleVariable Number(string name, string summary, float value, float minimum,
         float maximum, ConsoleApply apply) =>
@@ -76,11 +107,17 @@ public sealed class ConsoleVariable
         ? value.ToString("0.###", CultureInfo.InvariantCulture)
         : ((long)Math.Round(value)).ToString(CultureInfo.InvariantCulture);
 
+    private string AllowedText => _allowed == null ? "" : string.Join("/", _allowed);
+
     // "foliage.enabled = 0  (default 1)" / "r.scale = 1  (default 1, 0.25..2)". The range is printed for
-    // everything that has one worth reading — a switch's 0..1 is not.
-    public string Describe() => Kind == ConsoleValueKind.Switch
-        ? $"{Name} = {Value}  (default {DefaultText})"
-        : $"{Name} = {Value}  (default {DefaultText}, {Format(Minimum)}..{Format(Maximum)})";
+    // everything that has one worth reading — a switch's 0..1 is not, and a choice prints the values it
+    // takes rather than the span they happen to cover, because that span contains numbers it refuses.
+    public string Describe() => Kind switch
+    {
+        ConsoleValueKind.Switch => $"{Name} = {Value}  (default {DefaultText})",
+        _ when _allowed != null => $"{Name} = {Value}  (default {DefaultText}, one of {AllowedText})",
+        _ => $"{Name} = {Value}  (default {DefaultText}, {Format(Minimum)}..{Format(Maximum)})",
+    };
 
     // Parses `text` and stores it, leaving the variable untouched when it cannot. Out-of-range values are
     // REFUSED rather than clamped: a clamp answers `r.scale 5` with a frame that looks exactly like the
@@ -101,6 +138,11 @@ public sealed class ConsoleVariable
         {
             failure = $"{Format(parsed)} is outside {Name}'s range "
                 + $"({Format(Minimum)}..{Format(Maximum)}).";
+            return false;
+        }
+        if (_allowed != null && Array.IndexOf(_allowed, (int)Math.Round(parsed)) < 0)
+        {
+            failure = $"{Format(parsed)} is not one of {Name}'s values ({AllowedText}).";
             return false;
         }
         _value = parsed;

@@ -38,10 +38,40 @@ public static class RenderConsole
     private static ConsoleRegistry? Shared;
     private static bool StartupTaken;
 
+    // How far past a limiter's period still counts as hitting it, as a FRACTION of that period rather than
+    // a fixed millisecond count. The limiter lands either side of its target, so an exact comparison would
+    // call a capped frame uncapped on every one that overshot slightly — but a fixed slack means something
+    // different at every cap: half a millisecond is 6% of a 120 fps period and 50% of a 1000 fps one, so
+    // it grows more permissive exactly as the target tightens, and starts calling genuinely uncapped
+    // frames "capped".
+    private const double PeriodSlack = 0.05d;
+
+    private static bool ReachedPeriod(double frameMs, double periodMs) =>
+        periodMs > 0d && frameMs <= periodMs * (1d + PeriodSlack);
+
+    // How much the reported CPU work may exceed the frame before the attribution is called broken rather
+    // than jittery. The monitors and the frame clock are read at slightly different instants, so a small
+    // overshoot is ordinary sampling skew; a large one means they are describing different frames.
+    private const double AttributionSlackMs = 1d;
+
+    private static Node? HostNode;
+
     // Whichever node the console currently speaks through — the overlay in a normal session, the
     // benchmark's own context node in a run that has no overlay to open. Bindings resolve the world
     // from it, so it must be a node that is IN the tree the world was built into.
-    public static Node? Host { get; set; }
+    //
+    // Setting it also starts the frame clock, which is why this is not an auto-property: `perf` measures
+    // frames from a node of its own, and the benchmark host is the one that most needs it.
+    public static Node? Host
+    {
+        get => HostNode;
+        set
+        {
+            HostNode = value;
+            if (value != null)
+                FrameClock.EnsureTicking(value);
+        }
+    }
 
     // Built once per process, so a configuration survives the menu and the next map load. See
     // ConsoleVariable for why the values live here rather than in the nodes they drive.
@@ -146,6 +176,26 @@ public static class RenderConsole
             + "pass has to draw; the world keeps its lighting either way.",
             64f, 1f, 1024f, Lighting(host,
                 (cycle, value) => cycle.Sun.DirectionalShadowMaxDistance = value.AsFloat)));
+        // A choice rather than a 1..4 range: the engine has no three-cascade mode, so a 3 the console
+        // remembered would be a number the renderer never ran.
+        console.Add(ConsoleVariable.Choice("sun.shadows.cascades",
+            "How many times the shadow distance is split: 1, 2 or 4. Every split is another pass over the "
+            + "casters in its slice, so this is the shadow pass's geometry cost. Fewer splits spread the "
+            + "same map over more ground, and that IS visible up close — at 64 m over one 2048 cascade a "
+            + "texel is ~62 mm everywhere, against the ~3 mm a screen pixel covers at 5 m.",
+            2, new[] { 1, 2, 4 },
+            Lighting(host, (cycle, value) => cycle.Sun.DirectionalShadowMode = value.AsInt switch
+            {
+                1 => DirectionalLight3D.ShadowMode.Orthogonal,
+                4 => DirectionalLight3D.ShadowMode.Parallel4Splits,
+                _ => DirectionalLight3D.ShadowMode.Parallel2Splits,
+            })));
+        console.Add(ConsoleVariable.Switch("sun.shadows.blend",
+            "Cross-fade the seam between cascades. On (the default here, though not Godot's) every pixel "
+            + "in the blend band takes a SECOND shadow lookup; off makes the band one lookup again and "
+            + "leaves a visible line where the cascades meet — at the split, ~16 m out.",
+            true, Lighting(host,
+                (cycle, value) => cycle.Sun.DirectionalShadowBlendSplits = value.AsBool)));
 
         console.Add(ConsoleVariable.Switch("env.sky.enabled",
             "Draw the ported Unturned skybox. Off replaces it with a flat clear colour.",
@@ -238,8 +288,16 @@ public static class RenderConsole
                 return null;
             }));
 
-        console.Add("perf", "One line of the numbers the F3 HUD shows, into the scrollback — so a "
-            + "measurement is recorded next to the command that produced it.", "perf", Snapshot);
+        console.Add("perf", "The numbers the F3 HUD shows, into the scrollback — so a measurement is "
+            + "recorded next to the command that produced it. The second line says where the frame goes: "
+            + "its first number is frame minus cpu minus physics, and it is only a GPU reading when the "
+            + "frame ran flat out — so it reads 'gpu wait' uncapped (0.00 means the CPU is the bottleneck "
+            + "and removing GPU work will not move the frame) and 'idle' under vsync or r.fps.max, where "
+            + "it is the limiter sleeping rather than the GPU. Godot reports the "
+            + "monitors of the LAST COMPLETED frame, so `foo 0; perf` on one line prices the frame "
+            + "BEFORE the change — put perf on its own line. 'fps' is the last SECOND averaged, so it and "
+            + "'frame' describe different windows and lag each other while something is changing.",
+            "perf", arguments => Snapshot(host, arguments));
         console.Add("copy", "Put the whole scrollback on the clipboard as plain text — the transcript a "
             + "bug report wants. Ctrl+C copies just what you have selected, when something is.",
             "copy", arguments => Copy(host, arguments));
@@ -380,19 +438,140 @@ public static class RenderConsole
         return null;
     };
 
-    private static IEnumerable<ConsoleLine> Snapshot(IReadOnlyList<string> arguments)
+    // The second line is the one that decides what to optimize next, and every hard part of it is in what
+    // the leading number is allowed to be CALLED.
+    //
+    // Godot exposes no GPU-time monitor, so nothing here measures the GPU. What is computable is the time
+    // in the frame that the engine did not report as CPU work: wall clock minus the idle step minus every
+    // physics step that ran inside it. That remainder is only the CPU's wait on the GPU when it ran
+    // flat out — rendering is submitted on the main thread and does not block, so it sits at ~0 while the
+    // CPU is the bottleneck (even at full GPU utilisation) and opens up once the GPU is genuinely behind.
+    //
+    // Under vsync or a frame cap the same remainder is mostly the limiter sleeping, and calling that a GPU
+    // wait points at the wrong bottleneck. The console owns both limiters, so it checks them and renames
+    // the number instead of leaving the reader to remember. `0.00 ms gpu wait` uncapped is therefore an
+    // ANSWER — shaving GPU work will not move this frame — while `idle (vsync)` is a non-answer, and the
+    // two used to be indistinguishable. For real GPU frame time an external tool (MangoHud, radeontop,
+    // PIX) is still the instrument; draw calls and primitives are the workload proxies here.
+    //
+    // The wall clock is FrameClock's monotonic interval rather than 1000/fps or a process delta, because
+    // both of those are the wrong quantity in exactly the workflow this line exists for — see FrameClock.
+    //
+    // `fps` stays the one-second average, because that is what an fps readout means and a single frame's
+    // reciprocal is too jittery to read. So `fps` and `frame` deliberately describe different windows and
+    // will not agree during a change — the averaged one is the steady state, the frame is the last one.
+    // Whether the present path made this frame wait. Enabled always does — a frame slower than the refresh
+    // still ends on a refresh boundary, so the sleep is there either way. Adaptive only does while the
+    // frame is keeping up; past the refresh period it tears rather than waits. Mailbox never does.
+    private static bool Blocking(DisplayServer.VSyncMode mode, double frameMs)
+    {
+        double refreshHz = DisplayServer.ScreenGetRefreshRate();
+        double refreshMs = refreshHz > 0d ? 1000d / refreshHz : 0d;
+        return mode switch
+        {
+            DisplayServer.VSyncMode.Disabled or DisplayServer.VSyncMode.Mailbox => false,
+            // An unknown refresh rate leaves nothing to compare, so the conservative reading stands.
+            DisplayServer.VSyncMode.Adaptive => refreshMs <= 0d || ReachedPeriod(frameMs, refreshMs),
+            _ => true,
+        };
+    }
+
+    private static IEnumerable<ConsoleLine> Snapshot(Func<Node?> host, IReadOnlyList<string> arguments)
     {
         double fps = Performance.GetMonitor(Performance.Monitor.TimeFps);
-        double frameMs = fps > 0d ? 1000d / fps : 0d;
         double cpuMs = Performance.GetMonitor(Performance.Monitor.TimeProcess) * 1000d;
+        // The averaged frame is the fallback, not the reading: the clock has nothing yet before the second
+        // rendered frame of a session, and a wrong-window number beats none at all only because the
+        // alternative is a blank column.
+        double frameMs = FrameClock.LastFrameMs > 0d ? FrameClock.LastFrameMs
+            : fps > 0d ? 1000d / fps : 0d;
+        double navigationMs = Performance.GetMonitor(Performance.Monitor.TimeNavigationProcess) * 1000d;
+        // Physics comes out too. TimeProcess is the idle step ALONE — the physics step is a separate
+        // monitor, printed on the next line — so a frame that ran physics leaves that work in the
+        // remainder, where a heavier rigid-body load would read as the GPU falling behind.
+        //
+        // And it comes out once PER STEP, summed as the steps happened. Below the physics tick rate the
+        // engine runs several steps between two rendered frames while the monitor prices one, so
+        // subtracting a single sample at 30 fps against 60 Hz physics leaves half the physics bill behind
+        // — in the remainder, under a GPU label, in exactly the physics-bound session least able to afford
+        // the wrong diagnosis. Multiplying that sample by the step count would only trade the error for an
+        // assumption that every step cost the same, which is least true on the frames that have several:
+        // what makes a step expensive arrives in bursts. FrameClock adds up what each step reported.
+        //
+        // A measured 0 is kept as 0: above the physics tick rate most rendered frames run no physics step
+        // at all, and billing them one would eat a real GPU wait out of the high-FPS frame where that is
+        // the entire question. Only an unmeasured clock falls back to the monitor's single sample.
+        int steps = FrameClock.HasMeasured ? FrameClock.LastPhysicsSteps : 1;
+        double physicsMs = FrameClock.HasMeasured
+            ? FrameClock.LastPhysicsMs
+            : Performance.GetMonitor(Performance.Monitor.TimePhysicsProcess) * 1000d;
+        double idleMs = Mathf.Max(0d, frameMs - cpuMs - physicsMs);
+
+        // The clamp above hides the one case that must not be hidden. If the CPU work does not FIT in the
+        // frame, the monitors and the clock are describing different frames, and the subtraction has no
+        // meaning — but it still yields 0.00, which is the exact output that means "the CPU is the
+        // bottleneck, GPU work will not move this frame". A broken reading and a real answer become
+        // indistinguishable, and the wrong one is the confident-sounding one.
+        //
+        // It is not hypothetical: a tier-2 pose measured 105 ms of TimeProcess inside a 4.7 ms frame,
+        // because the harness's own per-pose work lands in the idle step the monitor then reports. Any
+        // session that does heavy work in _Process can do the same. So the overflow is named instead.
+        bool cpuOverflows = cpuMs + physicsMs > frameMs + AttributionSlackMs;
+
+        // And the frame may not have been measured at all yet, which is not the same as being measured
+        // badly. A tier-2 run given `perf` through UG_CONSOLE executes the line before its first rendered
+        // frame — the ticker is added deferred, so no interval exists — and that session has no pane to
+        // type it again in. Falling back to the averaged fps is the right column to print, but presenting
+        // a derived attribution on top of it would be a conclusion drawn from a number of the wrong kind.
+        bool unmeasured = !FrameClock.HasMeasured;
+
+        // What the remainder MEANS depends on whether the frame was allowed to run flat out, and the
+        // console knows because both limiters are its own variables. Under vsync the remainder is mostly
+        // the deliberate sleep, and reading that as "the GPU is behind" is exactly backwards.
+        //
+        // A frame cap only distorts while it BINDS, which is the difference between the cap being set and
+        // the cap being reached: a 120 cap over a 45 fps workload never sleeps, and suppressing there
+        // would withhold the diagnosis from the slow frame that most needs it — while r.fps.max's own help
+        // recommends a cap during measurement, so that case is the norm rather than the exception.
+        //
+        // Binding means the frame landed AT the cap's period, so the test is an upper bound. A lower one
+        // would be satisfied by every frame slower than the cap, which is most of them — the limiter
+        // cannot make a frame shorter than its period, so "not meaningfully longer than it" is the whole
+        // condition.
+        //
+        // Not every vsync mode blocks, so the mode is classified rather than compared against Disabled.
+        // Mailbox presents from a queue and imposes no refresh cap at all, and Adaptive is vsync only
+        // while the frame keeps up — below the refresh it tears instead of waiting, which is the same
+        // "flat out" the reading needs. Treating those two as blocking would hide the diagnosis on
+        // precisely the slow frames they were selected to keep responsive.
+        bool vsync = Blocking(DisplayServer.WindowGetVsyncMode(), frameMs);
+        bool capBinding = Engine.MaxFps > 0 && ReachedPeriod(frameMs, 1000d / Engine.MaxFps);
+        string idleLabel = (unmeasured, cpuOverflows, vsync, capBinding) switch
+        {
+            // Both disqualifications win over the limiters: nothing downstream is worth qualifying when
+            // the subtraction's own inputs are unusable.
+            (true, _, _, _) => "unattributed (frame not measured yet, averaged)",
+            (false, true, _, _) => "unattributed (cpu exceeds the frame, not a gpu reading)",
+            (false, false, true, true) => "idle (vsync + cap, not a gpu reading)",
+            (false, false, true, false) => "idle (vsync, not a gpu reading)",
+            (false, false, false, true) => "idle (fps cap, not a gpu reading)",
+            _ => "gpu wait (derived)",
+        };
         double drawCalls = Performance.GetMonitor(Performance.Monitor.RenderTotalDrawCallsInFrame);
         double primitives = Performance.GetMonitor(Performance.Monitor.RenderTotalPrimitivesInFrame);
         double objects = Performance.GetMonitor(Performance.Monitor.RenderTotalObjectsInFrame);
+        double vramMb = Performance.GetMonitor(Performance.Monitor.RenderVideoMemUsed) / (1024d * 1024d);
         double rssMb = Benchmark.ProcessMemory.RssBytes() / (1024d * 1024d);
         yield return ConsoleLine.Reply(string.Format(CultureInfo.InvariantCulture,
             "{0:0} fps   {1:0.00} ms frame   {2:0.00} ms cpu   {3:0} draw calls   {4:0} primitives   "
             + "{5:0} render objects   {6:0.0} MB rss",
             fps, frameMs, cpuMs, drawCalls, primitives, objects, rssMb));
+        // The step count is printed only when it is not 1, because that is the case where the physics
+        // number stops being the monitor's own reading and the reader deserves to know why.
+        string physicsSteps = steps > 1 ? $" ({steps} steps)" : "";
+        yield return ConsoleLine.Reply(string.Format(CultureInfo.InvariantCulture,
+            "{0:0.00} ms {1}   {2:0.00} ms physics{3}   {4:0.00} ms navigation   {5:0.0} MB vram",
+            idleMs, idleLabel, physicsMs, physicsSteps, navigationMs, vramMb));
     }
 
     private static IEnumerable<ConsoleLine> Copy(Func<Node?> host, IReadOnlyList<string> arguments)

@@ -1,3 +1,4 @@
+using System;
 using UnturnedGodot.DevConsole;
 using Xunit;
 
@@ -108,6 +109,49 @@ public class ConsoleVariableTests
 
         // A switch's range is 0..1 and saying so tells nobody anything.
         Assert.Equal("thing.enabled = 1  (default 1)", Switch().Describe());
+    }
+
+    // The gap inside a choice's span is the whole reason it is not a range. Shadow cascades are 1, 2 or 4
+    // and the engine has no three-cascade mode, so accepting 3 would leave the console remembering — and
+    // `list` reporting, and a transcript recording — a number the renderer never ran.
+    [Fact]
+    public void AChoiceRefusesTheGapsInsideItsRange()
+    {
+        int applied = 0;
+        ConsoleVariable cascades = ConsoleVariable.Choice("sun.shadows.cascades", "Splits.", 2,
+            new[] { 1, 2, 4 }, v => { applied = v.AsInt; return null; });
+
+        Assert.True(cascades.TrySet("4", out _));
+        Assert.Equal(4, cascades.AsInt);
+
+        Assert.False(cascades.TrySet("3", out string failure));
+        Assert.Equal("3 is not one of sun.shadows.cascades's values (1/2/4).", failure);
+        Assert.Equal(4, cascades.AsInt); // refused, so the last accepted value stands
+
+        // Outside the span is still the range's refusal, which names the span rather than the values.
+        Assert.False(cascades.TrySet("8", out string outside));
+        Assert.Contains("outside", outside);
+
+        Assert.Equal(0, applied); // TrySet stores; the registry is what applies
+    }
+
+    // The registration mistake the refusal above cannot catch: a default nothing can ever set it back to.
+    [Fact]
+    public void AChoiceRefusesADefaultOutsideItsOwnValues()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            ConsoleVariable.Choice("sun.shadows.cascades", "Splits.", 3, new[] { 1, 2, 4 }, _ => null));
+        Assert.Throws<ArgumentException>(() =>
+            ConsoleVariable.Choice("sun.shadows.cascades", "Splits.", 2, Array.Empty<int>(), _ => null));
+    }
+
+    [Fact]
+    public void AChoiceDescribesItsValuesRatherThanItsSpan()
+    {
+        ConsoleVariable cascades = ConsoleVariable.Choice("sun.shadows.cascades", "Splits.", 2,
+            new[] { 1, 2, 4 }, _ => null);
+
+        Assert.Equal("sun.shadows.cascades = 2  (default 2, one of 1/2/4)", cascades.Describe());
     }
 
     [Fact]
