@@ -958,6 +958,12 @@ public partial class Main : Node3D
             EnvironmentDir(unturnedPath, _mapName));
         var zombiesView = ZombiesView.Create(network.Client, unturnedPath, _oneShotAudio,
             navBounds, () => player.GlobalPosition);
+        // Where killed bodies are thrown. Its own node rather than a child of the zombie view, because
+        // a corpse outlives the avatar it came from — and because animals and players will want the
+        // same pool when they can die.
+        var ragdolls = new Ragdolls();
+        AddChild(ragdolls);
+        zombiesView.AttachRagdolls(ragdolls);
         AddChild(zombiesView);
         zombiesView.WarmupTemplates(); // still behind LoadingScreen; never import on a city-entry packet
         if (_impactAudio != null)

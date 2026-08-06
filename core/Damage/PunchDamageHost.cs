@@ -149,7 +149,13 @@ public sealed class PunchDamageHost
         ushort amount = PunchDamageResolver.Zombie(hit.Limb, direction, ZombieHitbox.ForwardOf(zombie));
         bool killed = _zombies!.Damage(zombie, amount, playerId, _views);
         if (killed)
-            _zombieHost?.ReportKilled(zombie);
+        {
+            // DamageTool.damageZombie builds this from the swing and the damage before it calls
+            // askDamage, and askDamage carries it through to sendZombieDead: the shove a corpse takes
+            // with it, which is why a hard hit throws a body and a weak one drops it.
+            _zombieHost?.ReportKilled(zombie, RagdollForce.Impulse(direction, amount));
+        }
+
         return new PunchResult(playerId, hit, amount, killed);
     }
 

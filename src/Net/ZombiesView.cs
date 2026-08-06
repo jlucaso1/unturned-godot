@@ -277,8 +277,8 @@ public partial class ZombiesView : Node3D
                 // player is mid-transition still names a zombie that is genuinely gone — the one thing
                 // that must not happen is leaving a dead zombie standing because the message looked
                 // late.
-                foreach (ushort id in killed.Ids)
-                    Kill(id);
+                for (int i = 0; i < killed.Ids.Count; i++)
+                    Kill(killed.Ids[i], i < killed.Ragdolls.Count ? killed.Ragdolls[i] : Vector3.Zero);
                 break;
             case ENetMessage.ZombieStunned:
                 if (!MalformedPacket.TryDecode(payload, ReadZombieStunned, out var stunned))
@@ -331,15 +331,36 @@ public partial class ZombiesView : Node3D
     // ZombieManager's death: the avatar goes. Unturned plays a ragdoll here (Zombie.askDamage hands
     // askDamage's force to the ragdoll and the body falls); there is no ragdoll in this port, so the
     // body is simply freed, which is what its own dead-zombie cleanup does once the ragdoll expires.
-    private void Kill(ushort id)
+    // `ragdoll` is the shove the killing blow gave the body, straight off the wire. Zero drops it where
+    // it stood, which is what a death with no direction behind it does.
+    private void Kill(ushort id, Vector3 ragdoll = default)
     {
         // Remembered whether or not an avatar exists for it: a kill that arrives BEFORE the list that
         // would have spawned this zombie is precisely the case the tombstone is for.
         _killed.Add(id);
         if (!_avatars.Remove(id, out ZombieAvatar? avatar))
             return; // never spawned here, or already removed on a region change
-        avatar.Root.QueueFree();
+
+        // RagdollTool's own adjustments, then the body is handed over: the pool owns it from here, and
+        // frees it when the debris timer runs out. Without a pool to hand it to, the corpse just goes.
+        if (_ragdolls == null)
+        {
+            avatar.Root.QueueFree();
+            return;
+        }
+
+        // The animation stops with the body: a corpse mid-walk-cycle tumbling across the ground is worse
+        // than one frozen in the pose it died in, which is what the original's ragdoll starts from.
+        if (avatar.Rig != null)
+            avatar.Rig.ProcessMode = ProcessModeEnum.Disabled;
+        _ragdolls.Throw(avatar.Root, RagdollForce.Thrown(ragdoll,
+            _rng.RandfRange(-1f, 1f), _rng.RandfRange(-1f, 1f)));
     }
+
+    // Where killed bodies go. Null on a session that built none, which frees them outright instead.
+    private Ragdolls? _ragdolls;
+
+    public void AttachRagdolls(Ragdolls ragdolls) => _ragdolls = ragdolls;
 
     // Zombie datagrams that reached a decoder and did not survive it; see NetServer.MalformedPacketsDropped.
     public long MalformedPacketsDropped { get; private set; }
@@ -350,8 +371,9 @@ public partial class ZombiesView : Node3D
         ZombieNetMessages.ReadZombieList;
     private static readonly System.Func<byte[], (uint Tick, List<ZombieSnapshotState> States)> ReadZombieStates =
         ZombieNetMessages.ReadZombieStates;
-    private static readonly System.Func<byte[], (byte Bound, List<ushort> Ids)> ReadZombieKilled =
-        ZombieNetMessages.ReadZombieKilled;
+    private static readonly
+        System.Func<byte[], (byte Bound, List<ushort> Ids, List<Vector3> Ragdolls)> ReadZombieKilled =
+            ZombieNetMessages.ReadZombieKilled;
 
     private void SpawnOrReset(in ZombieListing listing, byte bound)
     {

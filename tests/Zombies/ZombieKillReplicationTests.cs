@@ -30,7 +30,7 @@ public class ZombieKillReplicationTests
         byte[] payload = ZombieNetMessages.WriteZombieKilled(3, new ushort[] { 1, 65535, 900 });
 
         Assert.Equal(ENetMessage.ZombieKilled, NetMessages.TypeOf(payload));
-        (byte bound, List<ushort> ids) = ZombieNetMessages.ReadZombieKilled(payload);
+        (byte bound, List<ushort> ids, _) = ZombieNetMessages.ReadZombieKilled(payload);
         Assert.Equal(3, bound);
         Assert.Equal(new ushort[] { 1, 65535, 900 }, ids);
     }
@@ -38,7 +38,7 @@ public class ZombieKillReplicationTests
     [Fact]
     public void EmptyRoundTrips()
     {
-        (byte bound, List<ushort> ids) =
+        (byte bound, List<ushort> ids, _) =
             ZombieNetMessages.ReadZombieKilled(ZombieNetMessages.WriteZombieKilled(0, Array.Empty<ushort>()));
         Assert.Equal(0, bound);
         Assert.Empty(ids);
@@ -48,8 +48,18 @@ public class ZombieKillReplicationTests
     [Fact]
     public void WireLayoutIsExact()
     {
-        byte[] payload = ZombieNetMessages.WriteZombieKilled(7, new ushort[] { 0x0201 });
-        Assert.Equal(new byte[] { (byte)ENetMessage.ZombieKilled, 7, 1, 0x01, 0x02 }, payload);
+        byte[] payload = ZombieNetMessages.WriteZombieKilled(7, new ushort[] { 0x0201 },
+            new[] { new Godot.Vector3(1f, 0f, -2f) });
+
+        // type, bound, count, then the id and the shove that threw the body.
+        Assert.Equal(new byte[]
+        {
+            (byte)ENetMessage.ZombieKilled, 7, 1,
+            0x01, 0x02,
+            0x00, 0x00, 0x80, 0x3F, // 1
+            0x00, 0x00, 0x00, 0x00, // 0
+            0x00, 0x00, 0x00, 0xC0, // -2
+        }, payload);
     }
 
     [Fact]

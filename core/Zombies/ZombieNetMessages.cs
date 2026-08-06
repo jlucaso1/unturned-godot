@@ -161,7 +161,20 @@ public static class ZombieNetMessages
     //
     // One byte of count, like the list and snapshot payloads: a region holds at most 255 zombies
     // (NavBound.MaxZombies is a byte), so a single tick's deaths cannot overflow it.
-    public static byte[] WriteZombieKilled(byte bound, IReadOnlyList<ushort> ids)
+    //
+    // Each death also carries the SHOVE its killing blow gave it, as three plain floats. Quantizing them
+    // was the first instinct and the wrong one: the vector is `direction * damage`, so its magnitude runs
+    // with the weapon, and any fixed-point scale that resolved a punch would saturate on something
+    // heavier. Deaths are rare — a handful per tick at most, against the per-tick snapshot stream beside
+    // them — so six bytes a corpse is not worth a range limit to save.
+    public static byte[] WriteZombieKilled(byte bound, IReadOnlyList<ushort> ids) =>
+        WriteZombieKilled(bound, ids, null);
+
+    // `ragdolls`, when given, carries the shove each corpse takes with it, in the same order as `ids`. A
+    // null list writes zeroes, which is a body that simply drops — what a kill with no direction behind it
+    // (a burn, a despawn) does in the original too.
+    public static byte[] WriteZombieKilled(byte bound, IReadOnlyList<ushort> ids,
+        IReadOnlyList<Vector3>? ragdolls)
     {
         ArgumentNullException.ThrowIfNull(ids);
         // The count header is one byte, and a silent truncation here would be the worst possible
@@ -171,24 +184,39 @@ public static class ZombieNetMessages
         if (ids.Count > byte.MaxValue)
             throw new ArgumentOutOfRangeException(nameof(ids),
                 $"a ZombieKilled payload carries at most {byte.MaxValue} ids, not {ids.Count}");
-        var payload = new byte[3 + (ids.Count * 2)];
+        // id (2) + the shove (3 x 4).
+        const int PerZombie = 2 + (3 * 4);
+        var payload = new byte[3 + (ids.Count * PerZombie)];
         payload[0] = (byte)ENetMessage.ZombieKilled;
         payload[1] = bound;
         payload[2] = (byte)ids.Count;
         for (int i = 0; i < ids.Count; i++)
-            BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(3 + (i * 2)), ids[i]);
+        {
+            Span<byte> entry = payload.AsSpan(3 + (i * PerZombie));
+            BinaryPrimitives.WriteUInt16LittleEndian(entry, ids[i]);
+            Vector3 ragdoll = ragdolls != null && i < ragdolls.Count ? ragdolls[i] : Vector3.Zero;
+            BinaryPrimitives.WriteSingleLittleEndian(entry[2..], ragdoll.X);
+            BinaryPrimitives.WriteSingleLittleEndian(entry[6..], ragdoll.Y);
+            BinaryPrimitives.WriteSingleLittleEndian(entry[10..], ragdoll.Z);
+        }
+
         return payload;
     }
 
-    public static (byte Bound, List<ushort> Ids) ReadZombieKilled(byte[] payload)
+    public static (byte Bound, List<ushort> Ids, List<Vector3> Ragdolls) ReadZombieKilled(byte[] payload)
     {
         using BinaryReader r = Reader(payload);
         byte bound = r.ReadByte();
         int count = r.ReadByte();
         var ids = new List<ushort>(count);
+        var ragdolls = new List<Vector3>(count);
         for (int i = 0; i < count; i++)
+        {
             ids.Add(r.ReadUInt16());
-        return (bound, ids);
+            ragdolls.Add(new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()));
+        }
+
+        return (bound, ids, ragdolls);
     }
 
     // ZombieManager.sendZombieStun: which zombies staggered, and which reel each plays.

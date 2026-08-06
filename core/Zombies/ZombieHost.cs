@@ -69,14 +69,24 @@ public sealed class ZombieHost
     // would otherwise keep an id alive in _lastSent for the rest of the session. The zombie is already
     // out of the population by the time this is called — ZombieSystem.Damage removes it — so this is
     // purely the replication half of the same event.
-    public void ReportKilled(ZombieInstance zombie)
+    // `ragdoll` is the shove the killing blow gave the body — DamageTool.damageZombie's own vector,
+    // which askDamage hands to sendZombieDead. Zero for a death with no direction behind it.
+    public void ReportKilled(ZombieInstance zombie, Godot.Vector3 ragdoll = default)
     {
         System.ArgumentNullException.ThrowIfNull(zombie);
         _lastSent.Remove(zombie.Id);
         if (!_pendingKills.TryGetValue(zombie.Bound, out List<ushort>? ids))
+        {
             _pendingKills[zombie.Bound] = ids = new List<ushort>();
+            _pendingRagdolls[zombie.Bound] = new List<Godot.Vector3>();
+        }
+
         ids.Add(zombie.Id);
+        _pendingRagdolls[zombie.Bound].Add(ragdoll);
     }
+
+    // Kept beside _pendingKills and in lockstep with it — the payload pairs them by index.
+    private readonly Dictionary<byte, List<Godot.Vector3>> _pendingRagdolls = new();
 
     // Zombies staggered since the last tick, by region. Collected from ZombieSystem.Stunned rather than
     // polled, because a stun is an EVENT — the state snapshots carry position and behaviour state, and a
@@ -171,10 +181,12 @@ public sealed class ZombieHost
             {
                 if (_playerBounds.GetValueOrDefault(player, LevelNavigationData.NoBound) != bound)
                     continue;
-                payload ??= ZombieNetMessages.WriteZombieKilled(bound, ids);
+                payload ??= ZombieNetMessages.WriteZombieKilled(bound, ids,
+                    _pendingRagdolls.GetValueOrDefault(bound));
                 connection.Send(payload, ESendType.Reliable);
             }
             ids.Clear();
+            _pendingRagdolls.GetValueOrDefault(bound)?.Clear();
         }
     }
 
@@ -208,6 +220,7 @@ public sealed class ZombieHost
     {
         _playerBounds.Clear();
         _lastSent.Clear();
+        _pendingRagdolls.Clear();
         // The ids in here belong to the population being replaced. Announcing their deaths after the
         // swap would name zombies the client is about to be told about afresh, under the same ids.
         _pendingKills.Clear();
