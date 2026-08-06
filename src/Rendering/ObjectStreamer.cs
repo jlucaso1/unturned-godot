@@ -62,6 +62,11 @@ public partial class ObjectStreamer : Node
     // they join the same needed set, extraction plan and mesh library — only their scene root is separate.
     private List<PlacedObject> _vehicles = new();
     private ObjectAssetDatabase _db = null!;
+
+    // The object/tree assets this load scanned, once it has. Null until the scan finishes, which is why
+    // the crosshair's hit test takes a callback rather than a value: it is built with the player, several
+    // seconds before this exists, and asking it again per swing costs a field read.
+    public ObjectAssetDatabase? Assets => _db;
     private Dictionary<Guid, FoliageAsset.Owned> _foliageAssets = new();
     private LevelFoliageChunks? _foliage;
     private FoliageResidencyIndex? _foliageIndex;
@@ -121,6 +126,10 @@ public partial class ObjectStreamer : Node
     // in the .resource node at the end of the blob the pass already walks to. Extracting them afterwards
     // meant a second whole-bundle LZMA decode and left its transient heap resident for the session.
     private Dictionary<string, AudioExtractor.Request> _audioWants = new(StringComparer.Ordinal);
+
+    // The impact decals and crosshair icons each bundle owes, planned and carried the same way and for
+    // the same reason: they are textures in the bundles this pass already walks.
+    private Dictionary<string, ImpactDecalExtractor.Request> _decalWants = new(StringComparer.Ordinal);
 
     // Completes with every layer texture this pass decoded (empty when the cache already had them all, or
     // when nothing was decoded). Always completes: the terrain build waits on it.
@@ -220,6 +229,7 @@ public partial class ObjectStreamer : Node
             new HashSet<string>(_layerWants.Keys, StringComparer.Ordinal));
         _cold = ContentExtraction.TotalMissing(_plans) > 0;
         _audioWants = PlanAudio(unturnedPath);
+        _decalWants = PlanDecals();
 
         // Start decoding here rather than in Begin(): the bundles are the longest pole of a first
         // load, and nothing about them depends on the terrain, the roads or the player. Running them
@@ -337,6 +347,31 @@ public partial class ObjectStreamer : Node
     // can pick up its own. A scan of the physics materials only — the same cheap .dat walk the player's
     // movement audio does at spawn — so planning it twice costs a directory read, and a request whose
     // definitions are all cached is dropped here rather than handed to the pass as an empty want.
+    // The decal and crosshair textures, by bundle. Same shape and same reason as PlanAudio: they sit in
+    // the bundles this pass already walks, and fetching them afterwards meant reopening a 1.4 GB blob
+    // immediately after the load for a few dozen small textures.
+    private Dictionary<string, ImpactDecalExtractor.Request> PlanDecals()
+    {
+        var wants = new Dictionary<string, ImpactDecalExtractor.Request>(StringComparer.Ordinal);
+        // Unlike the audio, these are wanted by a measurement run too: FREECAM takes screenshots, and a
+        // screenshot without a crosshair is a different picture.
+        try
+        {
+            foreach (ImpactDecalExtractor.Request request in
+                ImpactDecalRequests.For(_sources, ImpactDecalRequests.CacheDirectory))
+            {
+                if (request.BundlePath.Length > 0 && !ImpactDecalExtractor.IsSatisfied(request))
+                    wants[request.BundlePath] = request;
+            }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // The session's own deferred extraction still runs and reports whatever went wrong there.
+        }
+
+        return wants;
+    }
+
     private Dictionary<string, AudioExtractor.Request> PlanAudio(string unturnedPath)
     {
         var wants = new Dictionary<string, AudioExtractor.Request>(StringComparer.Ordinal);
@@ -612,6 +647,16 @@ public partial class ObjectStreamer : Node
                     TerrainLayerPlan.BundleWants layers = LayerWantsFor(plan);
                     long megabytes = new FileInfo(plan.Source.BundlePath).Length >> 20;
                     AudioExtractor.Request? audio = _audioWants.GetValueOrDefault(plan.Source.BundlePath);
+                    ImpactDecalExtractor.Request? decals =
+                        _decalWants.GetValueOrDefault(plan.Source.BundlePath);
+
+                    // The decals ride the SAME forward pass: they are textures in the same bundles, and
+                    // fetching them afterwards meant reopening and re-decoding a 1.4 GB blob immediately
+                    // after the load for a handful of them.
+                    var wants = new Dictionary<string, Guid[]>(layers.ByContainerPath, StringComparer.Ordinal);
+                    if (decals != null)
+                        foreach (string path in decals.ContainerPaths)
+                            wants.TryAdd(path, Array.Empty<Guid>());
                     AppShutdown.PrintUnlessQuitting($"[stream] decoding {plan.Source.Name} ({megabytes} MB) for "
                         + $"{plan.Missing.Count} meshes, {plan.MissingTextures.Count} textures, "
                         + $"{layers.ByContainerPath.Count} terrain layers and "
@@ -624,18 +669,35 @@ public partial class ObjectStreamer : Node
                         },
                         onTextureWritten: key => _readyKeys.Enqueue(key),
                         foliageAssets: plan.Foliage, audio: audio,
-                        layerWantsByPath: layers.ByContainerPath,
-                        onLayerTexture: (material, texture) =>
+                        layerWantsByPath: wants,
+                        onContainerTexture: (containerPath, texture) =>
                         {
-                            _layersProduced[material] = texture;
-                            TerrainLayerCache.Write(material, texture, plan.Source.BundlePath);
+                            // A decal or a crosshair icon: filed straight into its own cache, and it is
+                            // not a terrain layer, so the terrain gate below must not count it.
+                            if (decals != null && decals.ContainerPaths.Contains(containerPath))
+                            {
+                                ImpactDecalExtractor.WriteTexture(decals, containerPath, texture);
+                                return;
+                            }
 
-                            // Release the terrain as soon as its last layer lands: the pass still has the
-                            // object textures to stream, and the game's own layers are inline, so waiting
-                            // for the whole pass held the terrain back by seconds for nothing.
-                            if (Interlocked.Decrement(ref _layersOutstanding) <= 0)
-                                _layerTextures.TrySetResult(_layersProduced);
+                            foreach (Guid material in layers.ByContainerPath[containerPath])
+                            {
+                                _layersProduced[material] = texture;
+                                TerrainLayerCache.Write(material, texture, plan.Source.BundlePath);
+
+                                // Release the terrain as soon as its last layer lands: the pass still has
+                                // the object textures to stream, and the game's own layers are inline, so
+                                // waiting for the whole pass held the terrain back by seconds for nothing.
+                                if (Interlocked.Decrement(ref _layersOutstanding) <= 0)
+                                    _layerTextures.TrySetResult(_layersProduced);
+                            }
                         }, cancellationToken: cancellation);
+
+                    // The manifest is what tells the deferred fallback this bundle has been read for
+                    // these paths, so it does not reopen it for the ones the bundle turned out not to
+                    // have. Written after the pass, like the pass's own caches.
+                    if (decals != null)
+                        ImpactDecalExtractor.WriteManifest(decals);
                 }
             }
             catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
@@ -695,6 +757,7 @@ public partial class ObjectStreamer : Node
         _layerWants = new Dictionary<string, TerrainLayerPlan.BundleWants>();
         _audioWants.Clear();
         _audioWants = new Dictionary<string, AudioExtractor.Request>(StringComparer.Ordinal);
+        _decalWants = new Dictionary<string, ImpactDecalExtractor.Request>(StringComparer.Ordinal);
         _layersProduced.Clear();
         while (_readyKeys.TryDequeue(out _)) { }
         _foliageAssets.Clear();

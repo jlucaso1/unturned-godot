@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Godot;
+using UnturnedGodot.Damage;
 using UnturnedGodot.Data;
 using UnturnedGodot.Net;
 using UnturnedGodot.Zombies;
@@ -11,7 +12,8 @@ namespace UnturnedGodot;
 // cloned), positioned from the server's ZombieList and interpolated through the same snapshot buffer the
 // remote players use. Animation follows Zombie.cs exactly: Move_{move}/Idle_{idle} variants with the
 // crawler (Move_4/Idle_3) and sprinter (Move_5/Idle_4) overrides, Attack_0..4 swings, and the replicated
-// per-zombie scale band (megas 1.45-1.55, everyone else 0.95-1.05).
+// per-zombie scale band (megas 1.45-1.55, everyone else 0.95-1.05). A killed body is handed to the
+// ragdoll pool rather than freed, so the corpse falls where the blow sent it.
 public partial class ZombiesView : Node3D
 {
     private const float AnimateWithin = 100f;  // skeletons past this stop sampling (Unturned's far
@@ -27,7 +29,14 @@ public partial class ZombiesView : Node3D
         public EZombieState State;
         public byte Bound;         // the zombie's home region (from its ZombieList header)
         public bool Streaming;     // any ZombieStates received yet (idle zombies never stream)
-        public double StartleUntil; // while set, the wake-up roar plays before the state clip
+        // A one-shot clip owns the rig until this instant: the wake-up roar, or a stagger. One field for
+        // both, because "something is playing and the state clip must wait" is one fact — two fields
+        // meant deciding which won every time they overlapped, which is the bug this replaced.
+        //
+        // They still differ in one way, and only one: a stagger INTERRUPTS whatever is playing, while a
+        // startle only starts when nothing is. That is a line at each call site rather than a state
+        // machine. See PlayOneShot.
+        public double HoldUntil;
         public double NextGroan;    // Zombie.cs's groan loop clock
         public Vector3 TargetPosition; // Zombie.tellState's interpolation target
         public float TargetYaw;
@@ -97,6 +106,80 @@ public partial class ZombiesView : Node3D
         foreach (ZombieAvatar avatar in _avatars.Values)
             avatar.Root.QueueFree();
         _avatars.Clear();
+    }
+
+    // Reused rather than allocated per query: a hitscan runs on a swing, but the population it walks is
+    // the whole visible region, and building one of these per zombie per swing is pure garbage.
+    private readonly ZombieInstance _probe = new();
+
+    // Stands an avatar at a position with nothing else attached, so the hitscan above can be tested
+    // without a session, a network or a character import behind it. The body it walks is the capsule,
+    // and the capsule comes from the position and the speciality alone.
+    internal void PlantForTest(Vector3 position, EZombieSpeciality speciality = EZombieSpeciality.Normal)
+    {
+        var root = new Node3D { Position = position };
+        AddChild(root);
+        _avatars[(ushort)(_avatars.Count + 1)] = new ZombieAvatar
+        {
+            Root = root,
+            Speciality = speciality,
+            KnownPosition = position,
+        };
+    }
+
+    // Which clip owns an avatar's rig, and for how much longer. The three one-shot sources (a stagger, a
+    // wake-up roar, a swing) arrive from different places and used to race for it, so this is what the
+    // runtime tests assert against — the field itself, at a time they choose, without a frame loop.
+    internal double HoldRemainingForTest(ushort id, double now) =>
+        _avatars.TryGetValue(id, out ZombieAvatar? avatar) && avatar.HoldUntil > now
+            ? avatar.HoldUntil - now
+            : 0.0;
+
+    internal EZombieState StateForTest(ushort id) =>
+        _avatars.TryGetValue(id, out ZombieAvatar? avatar) ? avatar.State : EZombieState.Idle;
+
+    internal void StunForTest(ushort id, byte clip, double now)
+    {
+        if (_avatars.TryGetValue(id, out ZombieAvatar? avatar))
+            PlayOneShot(avatar, $"Stun_{clip}", now, interrupt: true, ZombieStun.DurationSeconds);
+    }
+
+    internal void PushStateForTest(ushort id, EZombieState state, double now)
+    {
+        if (!_avatars.TryGetValue(id, out ZombieAvatar? avatar))
+            return;
+        avatar.Streaming = true;
+        Push(new ZombieSnapshotState { Id = id, Position = avatar.KnownPosition, State = state }, now);
+    }
+
+    // The nearest zombie AVATAR the ray enters, and which limb it entered at.
+    //
+    // This is the client's own copy of PlayerEquipment.punch's raycast, and it exists for one reason: the
+    // hitmarker. The original raycasts locally and flashes the mark before the server has heard about the
+    // swing, because a mark that waits a round trip does not read as feedback. The damage is decided by
+    // the server regardless, so a disagreement here costs a wrong mark and nothing else.
+    //
+    // Against the rendered avatars rather than the authoritative population, which is the point — this is
+    // what the player can SEE.
+    public bool RaycastAvatars(Vector3 origin, Vector3 direction, float maxDistance, out ELimb limb)
+    {
+        limb = ELimb.Spine;
+        bool found = false;
+        float nearest = maxDistance;
+        foreach (ZombieAvatar avatar in _avatars.Values)
+        {
+            _probe.Position = avatar.KnownPosition;
+            _probe.Yaw = avatar.AppliedYaw;
+            _probe.Speciality = avatar.Speciality;
+            if (!ZombieHitbox.Raycast(_probe, origin, direction, nearest, out float distance,
+                    out ELimb candidate, out _))
+                continue;
+            nearest = distance;
+            limb = candidate;
+            found = true;
+        }
+
+        return found;
     }
 
     public override void _ExitTree()
@@ -195,24 +278,96 @@ public partial class ZombiesView : Node3D
                 // player is mid-transition still names a zombie that is genuinely gone — the one thing
                 // that must not happen is leaving a dead zombie standing because the message looked
                 // late.
-                foreach (ushort id in killed.Ids)
-                    Kill(id);
+                for (int i = 0; i < killed.Ids.Count; i++)
+                    Kill(killed.Ids[i], i < killed.Ragdolls.Count ? killed.Ragdolls[i] : Vector3.Zero);
+                break;
+            case ENetMessage.ZombieStunned:
+                if (!MalformedPacket.TryDecode(payload, ReadZombieStunned, out var stunned))
+                {
+                    MalformedPacketsDropped++;
+                    break;
+                }
+
+                foreach ((ushort id, byte clip) in stunned.Stuns)
+                    Stun(id, clip);
                 break;
         }
     }
 
-    // ZombieManager's death: the avatar goes. Unturned plays a ragdoll here (Zombie.askDamage hands
-    // askDamage's force to the ragdoll and the body falls); there is no ragdoll in this port, so the
-    // body is simply freed, which is what its own dead-zombie cleanup does once the ragdoll expires.
-    private void Kill(ushort id)
+    private static readonly System.Func<byte[], (byte Bound, List<(ushort Id, byte Clip)> Stuns)>
+        ReadZombieStunned = ZombieNetMessages.ReadZombieStunned;
+
+    // Plays a clip that owns the rig until it finishes. `interrupt` is the whole difference between the
+    // two callers: a stagger takes the rig from whatever was playing, a wake-up roar waits its turn.
+    //
+    // The clip's own length is what the hold lasts, NOT the server's stun duration — the two are
+    // deliberately independent in the original, where the server counts a flat second and the client
+    // simply plays a reel. `fallback` covers a rig that does not carry the clip.
+    private static void PlayOneShot(ZombieAvatar avatar, string clip, double now, bool interrupt,
+        double fallback)
+    {
+        if (!interrupt && avatar.HoldUntil > now)
+            return;
+
+        // The HOLD is a fact about the avatar, not about the rig: an avatar whose character has not
+        // finished importing is still staggered, and must still not have a state clip picked for it the
+        // moment one arrives. So the hold is taken either way and only the playback is conditional.
+        avatar.Rig?.Replay(clip);
+        avatar.HoldUntil = now + (avatar.Rig != null
+            && avatar.Rig.Clips.TryGetValue(clip, out var length) && length.Length > 0f
+                ? length.Length
+                : fallback);
+    }
+
+    // Zombie.askStun: play the stagger reel, taking the rig from whatever was on it.
+    //
+    // A stagger for a zombie this client has not been told about yet is DROPPED rather than remembered.
+    // Both messages are reliable, so the region list is coming; but a stagger is a moment, and by the
+    // time the avatar exists the second the server counted has largely run out — playing it then would
+    // stagger a body the server has already released. A death is remembered (see _killed) precisely
+    // because it is the opposite: final, and wrong to miss.
+    private void Stun(ushort id, byte clip)
+    {
+        if (_avatars.TryGetValue(id, out ZombieAvatar? avatar))
+        {
+            PlayOneShot(avatar, $"Stun_{clip}", NetworkManager.Now, interrupt: true,
+                ZombieStun.DurationSeconds);
+        }
+    }
+
+    // ZombieManager's death: the avatar leaves the population and becomes debris. Zombie.askDamage hands
+    // its force to the ragdoll and the body falls; here it goes to the pool, which owns it until the
+    // debris timer runs out — the same lifetime the original gives it.
+    // `ragdoll` is the shove the killing blow gave the body, straight off the wire. Zero drops it where
+    // it stood, which is what a death with no direction behind it does.
+    private void Kill(ushort id, Vector3 ragdoll = default)
     {
         // Remembered whether or not an avatar exists for it: a kill that arrives BEFORE the list that
         // would have spawned this zombie is precisely the case the tombstone is for.
         _killed.Add(id);
         if (!_avatars.Remove(id, out ZombieAvatar? avatar))
             return; // never spawned here, or already removed on a region change
-        avatar.Root.QueueFree();
+
+        // RagdollTool's own adjustments, then the body is handed over: the pool owns it from here, and
+        // frees it when the debris timer runs out. Without a pool to hand it to, the corpse just goes.
+        if (_ragdolls == null)
+        {
+            avatar.Root.QueueFree();
+            return;
+        }
+
+        // The animation stops with the body: a corpse mid-walk-cycle tumbling across the ground is worse
+        // than one frozen in the pose it died in, which is what the original's ragdoll starts from.
+        if (avatar.Rig != null)
+            avatar.Rig.ProcessMode = ProcessModeEnum.Disabled;
+        _ragdolls.Throw(avatar.Root, RagdollForce.Thrown(ragdoll,
+            _rng.RandfRange(-1f, 1f), _rng.RandfRange(-1f, 1f)));
     }
+
+    // Where killed bodies go. Null on a session that built none, which frees them outright instead.
+    private Ragdolls? _ragdolls;
+
+    public void AttachRagdolls(Ragdolls ragdolls) => _ragdolls = ragdolls;
 
     // Zombie datagrams that reached a decoder and did not survive it; see NetServer.MalformedPacketsDropped.
     public long MalformedPacketsDropped { get; private set; }
@@ -223,8 +378,9 @@ public partial class ZombiesView : Node3D
         ZombieNetMessages.ReadZombieList;
     private static readonly System.Func<byte[], (uint Tick, List<ZombieSnapshotState> States)> ReadZombieStates =
         ZombieNetMessages.ReadZombieStates;
-    private static readonly System.Func<byte[], (byte Bound, List<ushort> Ids)> ReadZombieKilled =
-        ZombieNetMessages.ReadZombieKilled;
+    private static readonly
+        System.Func<byte[], (byte Bound, List<ushort> Ids, List<Vector3> Ragdolls)> ReadZombieKilled =
+            ZombieNetMessages.ReadZombieKilled;
 
     private void SpawnOrReset(in ZombieListing listing, byte bound)
     {
@@ -286,31 +442,33 @@ public partial class ZombiesView : Node3D
         avatar.TargetYaw = NetAngles.DequantizeYaw(state.Yaw);
         avatar.Streaming = true;
 
-        if (state.State != avatar.State)
+        if (state.State == avatar.State)
+            return;
+
+        // The state is recorded whatever is playing: it is what the rig returns to when a one-shot ends.
+        bool wokeUp = avatar.State == EZombieState.Idle && state.State == EZombieState.Chase;
+        avatar.State = state.State;
+
+        if (wokeUp)
         {
-            bool wokeUp = avatar.State == EZombieState.Idle && state.State == EZombieState.Chase;
-            avatar.State = state.State;
-            if (wokeUp && avatar.Rig is { } rig)
-            {
-                // Zombie.alert's startle: the wake-up roar plays first (the body already moves —
-                // the server never pauses for it), then the state clip takes over.
-                string startle = StartleClip(avatar);
-                rig.Play(startle);
-                avatar.StartleUntil = now
-                    + (rig.Clips.TryGetValue(startle, out var clip) && clip.Length > 0f ? clip.Length : 0.5f);
+            // Zombie.alert's startle: the wake-up roar plays first (the body already moves — the server
+            // never pauses for it), then the state clip takes over. It waits its turn, so a stagger
+            // already on the rig keeps it.
+            PlayOneShot(avatar, StartleClip(avatar), now, interrupt: false, fallback: 0.5f);
+            if (avatar.HoldUntil > now)
                 PlayVoice(avatar, "ZombieRoars");
-            }
-            else if (avatar.StartleUntil <= 0)
-            {
-                if (avatar.State == EZombieState.Attack)
-                {
-                    avatar.Rig?.Replay(AttackClip(avatar));
-                    avatar.NextSwing = now + 1.0;
-                    PlayVoice(avatar, "ZombieRoars"); // askAttack's swing roar
-                }
-                // Chase/Return/Idle clips are picked per-frame from the rendered motion.
-            }
+            return;
         }
+
+        // A swing announced while something is playing is not queued: the server keeps sending Attack,
+        // so the per-frame loop starts one as soon as the rig is free.
+        if (avatar.State == EZombieState.Attack && avatar.HoldUntil <= now && avatar.Rig != null)
+        {
+            avatar.Rig.Replay(AttackClip(avatar));
+            avatar.NextSwing = now + 1.0;
+            PlayVoice(avatar, "ZombieRoars"); // askAttack's swing roar
+        }
+        // Chase/Return/Idle clips are picked per-frame from the rendered motion.
     }
 
     public override void _Process(double delta)
@@ -360,12 +518,12 @@ public partial class ZombiesView : Node3D
                 }
             }
 
-            if (avatar.StartleUntil > 0 && now >= avatar.StartleUntil)
+            if (avatar.HoldUntil > 0 && now >= avatar.HoldUntil)
             {
-                avatar.StartleUntil = 0;
-                avatar.Rig?.Play(ClipFor(avatar, visiblyMoving)); // the roar ended: current clip
+                avatar.HoldUntil = 0;
+                avatar.Rig?.Play(ClipFor(avatar, visiblyMoving)); // the one-shot ended: current clip
             }
-            else if (avatar.StartleUntil <= 0 && avatar.Rig != null && avatar.Streaming)
+            else if (avatar.HoldUntil <= 0 && avatar.Rig != null && avatar.Streaming)
             {
                 if (avatar.State == EZombieState.Attack)
                 {

@@ -70,6 +70,13 @@ public sealed class ZombieInstance
     public EZombiePath Path;
     public float SinceSwing = float.PositiveInfinity; // seconds since the last swing started
     public float PendingHit = -1f;    // counts down from attackTime/2 to the damage landing
+
+    // Zombie.isStunned, as a countdown rather than a timestamp: seconds of stagger left. Above zero the
+    // body does nothing at all — no move, no swing, no repath — which is the whole of what a stun is on
+    // the server side. See ZombieStun.
+    public float StunRemaining;
+
+    public bool IsStunned => StunRemaining > 0f;
     public float LeaveDelay;          // Zombie.leave: stand still this long, then walk to LeaveTo
     public Vector3 LeaveTo;
     public bool RepathGranted;        // this tick's path-query token (granted round-robin)
@@ -464,6 +471,11 @@ public sealed partial class ZombieSystem
             for (int i = 0; i < count && granted < MaxRepathsPerTick; i++)
             {
                 ZombieInstance z = _zombies[(_repathCursor + i) % count];
+                // A staggered body will not run Move this tick, so a token spent on it is a token the
+                // hunters behind it in the queue do not get — and the budget is what keeps a blocked
+                // horde from stalling the tick.
+                if (z.IsStunned)
+                    continue;
                 if (z.State is EZombieState.Chase or EZombieState.Return && z.RepathTimer - dt <= 0f)
                 {
                     z.RepathGranted = true;
@@ -629,8 +641,19 @@ public sealed partial class ZombieSystem
     // Returns true when the zombie died on this hit. A dead one is removed from the population here, so
     // the caller's next read of Zombies no longer contains it — that is what makes the death final for
     // the brain; announcing it to the clients is the caller's job.
+    // Raised when a hit staggers a zombie: the zombie and the reel index the clients should play. A host
+    // replicates it; a pure test just watches it.
+    public event Action<ZombieInstance, byte>? Stunned;
+
+    // The mode's two stun switches. NORMAL can stun and stuns on damage alone; HARD turns Only_Critical
+    // on, EASY and NORMAL leave it off, and nothing can stun on HARD's Can_Stun=false. Settable because
+    // this is server config, read from Config.json in the original.
+    public bool CanStun { get; set; } = true;
+    public bool OnlyCriticalStuns { get; set; }
+
     public bool Damage(ZombieInstance zombie, ushort amount, byte instigator,
-        IReadOnlyList<ZombiePlayerView> players)
+        IReadOnlyList<ZombiePlayerView> players,
+        EZombieStunOverride stunOverride = EZombieStunOverride.None)
     {
         ArgumentNullException.ThrowIfNull(zombie);
         ArgumentNullException.ThrowIfNull(players);
@@ -644,9 +667,45 @@ public sealed partial class ZombieSystem
             return true;
         }
 
+        // Zombie.askDamage stuns only on the branch where the zombie SURVIVED — a killing blow has no
+        // stagger to play, because the body is being replaced by a ragdoll.
+        if (ZombieStun.ShouldStun(amount, zombie.Speciality == EZombieSpeciality.Mega, CanStun,
+                OnlyCriticalStuns, stunOverride))
+            Stun(zombie);
+
         if (instigator != byte.MaxValue && TryGetPlayer(players, instigator, out ZombiePlayerView attacker))
             Alert(zombie, attacker, players);
         return false;
+    }
+
+    // Zombie.stun: the body stops where it stands, drops the swing it was in the middle of, and plays one
+    // of its speciality's reels.
+    //
+    // Three things go, and each is a bug if it stays:
+    //
+    // The in-progress swing (PendingHit) is CANCELLED rather than paused. stun() sets isAttacking false,
+    // and a hit left counting down would land its damage a moment INTO the stagger — which is precisely
+    // the hit the player staggered the zombie to avoid.
+    //
+    // The ATTACK STATE goes with it, back to Chase. It is replicated, and a zombie left in Attack for the
+    // second it spends staggered has every client re-triggering its swing animation off that state: the
+    // body plays the stagger and then snaps into a swing it is not making. Leaving is the same
+    // `isAttacking = false`, seen from the wire.
+    //
+    // And the swing CLOCK is reset. Without it, a zombie interrupted late in its cooldown swings the
+    // instant the stagger ends, which turns the stun from a reprieve into a delay.
+    public void Stun(ZombieInstance zombie)
+    {
+        ArgumentNullException.ThrowIfNull(zombie);
+        if (zombie.IsDead)
+            return;
+
+        zombie.StunRemaining = ZombieStun.DurationSeconds;
+        zombie.PendingHit = -1f;
+        zombie.SinceSwing = 0f;
+        if (zombie.State == EZombieState.Attack)
+            zombie.State = EZombieState.Chase;
+        Stunned?.Invoke(zombie, ZombieStun.ClipFor(zombie.Speciality, _random.NextSingle()));
     }
 
     // Takes a zombie out of the population. Its aggro claim goes back to the player it was holding —
@@ -667,6 +726,15 @@ public sealed partial class ZombieSystem
 
     private void Behave(ZombieInstance zombie, IReadOnlyList<ZombiePlayerView> players, float dt)
     {
+        // A stunned zombie does nothing while it recovers. Zombie.OnUpdate returns early on isStunned
+        // before any of its behaviour runs, so this sits ahead of the swing clock as well: an interrupted
+        // swing does not resume where it left off, it is simply gone (stun() clears isAttacking).
+        if (zombie.IsStunned)
+        {
+            zombie.StunRemaining -= dt;
+            return;
+        }
+
         zombie.SinceSwing += dt;
         if (zombie.PendingHit >= 0f)
         {

@@ -161,34 +161,104 @@ public static class ZombieNetMessages
     //
     // One byte of count, like the list and snapshot payloads: a region holds at most 255 zombies
     // (NavBound.MaxZombies is a byte), so a single tick's deaths cannot overflow it.
+    //
+    // Each death also carries the SHOVE its killing blow gave it, as three plain floats. Quantizing them
+    // was the first instinct and the wrong one: the vector is `direction * damage`, so its magnitude runs
+    // with the weapon, and any fixed-point scale that resolved a punch would saturate on something
+    // heavier. Deaths are rare — a handful per tick at most, against the per-tick snapshot stream beside
+    // them — so six bytes a corpse is not worth a range limit to save.
+    // Ids alone: every corpse simply drops, which is what a kill with no direction behind it (a burn, a
+    // despawn) does in the original too.
     public static byte[] WriteZombieKilled(byte bound, IReadOnlyList<ushort> ids)
     {
         ArgumentNullException.ThrowIfNull(ids);
+        var kills = new List<(ushort, Vector3)>(ids.Count);
+        foreach (ushort id in ids)
+            kills.Add((id, Vector3.Zero));
+        return WriteZombieKilled(bound, kills);
+    }
+
+    // Each corpse with the shove its killing blow gave it. One list of PAIRS rather than two collections
+    // that a caller has to keep in step: a mismatch there would throw a body with another body's blow.
+    public static byte[] WriteZombieKilled(byte bound, IReadOnlyList<(ushort Id, Vector3 Ragdoll)> kills)
+    {
+        ArgumentNullException.ThrowIfNull(kills);
         // The count header is one byte, and a silent truncation here would be the worst possible
         // failure: a payload advertising zero ids that the reader believes, leaving every one of those
         // corpses standing forever. A region cannot hold more than 255 zombies, so this can only fire
         // on a caller that has already gone wrong somewhere else.
-        if (ids.Count > byte.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(ids),
-                $"a ZombieKilled payload carries at most {byte.MaxValue} ids, not {ids.Count}");
-        var payload = new byte[3 + (ids.Count * 2)];
+        if (kills.Count > byte.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(kills),
+                $"a ZombieKilled payload carries at most {byte.MaxValue} ids, not {kills.Count}");
+        // id (2) + the shove (3 x 4).
+        const int PerZombie = 2 + (3 * 4);
+        var payload = new byte[3 + (kills.Count * PerZombie)];
         payload[0] = (byte)ENetMessage.ZombieKilled;
         payload[1] = bound;
-        payload[2] = (byte)ids.Count;
-        for (int i = 0; i < ids.Count; i++)
-            BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(3 + (i * 2)), ids[i]);
+        payload[2] = (byte)kills.Count;
+        for (int i = 0; i < kills.Count; i++)
+        {
+            Span<byte> entry = payload.AsSpan(3 + (i * PerZombie));
+            BinaryPrimitives.WriteUInt16LittleEndian(entry, kills[i].Id);
+            BinaryPrimitives.WriteSingleLittleEndian(entry[2..], kills[i].Ragdoll.X);
+            BinaryPrimitives.WriteSingleLittleEndian(entry[6..], kills[i].Ragdoll.Y);
+            BinaryPrimitives.WriteSingleLittleEndian(entry[10..], kills[i].Ragdoll.Z);
+        }
+
         return payload;
     }
 
-    public static (byte Bound, List<ushort> Ids) ReadZombieKilled(byte[] payload)
+    public static (byte Bound, List<ushort> Ids, List<Vector3> Ragdolls) ReadZombieKilled(byte[] payload)
     {
         using BinaryReader r = Reader(payload);
         byte bound = r.ReadByte();
         int count = r.ReadByte();
         var ids = new List<ushort>(count);
+        var ragdolls = new List<Vector3>(count);
         for (int i = 0; i < count; i++)
+        {
             ids.Add(r.ReadUInt16());
-        return (bound, ids);
+            ragdolls.Add(new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()));
+        }
+
+        return (bound, ids, ragdolls);
+    }
+
+    // ZombieManager.sendZombieStun: which zombies staggered, and which reel each plays.
+    //
+    // Reliable, like a kill, and for the same reason: a dropped stun leaves a body standing still on the
+    // server while the client keeps walking it, and nothing later says otherwise. Unlike a kill, though,
+    // a stun is not final — the next state snapshot will move the zombie again — so this is bounded by
+    // the same one-byte count and addressed to the same region.
+    public static byte[] WriteZombieStunned(byte bound, IReadOnlyList<(ushort Id, byte Clip)> stuns)
+    {
+        ArgumentNullException.ThrowIfNull(stuns);
+        if (stuns.Count > byte.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(stuns),
+                $"a ZombieStunned payload carries at most {byte.MaxValue} zombies, not {stuns.Count}");
+
+        var payload = new byte[3 + (stuns.Count * 3)];
+        payload[0] = (byte)ENetMessage.ZombieStunned;
+        payload[1] = bound;
+        payload[2] = (byte)stuns.Count;
+        for (int i = 0; i < stuns.Count; i++)
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(3 + (i * 3)), stuns[i].Id);
+            payload[5 + (i * 3)] = stuns[i].Clip;
+        }
+
+        return payload;
+    }
+
+    public static (byte Bound, List<(ushort Id, byte Clip)> Stuns) ReadZombieStunned(byte[] payload)
+    {
+        using BinaryReader r = Reader(payload);
+        byte bound = r.ReadByte();
+        int count = r.ReadByte();
+        var stuns = new List<(ushort, byte)>(count);
+        for (int i = 0; i < count; i++)
+            stuns.Add((r.ReadUInt16(), r.ReadByte()));
+        return (bound, stuns);
     }
 
     private static BinaryReader Reader(byte[] payload)

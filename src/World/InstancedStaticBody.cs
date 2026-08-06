@@ -12,9 +12,17 @@ public partial class InstancedStaticBody : Node3D
     // The distinct shapes this body uses, kept referenced so their RIDs stay valid.
     public IReadOnlyList<Shape3D> Shapes { get; set; } = System.Array.Empty<Shape3D>();
 
-    // Each instance: which shape (index into Shapes) and its world transform.
-    public IReadOnlyList<(int Shape, Transform3D Transform)> Placements { get; set; }
-        = System.Array.Empty<(int, Transform3D)>();
+    // Each instance: which shape (index into Shapes), its world transform, and which surface it is made of.
+    public IReadOnlyList<CollisionPlacement> Placements { get; set; }
+        = System.Array.Empty<CollisionPlacement>();
+
+    // The physics-material names the placements' surface bytes index into (1-based; 0 is "no material").
+    // Shared with every other body from the same builder.
+    public IReadOnlyList<string> SurfaceNames { get; set; } = System.Array.Empty<string>();
+
+    // Which surface each added shape is made of, in BodyAddShape order — the same index a raycast reports.
+    // Null when no collider on this body named a material.
+    private byte[]? _surfaces;
 
     // Layer bit 1 is the solid world (player movement, camera rays). Callers add extra bits for
     // Unturned layer semantics — e.g. LARGE/MEDIUM objects carry the vision-blocker bit so alert
@@ -39,14 +47,32 @@ public partial class InstancedStaticBody : Node3D
         // space makes the physics server re-register it with the broadphase, so adding thousands of shapes
         // that way costs far more than adding them first and joining once
         // (godotengine/godot#24026).
-        foreach ((int shape, Transform3D transform) in Placements)
-            PhysicsServer3D.BodyAddShape(_body, Shapes[shape].GetRid(), transform);
+        for (int i = 0; i < Placements.Count; i++)
+        {
+            CollisionPlacement placement = Placements[i];
+            PhysicsServer3D.BodyAddShape(_body, Shapes[placement.Shape].GetRid(), placement.Transform);
+            if (placement.Material == 0 && _surfaces == null)
+                continue;
+            _surfaces ??= new byte[Placements.Count];
+            _surfaces[i] = placement.Material;
+        }
 
         PhysicsServer3D.BodySetSpace(_body, GetWorld3D().Space);
         // PhysicsServer copied every shape RID/transform above. Keeping thousands of managed tuples on
-        // every body serves no later query and inflated steady-state RAM for the whole session.
+        // every body serves no later query and inflated steady-state RAM for the whole session. The
+        // surface bytes survive, at one byte per shape, because they answer a question the server cannot.
         if (!EnvFlag.IsOn(OS.GetEnvironment("UG_KEEP_PHYSICS_PLACEMENTS"), whenUnset: false))
-            Placements = System.Array.Empty<(int Shape, Transform3D Transform)>();
+            Placements = System.Array.Empty<CollisionPlacement>();
+    }
+
+    // The physics-material name of one shape on this body, or empty when it carries none. Mirrors
+    // InstancedStaticBodies.MaterialFor, for the one-node-per-body mode (UG_NODE_PHYSICS=1).
+    public string MaterialFor(int shapeIndex)
+    {
+        if (_surfaces == null || shapeIndex < 0 || shapeIndex >= _surfaces.Length)
+            return string.Empty;
+        byte index = _surfaces[shapeIndex];
+        return index == 0 || index > SurfaceNames.Count ? string.Empty : SurfaceNames[index - 1];
     }
 
     public override void _ExitTree()

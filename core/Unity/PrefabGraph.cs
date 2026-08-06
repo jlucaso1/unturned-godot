@@ -38,8 +38,15 @@ public readonly struct ColliderPart
     // content says it: a ladder's climbing volume is an ordinary box everywhere else.
     public readonly int Layer;
 
+    // The name of the PhysicMaterial on m_Material, or empty when the collider carries none. This is the
+    // surface an impact resolves through — PhysicsTool.GetColliderSharedPhysicsMaterialName reads exactly
+    // this, and the empty case is meaningful rather than missing data: PlayerEquipment.punch gates its
+    // impact effect on `!string.IsNullOrEmpty(info.materialName)`, so a collider with no material makes no
+    // sound and leaves no mark. Most of them do not carry one.
+    public readonly string MaterialName;
+
     private ColliderPart(EColliderKind kind, Transform3D localToRoot, Vector3 center, Vector3 size,
-        float radius, float height, int direction, long meshId, int layer)
+        float radius, float height, int direction, long meshId, int layer, string materialName)
     {
         Kind = kind;
         LocalToRoot = localToRoot;
@@ -50,17 +57,21 @@ public readonly struct ColliderPart
         Direction = direction;
         MeshId = meshId;
         Layer = layer;
+        MaterialName = materialName;
     }
 
-    public static ColliderPart Box(Transform3D t, Vector3 center, Vector3 size, int layer = 0)
-        => new(EColliderKind.Box, t, center, size, 0f, 0f, 0, 0, layer);
-    public static ColliderPart Sphere(Transform3D t, Vector3 center, float radius, int layer = 0)
-        => new(EColliderKind.Sphere, t, center, Vector3.Zero, radius, 0f, 0, 0, layer);
+    public static ColliderPart Box(Transform3D t, Vector3 center, Vector3 size, int layer = 0,
+        string materialName = "")
+        => new(EColliderKind.Box, t, center, size, 0f, 0f, 0, 0, layer, materialName);
+    public static ColliderPart Sphere(Transform3D t, Vector3 center, float radius, int layer = 0,
+        string materialName = "")
+        => new(EColliderKind.Sphere, t, center, Vector3.Zero, radius, 0f, 0, 0, layer, materialName);
     public static ColliderPart Capsule(Transform3D t, Vector3 center, float radius, float height,
-        int direction, int layer = 0)
-        => new(EColliderKind.Capsule, t, center, Vector3.Zero, radius, height, direction, 0, layer);
-    public static ColliderPart Mesh(Transform3D t, long meshId, int layer = 0)
-        => new(EColliderKind.Mesh, t, Vector3.Zero, Vector3.Zero, 0f, 0f, 0, meshId, layer);
+        int direction, int layer = 0, string materialName = "")
+        => new(EColliderKind.Capsule, t, center, Vector3.Zero, radius, height, direction, 0, layer,
+            materialName);
+    public static ColliderPart Mesh(Transform3D t, long meshId, int layer = 0, string materialName = "")
+        => new(EColliderKind.Mesh, t, Vector3.Zero, Vector3.Zero, 0f, 0f, 0, meshId, layer, materialName);
 }
 
 // Reads a masterbundle SerializedFile's prefab structure: every object by path id, the asset container,
@@ -123,7 +134,8 @@ public sealed class PrefabGraph
 
         Dictionary<string, List<MeshPart>> partsByKey = MapObjectKeysToMeshes(
             file, out Dictionary<string, List<MeshPart>> lod1PartsByKey, objectsByPathId, walk);
-        Dictionary<string, List<ColliderPart>> collidersByKey = MapObjectKeysToColliders(file, walk);
+        Dictionary<string, List<ColliderPart>> collidersByKey =
+            MapObjectKeysToColliders(file, objectsByPathId, walk);
 
         return new PrefabGraph(file, objectsByPathId, containerByPath, assetPrefix, partsByKey,
             lod1PartsByKey, collidersByKey);
@@ -399,9 +411,10 @@ public sealed class PrefabGraph
     // wreck's ragdoll capsules do not stand in the world as solid geometry nothing draws.
     // Values are Unity-space; shape building happens later.
     private static Dictionary<string, List<ColliderPart>> MapObjectKeysToColliders(SerializedFile file,
-        PrefabWalk walk)
+        Dictionary<long, SerializedObject> objects, PrefabWalk walk)
     {
         var byKey = new Dictionary<string, List<ColliderPart>>();
+        var materialNames = new Dictionary<long, string>();
 
         foreach (SerializedObject o in file.Objects)
         {
@@ -424,21 +437,64 @@ public sealed class PrefabGraph
 
             if (!byKey.TryGetValue(anchor.Key, out List<ColliderPart>? list))
                 byKey[anchor.Key] = list = new List<ColliderPart>();
-            list.Add(ReadCollider(kind, c, anchor.LocalToRoot, walk.LayerOf(goId)));
+            list.Add(ReadCollider(kind, c, anchor.LocalToRoot, walk.LayerOf(goId),
+                PhysicsMaterialNameOf(file, objects, c, materialNames)));
         }
         return byKey;
     }
 
     private static ColliderPart ReadCollider(EColliderKind kind, Dictionary<string, object> c, Transform3D t,
-        int layer)
+        int layer, string materialName)
         => kind switch
         {
-            EColliderKind.Box => ColliderPart.Box(t, Vec(c["m_Center"]), Vec(c["m_Size"]), layer),
-            EColliderKind.Sphere => ColliderPart.Sphere(t, Vec(c["m_Center"]), F(c["m_Radius"]), layer),
+            EColliderKind.Box => ColliderPart.Box(t, Vec(c["m_Center"]), Vec(c["m_Size"]), layer,
+                materialName),
+            EColliderKind.Sphere => ColliderPart.Sphere(t, Vec(c["m_Center"]), F(c["m_Radius"]), layer,
+                materialName),
             EColliderKind.Capsule => ColliderPart.Capsule(t, Vec(c["m_Center"]), F(c["m_Radius"]),
-                F(c["m_Height"]), Convert.ToInt32(c["m_Direction"]), layer),
-            _ => ColliderPart.Mesh(t, PathId((Dictionary<string, object>)c["m_Mesh"]), layer),
+                F(c["m_Height"]), Convert.ToInt32(c["m_Direction"]), layer, materialName),
+            _ => ColliderPart.Mesh(t, PathId((Dictionary<string, object>)c["m_Mesh"]), layer, materialName),
         };
+
+    // Unity's PhysicMaterial. Named here rather than inlined because the constant is what identifies the
+    // object in the file; there is no other marker on it.
+    private const int PhysicMaterialClassId = 134;
+
+    // The name of the PhysicMaterial a collider's m_Material points at, cached by path id: the shipped
+    // content names 21 of them and hangs thousands of colliders off those, so this reads each object once
+    // rather than once per collider.
+    //
+    // A null pointer (path id 0) and a pointer into ANOTHER file are both the empty string. The first is
+    // the common case and is exactly Unity's `sharedMaterial == null`; the second cannot be resolved from
+    // here at all, and every collider in the shipped bundle resolves locally — the assertion in
+    // PrefabColliderMaterialRealTests is what keeps that true across game updates.
+    private static string PhysicsMaterialNameOf(SerializedFile file,
+        Dictionary<long, SerializedObject> objects, Dictionary<string, object> collider,
+        Dictionary<long, string> cache)
+    {
+        if (!collider.TryGetValue("m_Material", out object? pointer))
+            return string.Empty;
+
+        var pptr = (Dictionary<string, object>)pointer;
+        long pathId = PathId(pptr);
+        if (pathId == 0 || Convert.ToInt32(pptr["m_FileID"]) != 0)
+            return string.Empty;
+        if (cache.TryGetValue(pathId, out string? cached))
+            return cached;
+
+        string name = string.Empty;
+        if (objects.TryGetValue(pathId, out SerializedObject? material)
+            && material.ClassId == PhysicMaterialClassId)
+        {
+            Dictionary<string, object> fields =
+                TypeTreeReader.Read(material.TypeTree, file.ReaderFor(material));
+            if (fields.TryGetValue("m_Name", out object? value) && value is string named)
+                name = named;
+        }
+
+        cache[pathId] = name;
+        return name;
+    }
 
     private static Vector3 Vec(object value)
     {

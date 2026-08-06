@@ -26,15 +26,22 @@ public static class PunchTargeting
     // both. Null is an unobstructed world, which is what the pure tests run in.
     public delegate bool LineBlocked(Vector3 from, Vector3 to);
 
-    // Where the physics world stops the ray, if it does: the point, how far along it, and WHICH ASSET
-    // the body it struck belongs to. That last one is what turns a point into an identification — a
-    // punch that stops on a wall beside a garbage pile must not be attributed to the pile — and it is
-    // Guid.Empty for anything the host cannot name (terrain, a ladder volume), which is a miss.
+    // Where the physics world stops the ray, if it does: the point, its surface normal, how far along the
+    // ray it is, WHICH ASSET the body it struck belongs to, and what that surface is made of.
+    //
+    // The asset is what turns a point into an identification — a punch that stops on a wall beside a
+    // garbage pile must not be attributed to the pile — and it is Guid.Empty for anything the host cannot
+    // name (terrain, a ladder volume), which damages nothing.
+    //
+    // The SURFACE is independent of that. A wall the punch cannot hurt still says it is concrete, and
+    // that is what the impact effect is chosen by; an unnamed asset and a named surface is the ordinary
+    // case of punching a building.
     //
     // A host backs this with a real cast against the solid world; null means nothing solid is known,
     // and then only zombies can be hit.
     public delegate bool WorldRaycast(Vector3 origin, Vector3 direction, float maxDistance,
-        out Vector3 point, out float distance, out System.Guid asset);
+        out Vector3 point, out Vector3 normal, out float distance, out System.Guid asset,
+        out string surface);
 
     // The nearest zombie the ray enters, with the limb it entered at. Walks the population rather than
     // a broadphase because the caller has already narrowed it — a punch is one ray per swing, and swings
@@ -52,7 +59,7 @@ public static class PunchTargeting
             if (zombie.IsDead)
                 continue;
             if (!ZombieHitbox.Raycast(zombie, origin, direction, nearest, out float distance,
-                    out ELimb limb))
+                    out ELimb limb, out Vector3 normal))
                 continue;
             Vector3 point = origin + (direction.Normalized() * distance);
             // Checked only for the candidate that would win, and only once it has: the predicate is a
@@ -61,16 +68,28 @@ public static class PunchTargeting
             if (blocked != null && blocked(origin, point))
                 continue;
             nearest = distance;
-            hit = new PunchHit(EPunchTargetKind.Zombie, zombie.Id, limb, point, distance);
+            hit = new PunchHit(EPunchTargetKind.Zombie, zombie.Id, limb, point, distance, normal,
+                ZombieSurface);
         }
         return hit.Exists;
     }
 
+    // The physics material a hit on a zombie reports. Named here because this port's zombies are not in
+    // the physics world at all and so have no collider to read one off — DamageTool.raycast takes it from
+    // the bone collider, which on every zombie prefab is Flesh.
+    //
+    // The original has a second case: a RADIOACTIVE zombie answers "Alien_Dynamic" whatever its colliders
+    // say. This port's EZombieSpeciality carries no radioactive kind yet, so there is nothing to branch
+    // on; the constant is named beside this one so the branch has somewhere obvious to land.
+    public const string ZombieSurface = "Flesh";
+    public const string RadioactiveZombieSurface = "Alien_Dynamic";
+
     // The whole cast: whichever of the zombie population and the solid world the ray meets first.
     //
     // A world hit is only a TARGET if something breakable stands there; otherwise it is a wall, and the
-    // punch lands on nothing. Either way it still shortens the ray, which is what stops a fist reaching
-    // a zombie through a fence.
+    // punch damages nothing — but it still LANDED, and the returned hit carries where and on what, because
+    // that is what the impact effect is made of. Either way it shortens the ray, which is what stops a
+    // fist reaching a zombie through a fence.
     public static PunchHit Resolve(Vector3 origin, Vector3 direction, float maxDistance,
         IReadOnlyList<ZombieInstance> zombies, DamageableWorld? world = null,
         WorldRaycast? worldRaycast = null, LineBlocked? blocked = null)
@@ -84,14 +103,16 @@ public static class PunchTargeting
         float reach = maxDistance;
 
         if (worldRaycast != null
-            && worldRaycast(origin, direction, maxDistance, out Vector3 point, out float distance,
-                out System.Guid asset)
+            && worldRaycast(origin, direction, maxDistance, out Vector3 point, out Vector3 normal,
+                out float distance, out System.Guid asset, out string surface)
             && distance <= reach)
         {
             reach = distance;
             int index = world?.Find(point, PlacementMatchRadius, asset) ?? -1;
-            if (index >= 0)
-                best = new PunchHit(world![index].Kind, index, ELimb.Spine, point, distance);
+            // Kind is None when nothing breakable stands there, and the rest of the hit is filled in
+            // regardless: a punch on a wall does no damage and still cracks.
+            best = new PunchHit(index >= 0 ? world![index].Kind : EPunchTargetKind.None,
+                index >= 0 ? index : 0, ELimb.Spine, point, distance, normal, surface ?? string.Empty);
         }
 
         // The zombie cast is bounded by whatever the world stopped at, so a zombie standing behind a

@@ -48,6 +48,20 @@ public partial class PlayerController : CharacterBody3D
     // button went down, not to the round trip.
     public OneShotAudio? Sounds { get; set; }
 
+    // The crosshair and its hit marks, and the local raycast that decides which mark a swing flashes.
+    // Both optional: a headless or benchmark session builds neither and simply shows nothing.
+    public PlayerHud? Hud { get; set; }
+    public PunchHitmark? Hitmark { get; set; }
+
+    // Where a swing's own ray starts and which way it goes, from the same state PunchAim rebuilds it from
+    // on the server — so the mark the client flashes and the damage the server works out come from one
+    // description of the aim rather than two.
+    private Vector3 EyePosition() =>
+        UnturnedGodot.Damage.PunchAim.Origin(GlobalPosition, _stance);
+
+    private Vector3 AimForward() =>
+        UnturnedGodot.Damage.PunchAim.Forward(RotationDegrees.Y, _pitch);
+
     // Multiplayer session, when hosting or joined: the controller forwards inputs at the 12.5 Hz cadence.
     public UnturnedGodot.Net.NetClient? Net { get; set; }
 
@@ -296,7 +310,15 @@ public partial class PlayerController : CharacterBody3D
         _rig?.SetPitch(_pitch);          // bends the upper body toward the look
         // The arms follow the same movement state so they idle and bob like the body; the camera already
         // carries the look, so they take no pitch bend of their own.
-        _viewmodel?.SetState(_stance, moving);
+        //
+        // EXCEPT while a gesture is playing on them, when they stand up for its duration — see
+        // ViewmodelState, which is where the rule and the reason for it live.
+        if (_viewmodel is { } arms)
+        {
+            (EPlayerStance armStance, bool armsMoving) =
+                ViewmodelState.For(_stance, moving, arms.IsPlayingOnce);
+            arms.SetState(armStance, armsMoving);
+        }
 
         float speed = PlayerConfig.SpeedFor(_stance);
         bool wasOnFloor = IsOnFloor();
@@ -593,6 +615,15 @@ public partial class PlayerController : CharacterBody3D
         if (PlayerGestures.SoundFor(gesture) is { } sound)
             Sounds?.Play(sound, GlobalPosition + Vector3.Up,
                 PlayerGestures.PunchVolume, PlayerGestures.PunchMaxDistance);
+
+        // The hitmarker, locally and immediately, exactly where PlayerEquipment.punch puts it: inside
+        // `if (channel.IsLocalPlayer)`, before the swing has been sent anywhere. The server still decides
+        // the damage; this only says whether the crosshair flashes.
+        if (gesture is EPlayerGesture.PunchLeft or EPlayerGesture.PunchRight
+            && Hud != null && Hitmark != null)
+        {
+            Hud.Hitmark(Hitmark.Resolve(EyePosition(), AimForward()));
+        }
 
         if (PlayerGestures.ClipFor(gesture) is not { } clip)
             return gesture;
