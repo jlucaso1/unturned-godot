@@ -170,4 +170,58 @@ public class ZombieHitboxTests
             PunchDamageData.Reach, out _, out ELimb limb, out _));
         Assert.Equal(ELimb.Skull, limb);
     }
+
+    // ---- The surface normal a hit reports -----------------------------------------------------------
+
+    // The impact effect is oriented by this, and it is what the physics world would have supplied for
+    // anything that were a body in it. Away from the capsule's axis, always.
+    [Fact]
+    public void TheNormalPointsAwayFromTheBody()
+    {
+        ZombieInstance zombie = Zombie();
+        var origin = new Vector3(0, 1.2f, 1f);
+
+        Assert.True(ZombieHitbox.Raycast(zombie, origin, new Vector3(0, 0, -1),
+            PunchDamageData.Reach, out _, out _, out Vector3 normal));
+
+        // Struck from +Z, so the surface faces back that way.
+        Assert.True(normal.Z > 0.9f, $"the chest faced {normal}");
+        Assert.Equal(1f, normal.Length(), 3);
+    }
+
+    // A punch thrown from INSIDE the capsule — chest to chest, which is where punching happens — enters
+    // at distance zero with the point still at the eyes, and there is no surface there to be outward
+    // from. It faces back down the swing, which is where the fist came from.
+    [Fact]
+    public void ANormalFromInsideTheBodyFacesBackDownTheSwing()
+    {
+        ZombieInstance zombie = Zombie();
+
+        Assert.True(ZombieHitbox.Raycast(zombie, new Vector3(0, 1.2f, 0f), new Vector3(0, 0, -1),
+            PunchDamageData.Reach, out float distance, out _, out Vector3 normal));
+
+        Assert.Equal(0f, distance);
+        Assert.Equal(new Vector3(0, 0, 1), normal);
+    }
+
+    // A point ON the capsule's axis has no outward direction at all, and with no swing to fall back on
+    // either it points up rather than being zero — a zero normal would orient the mark on nothing.
+    [Fact]
+    public void ANormalWithNothingToDeriveItFromPointsUp()
+    {
+        ZombieInstance zombie = Zombie();
+        Vector3 onTheAxis = zombie.Position + (Vector3.Up * (ZombieHitbox.HeightOf(zombie) * 0.5f));
+
+        Assert.Equal(Vector3.Up, ZombieHitbox.NormalAt(zombie, onTheAxis, Vector3.Zero));
+    }
+
+    // The same point, but with a swing behind it: it faces back down the swing instead.
+    [Fact]
+    public void ANormalOnTheAxisFallsBackToTheSwing()
+    {
+        ZombieInstance zombie = Zombie();
+        Vector3 onTheAxis = zombie.Position + (Vector3.Up * (ZombieHitbox.HeightOf(zombie) * 0.5f));
+
+        Assert.Equal(new Vector3(0, 0, 1), ZombieHitbox.NormalAt(zombie, onTheAxis, new Vector3(0, 0, -1)));
+    }
 }

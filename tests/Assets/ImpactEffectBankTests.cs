@@ -87,6 +87,32 @@ public class ImpactEffectBankTests
         Assert.Equal(0, ImpactEffectBank.ScanDirectory(bundles, prefix).Count);
     }
 
+    // A .dat with no GUID at all — a truncated or hand-edited file — is skipped rather than registered
+    // under Guid.Empty, which would make it answer for every surface that names no effect.
+    [Fact]
+    public void IgnoresDatFilesWithNoGuid()
+    {
+        using var dir = new TempDir();
+        (string bundles, string prefix) = Source(dir, "Nameless", "Type Effect");
+
+        Assert.Equal(0, ImpactEffectBank.ScanDirectory(bundles, prefix).Count);
+    }
+
+    // No asset prefix means no container path, and an effect whose textures cannot be addressed offers
+    // none — it is in the bank (its GUID still resolves) but it leaves no mark.
+    [Fact]
+    public void AnEffectWithNoAssetPrefixOffersNoTextures()
+    {
+        using var dir = new TempDir();
+        (string bundles, _) = Source(dir, "Wood_WithDecal_NoAudio", WoodEffect);
+
+        ImpactEffectAsset asset = ImpactEffectBank.ScanDirectory(bundles, string.Empty)
+            .Find(Guid.Parse("b2bbae34370e493fb03f9042dd6a6acf"))!;
+
+        Assert.Equal(string.Empty, asset.BundleDirectory);
+        Assert.Empty(asset.DecalTextureCandidates);
+    }
+
     [Fact]
     public void AMissingEffectsFolderIsAnEmptyBank() =>
         Assert.Equal(0, ImpactEffectBank.ScanDirectory("/nowhere/at/all", "Assets/X").Count);

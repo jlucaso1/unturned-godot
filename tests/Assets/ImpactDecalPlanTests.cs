@@ -124,6 +124,39 @@ public class ImpactDecalPlanTests
         Assert.Empty(ImpactDecalPlan.TexturesByBundle(materials, effects, _ => "b"));
     }
 
+    // A name the bank has never heard of resolves to no effect rather than throwing — the surface a hit
+    // reports comes off a collider, and a mod can name one whose asset is missing.
+    [Fact]
+    public void AnUnknownSurfaceNamesNoEffect() =>
+        Assert.Equal(Guid.Empty, new PhysicsMaterialBank().FindImpactEffect("Nothing_Like_This"));
+
+    // A fallback chain that loops must terminate. The chain is data, and nothing validates it on the way
+    // in, so a mod pointing two materials at each other has to cost a bounded walk rather than a hang.
+    [Fact]
+    public void ACyclicFallbackChainTerminates()
+    {
+        Guid first = Guid.NewGuid();
+        Guid second = Guid.NewGuid();
+        var materials = new PhysicsMaterialBank();
+        materials.Add(Material("A", Guid.Empty, fallback: second, guid: first));
+        materials.Add(Material("B", Guid.Empty, fallback: first, guid: second));
+
+        Assert.Equal(Guid.Empty, materials.FindImpactEffect("A"));
+    }
+
+    // A chain that ends without anyone naming an effect is a surface that leaves no mark, which is what
+    // Foliage and Water do in the shipped content.
+    [Fact]
+    public void AChainThatNamesNoEffectResolvesToNothing()
+    {
+        Guid baseGuid = Guid.NewGuid();
+        var materials = new PhysicsMaterialBank();
+        materials.Add(Material("Base", Guid.Empty, guid: baseGuid));
+        materials.Add(Material("Derived", Guid.Empty, fallback: baseGuid));
+
+        Assert.Equal(Guid.Empty, materials.FindImpactEffect("Derived"));
+    }
+
     // The key has to survive being a filename: a container path is full of separators and dots, and one
     // that reached the filesystem unescaped would land in directories nothing ever creates.
     [Fact]

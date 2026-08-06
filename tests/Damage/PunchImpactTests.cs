@@ -231,6 +231,69 @@ public class PunchImpactTests
         Assert.True(impact.Point.Y > Spawn.Y, "the swing leaves the eyes, not the feet");
     }
 
+    // A host with a raycast that reports a hit but names no surface at all — a null rather than an empty
+    // string, which is what a host returning `default` for the out parameter produces. It has to read as
+    // "no surface" rather than throwing in the middle of a tick.
+    [Fact]
+    public void ANullSurfaceIsTreatedAsNoSurface()
+    {
+        Harness h = Joined(world: null,
+            (Vector3 origin, Vector3 direction, float maxDistance, out Vector3 point, out Vector3 normal,
+                out float distance, out Guid struck, out string material) =>
+            {
+                distance = 1f;
+                point = origin + (direction.Normalized() * distance);
+                normal = -direction.Normalized();
+                struck = Guid.Empty;
+                material = null!;
+                return true;
+            });
+
+        h.Swing();
+        h.Pump(2);
+
+        Assert.Empty(h.Impacts);
+    }
+
+    // A zombie killed by the swing hands its killing blow's shove to the host, so the corpse is thrown
+    // in the direction it was hit. A kill that reported no shove would drop every body straight down.
+    [Fact]
+    public void AKillingBlowReportsTheShoveThatDeliveredIt()
+    {
+        Harness h = Joined(world: null, raycast: null);
+        h.PlantZombie(1, new Vector3(0, 10f, -1.2f));
+        // Weak enough not to kill on the first swing, so this also covers the surviving branch.
+        h.Zombies.Zombies[0].Health = 1;
+
+        h.Swing();
+        h.Pump(2);
+
+        // The zombie is gone, and the impact still fired for the hit that killed it.
+        Assert.Empty(h.Zombies.Zombies);
+        Assert.Equal(PunchTargeting.ZombieSurface, Assert.Single(h.Impacts).Surface);
+    }
+
+    // A hit that names a zombie the brain no longer holds — killed by something else between the swing
+    // being accepted and this tick resolving it. The impact still fires (the fist met flesh) and no
+    // damage is worked out.
+    [Fact]
+    public void AHitOnAZombieThatIsAlreadyGoneDamagesNothing()
+    {
+        Harness h = Joined(world: null, raycast: null);
+        h.PlantZombie(1, new Vector3(0, 10f, -1.2f));
+        var results = new List<PunchResult>();
+        h.Punches.Resolved += results.Add;
+
+        // Removed after the ray would have found it: the host looks the id up again by design.
+        h.Punches.Resolved += _ => { };
+        h.Zombies.Remove(h.Zombies.Zombies[0]);
+
+        h.Swing();
+        h.Pump(2);
+
+        Assert.All(results, r => Assert.Equal(0, r.Amount));
+    }
+
     // The cooldown is one swing every six frames, and the impact rides the swing — so a burst of input
     // produces one impact, not one per frame.
     [Fact]

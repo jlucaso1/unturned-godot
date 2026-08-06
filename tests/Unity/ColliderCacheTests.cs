@@ -168,6 +168,111 @@ public class ColliderCacheTests
         Assert.Throws<InvalidDataException>(() => ColliderCache.Read(ms));
     }
 
+    // A negative name-table count is the other half of the bound: the positive one is refused for being
+    // implausible, and this one for being impossible.
+    [Fact]
+    public void Read_NegativeMaterialTableCount_Throws()
+    {
+        byte[] bytes = OneSphere();
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(12), -1);
+
+        using var ms = new MemoryStream(bytes);
+        Assert.Throws<InvalidDataException>(() => ColliderCache.Read(ms));
+    }
+
+    // A prefab cannot name more materials than a byte can address. Impossible in the shipped content —
+    // the whole game defines 21 — and refused at WRITE time rather than silently dropping the overflow to
+    // "no material", which would make an object quietly lose its impact sounds.
+    [Fact]
+    public void Write_MoreMaterialsThanAByteCanAddress_IsRefused()
+    {
+        var many = new List<CachedCollider>();
+        for (int i = 0; i < 300; i++)
+            many.Add(CachedCollider.Sphere(Pose, Vector3.Zero, 1f, materialName: $"Surface_{i}"));
+
+        using var ms = new MemoryStream();
+        Assert.Throws<InvalidDataException>(() => ColliderCache.Write(ms, many));
+    }
+
+    // The largest table a byte CAN address still round-trips, so the refusal above is a ceiling rather
+    // than an off-by-one.
+    [Fact]
+    public void RoundTrips_TheLargestTableAByteCanAddress()
+    {
+        var many = new List<CachedCollider>();
+        for (int i = 0; i < 255; i++)
+            many.Add(CachedCollider.Sphere(Pose, Vector3.Zero, 1f, materialName: $"Surface_{i}"));
+
+        using var ms = new MemoryStream();
+        ColliderCache.Write(ms, many);
+        ms.Position = 0;
+        List<CachedCollider> read = ColliderCache.Read(ms);
+
+        Assert.Equal("Surface_0", read[0].MaterialName);
+        Assert.Equal("Surface_254", read[254].MaterialName);
+    }
+
+    // A stream that cannot seek: every bound in the reader has a second form for this, measured against
+    // the header's declared length instead of the file's. The caches are read from files today, so this
+    // path is only exercised deliberately — and it is the path where a bad length would run off the end
+    // rather than being refused.
+    private sealed class ForwardOnlyStream : Stream
+    {
+        private readonly MemoryStream _inner;
+
+        public ForwardOnlyStream(byte[] bytes) => _inner = new MemoryStream(bytes);
+
+        public override bool CanSeek => false;
+        public override bool CanRead => true;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            _inner.Read(buffer, offset, count);
+
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+    }
+
+    [Fact]
+    public void Read_FromAForwardOnlyStream_StillDecodes()
+    {
+        using var ms = new MemoryStream();
+        ColliderCache.Write(ms, new List<CachedCollider>
+        {
+            CachedCollider.Sphere(Pose, Vector3.Zero, 1.5f, materialName: "Wood_Static"),
+            CachedCollider.Mesh(Pose, new[] { Vector3.Zero, Vector3.One, Vector3.Up }, new[] { 0, 1, 2 }),
+        });
+
+        using var forward = new ForwardOnlyStream(ms.ToArray());
+        List<CachedCollider> read = ColliderCache.Read(forward);
+
+        Assert.Equal(2, read.Count);
+        Assert.Equal("Wood_Static", read[0].MaterialName);
+        Assert.Equal(3, read[1].Vertices.Length);
+    }
+
+    // And the bounds still hold there: a count the payload cannot back is refused without allocating,
+    // measured against the declared length rather than the file's.
+    [Fact]
+    public void Read_ImplausibleCountOnAForwardOnlyStream_FailsWithoutAllocating()
+    {
+        byte[] bytes = OneSphere();
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(8), int.MaxValue);
+
+        using var forward = new ForwardOnlyStream(bytes);
+        Assert.Throws<InvalidDataException>(() => ColliderCache.Read(forward));
+    }
+
     [Fact]
     public void RoundTrips_EmptyList()
     {
