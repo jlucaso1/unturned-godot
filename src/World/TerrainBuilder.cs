@@ -20,43 +20,99 @@ public static partial class TerrainBuilder
         SpecularMode = BaseMaterial3D.SpecularModeEnum.Disabled,
     };
 
-    // Blends the 8 splat layers per pixel: two control textures carry the layer weights (sampled by UV2,
-    // the tile-normalized position), each layer texture is tiled by world XZ, and the result is their
-    // weighted average. World XZ comes straight from VERTEX since each tile mesh sits at the origin.
-    private static readonly Shader SplatShader = new()
+    // Blends a tile's splat layers per pixel: the control textures carry the layer weights (sampled by
+    // UV2, the tile-normalized position), each layer texture is tiled by world XZ, and the result is
+    // their weighted average. World XZ comes straight from VERTEX since each tile mesh sits at the origin.
+    //
+    // The shader is generated per *painted layer count* rather than written once for eight, because the
+    // terrain is the one thing that fills the whole screen and every sample it takes is paid at every
+    // pixel. Two things fall out of the splatmap that the fixed eight-way blend was paying for anyway:
+    //
+    //   Per tile, most layers are never painted. A tile names eight and PEI's paint 3.4 on average, so
+    //   the material binds only the ones its ActiveLayerMask reports — and a tile that paints four or
+    //   fewer needs ONE control texture instead of two, which is a sample and half the control VRAM.
+    //
+    //   Per pixel, most layers are zero. 87% of PEI's splat texels give all their weight to a single
+    //   layer and 99% to at most two, so a layer whose weight is zero here is skipped outright.
+    //
+    // Neither changes a pixel: skipping `sample * 0.0` removes a term that contributes +0.0, and `total`
+    // still sums every weight, so the normalized average is bit-identical to the eight-way form. That
+    // was checked rather than argued — a terrain-only PEI capture (`water/foliage/objects` switched off,
+    // so nothing animated is in frame) renders bit-for-bit the same before and after.
+    //
+    // The sample inside the branch keeps its IMPLICIT LOD — the opposite of what the tidy reading of the
+    // spec suggests, and what three captures against the unmodified render actually say:
+    //
+    //     texture() inside the branch       0 of 5,988,600 channel samples differ
+    //     textureGrad(), no branch          max delta 5/255 — coarse-against-fine derivative rounding
+    //     textureGrad() inside the branch   max delta 110/255 — visibly blurrier ground
+    //
+    // The middle row is the one that settles it: the gradients themselves are right, so what fails is
+    // hoisting them PAST a branch. A compiler is free to sink a dFdx whose only use is inside the
+    // conditional back into it, and taken there it is taken under divergent flow. The implicit form has
+    // no such value to sink — the derivative belongs to the sample instruction, which the quad's own
+    // semantics cover — and `uv` is computed before the branch, so every lane, helper lanes included,
+    // holds what it is taken from. The zero is the evidence that matters rather than the argument: that
+    // frame is full of splat boundaries, which are exactly the divergent quads the doubt is about.
+    //
+    // `specular_disabled` rides along for free: SPECULAR is 0, which makes f0 zero and with it the whole
+    // Schlick-GGX lobe, so the render mode drops ALU that was multiplying out to nothing. SPECULAR still
+    // has to be WRITTEN — the render mode only guards direct light, while the sky's indirect specular
+    // reads f0 all the same, and leaving SPECULAR at its 0.5 default lit the ground measurably brighter.
+    // Both halves are what the flat fallback material below has always done.
+    private static readonly Dictionary<int, Shader> SplatShaders = new();
+
+    private static Shader SplatShaderFor(int painted)
     {
-        Code = """
-        shader_type spatial;
-        render_mode cull_back;
-        uniform sampler2D layer0 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
-        uniform sampler2D layer1 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
-        uniform sampler2D layer2 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
-        uniform sampler2D layer3 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
-        uniform sampler2D layer4 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
-        uniform sampler2D layer5 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
-        uniform sampler2D layer6 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
-        uniform sampler2D layer7 : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
-        uniform sampler2D control0 : repeat_disable; // weights of layers 0..3
-        uniform sampler2D control1 : repeat_disable; // weights of layers 4..7
-        uniform float tiling = 0.15;                 // texture repeats every 1/tiling world metres
-        varying vec3 world_pos;
-        void vertex() { world_pos = VERTEX; }
-        void fragment() {
-            vec4 c0 = texture(control0, UV2);
-            vec4 c1 = texture(control1, UV2);
-            vec2 uv = world_pos.xz * tiling;
-            vec3 albedo =
-                texture(layer0, uv).rgb * c0.r + texture(layer1, uv).rgb * c0.g +
-                texture(layer2, uv).rgb * c0.b + texture(layer3, uv).rgb * c0.a +
-                texture(layer4, uv).rgb * c1.r + texture(layer5, uv).rgb * c1.g +
-                texture(layer6, uv).rgb * c1.b + texture(layer7, uv).rgb * c1.a;
-            float total = c0.r + c0.g + c0.b + c0.a + c1.r + c1.g + c1.b + c1.a;
-            ALBEDO = total > 0.0 ? albedo / total : albedo;
-            ROUGHNESS = 1.0;
-            SPECULAR = 0.0;
+        if (SplatShaders.TryGetValue(painted, out Shader? cached))
+            return cached;
+        var shader = new Shader { Code = SplatShaderCode(painted) };
+        SplatShaders[painted] = shader;
+        return shader;
+    }
+
+    // `painted` is the number of layers the tile paints (1..8); slot i samples `layer{i}`, weighted by
+    // channel i%4 of `control{i/4}`.
+    internal static string SplatShaderCode(int painted)
+    {
+        int controls = (painted + 3) / 4;
+        var code = new System.Text.StringBuilder();
+        code.Append("shader_type spatial;\n");
+        code.Append("render_mode cull_back, specular_disabled;\n");
+        for (int slot = 0; slot < painted; slot++)
+            code.Append($"uniform sampler2D layer{slot} : source_color, repeat_enable, "
+                + "filter_linear_mipmap_anisotropic;\n");
+        for (int control = 0; control < controls; control++)
+            code.Append($"uniform sampler2D control{control} : repeat_disable, filter_linear;\n");
+        // The A/B control for the per-pixel skip, so `terrain.splat.unpainted.enabled 1` can price it in
+        // a running frame. A bool uniform is the same value for every pixel of the draw, so the branch it
+        // adds is uniform and costs nothing beyond the compare the skip already does.
+        code.Append("uniform bool sample_unpainted = false;\n");
+        code.Append("uniform float tiling = 0.15; // texture repeats every 1/tiling world metres\n");
+        code.Append("varying vec2 world_xz;\n");
+        code.Append("void vertex() { world_xz = VERTEX.xz; }\n");
+        code.Append("void fragment() {\n");
+        for (int control = 0; control < controls; control++)
+            code.Append($"    vec4 c{control} = texture(control{control}, UV2);\n");
+        code.Append("    vec2 uv = world_xz * tiling; // uniform control flow: the sampler's derivative\n");
+        code.Append("    vec3 albedo = vec3(0.0);\n");
+        for (int slot = 0; slot < painted; slot++)
+        {
+            string weight = $"c{slot / 4}.{"rgba"[slot % 4]}";
+            code.Append($"    if (sample_unpainted || {weight} > 0.0)\n");
+            code.Append($"        albedo += texture(layer{slot}, uv).rgb * {weight};\n");
         }
-        """,
-    };
+        code.Append("    float total = ");
+        for (int slot = 0; slot < painted; slot++)
+            code.Append(slot == 0 ? "" : " + ").Append($"c{slot / 4}.{"rgba"[slot % 4]}");
+        code.Append(";\n");
+        code.Append("    ALBEDO = total > 0.0 ? albedo / total : albedo;\n");
+        code.Append("    ROUGHNESS = 1.0;\n");
+        code.Append("    SPECULAR = 0.0; // f0 = 0: the sky's indirect specular reads this even with the\n");
+        code.Append("                    // direct lobe disabled, and its 0.5 default brightens the ground\n");
+        code.Append("}\n");
+        return code.ToString();
+    }
 
     // Maps the map's terrain textures (by name) onto the 8 splat layers in layer order, returning null if
     // any layer's texture is missing so the caller falls back to the averaged-color material.
@@ -73,8 +129,9 @@ public static partial class TerrainBuilder
     }
 
     // Everything a tile carries between the worker-thread build (BuildTileMesh) and the main-thread finish
-    // (FinishTile): its LOD-baked geometry (an ImporterMesh, a data-only Resource) and the full-resolution
-    // heightmap for collision.
+    // (FinishTile): its LOD-baked geometry (an ImporterMesh, a data-only Resource), the full-resolution
+    // heightmap for collision, and which splat layers the tile paints — a scan of its 512 KB weight array,
+    // done here so the main thread's FinishTile only assembles the material it decides.
     public readonly struct TileMesh
     {
         public readonly ImporterMesh Importer;
@@ -83,8 +140,9 @@ public static partial class TerrainBuilder
         public readonly int X;
         public readonly int Y;
         public readonly SplatmapTile? Splat;
+        public readonly int[]? Painted;
         public TileMesh(ImporterMesh importer, ushort[]? heights16, float[]? heights32,
-            int x, int y, SplatmapTile? splat)
+            int x, int y, SplatmapTile? splat, int[]? painted = null)
         {
             Importer = importer;
             Heights16 = heights16;
@@ -92,6 +150,7 @@ public static partial class TerrainBuilder
             X = x;
             Y = y;
             Splat = splat;
+            Painted = painted;
         }
         public float HeightAt(int index) => Heights16 != null
             ? Heights16[index] / (float)ushort.MaxValue : Heights32![index];
@@ -230,7 +289,9 @@ public static partial class TerrainBuilder
                 for (int hy = 0; hy < fullRes; hy++)
                     flat[(hx * fullRes) + hy] = tile.HeightAt(hx, hy);
         }
-        return new TileMesh(importer, tile.RawSamples, flat, tile.CoordX, tile.CoordY, splat);
+        // Only the textured path builds a splat material, and only it needs to know what the tile paints.
+        int[]? painted = textured && splat != null ? PaintedLayers(splat) : null;
+        return new TileMesh(importer, tile.RawSamples, flat, tile.CoordX, tile.CoordY, splat, painted);
     }
 
     // Phase 2 — main thread only: realise the LOD mesh (GetMesh creates the ArrayMesh RenderingServer
@@ -265,7 +326,7 @@ public static partial class TerrainBuilder
     {
         ArrayMesh mesh = tm.Importer.GetMesh();
         mesh.SurfaceSetMaterial(0, layerTextures != null && tm.Splat != null
-            ? BuildSplatMaterial(layerTextures, tm.Splat, controls)
+            ? BuildSplatMaterial(layerTextures, tm.Splat, tm.Painted, controls)
             : SharedMaterial);
 
         var node = new TerrainTileNode
@@ -339,38 +400,68 @@ public static partial class TerrainBuilder
         return data;
     }
 
-    // A per-tile ShaderMaterial: the shared 8 layer textures plus this tile's two splat control textures
-    // (the 8 weights packed into two RGBA8 images, sampled by UV2).
+    // A per-tile ShaderMaterial: the layer textures this tile actually paints, plus the control textures
+    // holding their weights (four weights to an RGBA8 image, sampled by UV2).
     private static ShaderMaterial BuildSplatMaterial(ImageTexture[] layers, SplatmapTile splat,
-        ControlTextureCache? controls)
+        int[]? prepared, ControlTextureCache? controls)
     {
-        var material = new ShaderMaterial { Shader = SplatShader };
-        for (int i = 0; i < layers.Length; i++)
-            material.SetShaderParameter($"layer{i}", layers[i]);
-        material.SetShaderParameter("control0", ControlTexture(splat, 0, controls));
-        material.SetShaderParameter("control1", ControlTexture(splat, 4, controls));
+        // Normally handed down from the worker thread; a caller that built the tile without one (the
+        // synchronous fallback, and the tests) pays for the scan here instead of going without.
+        int[] painted = prepared ?? PaintedLayers(splat);
+        var material = new ShaderMaterial { Shader = SplatShaderFor(painted.Length) };
+        for (int slot = 0; slot < painted.Length; slot++)
+            material.SetShaderParameter($"layer{slot}", layers[painted[slot]]);
+
+        var channels = new int[4];
+        for (int control = 0; control * 4 < painted.Length; control++)
+        {
+            for (int channel = 0; channel < 4; channel++)
+            {
+                int slot = (control * 4) + channel;
+                channels[channel] = slot < painted.Length ? painted[slot] : -1;
+            }
+            material.SetShaderParameter($"control{control}", ControlTexture(splat, channels, controls));
+        }
         return material;
     }
 
-    // Packs 4 splat layers (firstLayer..firstLayer+3) into an RGBA8 image. Image pixel (x, y) — addressed
-    // (y * res + x) — carries the weights the splatmap stores at [x, y], so UV2 (which runs x->u, y->v)
-    // samples the same texel TerrainColor blends per vertex.
-    private static ImageTexture ControlTexture(SplatmapTile splat, int firstLayer,
+    // The layers this tile paints, in layer order. A tile that paints none still gets one slot: its
+    // weights are zero everywhere, so the shader's `total > 0.0` guard renders it black exactly as the
+    // eight-way blend did, and a zero-sampler shader would not be well-formed.
+    internal static int[] PaintedLayers(SplatmapTile splat)
+    {
+        int mask = splat.ActiveLayerMask();
+        if (mask == 0)
+            return new[] { 0 };
+        var painted = new List<int>(SplatmapTile.LAYERS);
+        for (int layer = 0; layer < SplatmapTile.LAYERS; layer++)
+            if ((mask & (1 << layer)) != 0)
+                painted.Add(layer);
+        return painted.ToArray();
+    }
+
+    // Packs up to 4 splat layers into an RGBA8 image, one layer per channel in `channels` order; a
+    // channel of -1 is a slot this tile does not fill and is written zero, so it contributes nothing to
+    // the blend or to `total`. Image pixel (x, y) — addressed (y * res + x) — carries the weights the
+    // splatmap stores at [x, y], so UV2 (which runs x->u, y->v) samples the same texel TerrainColor
+    // blends per vertex.
+    private static ImageTexture ControlTexture(SplatmapTile splat, IReadOnlyList<int> channels,
         ControlTextureCache? controls)
     {
         const int res = Landscape.SPLATMAP_RESOLUTION;
         byte[] weights = splat.Weights;
         var bytes = new byte[res * res * 4];
-        for (int x = 0; x < res; x++)
+        for (int channel = 0; channel < 4; channel++)
         {
-            for (int y = 0; y < res; y++)
+            int layer = channels[channel];
+            if (layer < 0)
+                continue;
+            for (int x = 0; x < res; x++)
             {
-                int src = SplatmapTile.WeightIndex(x, y, firstLayer);
-                int dst = (y * res + x) * 4;
-                bytes[dst + 0] = weights[src + 0];
-                bytes[dst + 1] = weights[src + 1];
-                bytes[dst + 2] = weights[src + 2];
-                bytes[dst + 3] = weights[src + 3];
+                int src = SplatmapTile.WeightIndex(x, 0, layer);
+                int dst = (x * 4) + channel;
+                for (int y = 0; y < res; y++, src += SplatmapTile.LAYERS, dst += res * 4)
+                    bytes[dst] = weights[src];
             }
         }
         return controls?.GetOrCreate(bytes)

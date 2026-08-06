@@ -43,6 +43,29 @@ public sealed class SplatmapTile
     public static SplatmapTile? TryRead(string filePath, int coordX, int coordY) =>
         File.Exists(filePath) ? Parse(File.ReadAllBytes(filePath), coordX, coordY) : null;
 
+    // Which of the eight layers this tile actually paints: bit `i` is set when some texel gives layer `i`
+    // a non-zero weight.
+    //
+    // A tile names eight layers but rarely paints eight. PEI's sixteen tiles paint 3.4 of them on
+    // average, and three of them paint exactly one — so the splat shader was sampling four or five
+    // anisotropically-filtered textures per pixel only to multiply each by a weight that is zero over the
+    // whole tile. The renderer builds its per-tile material from this mask and leaves those layers out.
+    public int ActiveLayerMask()
+    {
+        const int all = (1 << LAYERS) - 1;
+        int mask = 0;
+        byte[] weights = Weights;
+        for (int texel = 0; texel < weights.Length; texel += LAYERS)
+        {
+            for (int layer = 0; layer < LAYERS; layer++)
+                if (weights[texel + layer] != 0)
+                    mask |= 1 << layer;
+            if (mask == all)
+                break; // nothing left to learn: every layer is painted somewhere
+        }
+        return mask;
+    }
+
     // The per-texel argmax over the raw splatmap bytes (Landscape.getSplatmapHighestWeightLayerIndex),
     // one dominant-layer index per texel at [x * res + y]. Strict '>' keeps the FIRST layer on ties and
     // byte/255 is monotonic, so this matches an argmax over the normalized float weights exactly —
