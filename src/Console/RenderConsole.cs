@@ -146,12 +146,15 @@ public static class RenderConsole
             + "pass has to draw; the world keeps its lighting either way.",
             64f, 1f, 1024f, Lighting(host,
                 (cycle, value) => cycle.Sun.DirectionalShadowMaxDistance = value.AsFloat)));
-        console.Add(ConsoleVariable.Whole("sun.shadows.cascades",
+        // A choice rather than a 1..4 range: the engine has no three-cascade mode, so a 3 the console
+        // remembered would be a number the renderer never ran.
+        console.Add(ConsoleVariable.Choice("sun.shadows.cascades",
             "How many times the shadow distance is split: 1, 2 or 4. Every split is another pass over the "
             + "casters in its slice, so this is the shadow pass's geometry cost. Fewer splits spread the "
             + "same map over more ground, and that IS visible up close — at 64 m over one 2048 cascade a "
             + "texel is ~62 mm everywhere, against the ~3 mm a screen pixel covers at 5 m.",
-            2, 1, 4, Lighting(host, (cycle, value) => cycle.Sun.DirectionalShadowMode = value.AsInt switch
+            2, new[] { 1, 2, 4 },
+            Lighting(host, (cycle, value) => cycle.Sun.DirectionalShadowMode = value.AsInt switch
             {
                 1 => DirectionalLight3D.ShadowMode.Orthogonal,
                 4 => DirectionalLight3D.ShadowMode.Parallel4Splits,
@@ -260,7 +263,9 @@ public static class RenderConsole
             + "'gpu wait' is derived (frame minus cpu), so at 0.00 with vsync off the CPU is the "
             + "bottleneck and no amount of GPU work removed will move the frame. Godot reports the "
             + "monitors of the LAST COMPLETED frame, so `foo 0; perf` on one line prices the frame "
-            + "BEFORE the change — put perf on its own line.", "perf", Snapshot);
+            + "BEFORE the change — put perf on its own line. 'fps' is the last SECOND averaged, so it and "
+            + "'frame' describe different windows and lag each other while something is changing.",
+            "perf", arguments => Snapshot(host, arguments));
         console.Add("copy", "Put the whole scrollback on the clipboard as plain text — the transcript a "
             + "bug report wants. Ctrl+C copies just what you have selected, when something is.",
             "copy", arguments => Copy(host, arguments));
@@ -410,13 +415,27 @@ public static class RenderConsole
     // It is therefore NOT a GPU cost. `0.00 ms gpu wait` with vsync off means shaving GPU work will not
     // move the frame — the answer is on the CPU — and that is a different conclusion from a small one.
     // For real GPU frame time an external tool (MangoHud, radeontop, PIX) is still the instrument; draw
-    // calls and primitives are the workload proxies here. Same reading as the F3 HUD, which derives it
-    // the same way, so a `perf` line pasted into a report says what the HUD said.
-    private static IEnumerable<ConsoleLine> Snapshot(IReadOnlyList<string> arguments)
+    // calls and primitives are the workload proxies here.
+    //
+    // The wall clock in that subtraction is the node's own process delta, NOT 1000/fps, and the two are
+    // not interchangeable: TimeFps counts the frames rendered in the last SECOND and is refreshed once a
+    // second, while TimeProcess describes ONE frame. Subtracting a per-frame value from a per-second
+    // average is wrong in exactly the workflow this line is for — a `perf` typed within a second of a
+    // toggle reads a stale fps, which invents a GPU wait after a speedup and hides a real one after a
+    // slowdown, pointing at the wrong bottleneck both times. GetProcessDeltaTime is the interval of the
+    // frame the other per-frame counters on line one already describe.
+    //
+    // `fps` stays the one-second average, because that is what an fps readout means and a single frame's
+    // reciprocal is too jittery to read. So `fps` and `frame` deliberately describe different windows and
+    // will not agree during a change — the averaged one is the steady state, the frame is the last one.
+    private static IEnumerable<ConsoleLine> Snapshot(Func<Node?> host, IReadOnlyList<string> arguments)
     {
         double fps = Performance.GetMonitor(Performance.Monitor.TimeFps);
-        double frameMs = fps > 0d ? 1000d / fps : 0d;
         double cpuMs = Performance.GetMonitor(Performance.Monitor.TimeProcess) * 1000d;
+        // No host in the tree (the unit-test harness) leaves only the average to report the frame with.
+        double frameMs = host() is { } anchor && anchor.IsInsideTree()
+            ? anchor.GetProcessDeltaTime() * 1000d
+            : fps > 0d ? 1000d / fps : 0d;
         double physicsMs = Performance.GetMonitor(Performance.Monitor.TimePhysicsProcess) * 1000d;
         double navigationMs = Performance.GetMonitor(Performance.Monitor.TimeNavigationProcess) * 1000d;
         double gpuWaitMs = Mathf.Max(0d, frameMs - cpuMs);

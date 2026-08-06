@@ -1,3 +1,6 @@
+using System;
+using System.Globalization;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Chickensoft.GoDotTest;
 using Godot;
@@ -435,19 +438,37 @@ public class ConsoleTests : TestClass
     // The line that decides what to optimize next. "gpu wait" is frame minus cpu, so it reads 0 while the
     // CPU is the bottleneck — which is the answer, not a missing measurement, and the reason it ships next
     // to the workload counters rather than instead of them.
+    //
+    // The numbers are read back rather than the labels, because a line that prints the right words over
+    // arithmetic that does not hold is the failure worth catching: what the wait MEASURES is only true if
+    // it is frame minus cpu clamped at zero, on the same frame. The engine supplies the two inputs, so
+    // this asserts the identity between the printed values instead of pinning any of them.
     [Test]
     public async Task PerfSaysWhetherTheFrameIsWaitingOnTheGpu()
     {
         ConsoleOverlay console = await Attached();
+        await NextFrame(); // a delta to report: the attach frame's own is not a rendered interval
 
         console.Submit("perf", echo: false);
 
         string text = console.Output.GetParsedText();
-        Assert.Contains("gpu wait", text);
-        Assert.Contains("ms physics", text);
-        Assert.Contains("ms navigation", text);
-        Assert.Contains("MB vram", text);
+        double frameMs = Measured(text, "ms frame");
+        double cpuMs = Measured(text, "ms cpu");
+        double gpuWaitMs = Measured(text, "ms gpu wait");
+        Assert.Equal(Math.Max(0d, frameMs - cpuMs), gpuWaitMs, 2);
+        Assert.True(frameMs > 0d, $"the frame interval should be a real delta, got {frameMs}");
+        Assert.True(Measured(text, "ms physics") >= 0d);
+        Assert.True(Measured(text, "ms navigation") >= 0d);
+        Assert.True(Measured(text, "MB vram") >= 0d);
         Release(console);
+    }
+
+    // The number immediately before `label` in the scrollback, e.g. "13.70" from "13.70 ms frame".
+    private static double Measured(string text, string label)
+    {
+        Match match = Regex.Match(text, @"([0-9]+(?:\.[0-9]+)?)\s+" + Regex.Escape(label));
+        Assert.True(match.Success, $"'{label}' is missing from the perf output:\n{text}");
+        return double.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture);
     }
 
     // Both shadow knobs reach a DirectionalLight3D that only exists once a world is loaded. With no

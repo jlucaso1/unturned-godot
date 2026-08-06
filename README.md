@@ -179,7 +179,8 @@ derived wait rather than a cost; MangoHud or PIX is still the instrument for tru
 
 One trap worth knowing, because it silently reports the wrong frame: the monitors describe the **last
 completed** frame, so `terrain.enabled 0; perf` on a single line prices the frame *before* the change.
-Put `perf` on its own line.
+Put `perf` on its own line. `fps` is the one exception on the line — it is the last *second* averaged,
+which is what an fps readout means, so it and `frame` lag each other while something is changing.
 
 Recipes travel by clipboard, so both directions work. **Pasting** a block written a command per line —
 the shape one is written in here, in a note or in an issue — lands in the prompt as those commands in
