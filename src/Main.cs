@@ -838,12 +838,17 @@ public partial class Main : Node3D
     private NetworkManager? _network;
 
     // One-shot movement-audio extraction, deferred behind the world streamer (see BuildFootsteps).
-    private System.Action? _pendingAudioExtraction;
+    private System.Func<System.Threading.Tasks.Task>? _pendingAudioExtraction;
     private PlayerController? _player;
+
+    // The run of it, once started. A screenshot waits on this: the crosshair icons come out of the same
+    // pass, and a capture that raced it produced a picture with no crosshair — nondeterministically, on
+    // slower machines only, which is the worst way for a reference image to be wrong.
+    private System.Threading.Tasks.Task? _extraction;
 
     private void RunPendingAudioExtraction()
     {
-        _pendingAudioExtraction?.Invoke();
+        _extraction = _pendingAudioExtraction?.Invoke();
         _pendingAudioExtraction = null;
     }
 
@@ -1000,82 +1005,49 @@ public partial class Main : Node3D
     // live. Scanned from the Bundles/Effects .dat tree — a few hundred small files — rather than from the
     // master bundle, because the .dat is what carries the GUID a PhysicsMaterialAsset points at.
     private void BuildImpactDecals(System.Collections.Generic.IReadOnlyList<ContentSource> sources,
-        PhysicsMaterialBank bank, string coreBundlePath)
+        PhysicsMaterialBank bank)
     {
-        var effectSources = new System.Collections.Generic.List<(string, string)>(sources.Count);
-        var bundleBySource = new System.Collections.Generic.Dictionary<string, ContentSource>(
+        (_, ImpactEffectBank effects) = ImpactDecalRequests.Banks(sources);
+        string cacheDirectory = ImpactDecalRequests.CacheDirectory;
+
+        var bundleByDirectory = new System.Collections.Generic.Dictionary<string, ContentSource>(
             System.StringComparer.Ordinal);
         foreach (ContentSource source in sources)
-        {
-            // A source's Root IS its bundles directory: the game's own is <install>/Bundles, and a
-            // workshop item's is the folder its MasterBundle.dat sits in.
-            string prefix = MasterBundleConfig.Load(source.Root)?.AssetPrefix ?? string.Empty;
-            effectSources.Add((source.Root, prefix));
-            // Normalised the SAME way ImpactEffectBank builds its container paths: an author who typed
-            // backslashes or a trailing slash would otherwise leave this key unable to match the paths
-            // built from it, and every workshop effect would fall back to the core bundle — extracted
-            // and looked for under the wrong tag, so the mark never appears.
-            if (prefix.Length > 0)
-                bundleBySource[ImpactEffectBank.NormalizePrefix(prefix)] = source;
-        }
+            bundleByDirectory[source.Root] = source;
 
-        ImpactEffectBank effects = ImpactEffectBank.ScanSources(effectSources);
+        // An effect's textures are packaged in the bundle of whichever source SHIPPED it, and the effect
+        // remembers which that was. Keying by asset prefix instead was the first version and was wrong:
+        // two sources may declare the same prefix — each bundle has its own container namespace — and
+        // then one of them silently owned the other's effects.
+        //
+        // Through ImpactDecalRequests.TagFor, which is what the extraction files them under: a key
+        // written under one tag and read under another is a texture that exists and is never found.
+        string TagOf(ImpactEffectAsset effect) => ImpactDecalRequests.TagFor(sources,
+            bundleByDirectory.TryGetValue(effect.SourceDirectory, out ContentSource? owner)
+                ? owner.BundlePath
+                : string.Empty);
 
-        // An effect's textures are packaged in the bundle of whichever source shipped the effect, which is
-        // exactly what its container path's prefix names — so the lookup is the prefix, not the surface
-        // that pointed at it. A workshop surface falling back to a core effect therefore reads the core
-        // bundle, as the audio does.
-        ContentSource? SourceOf(ImpactEffectAsset effect)
-        {
-            foreach ((string prefix, ContentSource source) in bundleBySource)
-                if (effect.BundleDirectory.StartsWith(prefix, System.StringComparison.Ordinal))
-                    return source;
-            return null;
-        }
-
-        // The extraction and the runtime have to agree about the cache key, so BOTH take the tag through
-        // this one lookup. A key written under one tag and read under another is a texture that exists on
-        // disk and is never found.
-        string TagForBundle(string bundlePath)
-        {
-            foreach (ContentSource source in sources)
-                if (string.Equals(source.BundlePath, bundlePath, System.StringComparison.Ordinal))
-                    return source.CacheTag;
-            return UnturnedGodot.Unity.TextureKey.TagFor(
-                System.IO.Path.GetFileNameWithoutExtension(coreBundlePath));
-        }
-
-        string BundleFor(ImpactEffectAsset effect) => SourceOf(effect)?.BundlePath ?? coreBundlePath;
-
-        string cacheDirectory = ProjectSettings.GlobalizePath("user://decal_cache");
-        _impactDecals = new ImpactDecals(bank, effects,
-            effect => TagForBundle(BundleFor(effect)), cacheDirectory);
+        _impactDecals = new ImpactDecals(bank, effects, TagOf, cacheDirectory);
         AddChild(_impactDecals);
 
-        _decalRequests = new System.Collections.Generic.List<ImpactDecalExtractor.Request>();
-        foreach ((string bundlePath, System.Collections.Generic.HashSet<string> paths) in
-            ImpactDecalPlan.TexturesByBundle(bank, effects, BundleFor))
-        {
-            _decalRequests.Add(new ImpactDecalExtractor.Request(bundlePath, TagForBundle(bundlePath),
-                paths, cacheDirectory));
-        }
-
-        // The crosshair's own icons ride the same cache and the same extraction. They are only ever in
-        // the game's core bundle — StaticIconRef resolves them through its Resources folder, which is
-        // what the core bundle carries — so this asks the core source specifically rather than whichever
-        // source happens to be first.
         foreach (ContentSource source in sources)
         {
-            if (!source.IsCore)
+            if (!source.IsCore || source.BundlePath.Length == 0)
                 continue;
             string prefix = MasterBundleConfig.Load(source.Root)?.AssetPrefix ?? string.Empty;
-            if (prefix.Length == 0 || source.BundlePath.Length == 0)
-                break;
-            string tag = TagForBundle(source.BundlePath);
-            _hudIcons = new HudIconSet(cacheDirectory, tag, prefix);
-            _decalRequests.Add(HudIcons.RequestFor(source.BundlePath, tag, prefix, cacheDirectory));
+            if (prefix.Length > 0)
+            {
+                _hudIcons = new HudIconSet(cacheDirectory,
+                    ImpactDecalRequests.TagFor(sources, source.BundlePath), prefix);
+            }
+
             break;
         }
+
+        // What the object streamer's own pass did not cover. On a cold load it planned these into that
+        // pass and the requests below are already satisfied; this is the path for a load that ran no
+        // pass at all (a warm mesh cache) or one that was cancelled.
+        _decalRequests = ImpactDecalRequests.For(sources, bank, effects, cacheDirectory);
     }
 
     // Movement audio infrastructure: the physics-material bank + terrain splat sampler resolve WHICH
@@ -1196,7 +1168,7 @@ public partial class Main : Node3D
         // Built here rather than in AttachSession because this is where the bank and the bundle-tag
         // lookup exist; a session that starts later takes the finished thing.
         _impactAudio = new ImpactAudio(bank, oneShot, BundleTagOfDirectory);
-        BuildImpactDecals(sources, bank, bundlePath);
+        BuildImpactDecals(sources, bank);
 
         MovementAudio Factory(bool startGrounded) =>
             new(bank, landscape, splat, oneShot, startGrounded, BundleTagOfDirectory);
@@ -1251,6 +1223,15 @@ public partial class Main : Node3D
     // character settles onto the terrain). SHOT_CAM only applies to the free camera.
     private async System.Threading.Tasks.Task CaptureAndQuit(string path, int settleFrames)
     {
+        // The crosshair icons are extracted on the deferred pass, and reading the core bundle takes
+        // seconds — far longer than the settle frames below. Without this the capture commonly beat it and
+        // produced a screenshot with no crosshair, and whether it did depended on the machine.
+        if (_extraction is { } extraction)
+        {
+            while (!extraction.IsCompleted && !AppShutdown.IsShuttingDown)
+                await NextFrame();
+        }
+
         if (GetNodeOrNull<FreeCamera>("FreeCamera") is { } cam)
         {
             // A high three-quarter view of the whole map. The offsets are PEI's framing expressed as

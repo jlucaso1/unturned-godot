@@ -25,6 +25,16 @@ public sealed class ImpactEffectAsset
     // the master bundle keys its container table by. Empty when it could not be expressed that way.
     public string BundleDirectory { get; }
 
+    // The bundles directory this effect was scanned FROM, which is how its textures are traced back to
+    // the bundle they were packaged in.
+    //
+    // Carried on the effect rather than recovered afterwards from its container path. Recovering it meant
+    // keying sources by their asset prefix, and two installed sources are free to declare the same one —
+    // each master bundle has its own container namespace, so nothing stops them. The last one scanned
+    // then owned every effect under that prefix, and the other source's decals were extracted and looked
+    // for under the wrong tag: never drawn, with nothing to say why.
+    public string SourceDirectory { get; }
+
     // Where the mark's textures WOULD be, as container paths into the bundle: the single Texture.png and
     // the gore Texture_0..N.png, all of them, in that order.
     //
@@ -34,11 +44,13 @@ public sealed class ImpactEffectAsset
     // leaves no mark, which is what Foliage, Snow and Water do in the game.
     public IReadOnlyList<string> DecalTextureCandidates { get; }
 
-    public ImpactEffectAsset(Guid guid, string bundleDirectory, IReadOnlyList<string> decalTextures)
+    public ImpactEffectAsset(Guid guid, string bundleDirectory, IReadOnlyList<string> decalTextures,
+        string sourceDirectory = "")
     {
         Guid = guid;
         BundleDirectory = bundleDirectory;
         DecalTextureCandidates = decalTextures;
+        SourceDirectory = sourceDirectory;
     }
 }
 
@@ -116,7 +128,8 @@ public sealed class ImpactEffectBank
 
         string directory = Path.GetDirectoryName(datPath) ?? string.Empty;
         string bundleDirectory = ContainerDirectory(directory, bundlesDirectory, assetPrefix);
-        return new ImpactEffectAsset(guid, bundleDirectory, DecalCandidates(bundleDirectory));
+        return new ImpactEffectAsset(guid, bundleDirectory, DecalCandidates(bundleDirectory),
+            bundlesDirectory);
     }
 
     // "<install>/Bundles/Effects/Impacts/Wood_WithDecal_NoAudio" ->

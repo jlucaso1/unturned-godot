@@ -107,4 +107,51 @@ public class ImpactDecalExtractionRealTests : TestClass
             catch (IOException) { }
         }
     }
+
+    // The manifest, which is what answers "has this bundle been read for these paths".
+    //
+    // Neither obvious shortcut works. "Any wanted file exists" skips the bundle forever if extraction was
+    // interrupted after one write, or if an update adds a path beside a still-current one. "Every wanted
+    // file exists" never passes: most candidates are paths the bundle does not have, by design.
+    [Test]
+    public void AChangedRequestIsNotSatisfiedByAnOlderManifest()
+    {
+        string cache = Path.Combine(Path.GetTempPath(),
+            "ug-manifest-test-" + System.Guid.NewGuid().ToString("N"));
+        try
+        {
+            var first = new ImpactDecalExtractor.Request("/nowhere.masterbundle", "core",
+                new[] { "a/texture.png", "b/texture.png" }, cache);
+            ImpactDecalExtractor.WriteManifest(first);
+            Assert.True(ImpactDecalExtractor.IsSatisfied(first));
+
+            // A game update adds a decal path. The manifest no longer describes what is wanted, so the
+            // bundle has to be read again rather than skipped forever.
+            var widened = first with
+            {
+                ContainerPaths = new[] { "a/texture.png", "b/texture.png", "c/texture.png" },
+            };
+            Assert.False(ImpactDecalExtractor.IsSatisfied(widened));
+
+            // And a narrower one is not satisfied either: it is a different request.
+            Assert.False(ImpactDecalExtractor.IsSatisfied(
+                first with { ContainerPaths = new[] { "a/texture.png" } }));
+        }
+        finally
+        {
+            try { Directory.Delete(cache, recursive: true); }
+            catch (IOException) { }
+        }
+    }
+
+    // No manifest at all — an interrupted run, or a first boot — reads as "not yet" whatever textures
+    // happen to be lying in the cache.
+    [Test]
+    public void WithNoManifestNothingIsSatisfied()
+    {
+        var request = new ImpactDecalExtractor.Request("/nowhere.masterbundle", "core",
+            new[] { "a/texture.png" }, Path.Combine(Path.GetTempPath(), "ug-absent-" + System.Guid.NewGuid()));
+
+        Assert.False(ImpactDecalExtractor.IsSatisfied(request));
+    }
 }

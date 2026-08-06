@@ -181,6 +181,24 @@ public class ImpactDecalPlanTests
         Assert.NotEqual(ImpactDecalPlan.CacheKey("core", path), ImpactDecalPlan.CacheKey("mod", path));
     }
 
+    // The key is a HASH of the path, not the path with its separators flattened. That was the first
+    // version and it is not injective: these two are different textures in the same bundle, and one .tex
+    // would overwrite the other — both effects then drawing whichever was written last.
+    [Fact]
+    public void PathsThatFlattenAlikeStillGetDifferentKeys()
+    {
+        Assert.NotEqual(ImpactDecalPlan.CacheKey("core", "effects/a_b/texture.png"),
+            ImpactDecalPlan.CacheKey("core", "effects/a/b/texture.png"));
+    }
+
+    // And it is stable across runs — a key that moved would orphan every cached texture on every boot.
+    [Fact]
+    public void TheCacheKeyIsStable()
+    {
+        Assert.Equal(ImpactDecalPlan.CacheKey("core", "effects/impacts/wood/texture.png"),
+            ImpactDecalPlan.CacheKey("core", "effects/impacts/wood/texture.png"));
+    }
+
     [Fact]
     public void TheCacheKeyDistinguishesTextures()
     {

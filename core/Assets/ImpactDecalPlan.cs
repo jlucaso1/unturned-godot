@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using UnturnedGodot.Data;
 
 namespace UnturnedGodot.Assets;
 
@@ -49,28 +50,23 @@ public static class ImpactDecalPlan
         return byBundle;
     }
 
-    // The cache key one decal texture is filed under. The container path already names the bundle folder
-    // and the file, so it is unique across sources; the bundle TAG is prepended for the same reason the
-    // texture cache does it — two sources can ship the same path with different pixels.
+    // The cache key one decal texture is filed under: a filename, so it has to survive being one, and it
+    // has to name exactly one texture.
+    //
+    // A HASH of the container path rather than the path with its separators replaced. That was the first
+    // version and it is not injective — "effects/a_b/texture.png" and "effects/a/b/texture.png" flatten
+    // to the same key, so one .tex overwrites the other and both effects then draw whichever was written
+    // last. Distinct paths have to stay distinct, and the path is not needed back again.
+    //
+    // The bundle TAG stays readable, for the same reason TextureKey keeps it: two sources can ship the
+    // same path with different pixels, and a cache directory that can be read by eye is worth the bytes.
     public static string CacheKey(string bundleTag, string containerPath)
     {
         ArgumentNullException.ThrowIfNull(bundleTag);
         ArgumentNullException.ThrowIfNull(containerPath);
 
-        // The path is bundle metadata — a parsed string of whatever length the file claimed — so the
-        // buffer is only taken from the stack while it is small. A container path is well under this in
-        // the shipped content; the heap path exists so a hostile or corrupt one cannot overflow a stack.
-        const int MaxStackChars = 256;
-        char[]? rented = containerPath.Length > MaxStackChars ? new char[containerPath.Length] : null;
-        Span<char> safe = rented ?? stackalloc char[MaxStackChars];
-        safe = safe[..containerPath.Length];
-
-        for (int i = 0; i < containerPath.Length; i++)
-        {
-            char c = containerPath[i];
-            safe[i] = c is '/' or '\\' or ':' or '.' ? '_' : c;
-        }
-
-        return $"decal_{bundleTag}_{new string(safe)}";
+        // Truncated to 32 hex characters — 128 bits, which is far past any collision this could meet: a
+        // bundle names a few dozen decal textures.
+        return $"decal_{bundleTag}_{ExactContentKey.Bytes(System.Text.Encoding.UTF8.GetBytes(containerPath))[..32].ToLowerInvariant()}";
     }
 }
