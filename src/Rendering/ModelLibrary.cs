@@ -443,6 +443,9 @@ public static class ModelLibrary
             ALPHA = c.a;
             ALPHA_SCISSOR_THRESHOLD = 0.5;
             ROUGHNESS = 1.0;
+            SPECULAR = 0.0; // the render mode above drops the direct lobe; this drops the f0 the sky's
+                            // indirect specular reads, which the foliage-family shaders do not have
+
             if (!FRONT_FACING) {
                 NORMAL = -NORMAL;
             }
