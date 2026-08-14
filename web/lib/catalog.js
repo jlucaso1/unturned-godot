@@ -100,6 +100,10 @@ export async function readMap(fs, mapPath, source) {
     const folder = normalize(mapPath).split("/").pop() ?? "";
     const localization = await readLocalization(fs, mapPath);
     const { count, sizeMetres } = await measureLandscape(fs, mapPath);
+    // ONE read of Config.json for the whole entry, because MapCatalog.Read takes one LevelConfigData:
+    // the category and the terrain declaration come out of the same document, and reading it twice
+    // would let a file that parses differently on the second pass make them disagree.
+    const config = await readConfig(fs, mapPath);
 
     return {
         folderName: folder,
@@ -111,12 +115,19 @@ export async function readMap(fs, mapPath, source) {
         displayName: isNullOrWhiteSpace(localization.name) ? folder : localization.name,
         source,
         description: localization.description,
-        category: await readCategory(fs, mapPath),
+        category: config.category,
         tileCount: count,
         sizeMetres,
-        // Pre-2020 maps store terrain as one legacy heightmap instead of Landscape tiles; this port does
-        // not read those, so they are listed and marked rather than hidden.
-        supported: count > 0,
+        usesLegacyGround: config.usesLegacyGround,
+        // Pre-2020 maps store terrain as one legacy Unity Terrain instead of Landscape tiles; this port
+        // does not read those, so they are listed and marked rather than hidden.
+        //
+        // MapEntry.IsSupported: `!UsesLegacyGround && TileCount > 0`. The map's OWN declaration decides
+        // which terrain system it is authored for — LevelGround.load returns early into loadTrees() on
+        // Use_Legacy_Ground — and the tiles have to be on disk for the loader that reads them to have
+        // anything to read. This used to be `count > 0` alone, which made the browser call a map with
+        // tiles and no config supported while the desktop, reading the config, called it legacy.
+        supported: !config.usesLegacyGround && count > 0,
         iconPath: await existingFile(fs, mapPath, "Icon.png"),
         previewPath: await existingFile(fs, mapPath, "Preview.png"),
         chartPath: await existingFile(fs, mapPath, "Chart.png"),
@@ -148,20 +159,57 @@ async function readLocalization(fs, mapPath) {
     return { name: values.get("Name") ?? null, description: values.get("Description") ?? null };
 }
 
-async function readCategory(fs, mapPath) {
+// LevelConfigData's own constructor defaults, which is what the game reads for a map with no config at
+// all — and what LevelConfigData.Default hands back for one it cannot parse. Use_Legacy_Ground defaults
+// to TRUE, so a map that ships tiles but never declares itself is legacy terrain on both sides. That is
+// the game's answer too: Unturned deserializes onto a fresh LevelInfoConfigData whose Use_Legacy_Ground
+// the constructor sets true.
+const CONFIG_DEFAULTS = Object.freeze({ category: null, usesLegacyGround: true });
+
+// LevelConfigData.Load + Parse, for the two fields the catalogue reads. A missing, unreadable or
+// malformed file takes the defaults above, exactly as the C# does — including a root that parses but is
+// not an object, which JsonDocument accepts and LevelConfigData then rejects.
+async function readConfig(fs, mapPath) {
     const text = await safe(fs.readText(join(mapPath, "Config.json")), null);
-    if (text === null) return null;
+    if (text === null) return CONFIG_DEFAULTS;
+
+    let root;
     try {
-        const config = JSON.parse(relaxJson(text));
-        if (typeof config?.Category !== "string") return null;
-        // JsonElement.GetString() refuses a value holding an unpaired surrogate — `\uD800` with no low
-        // half — where JSON.parse hands it back happily. The desktop therefore has no category for such
-        // a config, so neither does this.
-        return hasUnpairedSurrogate(config.Category) ? null : config.Category;
+        root = JSON.parse(relaxJson(text));
     } catch {
-        // A map whose config will not parse still loads; the category is cosmetic.
-        return null;
+        // A map whose config will not parse still loads, on the terrain system the defaults name.
+        return CONFIG_DEFAULTS;
     }
+    // `root.ValueKind != JsonValueKind.Object`. Arrays, strings and numbers are all valid JSON and none
+    // of them is a config; null is typeof "object" in JavaScript and has to be excluded by hand.
+    if (root === null || typeof root !== "object" || Array.isArray(root)) return CONFIG_DEFAULTS;
+
+    return { category: readCategory(root), usesLegacyGround: readBool(root, "Use_Legacy_Ground", true) };
+}
+
+// LevelConfigData.Bool: only the JSON literals `true` and `false` answer. A number, a string — even
+// "true" — or a null leaves the caller's fallback standing, because JsonElement.ValueKind is checked
+// rather than the value being coerced. JavaScript would happily call all of those truthy or falsy.
+function readBool(root, key, fallback) {
+    const value = root[key];
+    if (value === true) return true;
+    if (value === false) return false;
+    return fallback;
+}
+
+// LevelConfigData.String -> Text: not a string is null, and a string that cannot be decoded is null too.
+//
+// The catch in the C# is per STRING rather than around the whole parse, and that split has to survive
+// the port: a config whose Category holds an unpaired surrogate still has a perfectly good
+// Use_Legacy_Ground, and failing the document wholesale would quietly demote a Landscape map to legacy
+// terrain over a bad character in an unrelated field. Reading the two fields independently here is what
+// reproduces that — `readBool` above never sees the category's problem.
+function readCategory(root) {
+    const value = root.Category;
+    if (typeof value !== "string") return null;
+    // JsonElement.GetString() throws on a value holding an unpaired surrogate — `\uD800` with no low
+    // half — where JSON.parse hands it back happily. The desktop has no category for such a config.
+    return hasUnpairedSurrogate(value) ? null : value;
 }
 
 // A string that cannot be encoded as UTF-8, because a surrogate is missing its partner.

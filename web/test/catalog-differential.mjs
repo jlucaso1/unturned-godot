@@ -108,6 +108,14 @@ const TILES = [
 ];
 
 // Config.json, read with comments and trailing commas allowed on the desktop and neither in JSON.parse.
+//
+// Use_Legacy_Ground shares this axis rather than getting one of its own, because it and Category come
+// out of the SAME parse: a document that fails, or that is not an object, loses both together, while a
+// Category the desktop cannot decode must NOT cost the map its terrain declaration.
+//
+// Without the rows that declare Landscape, every generated map defaults to legacy terrain and
+// `supported` is false on both sides for all 400 — agreement no port could fail. The differential has
+// to see a true before it means anything.
 const CONFIG = [
     { label: "none", files: {} },
     { label: "plain", files: { "Config.json": '{"Category":"Official"}' } },
@@ -118,6 +126,24 @@ const CONFIG = [
     { label: "not-an-object", files: { "Config.json": '["Category"]' } },
     { label: "malformed", files: { "Config.json": "{" } },
     { label: "surrogate", files: { "Config.json": '{"Category":"\\ud800"}' } },
+    // The declaration itself. False is a Landscape map — the only way `supported` is ever true — and
+    // the rest are values LevelConfigData.Bool refuses to coerce: it tests JsonElement.ValueKind, where
+    // JavaScript would call the string "false" truthy and the number 0 falsy.
+    { label: "landscape", files: { "Config.json": '{"Category":"Official","Use_Legacy_Ground":false}' } },
+    { label: "legacy-explicit", files: { "Config.json": '{"Use_Legacy_Ground":true}' } },
+    { label: "landscape-string", files: { "Config.json": '{"Use_Legacy_Ground":"false"}' } },
+    { label: "landscape-number", files: { "Config.json": '{"Use_Legacy_Ground":0}' } },
+    { label: "landscape-null", files: { "Config.json": '{"Use_Legacy_Ground":null}' } },
+    // A Landscape declaration next to a category the desktop cannot decode. The surrogate costs the
+    // category and nothing else, so a map with tiles is still supported — which is the whole reason the
+    // C# catches that exception per string instead of around the parse.
+    {
+        label: "landscape-surrogate-category",
+        files: { "Config.json": '{"Category":"\\ud800","Use_Legacy_Ground":false}' },
+    },
+    // And the declaration behind the relaxations, so the terrain answer survives the comment and
+    // trailing-comma passes rather than only the category doing so.
+    { label: "landscape-comments", files: { "Config.json": '{/* c */"Use_Legacy_Ground":false,//x\n}' } },
 ];
 
 // The artwork the menu shows, which is three independent File.Exists calls.
