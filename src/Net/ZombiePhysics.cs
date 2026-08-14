@@ -110,6 +110,14 @@ internal static class ZombiePhysics
                 query.Transform = new Transform3D(Basis.Identity, at + chest);
                 query.Motion = motion;
                 float[] cast = space.CastMotion(query);
+                // Godot answers an EMPTY array when the query could not run at all, and every read of
+                // `cast` below indexes it — including the three that had no guard where the
+                // contactFraction read below already had one. This runs per zombie per tick inside
+                // _PhysicsProcess, where an IndexOutOfRangeException is not a bad frame but the end of
+                // the process. No answer means no movement, which is what the loop settles on anyway
+                // when a pass cannot make progress.
+                if (cast.Length == 0)
+                    break;
                 bool destinationOccupied = false;
                 if (cast[0] >= 1f)
                 {
@@ -167,8 +175,11 @@ internal static class ZombiePhysics
                         at + chest + new Vector3(0f, Player.PlayerConfig.StepOffset, 0f));
                     query.Motion = motion;
                     float[] stepCast = space.CastMotion(query);
+                    // Same empty-result rule as the cast above. Here it means "the step-up could not be
+                    // measured", so the step is simply not taken and the slide below resolves the move.
+                    bool stepIsClear = stepCast.Length > 0 && stepCast[0] >= 1f;
                     bool stepDestinationOccupied = false;
-                    if (stepCast[0] >= 1f)
+                    if (stepIsClear)
                     {
                         query.Transform = new Transform3D(Basis.Identity,
                             at + motion + chest
@@ -177,7 +188,7 @@ internal static class ZombiePhysics
                         using Godot.Collections.Dictionary stepRest = space.GetRestInfo(query);
                         stepDestinationOccupied = stepRest.Count > 0;
                     }
-                    if (stepCast[0] >= 1f && !stepDestinationOccupied)
+                    if (stepIsClear && !stepDestinationOccupied)
                     {
                         stepDown.From = new Vector3(to.X, at.Y + 1.5f, to.Z);
                         stepDown.To = new Vector3(to.X, at.Y + 0.05f, to.Z);
@@ -235,7 +246,15 @@ internal static class ZombiePhysics
     private static bool TryOverlapCorrection(PhysicsDirectSpaceState3D space,
         PhysicsShapeQueryParameters3D query, Vector3 requestedMotion, out Vector3 correction)
     {
+        // Released like every other query in this file. This one runs on the collision-recovery path,
+        // which is to say exactly when a horde is wedged and the tick is already at its worst — the
+        // moment to hand a finalizable native array to the collector instead of dropping it here.
+        //
+        // Through the cast because Array<T> is a typed view over one Godot.Collections.Array and only
+        // the untyped one carries Dispose; the conversion hands back that same instance, so this frees
+        // the array the query allocated rather than a copy of it.
         Godot.Collections.Array<Vector3> contacts = space.CollideShape(query, 8);
+        using var owned = (Godot.Collections.Array)contacts;
         correction = Vector3.Zero;
         if (contacts.Count == 0)
             return false;
