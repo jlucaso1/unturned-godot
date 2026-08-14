@@ -349,6 +349,26 @@ public class LevelNodesTests
     // A shipped safezone, at the size it really is. Russia's is the biggest the game ships and its
     // slider is 0.573 — read as metres, as this port did, it was a volume 57 centimetres across that
     // nothing could ever stand inside, and the noWeapons flag behind it could never fire.
+    // The same fix, on the one map the content fetch downloads — so CI covers the normalized radius
+    // rather than leaving it to a machine that happens to have the whole game.
+    //
+    // PEI ships no safezone at all (Russia is the only official map that does), but its deadzone reads
+    // its radius through the same slider, and its slider is ZERO. That is the sharpest case of the bug
+    // there is: read as metres it is a volume of radius 0 that nothing can ever be inside, and read as
+    // the slider it means the MINIMUM size — Lerp(32, 1024, 0) * 0.5 = 16 m. Nothing about "0" says
+    // which, which is exactly why the port got it wrong.
+    [RealDataFact(Map = "PEI")]
+    public void RealPeiDeadzone_TakesTheMinimumSizeRatherThanNoSizeAtAll()
+    {
+        LevelNodeSet nodes = LevelNodes.Load(
+            Path.Combine(GameData.Map("PEI")!, "Environment", "Nodes.dat"));
+
+        DeadzoneNode zone = Assert.Single(nodes.Deadzones);
+        Assert.Equal(0f, zone.NormalizedRadius);
+        Assert.Equal(DeadzoneNode.MinSize * 0.5f, zone.Radius, 3);
+        Assert.Equal(16f, zone.Radius, 3);
+    }
+
     [RealDataFact(Map = "Russia")]
     public void RealRussiaSafezone_IsHundredsOfMetresAcross()
     {
