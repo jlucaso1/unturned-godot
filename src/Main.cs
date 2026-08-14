@@ -893,6 +893,9 @@ public partial class Main : Node3D
         };
         (player.Footsteps, _movementAudioFactory) = BuildMovementAudio(unturnedPath);
         player.Sounds = _oneShotAudio; // BuildMovementAudio created the pool; gestures share it
+        // Set after that call, which is what builds it: the friction reads the same material tables the
+        // footsteps do, so ice both sounds like ice and is slipped on.
+        player.SurfaceFriction = _surfaceFriction;
         AddChild(player);
 
         // The crosshair, and the local raycast behind its hit marks. Both come from BuildMovementAudio's
@@ -1178,10 +1181,22 @@ public partial class Main : Node3D
         _impactAudio = new ImpactAudio(bank, oneShot, BundleTagOfDirectory);
         BuildImpactDecals(sources, bank);
 
+        // The same splat -> landscape -> physics-material resolution the footsteps do, answering what
+        // PhysicMaterialCustomData.GetCharacterFrictionProperties answers instead of which clip to play.
+        // Built here because this is where the bank, the landscape table and the splat sampler exist.
+        _surfaceFriction = position =>
+            splat.TryGetDominantMaterial(position.X, -position.Z, out System.Guid materialGuid)
+            && landscape.PhysicsNameOf(materialGuid) is { } materialName
+                ? bank.FindCharacterFriction(materialName)
+                : CharacterFrictionProperties.Default;
+
         MovementAudio Factory(bool startGrounded) =>
             new(bank, landscape, splat, oneShot, startGrounded, BundleTagOfDirectory);
         return (Factory(startGrounded: false), () => Factory(startGrounded: true));
     }
+
+    // Resolves the friction of the surface under a position; see PlayerController.SurfaceFriction.
+    private System.Func<Vector3, CharacterFrictionProperties>? _surfaceFriction;
 
     // The content source whose assets folder holds `directory`, which is how a scanned asset is traced
     // back to the bundle its content lives in. Shared with the audio planning, so a definition and the

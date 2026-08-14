@@ -1,4 +1,5 @@
 using Godot;
+using UnturnedGodot.Assets;
 using UnturnedGodot.Player;
 
 namespace UnturnedGodot;
@@ -42,6 +43,15 @@ public partial class PlayerController : CharacterBody3D
 
     // Movement audio (footsteps + landing), built by the caller with the map's terrain material data.
     public MovementAudio? Footsteps { get; set; }
+
+    // PhysicMaterialCustomData.GetCharacterFrictionProperties for the surface under a given position —
+    // the same splat -> landscape -> physics-material resolution the footsteps already do, which is why
+    // this arrives as a delegate rather than being resolved a second time in here.
+    //
+    // Null, and every surface that does not declare Character_Friction_Mode, means the instant movement
+    // this port has always had. The shipped surface that does declare it is Ice: half the deceleration
+    // (you slide) and 1.2x the max speed (you go 20% faster).
+    public System.Func<Vector3, CharacterFrictionProperties>? SurfaceFriction { get; set; }
 
     // The shared positional voice pool, for the sounds a gesture makes. The owner plays its own swing
     // straight away for the same reason it animates it straight away: the sound belongs to the frame the
@@ -338,9 +348,25 @@ public partial class PlayerController : CharacterBody3D
         }
         else if (wasOnFloor)
         {
-            Vector3 ground = PlayerMovement.GroundVelocity(wishDir, speed);
-            velocity.X = ground.X;
-            velocity.Z = ground.Z;
+            // PlayerMovement.simulate's grounded branch. Nearly every surface leaves
+            // Character_Friction_Mode at ImmediatelyResponsive, which is the instant assignment this
+            // has always done; a surface declaring Custom ramps instead (GroundFriction.Apply ports
+            // both). Resolved per tick because the player walks between surfaces.
+            CharacterFrictionProperties friction =
+                SurfaceFriction?.Invoke(GlobalPosition) ?? CharacterFrictionProperties.Default;
+            if (GroundFriction.IsInstant(friction))
+            {
+                Vector3 ground = PlayerMovement.GroundVelocity(wishDir, speed);
+                velocity.X = ground.X;
+                velocity.Z = ground.Z;
+            }
+            else
+            {
+                Vector3 ramped = GroundFriction.Apply(velocity,
+                    PlayerMovement.GroundVelocity(wishDir, speed), GetFloorNormal(), speed, friction, dt);
+                velocity.X = ramped.X;
+                velocity.Z = ramped.Z;
+            }
             velocity.Y = canJump ? PlayerConfig.JumpSpeed : -2f; // small downward keeps us snapped to the floor
             velocity += _pendingLaunchVelocity;
             _pendingLaunchVelocity = Vector3.Zero;
