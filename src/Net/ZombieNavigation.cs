@@ -43,9 +43,14 @@ public sealed class ZombieNavigation
     private static IReadOnlyList<NavFlag>? PreloadedFlags;
     private static string? PreloadedLevelDir;
 
+    // Keyed on the level it was read for, not on "is something already here". A preload that was never
+    // claimed used to make the next load return early and hand a hosted session the PREVIOUS map's
+    // navmesh — zombies pathing over a world that is not there, with nothing in the log to say so. The
+    // discard on the way out of a load is what keeps that from arising; this is what keeps it from
+    // mattering if the discard is ever missed again.
     public static void Preload(string levelDir)
     {
-        if (PreloadedFlags != null)
+        if (PreloadedFlags != null && PreloadedLevelDir == levelDir)
             return;
         PreloadedFlags = LevelNavmesh.Load(System.IO.Path.Combine(levelDir, "Environment"));
         PreloadedLevelDir = levelDir;
@@ -106,14 +111,20 @@ public sealed class ZombieNavigation
     // that hugs the direct line scores ~1; a zombie sent around the houses scores 2 or 3. Reported as a
     // distribution because the mean alone hides the tail, and it is the tail that reads as "why is it
     // going that way?" in game.
-    private static int RouteCount;
-    private static double DetourSum;
-    private static int Over2;
-    private static int Over3;
-    private static double Worst;
-    private static int SinceReport;
+    //
+    // Per graph, not per process. These were statics, so a session that returned to the menu and loaded
+    // another map went on adding that map's routes to the first one's totals — and the mean, the worst
+    // and both tail percentages are then over two different worlds, which is exactly the reading that
+    // makes a genuinely bad map look acceptable. One graph is one map's navigation, so the numbers
+    // belong to it.
+    private int _routeCount;
+    private double _detourSum;
+    private int _over2;
+    private int _over3;
+    private double _worst;
+    private int _sinceReport;
 
-    private static void RecordDetour(Vector3 from, Vector3 to, IReadOnlyList<Vector3> points)
+    private void RecordDetour(Vector3 from, Vector3 to, IReadOnlyList<Vector3> points)
     {
         float direct = from.DistanceTo(to);
         if (direct < 1f)
@@ -124,21 +135,21 @@ public sealed class ZombieNavigation
             walked += points[i - 1].DistanceTo(points[i]);
 
         double ratio = walked / direct;
-        RouteCount++;
-        DetourSum += ratio;
+        _routeCount++;
+        _detourSum += ratio;
         if (ratio > 2.0)
-            Over2++;
+            _over2++;
         if (ratio > 3.0)
-            Over3++;
-        if (ratio > Worst)
-            Worst = ratio;
+            _over3++;
+        if (ratio > _worst)
+            _worst = ratio;
 
-        if (++SinceReport < 200)
+        if (++_sinceReport < 200)
             return;
-        SinceReport = 0;
-        Log.Print($"[nav] detour over {RouteCount} routes: mean={DetourSum / RouteCount:0.###} " +
-            $"worst={Worst:0.##} >2x={Over2} ({100.0 * Over2 / RouteCount:0.#}%) " +
-            $">3x={Over3} ({100.0 * Over3 / RouteCount:0.#}%)");
+        _sinceReport = 0;
+        Log.Print($"[nav] detour over {_routeCount} routes: mean={_detourSum / _routeCount:0.###} " +
+            $"worst={_worst:0.##} >2x={_over2} ({100.0 * _over2 / _routeCount:0.#}%) " +
+            $">3x={_over3} ({100.0 * _over3 / _routeCount:0.#}%)");
     }
 
     private IReadOnlyList<NavFlag> _flags = System.Array.Empty<NavFlag>();
