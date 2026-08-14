@@ -94,11 +94,23 @@ public class PhysicsBodyOrderTests
         // wait for, but a native SceneTree.Quit never returns to managed code, so a coverage run over
         // any of them — and a failed JOIN is one of the modes the coverage harness drives — recorded
         // nothing at all. The nonzero code is what this guard is really about, and it is unchanged.
-        int failure = source.IndexOf("loading.Fail(", StringComparison.Ordinal);
-        int headlessQuit = source.LastIndexOf("if (_headlessInteractive)", failure, StringComparison.Ordinal);
-        Assert.True(headlessQuit >= 0 && headlessQuit < failure,
-            "the headless route must quit before the on-screen failure path");
-        Assert.Contains("AppShutdown.QuitNow(GetTree(), 1);", source[headlessQuit..failure]);
+        //
+        // The rule used to be written out at each of the three failure paths; it is one reporter now, so
+        // what is checked is that Main asks it rather than deciding again, and that the headless answer
+        // is still the nonzero quit.
+        Assert.Contains("Failures.Fatal(", source);
+        Assert.DoesNotContain("loading.Fail(", source);
+
+        if (FindRepositoryFile(Path.Combine("src", "Boot", "FailureReporter.cs")) is not { } reporterPath)
+            return;
+
+        string reporter = File.ReadAllText(reporterPath);
+        int headless = reporter.IndexOf("class HeadlessFailureReporter", StringComparison.Ordinal);
+        int interactive = reporter.IndexOf("class InteractiveFailureReporter", StringComparison.Ordinal);
+        Assert.True(headless >= 0 && interactive > headless);
+        Assert.Contains("AppShutdown.QuitNow(_tree, 1);", reporter[headless..interactive]);
+        // ...and the interactive one is the only half that draws anything.
+        Assert.Contains("screen.Fail(", reporter[interactive..]);
 
         string script = File.ReadAllText(scriptPath);
         int runtimeTier = script.IndexOf("    runtime)", StringComparison.Ordinal);

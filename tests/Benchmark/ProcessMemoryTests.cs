@@ -61,6 +61,15 @@ public class ProcessMemoryTests
         Assert.Equal(128L * 1024, bytes);
     }
 
+    // The portable fallback, reached directly. On Linux the /proc read above always succeeds, so nothing
+    // else in this suite ever runs it — and a fallback that only runs on the platforms CI does not cover
+    // is one that breaks exactly when it is finally needed.
+    [Fact]
+    public void TheWorkingSetFallbackAnswersOnItsOwn()
+    {
+        Assert.InRange(ProcessMemory.WorkingSetBytes(), 1L << 20, 1L << 40);
+    }
+
     [Fact]
     public void ReportsAPlausiblePositiveSize()
     {
