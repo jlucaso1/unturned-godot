@@ -17,6 +17,15 @@ public sealed class NavBound
     public bool SpawnZombies = true;
     public bool HyperAgro;
 
+    // Flags_Data.dat's first field: the ZombieDifficultyAsset this bound spawns under
+    // (ZombieManager.getDifficultyInBound). Guid.Empty for a bound that names none, which sends the roll
+    // to Provider.modeConfigData instead. PEI names Peaks_Military and Peaks_Burned_Town here.
+    public System.Guid DifficultyGuid;
+
+    // Flags_Data.dat v5+: the region's boss cap. Negative means uncapped; ZombieManager skips a rolled
+    // boss when the region already holds that many.
+    public int MaxBossZombies = -1;
+
     public bool ContainsXZ(Vector3 point) =>
         Mathf.Abs(point.X - Center.X) <= Size.X * 0.5f &&
         Mathf.Abs(point.Z - Center.Z) <= Size.Z * 0.5f;
@@ -59,7 +68,9 @@ public static class LevelNavigationData
                 byte count = river.ReadByte();
                 for (int i = 0; i < count && i < bounds.Count; i++)
                 {
-                    river.ReadString(); // difficulty GUID
+                    string difficulty = river.ReadString();
+                    if (System.Guid.TryParse(difficulty, out System.Guid parsed))
+                        bounds[i].DifficultyGuid = parsed;
                     if (version > 1)
                         bounds[i].MaxZombies = river.ReadByte();
                     if (version > 2)
@@ -67,7 +78,7 @@ public static class LevelNavigationData
                     if (version >= 4)
                         bounds[i].HyperAgro = river.ReadBoolean();
                     if (version >= 5)
-                        river.ReadInt32(); // maxBossZombies (bosses are out of scope)
+                        bounds[i].MaxBossZombies = river.ReadInt32();
                 }
             }
         }

@@ -444,11 +444,17 @@ public class ZombieHostTests
         (_, _, List<List<ZombieSnapshotState>> batches) = Join(h, "A");
         Pump(h, 2); // admitted first, so the client actually witnesses the edge
 
-        // Wake the zombie a couple of meters from its retreat point: it walks there streaming
-        // Return states, then the host must replicate exactly the Return -> Idle edge and go quiet.
+        // Wake the zombie a few meters from its retreat point: it walks there streaming Return states,
+        // then the host must replicate exactly the Return -> Idle edge and go quiet.
+        //
+        // Distance and yaw are both pinned rather than left to the spawn roll. Return ends inside
+        // ArriveDistanceSquared (1.73 m) and a body covers 0.44 m per 0.08 s tick at 5.5 m/s, so a 2 m
+        // start lands inside the arrival radius on the FIRST tick whenever the rolled yaw happens to
+        // already point the right way — and the Return state this test is about is never observed.
         zombie.State = EZombieState.Return;
         zombie.LeaveTo = zombie.Position;
-        zombie.Position = zombie.Position + new Vector3(2f, 0, 0);
+        zombie.Position = zombie.Position + new Vector3(4f, 0, 0);
+        zombie.Yaw = 90f; // face -X, toward the retreat point, so the walk starts on tick one
         Pump(h, 10);
         List<ZombieSnapshotState> flat = batches.SelectMany(b => b).ToList();
         Assert.Contains(flat, s => s.Id == zombie.Id && s.State == EZombieState.Return);

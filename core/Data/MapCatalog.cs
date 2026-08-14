@@ -39,9 +39,16 @@ public sealed class MapEntry
     public string? PreviewPath { get; init; }
     public string? ChartPath { get; init; }
 
-    // Pre-2020 maps store terrain as a single legacy heightmap instead of Landscape tiles, which this
-    // port does not read yet. They are listed but cannot be loaded.
-    public bool IsSupported => TileCount > 0;
+    // Config.json's Use_Legacy_Ground: the map declares which terrain system it is authored for.
+    public bool UsesLegacyGround { get; init; } = true;
+
+    // Pre-2020 maps store terrain as a single legacy Unity Terrain instead of Landscape tiles, which
+    // this port does not read yet. They are listed but cannot be loaded.
+    //
+    // The map's own declaration decides that (LevelGround.load's `if (!Use_Legacy_Ground)` early
+    // return), and the tiles have to actually be on disk for the loader that reads them to have
+    // anything to read — a map may declare Landscape and still ship no readable tile.
+    public bool IsSupported => !UsesLegacyGround && TileCount > 0;
 }
 
 // Finds the maps installed on this machine: the ones shipped with the game, the ones the game copied
@@ -182,6 +189,7 @@ public static class MapCatalog
         string folder = Path.GetFileName(Path.TrimEndingDirectorySeparator(mapDirectory));
         (string? localizedName, string? description) = ReadLocalization(mapDirectory);
         (int tiles, float size) = MeasureLandscape(mapDirectory);
+        LevelConfigData config = LevelConfigData.Load(mapDirectory);
 
         return new MapEntry
         {
@@ -190,7 +198,8 @@ public static class MapCatalog
             DisplayName = string.IsNullOrWhiteSpace(localizedName) ? folder : localizedName,
             Source = source,
             Description = description,
-            Category = ReadCategory(mapDirectory),
+            Category = config.Category,
+            UsesLegacyGround = config.UseLegacyGround,
             TileCount = tiles,
             SizeMetres = size,
             IconPath = ExistingFile(mapDirectory, "Icon.png"),
@@ -220,39 +229,6 @@ public static class MapCatalog
 
         DatDictionary root = DatParser.Parse(text);
         return (root.GetString("Name"), root.GetString("Description"));
-    }
-
-    // Config.json's Category ("Official", "Curated", ...). Unknown or malformed config is not fatal.
-    private static string? ReadCategory(string mapDirectory)
-    {
-        string? text = TryReadAllText(Path.Combine(mapDirectory, "Config.json"));
-        if (text == null)
-            return null;
-
-        try
-        {
-            using JsonDocument document = JsonDocument.Parse(text,
-                new JsonDocumentOptions { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip });
-            if (document.RootElement.ValueKind == JsonValueKind.Object
-                && document.RootElement.TryGetProperty("Category", out JsonElement category)
-                && category.ValueKind == JsonValueKind.String)
-            {
-                return category.GetString();
-            }
-        }
-        catch (JsonException)
-        {
-            // A map we cannot read the config of still loads; the category is cosmetic.
-        }
-        catch (InvalidOperationException)
-        {
-            // GetString() throws this, not JsonException, when the value holds an unpaired surrogate
-            // ("Cannot read incomplete UTF-16 JSON text as string"). Parse accepts the escape, so the
-            // throw lands here rather than above -- and without this catch it left ReadCategory, left
-            // Read, and left Scan, so one hand-edited workshop config took the whole map list down.
-        }
-
-        return null;
     }
 
     // Tile count and the edge of the square the tiles span, in metres.

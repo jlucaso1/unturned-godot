@@ -11,18 +11,40 @@ namespace UnturnedGodot.Tests;
 public class MapCatalogTests
 {
     // Builds <root>/Maps/<name> with the files a real map has, so Read/Scan see a map.
+    //
+    // A map given tiles also gets "Use_Legacy_Ground": false in its Config.json, because that is what a
+    // real Landscape map ships and it is the map's own declaration — not the presence of tiles on disk
+    // — that decides which terrain system loads it (LevelGround.load's early return). A fixture holding
+    // tiles while its config said "legacy" would describe a map the game itself could not load.
     private static string WriteMap(TempDir dir, string relative, string? english = null,
         string? config = null, params (int X, int Y)[] tiles)
     {
         dir.Write(Path.Combine(relative, "Level.dat"), new byte[] { 4 });
         if (english != null)
             dir.Write(Path.Combine(relative, "English.dat"), english);
-        if (config != null)
-            dir.Write(Path.Combine(relative, "Config.json"), config);
+
+        bool landscape = tiles.Length > 0;
+        if (config != null || landscape)
+            dir.Write(Path.Combine(relative, "Config.json"), WithGroundDeclaration(config, landscape));
+
         foreach ((int x, int y) in tiles)
             dir.Write(Path.Combine(relative, "Landscape", "Heightmaps", $"Tile_{x}_{y}_Source.heightmap"),
                 new byte[] { 0, 0 });
         return Path.Combine(dir.Path, relative);
+    }
+
+    // Splices Use_Legacy_Ground into whatever config the test asked for, keeping that config's own keys
+    // — and its deliberate malformations — exactly as written.
+    private static string WithGroundDeclaration(string? config, bool landscape)
+    {
+        string declaration = $"\"Use_Legacy_Ground\": {(landscape ? "false" : "true")}";
+        if (config == null)
+            return "{ " + declaration + " }";
+
+        int brace = config.IndexOf('{', StringComparison.Ordinal);
+        if (brace < 0)
+            return config; // not an object: the test is exercising a malformed config, so leave it alone
+        return config[..(brace + 1)] + " " + declaration + "," + config[(brace + 1)..];
     }
 
     [Fact]
@@ -189,6 +211,8 @@ public class MapCatalogTests
             "California2", "Level.dat"), new byte[] { 4 });
         dir.Write(Path.Combine("steamapps", "workshop", "content", "304930", "3707778928",
             "California2", "Landscape", "Heightmaps", "Tile_0_0_Source.heightmap"), new byte[] { 0, 0 });
+        dir.Write(Path.Combine("steamapps", "workshop", "content", "304930", "3707778928",
+            "California2", "Config.json"), "{ \"Use_Legacy_Ground\": false }");
         // A mod item with no map inside must not break the scan.
         dir.Write(Path.Combine("steamapps", "workshop", "content", "304930", "1418436222",
             "MoreStacking.txt"), "not a map");
@@ -371,6 +395,7 @@ public class MapCatalogTests
             DisplayName = name,
             Source = source,
             TileCount = tiles,
+            UsesLegacyGround = tiles == 0, // a tile-less map here stands in for a legacy-terrain one
         };
 
         MapEntry playable = Make("Zulu", MapSource.Official, 1);

@@ -121,6 +121,33 @@ public static class LightingCycle
     public const int MoonPhaseCount = 5;
     public const int FullMoonPhase = 2;
 
+    // --- LightingManager's time-of-day predicates, which GAMEPLAY reads, not just the sky ---
+
+    // "public static bool isDaytime => day < LevelLighting.bias" (LightingManager.cs:347). `day` is the
+    // same 0..1 cycle fraction everything above takes as `time`.
+    public static bool IsDaytime(float time, float bias) => time < bias;
+
+    // "public static bool isNighttime => !isDaytime". This gates the two Dying Light volatiles into the
+    // zombie speciality roll — "Only spawn volatiles at nighttime, otherwise they explode immediately"
+    // (ZombieManager.cs:1059).
+    public static bool IsNighttime(float time, float bias) => !IsDaytime(time, bias);
+
+    // "isCycled = day > LevelLighting.bias" (LightingManager.cs:386). Note the STRICT greater-than
+    // against isDaytime's strict less-than: exactly AT the bias neither holds, so that one instant is
+    // neither daytime nor cycled. The asymmetry is the original's and is reproduced rather than tidied
+    // — a tidied version would disagree at exactly one instant per cycle, which is the kind of
+    // difference nobody ever finds again.
+    public static bool IsCycled(float time, float bias) => time > bias;
+
+    // "isFullMoon = isCycled && LevelLighting.moon == 2" (LightingManager.cs:387). A full moon is not
+    // merely the phase: it is the phase AND the cycle having crossed into night, so a map saved at
+    // midday with MoonPhase 2 is not a full moon until dusk.
+    //
+    // What it drives, all of which the port can now answer: ZombieRegion.isHyper (hyper-aggressive
+    // zombies), the Respawn_Night_Time respawn cadence, and Full_Moon_Experience_Multiplier.
+    public static bool IsFullMoon(float time, float bias, int moonPhase) =>
+        IsCycled(time, bias) && moonPhase == FullMoonPhase;
+
     public static float MoonPhaseYawDegrees(int phase)
         => (phase - FullMoonPhase) * 60f;
 }

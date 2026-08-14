@@ -5,8 +5,12 @@ namespace UnturnedGodot.Damage;
 //
 // A record rather than constants because these are the numbers a server operator edits: Unturned writes
 // them to the server's own Config.json and reloads them from there, and EASY/HARD differ from NORMAL in
-// several of them. Nothing loads that file yet, so Normal below is what everything uses; when it is
-// loaded, the loader fills one of these and the maths above it does not change.
+// several of them.
+//
+// UnturnedGodot.Config.ModeConfigData is that loader now, and its `Damage` projection fills one of these
+// from whichever mode block it read — so the maths below still takes one small record and does not know
+// whether the numbers came from a file or from the ported defaults. `Normal` remains what a host with no
+// server config uses, which is the same thing the game constructs before deserializing over it.
 public sealed record ModeDamageConfig
 {
     // Zombies.Damage_Multiplier: what a zombie's own swing does to a player. Not read by the punch, and

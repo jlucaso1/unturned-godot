@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using Godot;
 using UnturnedGodot.Assets;
+using UnturnedGodot.Config;
 
 namespace UnturnedGodot.Data;
 
@@ -23,10 +24,6 @@ public static class VehicleSpawnPlan
     // that then settles onto the ground. Nothing here simulates, so this is simply where the game puts it.
     private const float SpawnHeightOffset = 0.5f;
 
-    // Provider.modeConfigData.Vehicles, at the values the game ships for its normal mode. The port has no
-    // server mode configuration to read, and these are what every unmodified session uses.
-    private const int MinNaturalVehicles = 16;
-
     private static int MaxInstancesFor(ELevelSize size) => size switch
     {
         ELevelSize.Tiny => 4,
@@ -36,9 +33,14 @@ public static class VehicleSpawnPlan
         _ => 16, // Medium
     };
 
-    // GetNumberOfNaturalVehiclesToSpawn with no vehicles loaded from a save, which is always the case here.
-    public static int NaturalVehicleCount(ELevelSize size) =>
-        Math.Max(MaxInstancesFor(size), MinNaturalVehicles);
+    // GetNumberOfNaturalVehiclesToSpawn with no vehicles loaded from a save, which is always the case
+    // here. The floor is Provider.modeConfigData.Vehicles.Min_Natural_Vehicles (VehicleManager.cs:2475),
+    // which used to be a 16 written out here because nothing read the mode config. It comes from the
+    // config record now — whose own default is the same 16 ZombiesConfigData's sibling constructor
+    // assigns, so an unconfigured host is unchanged and a configured one is finally listened to.
+    public static int NaturalVehicleCount(ELevelSize size, ModeConfigData? config = null) =>
+        Math.Max(MaxInstancesFor(size),
+            (int)(config ?? ModeConfigData.Normal).Vehicles.MinNaturalVehicles);
 
     // Which vehicles a map rolls is random in Unturned, and nothing here simulates them afterwards, so the
     // port fixes the seed: a screenshot or a benchmark of a map has to show the same vehicles every run.

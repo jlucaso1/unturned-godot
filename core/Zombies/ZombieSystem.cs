@@ -1,20 +1,101 @@
 using System;
 using System.Collections.Generic;
 using Godot;
+using UnturnedGodot.Assets;
+using UnturnedGodot.Config;
 using UnturnedGodot.Data;
 using UnturnedGodot.Net;
 using UnturnedGodot.Player;
 
 namespace UnturnedGodot.Zombies;
 
-// EZombieSpeciality, reduced to the kinds PEI's NORMAL difficulty actually rolls at spawn
-// (flanker/burner/acid/boss variants come from harder difficulty assets).
+// SDG.Unturned.EZombieSpeciality, in the game's own declaration order — the values are what the roll
+// and the wire carry, so they are the game's numbers rather than a local re-numbering.
+//
+// This used to stop at Mega, on the grounds that those were the kinds "PEI's NORMAL difficulty actually
+// rolls". That was wrong twice over. NORMAL itself weights Flanker, Burner and Acid at 0.025 each
+// (PlayConfigData.cs:1123-1130), and PEI's own difficulty assets weight them far higher:
+// Peaks_Military rolls 0.075 of each, and Peaks_Burned_Town rolls 0.4 burners plus a 0.025 fire boss.
+//
+// Not all of them BEHAVE yet — the README says which do and what the rest fall back to. They are rolled
+// and replicated regardless, because dropping a rolled speciality on the floor silently changes the
+// distribution of the ones that remain.
 public enum EZombieSpeciality : byte
 {
-    Normal = 0,
-    Crawler = 1,
-    Sprinter = 2,
-    Mega = 3,
+    None = 0,
+    Normal = 1,
+    Mega = 2,
+    Crawler = 3,
+    Sprinter = 4,
+    FlankerFriendly = 5,
+    FlankerStalk = 6,
+    Burner = 7,
+    Acid = 8,
+    BossElectric = 9,
+    BossWind = 10,
+    BossFire = 11,
+    BossAll = 12,
+    BossMagma = 13,
+    Spirit = 14,
+    BossSpirit = 15,
+    BossNuclear = 16,
+    // "Crossover from Dying Light. Only spawns during night. Explodes into fire at dawn."
+    RedVolatile = 17,
+    BlueVolatile = 18,
+    BossElverStomper = 19,
+    BossKuwait = 20,
+    // "Buak boss types have a red-eyed flashbang effect."
+    BossBuakElectric = 21,
+    BossBuakWind = 22,
+    BossBuakFire = 23,
+    BossBuakFinal = 24,
+}
+
+// The parts of EZombieSpecialityExtension this port needs, ported case for case.
+public static class ZombieSpecialityExtension
+{
+    // "Is this one of the Dying Light volatile zombies?"
+    public static bool IsDLVolatile(this EZombieSpeciality speciality) =>
+        speciality is EZombieSpeciality.RedVolatile or EZombieSpeciality.BlueVolatile;
+
+    // "Does this have the BOSS_* prefix?" — the original enumerates the list rather than deriving it
+    // from the name, and BOSS_ALL is deliberately absent from it.
+    public static bool IsBoss(this EZombieSpeciality speciality) => speciality
+        is EZombieSpeciality.BossElectric
+        or EZombieSpeciality.BossWind
+        or EZombieSpeciality.BossFire
+        or EZombieSpeciality.BossMagma
+        or EZombieSpeciality.BossSpirit
+        or EZombieSpeciality.BossNuclear
+        or EZombieSpeciality.BossElverStomper
+        or EZombieSpeciality.BossKuwait
+        or EZombieSpeciality.BossBuakFire
+        or EZombieSpeciality.BossBuakElectric
+        or EZombieSpeciality.BossBuakWind
+        or EZombieSpeciality.BossBuakFinal;
+
+    // "Boss zombies are considered mega as well" (Zombie.isMega, Zombie.cs:390). The capsule radius and
+    // the doubled attack range key on THIS, not on the MEGA speciality alone, so a boss is wide and
+    // long-reaching without being a mega itself.
+    public static bool IsMega(this EZombieSpeciality speciality) =>
+        speciality == EZombieSpeciality.Mega || speciality == EZombieSpeciality.BossAll
+        || speciality.IsBoss();
+
+    // Zombie.PlayFootstepAudioClip's own switch: which specialities run rather than shamble.
+    public static bool IsRunner(this EZombieSpeciality speciality) => speciality
+        is EZombieSpeciality.Sprinter
+        or EZombieSpeciality.FlankerFriendly
+        or EZombieSpeciality.FlankerStalk
+        or EZombieSpeciality.BlueVolatile
+        or EZombieSpeciality.RedVolatile;
+
+    // Zombie.cs:255 / 1010: an ACID zombie explodes into a radioactive cloud on death and reports the
+    // Alien_Dynamic surface. BOSS_NUCLEAR, BOSS_ALL and BOSS_BUAK_FINAL share it (Zombie.cs:2335).
+    public static bool IsRadioactive(this EZombieSpeciality speciality) => speciality
+        is EZombieSpeciality.Acid
+        or EZombieSpeciality.BossNuclear
+        or EZombieSpeciality.BossAll
+        or EZombieSpeciality.BossBuakFinal;
 }
 
 // The animation-relevant behavior states a zombie replicates. Return covers walking back to the
@@ -101,19 +182,22 @@ public sealed class ZombieInstance
     public int LastCollisionDetourRoutePoints;
     public int LastCollisionDetourFailedEdge = -1;
 
-    // ZombieManager.getZombieSpeed with Slow_Movement=false (NORMAL difficulty).
+    // Zombie.tellAlive's seeker.Speed assignment (Zombie.cs:1801-1845), with Slow_Movement=false — the
+    // NORMAL default. The volatiles share the sprinter's branch and the flankers get their own 6.
     public float Speed => Speciality switch
     {
         EZombieSpeciality.Crawler => 3f,
         EZombieSpeciality.Sprinter => 6.5f,
+        _ when Speciality.IsDLVolatile() => 6.5f,
+        EZombieSpeciality.FlankerFriendly or EZombieSpeciality.FlankerStalk => 6f,
         EZombieSpeciality.Mega => 6f,
         _ => 5.5f,
     };
 
     // The CharacterController capsule (SetCapsuleRadiusAndHeight): megas 0.75, everyone else 0.4. The
     // ordinary radius comes from BakedNavGraph so the routes and the body cannot drift apart — the funnel
-    // insets wall portals by exactly this much.
-    public float Radius => Speciality == EZombieSpeciality.Mega ? 0.75f : BakedNavGraph.AgentRadius;
+    // insets wall portals by exactly this much. `IsMega` covers the bosses too, as Zombie.isMega does.
+    public float Radius => Speciality.IsMega() ? 0.75f : BakedNavGraph.AgentRadius;
 
     // Zombie.GetHorizontalAttackRangeSquared for a player target on a dedicated server. The
     // official value IS the squared threshold (compared against sqrHorizontalDistanceFromTarget):
@@ -121,12 +205,22 @@ public sealed class ZombieInstance
     // mega 2 m of actual reach. Squaring it again made sprinters and megas stop conspicuously far.
     public float AttackRangeSquared => 2f
         * (Speciality == EZombieSpeciality.Normal ? 0.5f : 1f)
-        * (Speciality == EZombieSpeciality.Mega ? 2f : 1f);
+        * (Speciality.IsMega() ? 2f : 1f);
 
-    // Zombie.GetVerticalAttackRange: hyper regions reach 3.5 m, everyone else 2.1, megas x1.5.
-    public bool IsHyper; // the nav flag's hyperAgro, stamped at spawn
+    // Zombie.isHyper (Zombie.cs:381): `zombieRegion.isHyper` minus two boss kinds, and ZombieRegion's
+    // own isHyper is `LightingManager.isFullMoon || hasBeacon` (ZombieRegion.cs:59). It is a FULL MOON
+    // property, NOT the navigation flag's hyperAgro — which is a separate thing feeding
+    // HasInfiniteAgroRange (ZombieRegion.cs:61). The port had the two conflated: it stamped the flag's
+    // hyperAgro in here at spawn, so a hyper-agro bound hit 50% harder in broad daylight while a full
+    // moon did nothing at all.
+    //
+    // Stamped at spawn like everything else the instance carries. Beacons do not exist here, so a full
+    // moon is the whole of it.
+    public bool IsHyper;
+
+    // Zombie.GetVerticalAttackRange: hyper zombies reach 3.5 m, everyone else 2.1, megas x1.5.
     public float VerticalAttackRange =>
-        (IsHyper ? 3.5f : 2.1f) * (Speciality == EZombieSpeciality.Mega ? 1.5f : 1f);
+        (IsHyper ? 3.5f : 2.1f) * (Speciality.IsMega() ? 1.5f : 1f);
 
     // What is left of it. Zombie.askDamage subtracts from this and calls the zombie dead at zero, which
     // is the ONE state in this class that something outside the brain writes — everything else here is
@@ -139,17 +233,23 @@ public sealed class ZombieInstance
 
     public bool IsDead => Health == 0;
 
-    // Zombie.tellAlive's health assignment: the table's number, then the speciality's own adjustment.
-    // A crawler carries half again as much (it is harder to hit), a sprinter half as much (it is
-    // fragile), and a mega simply uses the table — the mega tables are already written with thousands.
-    // The bosses the original also lists have no spawner here, so their fixed numbers are not ported.
+    // Zombie.tellAlive's health assignment (Zombie.cs:1619-1660): the table's number, then the
+    // speciality's own adjustment. A crawler carries half again as much (it is harder to hit) and the
+    // volatiles share that branch; a sprinter half as much (it is fragile); a mega simply uses the table
+    // — the mega tables are already written with thousands. The bosses REPLACE it with a fixed number,
+    // and those are ported now that a difficulty asset can actually roll one.
     public static ushort HealthFor(ZombieTable table, EZombieSpeciality speciality)
     {
         ArgumentNullException.ThrowIfNull(table);
+        if (speciality == EZombieSpeciality.Crawler || speciality.IsDLVolatile())
+            return (ushort)(table.Health * 1.5f);
         return speciality switch
         {
-            EZombieSpeciality.Crawler => (ushort)(table.Health * 1.5f),
             EZombieSpeciality.Sprinter => (ushort)(table.Health * 0.5f),
+            EZombieSpeciality.BossAll or EZombieSpeciality.BossMagma => (ushort)12000,
+            EZombieSpeciality.BossElverStomper => (ushort)4600, // "~23 hits with a 200 damage melee weapon"
+            EZombieSpeciality.BossKuwait => (ushort)60000,
+            EZombieSpeciality.BossBuakWind => (ushort)6000,
             _ => table.Health,
         };
     }
@@ -214,10 +314,32 @@ public delegate bool ZombieGroundSnap(Vector3 position, out float y);
 // required, matching the game's own fallback movement model.
 public sealed partial class ZombieSystem
 {
-    // ZombiesConfigData NORMAL difficulty.
+    // ZombiesConfigData NORMAL difficulty. The speciality chances that used to sit beside this are gone:
+    // they are per-bound and per-table DATA now (see GenerateSpeciality), because the map's own
+    // difficulty assets override them and PEI ships two that do.
     public const float SpawnChance = 0.25f;
-    public const float CrawlerChance = 0.15f;
-    public const float SprinterChance = 0.15f;
+
+    // Provider.modeConfigData: the fallback weights, used for any bound whose difficulty asset is absent
+    // or does not set Overrides_Spawn_Chance. Defaults to the ported NORMAL block.
+    public ModeConfigData ModeConfig { get; set; } = ModeConfigData.Normal;
+
+    // The map's difficulty assets, by GUID. Null until a host scans Bundles/Assets; with nothing
+    // resolvable every bound falls back to ModeConfig above, which is what the game does too.
+    public ZombieDifficultyBank? Difficulties { get; set; }
+
+    // LightingManager.isNighttime at the moment of the roll. The two Dying Light volatiles are only
+    // added to the table at night ("otherwise they explode immediately"), so the roll has to be told
+    // what time it is; everything else in the table is time-independent.
+    public bool IsNighttime { get; set; }
+
+    // LightingManager.isFullMoon — `isCycled && LevelLighting.moon == 2`, i.e. the map's own MoonPhase
+    // combined with the cycle having crossed dusk (LightingCycle.IsFullMoon computes it). The map has
+    // carried that phase all along and nothing in here read it.
+    //
+    // A full moon makes every zombie HYPER: 3.5 m of vertical reach instead of 2.1, and half again the
+    // swing damage. It also selects Respawn_Night_Time and Full_Moon_Experience_Multiplier, neither of
+    // which has a path here yet (nothing respawns a zombie, nothing awards experience).
+    public bool IsFullMoon { get; set; }
 
     // LegacyAIPathNoRedist (decompiled from the game assembly) with the values
     // CreateMovementComponentForZombie assigns.
@@ -366,13 +488,12 @@ public sealed partial class ZombieSystem
     private ZombieInstance Create(ushort id, byte bound, ZombieSpawnpointData spawn, Random random)
     {
         ZombieTable table = _tables[spawn.Type];
-        EZombieSpeciality speciality = EZombieSpeciality.Normal;
-        if (table.IsMega)
-            speciality = EZombieSpeciality.Mega;
-        else if (random.NextSingle() < CrawlerChance)
-            speciality = EZombieSpeciality.Crawler;
-        else if (random.NextSingle() < SprinterChance)
-            speciality = EZombieSpeciality.Sprinter;
+        // ZombieManager.generateZombies (ZombieManager.cs:1197-1208): a mega table is a mega outright and
+        // is never rolled; everything else goes through the weighted table. (The original also gates that
+        // on Level.info.type == SURVIVAL, which every map this port loads is.)
+        EZombieSpeciality speciality = table.IsMega
+            ? EZombieSpeciality.Mega
+            : GenerateSpeciality(bound, table, random);
 
         Vector3 position = spawn.Point;
         if (_ground(position.X, position.Z, out float y))
@@ -388,7 +509,10 @@ public sealed partial class ZombieSystem
             Bound = bound,
             Type = spawn.Type,
             Speciality = speciality,
-            IsHyper = _bounds[bound].HyperAgro,
+            // Zombie.isHyper's two exclusions: BOSS_ALL and BOSS_BUAK_FINAL are never hyper.
+            IsHyper = IsFullMoon
+                && speciality != EZombieSpeciality.BossAll
+                && speciality != EZombieSpeciality.BossBuakFinal,
             Shirt = RollSlot(table, 0, random),
             Pants = RollSlot(table, 1, random),
             Hat = RollSlot(table, 2, random),
@@ -399,6 +523,66 @@ public sealed partial class ZombieSystem
             Position = position,
             Yaw = random.NextSingle() * 360f,
         };
+    }
+
+    // ZombieManager.GetDifficultyInBoundForTable (ZombieManager.cs:915-946) with the default
+    // prioritization, NavmeshOverridesTable: the navigation bound's asset wins, and the table's is the
+    // fallback when the bound names none or the one it names does not set Overrides_Spawn_Chance.
+    //
+    // `forSpawnOverrides` is always true here — the speciality roll is this port's only caller — so the
+    // Overrides_Spawn_Chance test is folded in rather than carried as a parameter.
+    internal ZombieDifficultyAsset? DifficultyFor(byte bound, ZombieTable table)
+    {
+        if (Difficulties == null)
+            return null;
+
+        ZombieDifficultyAsset? result = bound < _bounds.Count
+            ? Difficulties.Find(_bounds[bound].DifficultyGuid)
+            : null;
+        if (result == null || !result.OverridesSpawnChance)
+            result = Difficulties.Find(table.DifficultyGuid);
+        return result;
+    }
+
+    // ZombieManager.generateZombieSpeciality (ZombieManager.cs:1041-1097). ONE weighted draw across
+    // every speciality's weight, not a ladder of independent chances: the difficulty asset's numbers
+    // when it overrides, the mode config's otherwise, with NORMAL absorbing the leftover weight.
+    //
+    // This replaces `random < 0.15 ? Crawler : random < 0.15 ? Sprinter : Normal`, which was wrong in
+    // both directions — it could not produce a flanker, burner or acid zombie at all, and it gave PEI's
+    // military bounds a 15% crawler where the map itself asks for 20%.
+    internal EZombieSpeciality GenerateSpeciality(byte bound, ZombieTable table, Random random)
+    {
+        ZombieDifficultyAsset? asset = DifficultyFor(bound, table);
+        ZombieSpecialityWeights weights = asset != null && asset.OverridesSpawnChance
+            ? asset.Weights(IsNighttime)
+            : ModeWeights();
+        return weights.Pick(random);
+    }
+
+    // The Provider.modeConfigData branch of that same method.
+    private ZombieSpecialityWeights ModeWeights()
+    {
+        ZombiesConfig z = ModeConfig.Zombies;
+        var table = new ZombieSpecialityWeights();
+        table.Add(EZombieSpeciality.Crawler, z.CrawlerChance);
+        table.Add(EZombieSpeciality.Sprinter, z.SprinterChance);
+        table.Add(EZombieSpeciality.FlankerFriendly, z.FlankerChance);
+        table.Add(EZombieSpeciality.Burner, z.BurnerChance);
+        table.Add(EZombieSpeciality.Acid, z.AcidChance);
+        table.Add(EZombieSpeciality.BossElectric, z.BossElectricChance);
+        table.Add(EZombieSpeciality.BossWind, z.BossWindChance);
+        table.Add(EZombieSpeciality.BossFire, z.BossFireChance);
+        table.Add(EZombieSpeciality.Spirit, z.SpiritChance);
+        if (IsNighttime)
+        {
+            table.Add(EZombieSpeciality.RedVolatile, z.RedVolatileChance);
+            table.Add(EZombieSpeciality.BlueVolatile, z.BlueVolatileChance);
+        }
+        table.Add(EZombieSpeciality.BossElverStomper, z.BossElverStomperChance);
+        table.Add(EZombieSpeciality.BossKuwait, z.BossKuwaitChance);
+        table.AddNormalRemainder();
+        return table;
     }
 
     // ZombieManager's clothing roll: pass the slot's chance to wear a random entry, else bare (255).
@@ -786,7 +970,11 @@ public sealed partial class ZombieSystem
             return;
         }
         float sqrHorizontal = HorizontalDistanceSquared(zombie.Position, target.Position);
-        if (sqrHorizontal > MaxChaseDistanceSquared)
+        // Zombie.cs:2313: "sqrHorizontalDistanceFromTarget > 4096 && (player == null ||
+        // !zombieRegion.HasInfiniteAgroRange)". THIS is what the navigation flag's hyperAgro drives
+        // (ZombieRegion.cs:61) — a hyper-agro bound never gives up on a player at range, which is what
+        // makes those bounds feel relentless. It is not the 1.5x damage the port used to spend it on.
+        if (sqrHorizontal > MaxChaseDistanceSquared && !_bounds[zombie.Bound].HyperAgro)
         {
             Leave(zombie, target.Position, quick: false); // beyond 64 m -> leave(false)
             return;
@@ -1262,8 +1450,11 @@ public sealed partial class ZombieSystem
 
     private void LandHit(ZombieInstance zombie)
     {
-        bool hyper = _bounds[zombie.Bound].HyperAgro;
-        float damage = _tables[zombie.Type].Damage * (hyper ? 1.5f : 1f);
+        // Zombie.cs:2448-2457, in the original's order: the table's damage times the hyper bonus, then
+        // the mode's Damage_Multiplier, then the speciality's own factor. `isHyper` here is the ZOMBIE's
+        // (a full moon), which is what the original reads — not the navigation flag it used to read.
+        float damage = _tables[zombie.Type].Damage * (zombie.IsHyper ? 1.5f : 1f);
+        damage *= ModeConfig.Zombies.DamageMultiplier;
         damage *= zombie.Speciality switch
         {
             EZombieSpeciality.Crawler => 2f,
