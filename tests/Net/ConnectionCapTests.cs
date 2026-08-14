@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
 using UnturnedGodot.Net;
+using UnturnedGodot.Tests.Helpers;
 using Xunit;
 
 namespace UnturnedGodot.Tests.Net;
@@ -9,6 +10,10 @@ namespace UnturnedGodot.Tests.Net;
 // A UdpServerTransport connection is keyed by address AND port, and every new key allocates a Connection
 // plus a ReliableChannel. A sender that varies its source port grew that table without limit, from one
 // host, before saying anything the server would recognise — no handshake, nothing to authenticate.
+//
+// Traited because this is one of the two files here that can flake: it binds real ports (through a
+// FreePort probe with a TOCTOU window) and sleeps on localhost datagram scheduling. See TestCategories.
+[Trait(TestCategories.Name, TestCategories.RealSockets)]
 public class ConnectionCapTests
 {
     private static ushort FreePort()

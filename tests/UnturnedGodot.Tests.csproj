@@ -11,6 +11,11 @@
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
     <PackageReference Include="coverlet.collector" Version="10.0.1" />
+    <!-- For SourceRules/. The ordering invariants that used to be asserted as SUBSTRINGS of the source
+         are checked against the parsed syntax tree instead, so reformatting a call, renaming a local or
+         re-wrapping an argument list cannot break them — and, which matters more, cannot hide a real
+         violation behind a string that still happens to match. See tests/SourceRules/SourceRuleTests.cs. -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.6.0" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../core/UnturnedGodot.Core.csproj" />
