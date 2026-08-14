@@ -71,9 +71,61 @@ public class ZombieDifficultyTests
         Assert.False(Parse(MilitaryAsset.Replace("ID 0", "ID 0\n\tOverrides_Spawn_Chance False",
             StringComparison.Ordinal)).OverridesSpawnChance);
 
+    // The key present but holding nothing — a bare `Overrides_Spawn_Chance` — is NOT the same as the
+    // key being absent. PopulateAsset gates on ContainsKey and then calls ParseBool with no default, so
+    // a value that does not parse is FALSE, where an absent key is true. Reading this as
+    // `GetBool(key, true)` would collapse the two and make a bare flag mean the opposite.
+    [Fact]
+    public void OverridesSpawnChance_PresentButUnparseable_IsFalse() =>
+        Assert.False(Parse(MilitaryAsset.Replace("ID 0", "ID 0\n\tOverrides_Spawn_Chance",
+            StringComparison.Ordinal)).OverridesSpawnChance);
+
+    // DatValueEx.TryParseBool reads a one-character value as a letter rather than through
+    // bool.TryParse, so these spellings are real booleans in the game's own files.
+    [Theory]
+    [InlineData("n", false)]
+    [InlineData("0", false)]
+    [InlineData("f", false)]
+    [InlineData("y", true)]
+    [InlineData("1", true)]
+    [InlineData("t", true)]
+    public void OverridesSpawnChance_TakesTheSingleLetterSpellings(string raw, bool expected) =>
+        Assert.Equal(expected, Parse(MilitaryAsset.Replace("ID 0",
+            $"ID 0\n\tOverrides_Spawn_Chance {raw}", StringComparison.Ordinal)).OverridesSpawnChance);
+
     [Fact]
     public void AllowHordeBeacon_DefaultsToTrue() =>
         Assert.True(Parse(MilitaryAsset).AllowHordeBeacon);
+
+    [Fact]
+    public void AllowHordeBeacon_PresentButUnparseable_IsFalse() =>
+        Assert.False(Parse(MilitaryAsset.Replace("ID 0", "ID 0\n\tAllow_Horde_Beacon",
+            StringComparison.Ordinal)).AllowHordeBeacon);
+
+    // NumberStyles.Any: a chance written with a decimal point, a sign or parentheses is a number to the
+    // game, and reading it under NumberStyles.Float would silently zero it.
+    [Fact]
+    public void Chances_ParseTheWidthDatValueExAccepts()
+    {
+        ZombieDifficultyAsset asset = Parse(MilitaryAsset
+            .Replace("Crawler_Chance 0.2", "Crawler_Chance +0.2", StringComparison.Ordinal)
+            .Replace("Sprinter_Chance 0.2", "Sprinter_Chance (0.2)", StringComparison.Ordinal));
+
+        Assert.Equal(0.2f, asset.CrawlerChance);
+        Assert.Equal(-0.2f, asset.SprinterChance); // parentheses are the accounting negative
+    }
+
+    // A negative weight is clamped by the table rather than eating the total, so a file like that
+    // degrades to "no crawlers" instead of skewing everything else.
+    [Fact]
+    public void NegativeChance_IsClampedByTheTable()
+    {
+        ZombieSpecialityWeights weights = Parse(MilitaryAsset
+            .Replace("Crawler_Chance 0.2", "Crawler_Chance (0.2)", StringComparison.Ordinal))
+            .Weights(isNighttime: false);
+
+        Assert.Equal(0f, Weight(weights, EZombieSpeciality.Crawler));
+    }
 
     [Fact]
     public void AllowHordeBeacon_CanBeTurnedOff() =>

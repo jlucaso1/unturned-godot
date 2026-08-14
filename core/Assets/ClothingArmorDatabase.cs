@@ -121,12 +121,26 @@ public sealed class ClothingArmorDatabase
             return true;
         }
 
-        float armor = data.TryGetSingle("Armor", out float parsed) ? parsed : 1f;
+        // "if (ContainsKey("Armor")) _armor = ParseFloat("Armor"); else _armor = 1.0f;" — the presence
+        // of the key and the parse of its value are two separate questions in the original, and they
+        // disagree for a key that is there but holds nothing: ParseFloat yields 0, while treating a
+        // failed parse as "absent" would yield 1. An armor of 0 is total immunity and an armor of 1 is
+        // bare, so the two are not a rounding apart.
+        float armor = ReadOr(data, "Armor", 1f);
         // "Defaults to armor value if Armor_Explosion isn't specified."
-        float explosion = data.TryGetSingle("Armor_Explosion", out float explosionParsed) ? explosionParsed : armor;
+        float explosion = ReadOr(data, "Armor_Explosion", armor);
 
         clothing = new ClothingArmor(id, type, armor, explosion);
         return true;
+    }
+
+    // ParseFloat behind a ContainsKey gate: an absent key takes `whenAbsent`, a present one takes what
+    // it parses to — including the 0 that an unparseable value parses to.
+    private static float ReadOr(DatDictionary data, string key, float whenAbsent)
+    {
+        if (!data.ContainsKey(key))
+            return whenAbsent;
+        return data.TryGetSingle(key, out float parsed) ? parsed : 0f;
     }
 
     private static EClothingType ParseType(string? type) => type switch

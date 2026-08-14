@@ -120,6 +120,31 @@ public class PhysicsMaterialFrictionTests
         Assert.Null(asset.CharacterMaxSpeedMultiplier);
     }
 
+    // Absent means null so the fallback chain answers; present-but-unparseable means ZERO, which is a
+    // real surface property (one a character cannot accelerate on) and stops the walk. Collapsing the
+    // two would quietly hand the property to the fallback asset instead.
+    [Fact]
+    public void MultiplierPresentButUnparseable_IsZeroNotNull()
+    {
+        PhysicsMaterialAsset asset = Parse(IceAsset.Replace(
+            "Character_Acceleration_Multiplier 1", "Character_Acceleration_Multiplier",
+            System.StringComparison.Ordinal));
+
+        Assert.Equal(0f, asset.CharacterAccelerationMultiplier);
+        Assert.Equal(0.5f, asset.CharacterDecelerationMultiplier); // untouched
+    }
+
+    // And that zero survives the chain rather than being replaced by the fallback's value.
+    [Fact]
+    public void ZeroMultiplierStopsTheFallbackWalk()
+    {
+        string zeroed = IceAsset.Replace(
+            "Character_Acceleration_Multiplier 1", "Character_Acceleration_Multiplier",
+            System.StringComparison.Ordinal);
+
+        Assert.Equal(0f, Bank(zeroed, GravelAsset).FindCharacterFriction("Ice").AccelerationMultiplier);
+    }
+
     [Fact]
     public void IsArableAndHasOilAreRead()
     {

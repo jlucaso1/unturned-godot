@@ -155,11 +155,23 @@ public sealed class PhysicsMaterialAsset
             ? mode
             : EPhysicsMaterialCharacterFrictionMode.ImmediatelyResponsive;
 
-    // "if (p.data.ContainsKey(key)) x = ParseFloat(key)" — absent stays null, which is what lets the
-    // fallback chain supply it instead.
-    private static float? Optional(DatDictionary data, string key) =>
-        data.TryGetSingle(key, out float value) ? value : null;
+    // "if (p.data.ContainsKey(key)) x = ParseFloat(key)" — an ABSENT key stays null, which is what lets
+    // the fallback chain supply it instead.
+    //
+    // The presence of the key is tested separately from the parse of its value, and here that is
+    // load-bearing rather than pedantic: null routes the property to the fallback asset, while a
+    // present-but-unparseable key is a value of ZERO in the original (ParseFloat's own default) and
+    // stops the walk. A zero acceleration multiplier is a surface a character cannot accelerate on;
+    // collapsing it to null would quietly hand the walk to Gravel instead.
+    private static float? Optional(DatDictionary data, string key)
+    {
+        if (!data.ContainsKey(key))
+            return null;
+        return data.TryGetSingle(key, out float value) ? value : 0f;
+    }
 
+    // Same split for the flags. GetBool's own default is false, which is what ParseBool yields for a
+    // key that is present and does not parse, so the two agree once the absent case is handled here.
     private static bool? OptionalBool(DatDictionary data, string key) =>
         data.ContainsKey(key) ? data.GetBool(key) : null;
 }

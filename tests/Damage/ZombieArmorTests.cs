@@ -44,6 +44,24 @@ public class ClothingArmorDatabaseTests
     public void ExplosionArmorIsReadWhenNamed() =>
         Assert.Equal(0.4f, Parse(Dat("Vest", 1013, "Armor 0.9\nArmor_Explosion 0.4\n")).ExplosionArmor);
 
+    // Present-but-unparseable is not the same as absent: PopulateAsset gates on ContainsKey and then
+    // calls ParseFloat, whose own default is 0. An armor of 0 is total immunity and an armor of 1 is
+    // bare, so treating a failed parse as "absent" would invert the item.
+    [Fact]
+    public void ArmorPresentButUnparseable_IsZeroNotOne() =>
+        Assert.Equal(0f, Parse(Dat("Shirt", 1015, "Armor\n")).Armor);
+
+    [Fact]
+    public void ExplosionArmorPresentButUnparseable_IsZeroNotTheArmor() =>
+        Assert.Equal(0f, Parse(Dat("Vest", 1016, "Armor 0.9\nArmor_Explosion\n")).ExplosionArmor);
+
+    // NumberStyles.Any, so an armor written with a leading + or as an integer still reads.
+    [Theory]
+    [InlineData("Armor +0.9\n", 0.9f)]
+    [InlineData("Armor 1\n", 1f)]
+    public void ArmorParsesTheWidthDatValueExAccepts(string extra, float expected) =>
+        Assert.Equal(expected, Parse(Dat("Shirt", 1017, extra)).Armor);
+
     // "if (isPro) { _armor = 1f; _explosionArmor = 1f; }" — and isPro is the bare presence of a Pro key.
     [Fact]
     public void ProItem_ForcesArmorToOne()

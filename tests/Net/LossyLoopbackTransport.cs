@@ -211,16 +211,6 @@ public sealed class LossyLoopbackServerTransport : IServerTransport
     private readonly List<LossyLoopbackConnection> _connections = new();
     private int _nextConnectionId = 1;
 
-    // The same shape LoopbackServerTransport has: one roll-up here, a child meter per connection that
-    // reports through it. Present because IServerTransport requires it — this harness is about loss,
-    // not about bandwidth, so nothing asserts on the numbers, but they have to be real rather than
-    // null or the transport under test is not the transport that ships.
-    public NetTraffic Traffic { get; } = new();
-
-    // The connectionless fast path (ServerInfoRequest). NetServer sets it; this harness has no
-    // unconnected peers to answer, so it is stored and never consulted.
-    public Func<byte[], byte[]?>? AnswerConnectionless { get; set; }
-
     public LossyLoopbackServerTransport(LossPolicy policy) => _policy = policy;
 
     public LossPolicy Policy => _policy;
@@ -374,8 +364,6 @@ public sealed class LossyLoopbackConnection : ITransportConnection
 public sealed class LossyLoopbackClientTransport : IClientTransport
 {
     private readonly LossyLoopbackConnection _connection;
-
-    public NetTraffic Traffic { get; } = new();
 
     internal LossyLoopbackClientTransport(LossyLoopbackConnection connection, LossPolicy policy) =>
         _connection = connection;

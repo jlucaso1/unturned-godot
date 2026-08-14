@@ -97,16 +97,25 @@ public sealed class ZombieDifficultyAsset
 
         asset = new ZombieDifficultyAsset(
             guid,
-            // Both of these default to TRUE when the key is absent, and PopulateAsset says why for the
-            // first: "Previously difficulty assets were only used to override spawn chance, so we
-            // default to overriding if this is an older asset." Both of PEI's omit it and so override.
-            data.GetBool("Overrides_Spawn_Chance", true),
+            DefaultsToTrue(data, "Overrides_Spawn_Chance"),
             chances,
             Threshold(data, "Mega_Stun_Threshold"),
             Threshold(data, "Normal_Stun_Threshold"),
-            data.GetBool("Allow_Horde_Beacon", true));
+            DefaultsToTrue(data, "Allow_Horde_Beacon"));
         return true;
     }
+
+    // Both flags follow PopulateAsset's `ContainsKey ? ParseBool : true` shape, and PopulateAsset says
+    // why for the first: "Previously difficulty assets were only used to override spawn chance, so we
+    // default to overriding if this is an older asset." Both of PEI's omit them and so take true.
+    //
+    // Not `GetBool(key, true)`. Those two are not the same function once the key is PRESENT but does
+    // not parse — a bare `Overrides_Spawn_Chance` with no value, which DatValue holds as null.
+    // GetBool would hand back the caller's default (true); the game calls ParseBool with no default
+    // there and gets false. The key's presence is therefore tested separately from its value, which is
+    // exactly the split the original writes out.
+    private static bool DefaultsToTrue(DatDictionary data, string key) =>
+        !data.ContainsKey(key) || data.GetBool(key);
 
     private static float Chance(DatDictionary data, string key) =>
         data.TryGetSingle(key, out float value) ? value : 0f;
