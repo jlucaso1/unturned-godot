@@ -359,32 +359,33 @@ public static class GpuBenchmark
             : $"{path}-{pose}";
     }
 
-    private static float EnvFloat(string name, float fallback) =>
-        float.TryParse(System.Environment.GetEnvironmentVariable(name), System.Globalization.NumberStyles.Float,
-            System.Globalization.CultureInfo.InvariantCulture, out float v) ? v : fallback;
-
-    private static int EnvInt(string name, int fallback) =>
-        int.TryParse(System.Environment.GetEnvironmentVariable(name), out int v) ? v : fallback;
-
     private static void AddEnvironment(Node context)
     {
-        // Shadow knobs are env-tunable for the #6 sweep: UG_SHADOW (0/1), UG_SHADOW_DIST (max distance,
-        // metres), UG_SHADOW_MODE (0=Orthogonal, 2=2 splits, 4=4 splits). Unset = Godot defaults.
+        // Shadow knobs are env-tunable for the #6 sweep: UG_SHADOW (on/off), UG_SHADOW_DIST (max distance,
+        // metres, -1 for the default), UG_SHADOW_MODE (0=Orthogonal, 2=2 splits, 4=4 splits). Unset =
+        // Godot defaults.
+        //
+        // Bounded, unlike the copy this used to keep. A sweep is a measurement, and an unbounded knob
+        // reads a mistyped UG_SHADOW_DIST=100000 as a legitimate setting: the run finishes, reports a
+        // frame time, and is silently measuring something nobody asked for.
         var sun = new DirectionalLight3D
         {
             Name = "BenchSun",
             RotationDegrees = new Vector3(-50, -30, 0),
-            ShadowEnabled = EnvInt("UG_SHADOW", 1) != 0,
+            ShadowEnabled = EnvOption.IsOn(System.Environment.GetEnvironmentVariable("UG_SHADOW"),
+                whenUnset: true),
             // Match DayNightController so Tier 2 measures the shipping shadow workload by default.
             DirectionalShadowMaxDistance = 64f,
             DirectionalShadowSplit1 = 0.25f,
             DirectionalShadowBlendSplits = true,
         };
-        float dist = EnvFloat("UG_SHADOW_DIST", -1f);
+        float dist = EnvOption.Number(System.Environment.GetEnvironmentVariable("UG_SHADOW_DIST"),
+            whenUnset: -1f, min: -1f, max: 8192f);
         if (dist > 0f)
             sun.DirectionalShadowMaxDistance = dist;
         // Default matches the game (2 splits, #6); UG_SHADOW_MODE overrides it for sweeps.
-        sun.DirectionalShadowMode = EnvInt("UG_SHADOW_MODE", 2) switch
+        sun.DirectionalShadowMode = EnvOption.Whole(
+            System.Environment.GetEnvironmentVariable("UG_SHADOW_MODE"), whenUnset: 2, min: 0, max: 4) switch
         {
             0 => DirectionalLight3D.ShadowMode.Orthogonal,
             4 => DirectionalLight3D.ShadowMode.Parallel4Splits,

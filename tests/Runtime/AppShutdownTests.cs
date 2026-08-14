@@ -9,15 +9,19 @@ namespace UnturnedGodot.RuntimeTests;
 
 // Leaving.
 //
-// The quit itself is deliberately NOT exercised here, and the reason is worth stating rather than
-// leaving as a hole in the file. RequestQuit cancels one process-wide token and then tears the tree
-// down — so a test that called it would end the run, and every test after it would be reported as
-// neither passed nor failed. Worse, the cancellation is irreversible: the reconciliation pass, the bundle
-// decoders and the extraction workers all check IsShuttingDown at their loop boundaries, so a single call
-// would quietly turn the rest of the suite into no-ops that still report success.
+// The quit itself is still NOT exercised here: RequestQuit and QuitNow both end the process, so a test
+// that called one would end the run and every test after it would be reported as neither passed nor
+// failed. That part is unchanged.
 //
-// What is covered is everything around it: the tracking a quit waits on, and the guards that keep a
-// worker from talking to an engine that is already gone.
+// What HAS changed is the flag they raise on the way. It used to be irreversible — one process-wide
+// CancellationTokenSource, created once — so the first test to raise it left IsShuttingDown true for
+// every test after it. The reconciliation pass, the bundle decoders, the extraction workers and both
+// guarded log channels all read that flag at their loop boundaries, so the rest of the suite would have
+// quietly become no-ops that still reported success. Nothing could exercise "quit, then carry on".
+//
+// SignalForTests raises the flag without leaving and ResetForTests puts it back, which is what makes the
+// guards observable at all. Every test here that raises it MUST reset it, and the fixture below is why
+// they do so in a finally.
 public class AppShutdownTests : TestClass
 {
     public AppShutdownTests(Node testScene) : base(testScene) { }
@@ -99,5 +103,66 @@ public class AppShutdownTests : TestClass
         AppShutdown.EndBenchmark();
 
         Assert.False(AppShutdown.IsShuttingDown);
+    }
+
+    // The guards, from the other side. This is what a worker sees once teardown has started, and until
+    // the flag could be put back it was unreachable from a test at all.
+    [Test]
+    public void OnceTeardownStartsTheGuardedChannelsFallSilent()
+    {
+        const string line = "[runtime-tests] a line from a worker that is on its way out";
+        try
+        {
+            AppShutdown.SignalForTests();
+
+            Assert.True(AppShutdown.IsShuttingDown);
+            Assert.True(AppShutdown.Token.IsCancellationRequested);
+
+            AppShutdown.PrintUnlessQuitting(line);
+            AppShutdown.WarnUnlessQuitting(line);
+        }
+        finally
+        {
+            AppShutdown.ResetForTests();
+        }
+
+        // Log keeps a ring of what it has printed, which is the only way to see that a line did NOT go
+        // out. A guard that let it through would reach a subsystem teardown has already taken away.
+        Assert.DoesNotContain(Log.Tail(), printed => printed.Contains(line, System.StringComparison.Ordinal));
+    }
+
+    // ...and then the process carries on. This is the property the whole reset exists for: without it,
+    // every test after the one above would be running against a shutting-down engine and passing anyway.
+    [Test]
+    public void TheFlagCanBePutBack()
+    {
+        AppShutdown.SignalForTests();
+        Assert.True(AppShutdown.IsShuttingDown);
+
+        AppShutdown.ResetForTests();
+
+        Assert.False(AppShutdown.IsShuttingDown);
+        Assert.False(AppShutdown.Token.IsCancellationRequested);
+
+        // And the guards speak again, which is what the rest of the suite depends on.
+        const string line = "[runtime-tests] a line from a worker that is running again";
+        AppShutdown.PrintUnlessQuitting(line);
+        Assert.Contains(Log.Tail(), printed => printed.Contains(line, System.StringComparison.Ordinal));
+    }
+
+    // Resetting drops the tracked work as well as the flag. A test that left a wedged task registered
+    // would have every later quit path in the process wait its full grace period for it.
+    [Test]
+    public async Task ResettingAlsoDropsTheTrackedWork()
+    {
+        using var running = new CancellationTokenSource();
+        _ = AppShutdown.Track(Task.Delay(Timeout.Infinite, running.Token));
+        Assert.Equal(1, AppShutdown.StillRunning());
+
+        AppShutdown.ResetForTests();
+
+        Assert.Equal(0, AppShutdown.StillRunning());
+        running.Cancel();
+        await Task.CompletedTask;
     }
 }

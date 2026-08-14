@@ -51,6 +51,15 @@ public static class ProcessMemory
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
+        return WorkingSetBytes();
+    }
+
+    // The portable fallback: what the process itself reports, for a platform with no /proc and for a
+    // status file this could not read. Its own method so a test can reach it — on Linux the read above
+    // always succeeds, so nothing else ever runs this, and an untested fallback is one that is broken
+    // exactly when it is finally needed.
+    internal static long WorkingSetBytes()
+    {
         try
         {
             using System.Diagnostics.Process process = System.Diagnostics.Process.GetCurrentProcess();

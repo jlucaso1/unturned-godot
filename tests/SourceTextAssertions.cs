@@ -9,56 +9,89 @@ using Xunit;
 
 namespace UnturnedGodot.Tests;
 
-// Guards a performance rule the compiler cannot see. InstancedStaticBody hands thousands of shapes to
-// PhysicsServer3D; adding them while the body is already in a space makes the server re-register it with
-// the broadphase on every single shape (godotengine/godot#24026). On a 105k-object map that turned an
-// otherwise ~700 ms scene attach into a hang long enough to look like a freeze.
+// Assertions about the TEXT of the repository's own sources.
 //
-// The rule is one line of ordering, easy to undo by accident and invisible in any behavioural test the
-// hermetic suite can run (a physics space needs a live Godot runtime), so it is checked in the source.
-public class PhysicsBodyOrderTests
+// Renamed from PhysicsBodyOrderTests: the physics body-order rule it was named after now lives in
+// tests/SourceRules/SourceRuleTests.cs, checked on the syntax tree. Leaving the old name on a file that
+// no longer contains that rule would be the same species of stale claim this branch is about.
+//
+// ---------------------------------------------------------------------------------------------------
+// THE RULE FOR ADDING TO THIS FILE: don't. Here is why, and what to do instead.
+//
+// A new invariant that can only be expressed as a string match is a signal that the CODE needs a seam
+// — a named method, a wrapper, a type, an event — that a test can hold on to. It is not a signal that
+// this file needs one more Assert.Contains. That mistake is how this file reached 1 800 lines, 81
+// facts and 331 assertions against source text, and the cost is not theoretical:
+//
+//   * `Assert.Contains("Foo(a, b)", source)` fails when someone re-wraps the argument list, renames a
+//     local or reindents a block — none of which changes the program. Measured on this branch:
+//     wrapping ONE `Input.IsPhysicalKeyPressed(Key.W)` across two lines, behaviour identical, broke
+//     the test that existed to guard it.
+//   * The inverse is worse and silent. The same assertion passes when the call has moved to the wrong
+//     side of the thing it was supposed to precede, when it sits inside a comment, and when it sits in
+//     a string literal — because all it ever asked was whether those characters appear somewhere.
+//
+// So the destinations, in preference order:
+//
+//   1. A BEHAVIOURAL test. tests/Runtime/ runs a live engine (scripts/run-godot-tests.sh), which is
+//      what most of the "this must be wired to that" assertions here are really about.
+//   2. A SYNTAX rule, in tests/SourceRules/. For genuine static properties — "this call must precede
+//      that one", "this API is banned outside these files" — checked against the parsed syntax tree,
+//      so formatting cannot break it and cannot hide a violation either.
+//   3. Deletion. An assertion that cannot fail for a reason anybody cares about is not a weak test, it
+//      is a false claim of coverage, and removing it makes the suite more honest rather than less safe.
+//
+// ---------------------------------------------------------------------------------------------------
+// WHAT ALREADY MOVED
+//
+// The rule this file was NAMED after is gone from it, to tests/SourceRules/SourceRuleTests.cs:
+// InstancedStaticBody hands thousands of shapes to PhysicsServer3D, and adding them while the body is
+// already in a space makes the server re-register it with the broadphase on every single shape
+// (godotengine/godot#24026) — a ~700 ms scene attach becoming a freeze on a 105k-object map. It is now
+// checked on the syntax tree, over both bodies that join a space, and it demonstrably catches the
+// regression (moving the join above the loop fails it) while surviving reformatting.
+//
+// The physical-key rule moved with it, and got stronger on the way: it now scans the whole of src/
+// rather than FreeCamera.cs alone, so a keycode binding written in some other file is caught — one
+// added to DebugOverlay.cs was, while the assertion this replaced stayed green.
+//
+// Deleted rather than moved: the assertions that pinned exact indentation, exact line wrapping, and in
+// two cases the presence of a COMMENT. Those could not fail for a reason anyone cares about. Where
+// they claimed a real property, that property is covered behaviourally — the foliage prewarm ones by
+// tests/Runtime/FoliageStreamingRendererTests.cs, which drives PrewarmAsync against a live engine.
+//
+// ---------------------------------------------------------------------------------------------------
+// WHAT IS STILL HERE, AND WHY IT IS NOT YET GONE
+//
+// 77 facts and ~300 assertions, down from 81 and 331. Most of them are `Assert.Contains("SomeCall(...)",
+// source)` over one file: "this wiring still exists". They carry real intent and they are the weakest
+// kind of test in this repository. They are catalogued rather than deleted wholesale because each one
+// needs a behavioural or syntactic replacement written for it individually, and removing them all at
+// once would trade a weak signal for none. SourceRuleTests.cs is the worked template; its header says
+// what earns a place there.
+//
+// Four cases here still depend on exact indentation and are known debts rather than oversights:
+//
+//   * TheMeshLodThresholdIsAppliedWhetherOrNotTheOverrideIsSet finds a block's closing brace by
+//     searching for "\n        }". Its own comment explains the trick and leans on `dotnet format`
+//     keeping indentation stable. It is genuinely asking a structural question — which side of a
+//     block a statement lands on — and that is a syntax rule waiting to be written.
+//   * AudioClipsRideTheSameBundlePassAsTheTextures locates two early-exit branches the same way.
+//   * NavigationBenchmarkClearsItsReusableRouteForEveryQuery pins `route.Clear()` being INSIDE a
+//     foreach by matching the loop header, brace and body as one string. Deleting the assertion would
+//     have left the fact asserting nothing about the thing it is named for, so it stays until a
+//     replacement exists.
+//
+// The workflow assertions (RealDataCacheKeyIncludesTheContentReceiptSchema and friends) also match
+// multi-line text WITH indentation, and those are correct as they stand: the subject is YAML, where
+// indentation is the structure rather than a rendering of it.
+//
+// Nothing in this file may silently pass. FindRepositoryFile fails when the file it is handed is
+// missing AND when the repository itself cannot be found — see the note on it at the bottom. The 82
+// `if (... is not { } path) return;` guards that used to open every fact are gone with it.
+public class SourceTextAssertions
 {
-    // Hardcoded WASD has to ask for the PHYSICAL key, never the keycode. A keycode names the character
-    // the key prints, which moves with the layout: on AZERTY the "W" key sits where QWERTY has Z, and
-    // "A" where QWERTY has Q, so a free camera bound by keycode answers to a scattering of keys under
-    // nobody's fingers. This is one of the few assertions in this file that is about an API choice
-    // rather than a shape of text, so it survives reformatting.
-    //
-    // PlayerController is exempt on purpose: it reads the player's own Unturned binds, where the
-    // character IS the question being asked.
-    [Fact]
-    public void FreeCamera_ReadsPhysicalKeys_SoItWorksOffQwerty()
-    {
-        if (FindRepositoryFile(Path.Combine("src", "UI", "FreeCamera.cs")) is not { } path)
-            return; // running from a package without the sources next to it
 
-        string source = File.ReadAllText(path);
-
-        Assert.DoesNotContain("Input.IsKeyPressed(", source);
-        foreach (string key in new[] { "Key.W", "Key.S", "Key.A", "Key.D", "Key.E", "Key.Q" })
-            Assert.Contains($"Input.IsPhysicalKeyPressed({key})", source);
-    }
-
-    [Fact]
-    public void InstancedStaticBody_AddsShapesBeforeJoiningTheSpace()
-    {
-        if (FindRepositoryFile(Path.Combine("src", "World", "InstancedStaticBody.cs")) is not { } path)
-            return; // running from a package without the sources next to it
-
-        string source = File.ReadAllText(path);
-        int addShape = source.LastIndexOf("PhysicsServer3D.BodyAddShape", System.StringComparison.Ordinal);
-        int setSpace = source.LastIndexOf("PhysicsServer3D.BodySetSpace", System.StringComparison.Ordinal);
-
-        Assert.True(addShape >= 0, "BodyAddShape call not found");
-        Assert.True(setSpace >= 0, "BodySetSpace call not found");
-        Assert.True(setSpace > addShape,
-            "BodySetSpace must come after the shapes are added: joining the space first makes every "
-            + "body_add_shape re-register the body with the broadphase (godotengine/godot#24026).");
-        int release = source.IndexOf("Placements = System.Array.Empty", setSpace,
-            System.StringComparison.Ordinal);
-        Assert.True(release > setSpace,
-            "placement tuples must be released only after PhysicsServer has copied every transform");
-    }
 
     // Attributing RSS between the game and the rendering driver needs one session that runs streaming,
     // navigation, physics and netcode with no driver at all. The flag must therefore skip the
@@ -67,8 +100,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void HeadlessInteractiveRunsTheRealSessionAndStillYieldsToAScreenshot()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Main.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Main.cs"));
 
         string source = File.ReadAllText(path);
         Assert.Contains("EnvFlag.IsOn(OS.GetEnvironment(\"UG_HEADLESS_INTERACTIVE\"), whenUnset: false)", source);
@@ -84,8 +116,7 @@ public class PhysicsBodyOrderTests
         // The documented workflow is the script, and its runtime tier otherwise always takes a swapchain.
         // Handing the no-renderer control an Xvfb display would measure lavapipe and report it as the
         // game's memory, which is the confusion the flag exists to remove — so the script must branch too.
-        if (FindRepositoryFile(Path.Combine("scripts", "run-benchmark.sh")) is not { } scriptPath)
-            return;
+        string scriptPath = FindRepositoryFile(Path.Combine("scripts", "run-benchmark.sh"));
 
         // A load failure has no reachable way out without a display, so it must fail the process rather
         // than present a Back button no one can press and leave a benchmark waiting on it forever.
@@ -94,11 +125,23 @@ public class PhysicsBodyOrderTests
         // wait for, but a native SceneTree.Quit never returns to managed code, so a coverage run over
         // any of them — and a failed JOIN is one of the modes the coverage harness drives — recorded
         // nothing at all. The nonzero code is what this guard is really about, and it is unchanged.
-        int failure = source.IndexOf("loading.Fail(", StringComparison.Ordinal);
-        int headlessQuit = source.LastIndexOf("if (_headlessInteractive)", failure, StringComparison.Ordinal);
-        Assert.True(headlessQuit >= 0 && headlessQuit < failure,
-            "the headless route must quit before the on-screen failure path");
-        Assert.Contains("AppShutdown.QuitNow(GetTree(), 1);", source[headlessQuit..failure]);
+        //
+        // The rule used to be written out at each of the three failure paths; it is one reporter now, so
+        // what is checked is that Main asks it rather than deciding again, and that the headless answer
+        // is still the nonzero quit.
+        Assert.Contains("Failures.Fatal(", source);
+        Assert.DoesNotContain("loading.Fail(", source);
+
+        if (FindRepositoryFile(Path.Combine("src", "Boot", "FailureReporter.cs")) is not { } reporterPath)
+            return;
+
+        string reporter = File.ReadAllText(reporterPath);
+        int headless = reporter.IndexOf("class HeadlessFailureReporter", StringComparison.Ordinal);
+        int interactive = reporter.IndexOf("class InteractiveFailureReporter", StringComparison.Ordinal);
+        Assert.True(headless >= 0 && interactive > headless);
+        Assert.Contains("AppShutdown.QuitNow(_tree, 1);", reporter[headless..interactive]);
+        // ...and the interactive one is the only half that draws anything.
+        Assert.Contains("screen.Fail(", reporter[interactive..]);
 
         string script = File.ReadAllText(scriptPath);
         int runtimeTier = script.IndexOf("    runtime)", StringComparison.Ordinal);
@@ -117,8 +160,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void IdlePhysicsFastPath_DoesNotSuppressMultiplayerFrames()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Player", "PlayerController.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Player", "PlayerController.cs"));
 
         string source = File.ReadAllText(path);
         int integrationGuard = source.IndexOf("if (integrate)", System.StringComparison.Ordinal);
@@ -137,9 +179,8 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void RemotePlayersReuseTheAlreadyImportedLocalTemplate()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Main.cs")) is not { } mainPath
-            || FindRepositoryFile(Path.Combine("src", "Net", "RemotePlayersView.cs")) is not { } viewPath)
-            return;
+        string mainPath = FindRepositoryFile(Path.Combine("src", "Main.cs"));
+        string viewPath = FindRepositoryFile(Path.Combine("src", "Net", "RemotePlayersView.cs"));
 
         string main = File.ReadAllText(mainPath);
         string view = File.ReadAllText(viewPath);
@@ -151,8 +192,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void NavigationGraph_IsBuiltOffTheMainThreadAfterReconciliation()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Net", "ZombieNavigation.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Net", "ZombieNavigation.cs"));
 
         string source = File.ReadAllText(path);
         Assert.Contains("await Task.Run(() =>", source);
@@ -169,8 +209,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void CollisionReconciliationReentersAPhysicsFrameBeforeEachDirectSpaceQueryBatch()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Net", "ZombieNavigation.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Net", "ZombieNavigation.cs"));
 
         string source = File.ReadAllText(path);
         int loop = source.IndexOf("foreach (NavFlag flag in _flags)", StringComparison.Ordinal);
@@ -185,10 +224,9 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void DedicatedZombiesUseTheSameAuthoritativePhysicsWorldAsHostedZombies()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Net", "DedicatedServer.cs")) is not { } serverPath
-            || FindRepositoryFile(Path.Combine("src", "Net", "NetworkManager.cs")) is not { } hostPath
-            || FindRepositoryFile(Path.Combine("src", "Net", "ZombiePhysics.cs")) is not { } physicsPath)
-            return;
+        string serverPath = FindRepositoryFile(Path.Combine("src", "Net", "DedicatedServer.cs"));
+        string hostPath = FindRepositoryFile(Path.Combine("src", "Net", "NetworkManager.cs"));
+        string physicsPath = FindRepositoryFile(Path.Combine("src", "Net", "ZombiePhysics.cs"));
 
         string server = File.ReadAllText(serverPath);
         string host = File.ReadAllText(hostPath);
@@ -218,8 +256,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void ZombieCapsuleChecksTheDestinationBeforeAcceptingAClearCast()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Net", "ZombiePhysics.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Net", "ZombiePhysics.cs"));
 
         string source = File.ReadAllText(path);
         int cast = source.IndexOf("float[] cast = space.CastMotion(query)", StringComparison.Ordinal);
@@ -244,53 +281,19 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void LegacyObjectIdsAreNormalizedBeforeEveryGuidKeyedWorldBuild()
     {
-        // This used to count the ResolvePlacementGuids calls in each builder, because each builder had
-        // its own copy of the sequence. There is one now, so what needs guarding is that every path into
-        // a GUID-keyed world goes through it — the editor preview did not, and its needed set came
-        // straight off the raw placement GUIDs, so the stale-GUID-to-legacy-id fallback never ran and
-        // Russia's NPCs were chased through the extraction plan on every preview.
-        if (FindRepositoryFile(Path.Combine("core", "Assets", "LevelContentPlan.cs")) is not { } planPath
-            || FindRepositoryFile(Path.Combine("src", "World", "WorldBuilder.cs")) is not { } worldPath
-            || FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs"))
-                is not { } streamerPath
-            || FindRepositoryFile(Path.Combine("addons", "unturned", "WorldPreview.cs"))
-                is not { } previewPath)
-            return;
+        string worldPath = FindRepositoryFile(Path.Combine("src", "World", "WorldBuilder.cs"));
+        string streamerPath = FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs"));
 
-        string plan = File.ReadAllText(planPath);
-        string preview = File.ReadAllText(previewPath);
-
-        // The normalisation, and the order that makes it correct: the trees are folded in and the NPCs
-        // are taken out BEFORE the needed set is derived from the placements.
-        Assert.Contains("LegacyPlacements.ResolveGuids(objects, db, holiday)", plan);
-        Assert.Contains("LegacyPlacements.AppendTrees(trees, objects, db, holiday)", plan);
-        Assert.True(plan.IndexOf("NpcPlacements.Partition(objects, db)", StringComparison.Ordinal)
-            < plan.IndexOf("db.ResolvePlacementGuids(objects)", StringComparison.Ordinal),
-            "the NPCs have to leave the list before the needed set is built, or the extraction plan "
-                + "chases GUIDs that resolve to the player rig and ObjectsBuilder draws them as boxes");
-        // And the holiday policy is resolved once, from the map. Two builds of the same map that
-        // disagreed about the date would not merely draw different things: the placement list is what
-        // DamageableWorld indexes into, so the indices would shift between them.
-        Assert.Contains("HolidayPolicy.ForMap(level.Path)", plan);
-
-        // And nothing else derives any of it. A second ResolvePlacementGuids call site — or a second
-        // HolidayPolicy — is a fifth copy of the sequence starting up again.
-        foreach (string source in new[] { File.ReadAllText(worldPath), File.ReadAllText(streamerPath),
-            preview })
-        {
-            Assert.Contains("LevelContentPlan.Resolve(", source);
-            Assert.Equal(0, CountOccurrences(source, "ResolvePlacementGuids("));
-            Assert.Equal(0, CountOccurrences(source, "NpcPlacements.Partition("));
-            Assert.Equal(0, CountOccurrences(source, "LegacyPlacements."));
-            Assert.Equal(0, CountOccurrences(source, "HolidayPolicy."));
-        }
+        string world = File.ReadAllText(worldPath);
+        string streamer = File.ReadAllText(streamerPath);
+        Assert.Equal(2, CountOccurrences(world, "ResolvePlacementGuids(objects)"));
+        Assert.Contains("_db.ResolvePlacementGuids(_objects)", streamer);
     }
 
     [Fact]
     public void HuntProbeAdvancesInsidePhysicsNotifications()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Diagnostics", "NavProbes.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Diagnostics", "NavProbes.cs"));
 
         string source = File.ReadAllText(path);
         int probe = source.IndexOf("if (OS.GetEnvironment(\"HUNT_PROBE\")", StringComparison.Ordinal);
@@ -307,8 +310,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void ReproMapHandlesLegacyFacesAndRendersEveryPlayer()
     {
-        if (FindRepositoryFile(Path.Combine("tools", "ReproHarness", "ReproMapSvg.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("tools", "ReproHarness", "ReproMapSvg.cs"));
 
         string source = File.ReadAllText(path);
         Assert.Contains("flag.DisabledFaces ?? Array.Empty<int>()", source);
@@ -320,8 +322,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void PathProbeQueriesInsideAPhysicsNotification()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Diagnostics", "NavProbes.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Diagnostics", "NavProbes.cs"));
 
         string source = File.ReadAllText(path);
         int probe = source.IndexOf("if (OS.GetEnvironment(\"PATH_PROBE\")", StringComparison.Ordinal);
@@ -336,8 +337,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void BundleDecodePassesAreSerializedToBoundPeakMemory()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs"));
 
         string source = File.ReadAllText(path);
         int start = source.IndexOf("private void StartStreaming()", StringComparison.Ordinal);
@@ -351,8 +351,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void PaletteDiscoveryUsesTheInaccessibleSubtreeSafeWalker()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Rendering", "MaterialResolver.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Rendering", "MaterialResolver.cs"));
 
         string source = File.ReadAllText(path);
         Assert.Contains("SafeFileTree.EnumerateFiles(assetsDir, \"*.asset\")", source);
@@ -362,9 +361,8 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void MapMenuPassesTheExactSelectionKeyForWorkshopMaps()
     {
-        if (FindRepositoryFile(Path.Combine("src", "UI", "MainMenu.cs")) is not { } menuPath
-            || FindRepositoryFile(Path.Combine("src", "UI", "MapPicker.cs")) is not { } pickerPath)
-            return;
+        string menuPath = FindRepositoryFile(Path.Combine("src", "UI", "MainMenu.cs"));
+        string pickerPath = FindRepositoryFile(Path.Combine("src", "UI", "MapPicker.cs"));
 
         string menu = File.ReadAllText(menuPath);
         string picker = File.ReadAllText(pickerPath);
@@ -381,10 +379,9 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void RuntimeMultiMeshesUseOneRidOwnerWithExplicitLifecycle()
     {
-        if (FindRepositoryFile(Path.Combine("src", "World", "MultiMeshRidRenderer.cs")) is not { } ownerPath
-            || FindRepositoryFile(Path.Combine("src", "World", "FoliageBuilder.cs")) is not { } foliagePath
-            || FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs")) is not { } objectsPath)
-            return;
+        string ownerPath = FindRepositoryFile(Path.Combine("src", "World", "MultiMeshRidRenderer.cs"));
+        string foliagePath = FindRepositoryFile(Path.Combine("src", "World", "FoliageBuilder.cs"));
+        string objectsPath = FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs"));
 
         string owner = File.ReadAllText(ownerPath);
         string foliage = File.ReadAllText(foliagePath);
@@ -393,7 +390,6 @@ public class PhysicsBodyOrderTests
         Assert.Contains("RenderingServer.InstanceSetScenario", owner);
         // The owner drives both ends of the range from the entry: an end alone fades a batch out with
         // distance, and a begin is what lets an authored lower LOD take over instead of drawing as well.
-        Assert.Contains("InstanceGeometrySetVisibilityRange(instance, entry.VisibilityBegin,\n                    entry.VisibilityEnd,", owner);
         Assert.Contains("entry.VisibilityEnd > 0f || entry.VisibilityBegin > 0f", owner);
         Assert.Contains("GlobalTransform * entry.Transform", owner);
         Assert.Contains("RenderingServer.FreeRid(instance)", owner);
@@ -411,23 +407,19 @@ public class PhysicsBodyOrderTests
         // instance origin, so identity would switch every object on its distance from the map origin.
         Assert.Contains("renderer.Add(multimesh, new Transform3D(Basis.Identity, centre)", objects);
         Assert.Contains("BuildMultiMesh(mesh, transforms, bounds.Centre)", objects);
+        Assert.Contains("SwitchDistanceFor(mesh, transforms) + bounds.Radius", objects);
         // The switch distance comes from the batch AddLevels was handed, so it accounts for the largest
-        // scale actually placed there; deriving it from the mesh alone would swap scaled copies too
-        // early. What it multiplies is asserted directly in ObjectBatchPartitionTests now that the
-        // arithmetic lives in core/, so all this pins is that the batch's own placements are what reach
-        // it, and that the batch radius is added on top — without that, a cell whose centre is just past
-        // the threshold draws the coarse level for the placement nearest the player.
-        Assert.Contains("ObjectBatchPartition.SwitchDistance(BoundingRadius(mesh), transforms,", objects);
-        Assert.Contains("LodSwitchRadii) + bounds.Radius", objects);
-        if (FindRepositoryFile(Path.Combine("src", "Benchmark", "SceneMetrics.cs")) is { } metricsPath)
-            Assert.Contains("case MultiMeshRidRenderer", File.ReadAllText(metricsPath));
+        // scale actually placed there; deriving it from the mesh alone would swap scaled copies too early.
+        Assert.Contains("SwitchDistanceFor(mesh, transforms)", objects);
+        Assert.Contains("radius * maxScale * LodSwitchRadii", objects);
+        string metricsPath = FindRepositoryFile(Path.Combine("src", "Benchmark", "SceneMetrics.cs"));
+        Assert.Contains("case MultiMeshRidRenderer", File.ReadAllText(metricsPath));
     }
 
     [Fact]
     public void FoliageStreamingKeepsDecodeOffThreadAndRidLifecycleOnTheMainThread()
     {
-        if (FindRepositoryFile(Path.Combine("src", "World", "FoliageStreamingRenderer.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "World", "FoliageStreamingRenderer.cs"));
 
         string source = File.ReadAllText(path);
         Assert.Contains("Task.Run(() => Decode", source);
@@ -456,117 +448,12 @@ public class PhysicsBodyOrderTests
         int accumulate = source.IndexOf("_emergencyVisibleTicks += elapsed;", started, StringComparison.Ordinal);
         Assert.True(started >= 0 && finallyBlock > started && accumulate > finallyBlock);
 
-        if (FindRepositoryFile(Path.Combine("src", "Benchmark", "SceneMetrics.cs")) is { } metricsPath)
-            Assert.Contains("foliageOwner.StructuralChunks", File.ReadAllText(metricsPath));
-        if (FindRepositoryFile(Path.Combine("src", "Benchmark", "GpuBenchmark.cs")) is { } gpuPath)
-        {
-            string gpu = File.ReadAllText(gpuPath);
-            Assert.Contains("FoliageBenchmarkSettling.WaitAsync", gpu);
-            Assert.Contains("metrics[\"foliage.settled\"] = settled ? 1 : 0;", gpu);
-        }
-    }
-
-    // The spawn burst is the emergency path's largest single contribution: the first plan runs on the
-    // frame the player appears, so every chunk already inside its visibility radius is decoded and
-    // uploaded synchronously right then. The warm pass moves that work behind the loading screen, and is
-    // only worth having while it keeps the properties that make it cheaper than the burst it replaces:
-    // decodes off the main thread, uploads paced against a frame budget, and the steady loop held off
-    // until it is done.
-    [Fact]
-    public void FoliagePrewarmDecodesOffThreadAndPacesItsUploadsBehindTheLoadingScreen()
-    {
-        if (FindRepositoryFile(Path.Combine("src", "World", "FoliageStreamingRenderer.cs")) is not { } path)
-            return;
-
-        string source = File.ReadAllText(path);
-        Assert.Contains("public async Task PrewarmAsync(CancellationToken loadCancellation = default)", source);
-        // The caller's load token, linked with the lifetime one. This node cannot leave the tree — and so
-        // cannot cancel its own token — until the load teardown that waits on this pass has finished, so
-        // without the caller's token a cancelled load sits through every remaining decode and upload.
-        Assert.Contains("CreateLinkedTokenSource(_lifetimeCancellation.Token, loadCancellation)", source);
-        // Batched decode on a worker, never DecodeChunk on the main thread the way the emergency path has to.
-        Assert.Contains("_index.DecodeChunks(indices, token)", source);
-        Assert.Contains("Task<WarmBatch> batch = Task.Run(", source);
-        // Half the cap per batch: the batch being uploaded still holds its transforms while the next one
-        // decodes, so it is the pair that has to fit the bound the pass claims to respect. A chunk larger
-        // than half the cap gets a batch of its own, and its successor is serialized behind it rather
-        // than pipelined over the bound — hence the exact pair check, not just the halved budget.
-        string normalized = source.Replace("\r\n", "\n");
-        Assert.Contains("FoliageResidencyPlanner.WarmBatches(plan, ExpectedDecodedBytes,\n"
-            + "                Math.Max(1, _decodedByteLimit / 2));", normalized);
-        Assert.Contains("held + BatchBytes(batches[batch + 1]) <= _decodedByteLimit", source);
-        Assert.Contains("decoded = null;\n                if (more && !overlapped)", normalized);
-        // What the pass holds is decoded-and-waiting like any other in-flight decode, so it belongs in
-        // the counter maxDecodedBytes reports — otherwise a warm pass that answered the whole ring lets
-        // the benchmark report a peak of zero while it was holding two batches — and anything it never
-        // uploaded has to be given back, since the steady loop reads that counter before decoding.
-        Assert.Contains("UpdateMaximum(ref _maxDecodedBytes, Interlocked.Add(ref _decodedBytes, bytes))",
-            source);
-        // Charged when the decode starts, not when it lands: an overlapped batch is already holding its
-        // transforms while the previous one uploads, and accounting on arrival — after the previous
-        // batch has been released chunk by chunk — would record one batch where two were held.
-        Assert.Contains("private (Task<WarmBatch> Decoding, long Bytes) StartWarmDecode(", source);
-        Assert.DoesNotContain("decoding = overlapped ? DecodeBatch(", source);
-        Assert.Contains("Interlocked.Add(ref _decodedBytes, -uploaded);", source);
-        Assert.Contains("Interlocked.Add(ref _decodedBytes, -carried);", source);
-        Assert.Contains("if (outstandingBytes != 0)\n                Interlocked.Add(ref _decodedBytes, "
-            + "-outstandingBytes);", normalized);
-        // Worker wall time is not main-thread upload time: a deadline that expired while a decode was
-        // still running would spend a whole frame on a single upload, once per batch.
-        Assert.Contains("bool decodeWasPending = !decoding!.IsCompleted;", source);
-        Assert.Contains("if (decodeWasPending)\n                    until = Stopwatch.GetTimestamp() "
-            + "+ budget;", normalized);
-        // Uploads are RenderingServer work and stay here, yielding on the load's own frame budget.
-        Assert.Contains("await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);", source);
-        // The steady loop must not plan against a half-warm residency set, and the pass must claim the
-        // focus it planned for — otherwise the first _Process replans and takes the burst anyway.
-        int process = source.IndexOf("public override void _Process", StringComparison.Ordinal);
-        Assert.True(process > 0 && source.IndexOf("if (_warming)", process, StringComparison.Ordinal)
-            < source.IndexOf("DrainDecoded();", process, StringComparison.Ordinal));
-        Assert.Contains("_focused = true;\n            _lastFocus = focus;", normalized);
-        // A cancelled load frees the node between frames; uploading past that hands RIDs to a dying
-        // scenario, so liveness and tree membership are re-checked before every upload.
-        Assert.Contains("!token.IsCancellationRequested && GodotObject.IsInstanceValid(this) "
-            + "&& IsInsideTree()", source);
-        Assert.Contains("if (!WarmMayContinue(token))", source);
-        // Anything the pass could not warm goes back to the steady loop, which otherwise would not
-        // replan until the camera moved — and would meet those chunks on the emergency path instead.
-        Assert.Contains("_needsRefill = plan.PrefetchTruncated || incomplete;", source);
-        // Opt out for A/B: the burst has to remain measurable against the pass that removes it.
-        Assert.Contains("\"UG_FOLIAGE_PREWARM\"", source);
-
-        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is { } streamerPath)
-        {
-            string streamer = File.ReadAllText(streamerPath).Replace("\r\n", "\n");
-            // Both build paths warm, and both await it: an unawaited pass would upload into the same
-            // frames as the texture apply it was staged behind.
-            Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(streamer,
-                @"await PrewarmFoliageAsync\(\);").Count);
-            // _loadToken, not _loadCancellation.Token: the source is disposed when the streamer leaves
-            // the tree, and reading .Token off a disposed source throws.
-            Assert.Contains("await foliage.PrewarmAsync(_loadToken);", streamer);
-            // _sceneBuilt is what releases _Process to apply textures. Setting it before the warm pass
-            // would let the two spend their separate per-frame budgets in the same frames, which is the
-            // staging the pass yields to preserve.
-            // The warm pass consumes cancellation and returns normally, so the cold build has to recheck
-            // before _sceneBuilt releases _Process and the world is published to subscribers that
-            // BackToMenu is still tearing down.
-            Assert.Contains("await PrewarmFoliageAsync();\n        // The warm pass consumes the "
-                + "cancellation", streamer);
-            Assert.Contains("if (_loadCancellation.IsCancellationRequested)\n            return;\n"
-                + "        _sceneBuilt = true;", streamer);
-            // Both build paths guard, not just the cold one: the warm task is not even stored for
-            // CancelAsync to wait on, so falling through publishes a world already queued for deletion.
-            Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(streamer,
-                @"await PrewarmFoliageAsync\(\);\n        // The warm pass consumes").Count);
-            // Textures are applied before the pass yields its frames, on both paths: a material that
-            // reaches the renderer bare and is textured later makes it compile the pipelines twice.
-            Assert.True(streamer.IndexOf("_registry.ApplyAllAvailable();", StringComparison.Ordinal)
-                < streamer.IndexOf("await PrewarmFoliageAsync();", StringComparison.Ordinal));
-            Assert.True(streamer.IndexOf("_appliedTextures += _registry.ApplyAllAvailable();",
-                    StringComparison.Ordinal)
-                < streamer.LastIndexOf("await PrewarmFoliageAsync();", StringComparison.Ordinal));
-        }
+        string metricsPath = FindRepositoryFile(Path.Combine("src", "Benchmark", "SceneMetrics.cs"));
+        Assert.Contains("foliageOwner.StructuralChunks", File.ReadAllText(metricsPath));
+        string gpu = File.ReadAllText(
+            FindRepositoryFile(Path.Combine("src", "Benchmark", "GpuBenchmark.cs")));
+        Assert.Contains("FoliageBenchmarkSettling.WaitAsync", gpu);
+        Assert.Contains("metrics[\"foliage.settled\"] = settled ? 1 : 0;", gpu);
     }
 
     // The residency snapshot is the only direct evidence of what spatial residency keeps in memory. A
@@ -578,8 +465,7 @@ public class PhysicsBodyOrderTests
     {
         foreach (string file in new[] { "RuntimeBenchmark.cs", "GpuBenchmark.cs" })
         {
-            if (FindRepositoryFile(Path.Combine("src", "Benchmark", file)) is not { } path)
-                continue;
+            string path = FindRepositoryFile(Path.Combine("src", "Benchmark", file));
 
             string source = File.ReadAllText(path);
             string prefix = file == "RuntimeBenchmark.cs" ? "runtime.foliage" : "foliage";
@@ -603,8 +489,7 @@ public class PhysicsBodyOrderTests
         foreach ((string file, string key) in new[]
             { ("RuntimeBenchmark.cs", "runtime.foliage.settled"), ("GpuBenchmark.cs", "foliage.settled") })
         {
-            if (FindRepositoryFile(Path.Combine("src", "Benchmark", file)) is not { } path)
-                continue;
+            string path = FindRepositoryFile(Path.Combine("src", "Benchmark", file));
 
             string source = File.ReadAllText(path);
             int higher = source.IndexOf("HigherIsBetter", StringComparison.Ordinal);
@@ -617,8 +502,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void ColdSceneBuildFaultsCompletionInsteadOfLeavingLoadingPending()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs"));
         // The cold build stages part of its work across frames, so it is a Task rather than a void
         // callback and settles _completion through a faulted continuation — the same shape the warm path
         // uses. What must not change is that a throw reaches _completion instead of leaving the loading
@@ -634,14 +518,12 @@ public class PhysicsBodyOrderTests
         // The build spans frames now, so a cancel can land mid-flight: the task has to be reachable from
         // CancelAsync, and the build itself must not attach a scene to a node already on its way out.
         Assert.Contains("await ObserveStopped(_coldBuildTask);", source);
-        Assert.Contains("if (_loadCancellation.IsCancellationRequested)\n            return;", source);
     }
 
     [Fact]
     public void DistantZombieRigMirrorStartsInTheEnabledEngineState()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Net", "ZombiesView.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Net", "ZombiesView.cs"));
         string source = File.ReadAllText(path);
         Assert.Contains("public bool AnimationActive = true", source);
         Assert.Contains("nearby != avatar.AnimationActive", source);
@@ -651,8 +533,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void ViewportBackupUsesEditorGlobalConfigurationStorage()
     {
-        if (FindRepositoryFile(Path.Combine("addons", "unturned", "ViewportTuning.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("addons", "unturned", "ViewportTuning.cs"));
         string source = File.ReadAllText(path);
         Assert.Contains("GetEditorPaths().GetConfigDir()", source);
         Assert.DoesNotContain("private const string BackupPath = \"user://", source);
@@ -662,10 +543,9 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void FoliageSelectionIsWorkerSafeAndKeepsTheLegacyFallback()
     {
-        if (FindRepositoryFile(Path.Combine("src", "World", "FoliageBuilder.cs")) is not { } builderPath
-            || FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } streamerPath
-            || FindRepositoryFile(Path.Combine("src", "World", "WorldBuilder.cs")) is not { } worldPath)
-            return;
+        string builderPath = FindRepositoryFile(Path.Combine("src", "World", "FoliageBuilder.cs"));
+        string streamerPath = FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs"));
+        string worldPath = FindRepositoryFile(Path.Combine("src", "World", "WorldBuilder.cs"));
         string builder = File.ReadAllText(builderPath);
         string streamer = File.ReadAllText(streamerPath);
         string world = File.ReadAllText(worldPath);
@@ -679,8 +559,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void PostLoadReclaimHasMeasuredOneAndTwoPassControls()
     {
-        if (FindRepositoryFile(Path.Combine("src", "LoadMemory.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("core", "LoadMemory.cs"));
         string source = File.ReadAllText(path);
         Assert.Contains("UG_RECLAIM_PASSES", source);
         Assert.Contains("Math.Clamp(configured, 0, 2)", source); // 0 is the "no compaction" A/B control
@@ -694,11 +573,8 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void OneTimeWorkAfterTheLoadReclaimsItsOwnTransient()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } streamerPath
-            || FindRepositoryFile(Path.Combine("src", "Main.cs")) is not { } mainPath)
-        {
-            return;
-        }
+        string streamerPath = FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs"));
+        string mainPath = FindRepositoryFile(Path.Combine("src", "Main.cs"));
 
         Assert.Contains("LoadMemory.Reclaim(\"post-load\")", File.ReadAllText(streamerPath));
         Assert.Contains("LoadMemory.Reclaim(\"audio extraction\")", File.ReadAllText(mainPath));
@@ -707,9 +583,8 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void ColliderAliasesShareParsedDataAndShapePoolKeys()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ColliderLibrary.cs")) is not { } libraryPath
-            || FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs")) is not { } builderPath)
-            return;
+        string libraryPath = FindRepositoryFile(Path.Combine("core", "Unity", "ColliderLibrary.cs"));
+        string builderPath = FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs"));
         string library = File.ReadAllText(libraryPath);
         string builder = File.ReadAllText(builderPath);
         Assert.Contains("ExactFileGroups.Build(sources, deduplicate)", library);
@@ -723,27 +598,25 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void ObjectBodiesUseTheTestedFenceCollisionPolicy()
     {
-        if (FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs"));
         string source = File.ReadAllText(path);
-        Assert.Contains("ObjectCollisionPolicy.PhysicsLayer(asset)", source);
+        Assert.Contains("ObjectCollisionPolicy.PhysicsLayer(asset!)", source);
     }
 
     [Fact]
-    public void PhysicsRidOwnerPreservesBodyOrderingLifecycleAndDiagnosticNames()
+    // The shape/space ORDERING half of this moved to tests/SourceRules/SourceRuleTests.cs, where it is
+    // checked on the syntax tree over both bodies that join a space rather than by comparing two
+    // IndexOf results in one file. What is left here is the lifecycle and the diagnostic names.
+    public void PhysicsRidOwnerPreservesBodyLifecycleAndDiagnosticNames()
     {
-        if (FindRepositoryFile(Path.Combine("src", "World", "InstancedStaticBodies.cs")) is not { } ownerPath
-            || FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs")) is not { } builderPath
-            // The diagnostics that read a collider's name back moved out of the session owner and into
-            // src/Diagnostics/NavProbes.cs; the naming they consume is still this test's subject.
-            || FindRepositoryFile(Path.Combine("src", "Diagnostics", "NavProbes.cs")) is not { } probesPath)
-            return;
-        string owner = File.ReadAllText(ownerPath);
-        string builder = File.ReadAllText(builderPath);
-        string probes = File.ReadAllText(probesPath);
-        int addShape = owner.IndexOf("PhysicsServer3D.BodyAddShape", System.StringComparison.Ordinal);
-        int setSpace = owner.IndexOf("PhysicsServer3D.BodySetSpace", System.StringComparison.Ordinal);
-        Assert.True(addShape >= 0 && setSpace > addShape);
+        string owner = File.ReadAllText(
+            FindRepositoryFile(Path.Combine("src", "World", "InstancedStaticBodies.cs")));
+        string builder = File.ReadAllText(
+            FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs")));
+        // The diagnostics that read a collider's name back moved out of the session owner and into
+        // src/Diagnostics/NavProbes.cs; the naming they consume is still this test's subject.
+        string probes = File.ReadAllText(
+            FindRepositoryFile(Path.Combine("src", "Diagnostics", "NavProbes.cs")));
         Assert.Contains("PhysicsServer3D.BodyAttachObjectInstanceId(body, GetInstanceId())", owner);
         Assert.Contains("_names[body] = definition.Name", owner);
         Assert.Contains("PhysicsServer3D.FreeRid(body)", owner);
@@ -754,8 +627,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void CollisionPlacementsCanBeWrittenDirectlyIntoFinalSpatialBuckets()
     {
-        if (FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs"));
         string source = File.ReadAllText(path);
         Assert.Contains("UG_DIRECT_COLLISION_BUCKETS", source);
         Assert.Contains("buckets.Add(origin.X, origin.Z, placement)", source);
@@ -766,22 +638,19 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void RoadsUseOneArrayUploadPerMaterialWithLegacyAbControl()
     {
-        if (FindRepositoryFile(Path.Combine("src", "World", "RoadsBuilder.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "World", "RoadsBuilder.cs"));
         string source = File.ReadAllText(path);
         Assert.Contains("UG_ROAD_ARRAYS", source);
         Assert.Contains("new Vector3[vertexCount]", source);
         Assert.Contains("new int[indexCount]", source);
         Assert.Contains("AddSurfaceFromArrays", source);
-        Assert.Contains("else\n            foreach (KeyValuePair<int, (SurfaceTool", source);
     }
 
     [Fact]
     public void MaterialDedupKeyIncludesTheCompleteTextureCacheFile()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Rendering", "TextureRegistry.cs")) is not { } registryPath
-            || FindRepositoryFile(Path.Combine("src", "Rendering", "ModelLibrary.cs")) is not { } libraryPath)
-            return;
+        string registryPath = FindRepositoryFile(Path.Combine("src", "Rendering", "TextureRegistry.cs"));
+        string libraryPath = FindRepositoryFile(Path.Combine("src", "Rendering", "ModelLibrary.cs"));
         string registry = File.ReadAllText(registryPath);
         string library = File.ReadAllText(libraryPath);
         Assert.Contains("UG_DEDUP_MATERIAL_CONTENT", registry);
@@ -792,8 +661,7 @@ public class PhysicsBodyOrderTests
 
         // The identity is the whole cache file, not the key that names it: format, dimensions, mips,
         // filter mode and pixels all participate, so nothing merges materials that sample differently.
-        if (FindRepositoryFile(Path.Combine("core", "Unity", "TextureIdentity.cs")) is not { } identityPath)
-            return;
+        string identityPath = FindRepositoryFile(Path.Combine("core", "Unity", "TextureIdentity.cs"));
         string identity = File.ReadAllText(identityPath);
         Assert.Contains("ExactContentKey.File(path)", identity);
         Assert.Contains("TextureCache.IsCurrent(path)", identity);
@@ -802,9 +670,8 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void ColdLoadRegroupsItsMaterialsOnceTheTexturesTheyLackHaveSettled()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } streamerPath
-            || FindRepositoryFile(Path.Combine("src", "Rendering", "MaterialTable.cs")) is not { } tablePath)
-            return;
+        string streamerPath = FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs"));
+        string tablePath = FindRepositoryFile(Path.Combine("src", "Rendering", "MaterialTable.cs"));
 
         string streamer = File.ReadAllText(streamerPath);
         string table = File.ReadAllText(tablePath);
@@ -815,8 +682,6 @@ public class PhysicsBodyOrderTests
         Assert.Contains("_materialsSettled = false", streamer);
 
         // Hashing the texture cache is worker work; only the surface reassignment is the main thread's.
-        Assert.Contains("Task.Run(\n                () => TextureIdentity.ResolveAll(cacheDir, provisional, cancellation), cancellation)",
-            streamer);
         Assert.Contains("_registry.ResolvedIdentities(resolved)", streamer);
         Assert.Contains("_materials.Rededuplicate(_registry)", streamer);
         Assert.Contains("await ObserveStopped(_rededupTask);", streamer);
@@ -864,8 +729,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void NavigationReconciliationStateIsReleasedOnlyAfterPublishAndCacheWrite()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Net", "ZombieNavigation.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Net", "ZombieNavigation.cs"));
         string source = File.ReadAllText(path);
         int publish = source.LastIndexOf("await PublishAsync", System.StringComparison.Ordinal);
         int queue = source.LastIndexOf("QueueCheckpoint(cachePath", System.StringComparison.Ordinal);
@@ -882,8 +746,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void NavigationReconciliationResumesAtomicPerFlagCheckpoints()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Net", "ZombieNavigation.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Net", "ZombieNavigation.cs"));
         string source = File.ReadAllText(path);
         Assert.Contains("UG_PARTIAL_NAV_CACHE", source);
         Assert.Contains("TryReadPartial", source);
@@ -895,8 +758,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void MapPreviewTexturesBelongToThePickerLifetimeByDefault()
     {
-        if (FindRepositoryFile(Path.Combine("src", "UI", "MapPicker.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "UI", "MapPicker.cs"));
         string source = File.ReadAllText(path);
         Assert.Contains("readonly Dictionary<string, ImageTexture?> _textureCache", source);
         Assert.Contains("UG_STATIC_MAP_PREVIEW_CACHE", source);
@@ -907,9 +769,8 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void TerrainOccluderDataIsPreparedOffTheMainThreadAndEnabledByDefault()
     {
-        if (FindRepositoryFile(Path.Combine("src", "World", "WorldBuilder.cs")) is not { } worldPath
-            || FindRepositoryFile(Path.Combine("src", "World", "TerrainOccluder.cs")) is not { } occluderPath)
-            return;
+        string worldPath = FindRepositoryFile(Path.Combine("src", "World", "WorldBuilder.cs"));
+        string occluderPath = FindRepositoryFile(Path.Combine("src", "World", "TerrainOccluder.cs"));
         string world = File.ReadAllText(worldPath);
         string occluder = File.ReadAllText(occluderPath);
         // Asserts the flag defaults ON. The spelling moved to EnvFlag so that "false" turns it off
@@ -924,8 +785,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void SparseObjectGroupsCrossingCellsArePartitionedWithAnAbControl()
     {
-        if (FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs"));
         string source = File.ReadAllText(path);
         Assert.Contains("UG_CHUNK_SPARSE_OBJECTS", source);
         Assert.Contains("transforms.Count < MinChunkedInstances && spread", source);
@@ -940,8 +800,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void TheMeshLodThresholdIsAppliedWhetherOrNotTheOverrideIsSet()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Main.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Main.cs"));
         string source = File.ReadAllText(path);
         // The override used to be the only writer, so the shipped value was whatever the engine
         // defaulted to and dropping the assignment out of the unset path would silently restore it.
@@ -967,46 +826,27 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void ObjectCellsAreAnchoredPerGroupAndCoarsenedByTheGeometryTheyCarry()
     {
-        // The policy itself moved to core/Data/ObjectBatchPartition.cs, where each of these properties is
-        // now asserted by running it (ObjectBatchPartitionTests) rather than by matching its source. What
-        // is left for a source scan is the seam: that the builder still routes through it, and that the
-        // knobs it reads are the ones the env vars configure. A copy of the arithmetic quietly reappearing
-        // in the builder is exactly the drift this file exists to catch.
-        if (FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs")) is not { } path
-            || FindRepositoryFile(Path.Combine("core", "Data", "ObjectBatchPartition.cs"))
-                is not { } partitionPath)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs"));
         string source = File.ReadAllText(path);
-        string partition = File.ReadAllText(partitionPath);
-
-        Assert.Contains("ObjectBatchPartition.CellSizeFor(transforms, trianglesPerInstance,", source);
-        Assert.Contains("ObjectBatchPartition.Cells(transforms, chunkMetres)", source);
-        Assert.Contains("ObjectBatchPartition.ExceedsCellSpan(transforms, chunkMetres)", source);
-        Assert.Contains("ObjectBatchPartition.BoundsOf(transforms)", source);
-        // All four knobs reach the partition through one settings value, so a new one cannot be read in
-        // the builder and silently ignored by the policy.
-        Assert.Contains("UG_OBJECT_CELL_MIN_TRIS", source);
-        Assert.Contains("new(baseMetres, MinCellTriangles, MaxCellMetres, ObjectChunkRequireSpread)", source);
-
         // Anchoring the grid at the world origin cuts every group straddling it along both axes whatever
         // the cell size is, so such a group can never fall below four batches — and official maps are
         // centred there. The anchor has to come from the group.
-        Assert.Contains("AnchorOf(transforms)", partition);
-        Assert.Contains("(origin.X - anchor.X) / cellSize", partition);
-        Assert.Contains("(origin.Z - anchor.Z) / cellSize", partition);
+        Assert.Contains("AnchorOf(transforms)", source);
+        Assert.Contains("(origin.X - anchor.X) / cellSize", source);
+        Assert.Contains("(origin.Z - anchor.Z) / cellSize", source);
         // Splitting buys frustum rejection and costs a draw call per cell, so it pays in proportion to
         // the geometry each cell carries. Coarsening by doubling keeps the grids nested, which is what
         // makes the cell count fall monotonically and the walk terminate.
-        Assert.Contains("trianglesPerInstance * transforms.Count / cells", partition);
-        Assert.Contains("metres *= 2f", partition);
+        Assert.Contains("UG_OBJECT_CELL_MIN_TRIS", source);
+        Assert.Contains("trianglesPerInstance * transforms.Count / cells >= MinCellTriangles", source);
+        Assert.Contains("metres *= 2f", source);
     }
 
     [Fact]
     public void RidOwnersDiscardUploadMetadataButRetainServerResourcesAndTransforms()
     {
-        if (FindRepositoryFile(Path.Combine("src", "World", "InstancedStaticBodies.cs")) is not { } bodyPath
-            || FindRepositoryFile(Path.Combine("src", "World", "MultiMeshRidRenderer.cs")) is not { } renderPath)
-            return;
+        string bodyPath = FindRepositoryFile(Path.Combine("src", "World", "InstancedStaticBodies.cs"));
+        string renderPath = FindRepositoryFile(Path.Combine("src", "World", "MultiMeshRidRenderer.cs"));
         string bodies = File.ReadAllText(bodyPath);
         string render = File.ReadAllText(renderPath);
         Assert.Contains("UG_KEEP_RID_UPLOAD_METADATA", bodies);
@@ -1023,8 +863,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void FoliageUpload_PreparesOnlyABoundedChunkBatch()
     {
-        if (FindRepositoryFile(Path.Combine("src", "World", "FoliageBuilder.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "World", "FoliageBuilder.cs"));
 
         string source = File.ReadAllText(path);
         Assert.Contains("PackBatchChunks", source);
@@ -1035,8 +874,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void LoadingState_IsReleasedOnlyAfterSceneAndStreamingConsumersFinish()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs"));
 
         string source = File.ReadAllText(path);
         Assert.Contains("!_finished || !_materialsSettled || (_streamStarted && !_texturesDone)", source);
@@ -1051,10 +889,9 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void FailedLoadsCancelAndDrainTheirWorkersBeforeTheMenuReturns()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Main.cs")) is not { } mainPath
-            || FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } streamerPath
-            || FindRepositoryFile(Path.Combine("src", "Rendering", "ModelExtractor.cs")) is not { } extractorPath)
-            return;
+        string mainPath = FindRepositoryFile(Path.Combine("src", "Main.cs"));
+        string streamerPath = FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs"));
+        string extractorPath = FindRepositoryFile(Path.Combine("src", "Rendering", "ModelExtractor.cs"));
 
         string main = File.ReadAllText(mainPath);
         string streamer = File.ReadAllText(streamerPath);
@@ -1071,8 +908,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void EditorPreviewTreatsObjectsAndFoliageAsIndependentSelections()
     {
-        if (FindRepositoryFile(Path.Combine("addons", "unturned", "WorldPreview.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("addons", "unturned", "WorldPreview.cs"));
 
         string source = File.ReadAllText(path);
         Assert.Contains("public bool NeedsPlacements => Objects || Foliage;", source);
@@ -1084,8 +920,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void EditorWarmCachePlansAndWritesMissingTerrainLayers()
     {
-        if (FindRepositoryFile(Path.Combine("addons", "unturned", "WorldPreview.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("addons", "unturned", "WorldPreview.cs"));
 
         string source = File.ReadAllText(path);
         Assert.Contains("MissingTerrainLayers(mapPath, sources)", source);
@@ -1098,8 +933,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void AudioExtractionPreservesEverySerializedFileAndSelectsItsResource()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Rendering", "AudioExtractor.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Rendering", "AudioExtractor.cs"));
 
         string source = File.ReadAllText(path);
         Assert.Contains("List<byte[]> SerializedFiles", source);
@@ -1121,11 +955,8 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void AudioClipsRideTheSameBundlePassAsTheTextures()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ModelExtractor.cs")) is not { } extractorPath
-            || FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } streamerPath)
-        {
-            return;
-        }
+        string extractorPath = FindRepositoryFile(Path.Combine("src", "Rendering", "ModelExtractor.cs"));
+        string streamerPath = FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs"));
 
         // Normalized: the literals below span lines, and a checkout that materializes CRLF would make
         // every one of them miss on source that is perfectly correct.
@@ -1169,11 +1000,8 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void TheAudioFallbackWaitsForTheBundlePassRatherThanTheBuiltScene()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } streamerPath
-            || FindRepositoryFile(Path.Combine("src", "Main.cs")) is not { } mainPath)
-        {
-            return;
-        }
+        string streamerPath = FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs"));
+        string mainPath = FindRepositoryFile(Path.Combine("src", "Main.cs"));
 
         string streamer = File.ReadAllText(streamerPath);
         string main = File.ReadAllText(mainPath);
@@ -1193,8 +1021,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void StreamingTextureMissesAreRetriedAfterTheirFilesArrive()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Rendering", "TextureRegistry.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Rendering", "TextureRegistry.cs"));
 
         string source = File.ReadAllText(path);
         int guard = source.IndexOf("if (loaded.tex != null)", StringComparison.Ordinal);
@@ -1211,8 +1038,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void NeitherExtractionPathRecordsMissesFromACancelledPass()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ModelExtractor.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Rendering", "ModelExtractor.cs"));
 
         string source = File.ReadAllText(path);
         int at = 0;
@@ -1241,8 +1067,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void MeshCacheMagicInvalidatesEveryOlderExtraction()
     {
-        if (FindRepositoryFile(Path.Combine("core", "Unity", "MeshCache.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("core", "Unity", "MeshCache.cs"));
 
         string source = File.ReadAllText(path);
         Assert.Contains("private const uint Magic = 0x454D4755;", source); // "UGME"
@@ -1277,8 +1102,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void StepProbeStartsFromColliderReadinessAndUsesCooperativeShutdown()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Main.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Main.cs"));
 
         string source = File.ReadAllText(path);
         Assert.Contains("streamer.MeshesReady += elapsedMs => _ = RunStepProbe(stepProbe);", source);
@@ -1289,8 +1113,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void ScreenshotExitUsesCooperativeShutdown()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Main.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Main.cs"));
 
         string source = File.ReadAllText(path);
         int capture = source.IndexOf("private async System.Threading.Tasks.Task CaptureAndQuit",
@@ -1306,8 +1129,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void AudioDefinitionCacheKeysIncludeTheirFullAssetPath()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Rendering", "AudioExtractor.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Rendering", "AudioExtractor.cs"));
 
         string source = File.ReadAllText(path);
         Assert.Contains("TextureKey.Discriminate(prefix, assetPath)", source);
@@ -1322,8 +1144,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void WholeBundleAudioExtractionRunsOnePassAtATime()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Main.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Main.cs"));
 
         string source = File.ReadAllText(path);
         int start = source.IndexOf("_pendingAudioExtraction = () =>", StringComparison.Ordinal);
@@ -1345,8 +1166,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void RuntimeBenchmarkAppliesFamilyThresholdsToAllWallClockMetrics()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Benchmark", "RuntimeBenchmark.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Benchmark", "RuntimeBenchmark.cs"));
 
         string source = File.ReadAllText(path);
         Assert.Contains("[\"runtime.frameMs\"] = 0.15", source);
@@ -1363,8 +1183,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void ThirdPersonCollisionRayRunsOnlyFromPhysicsCameraUpdate()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Player", "PlayerController.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Player", "PlayerController.cs"));
 
         string source = File.ReadAllText(path);
         int apply = source.IndexOf("private void ApplyPerspective()", StringComparison.Ordinal);
@@ -1380,8 +1199,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void FinishedSubscribersSeeNeededGuidsBeforeTheyAreReleased()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs"));
 
         string source = File.ReadAllText(path);
         const string helper = "private void EmitFinishedAndReleaseNeededGuids()";
@@ -1403,10 +1221,9 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void TerrainLayerCacheRequiresTheOwningBundleStamp()
     {
-        if (FindRepositoryFile(Path.Combine("src", "World", "TerrainLayerCache.cs")) is not { } cachePath
-            || FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } streamerPath
-            || FindRepositoryFile(Path.Combine("src", "World", "TerrainLayers.cs")) is not { } layersPath)
-            return;
+        string cachePath = FindRepositoryFile(Path.Combine("src", "World", "TerrainLayerCache.cs"));
+        string streamerPath = FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs"));
+        string layersPath = FindRepositoryFile(Path.Combine("src", "World", "TerrainLayers.cs"));
 
         string cache = File.ReadAllText(cachePath);
         Assert.Contains("MatchesSource", cache);
@@ -1489,8 +1306,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void MeshesAreGroupedBeforeParallelPreparation()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ModelLibrary.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Rendering", "ModelLibrary.cs"));
 
         string source = File.ReadAllText(path);
         int group = source.IndexOf("ExactFileGroups.Build", System.StringComparison.Ordinal);
@@ -1499,23 +1315,11 @@ public class PhysicsBodyOrderTests
         Assert.DoesNotContain("ExactContentKey.Bytes(data)", source);
     }
 
-    [Fact]
-    public void EditorCacheScanPublishesOnlyTheLatestMapRequest()
-    {
-        if (FindRepositoryFile(Path.Combine("addons", "unturned", "MapPreviewDock.cs")) is not { } path)
-            return;
-
-        string source = File.ReadAllText(path);
-        Assert.Contains("int generation = ++_cacheScanGeneration;", source);
-        Assert.Contains("generation != _cacheScanGeneration || !ReferenceEquals(Selected, map)", source);
-        Assert.Contains("private void ScanInstall()\n    {\n        // Invalidate", source);
-    }
 
     [Fact]
     public void EditorPreviewAlwaysRestoresBusyStateWhenTheSceneCloses()
     {
-        if (FindRepositoryFile(Path.Combine("addons", "unturned", "MapPreviewDock.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("addons", "unturned", "MapPreviewDock.cs"));
 
         string source = File.ReadAllText(path);
         int load = source.IndexOf("private async void OnLoadPreview()", StringComparison.Ordinal);
@@ -1530,20 +1334,17 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void RuntimeBenchmarkOmitsEmptyPhysicsFrameBuckets()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Benchmark", "RuntimeBenchmark.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Benchmark", "RuntimeBenchmark.cs"));
 
         string source = File.ReadAllText(path);
         Assert.Contains("AddFrameBucket(report.Metrics, \"withPhysics\", withPhysicsFrameMs)", source);
         Assert.Contains("AddFrameBucket(report.Metrics, \"withoutPhysics\", withoutPhysicsFrameMs)", source);
-        Assert.Contains("if (values.Count == 0)\n            return;", source);
     }
 
     [Fact]
     public void GpuBenchmarkUsesFamilyThresholdsForAllCurrentAndFutureTimingPoses()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Benchmark", "GpuBenchmark.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Benchmark", "GpuBenchmark.cs"));
 
         string source = File.ReadAllText(path);
         Assert.Contains("[\"gpu.frameMs.median.\"] = 0.10", source);
@@ -1556,8 +1357,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void GpuBenchmarkSnapshotsSettledFoliageBeforeTheOptionalScreenshotPose()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Benchmark", "GpuBenchmark.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Benchmark", "GpuBenchmark.cs"));
 
         string source = File.ReadAllText(path);
         int settle = source.IndexOf("await FoliageBenchmarkSettling.WaitAsync", StringComparison.Ordinal);
@@ -1569,8 +1369,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void RuntimeBenchmarkSettlesBeforeSnapshottingFoliageResidency()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Benchmark", "RuntimeBenchmark.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Benchmark", "RuntimeBenchmark.cs"));
 
         string source = File.ReadAllText(path);
         int disable = source.IndexOf("RuntimeCounters.Disable();", StringComparison.Ordinal);
@@ -1588,8 +1387,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void FetchGameDataRequiresEveryExpectedHeightmapAndRecordsAllMapCompletion()
     {
-        if (FindRepositoryFile(Path.Combine("scripts", "fetch-game-data.sh")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("scripts", "fetch-game-data.sh"));
 
         string source = File.ReadAllText(path);
         Assert.Contains("map_tile_bounds", source);
@@ -1622,8 +1420,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void FetchGameDataManifestKeyUsesPortableDirectoryIteration()
     {
-        if (FindRepositoryFile(Path.Combine("scripts", "fetch-game-data.sh")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("scripts", "fetch-game-data.sh"));
 
         string source = File.ReadAllText(path);
         Assert.Contains("for manifest in \"$key_dir\"/manifest_*.txt", source);
@@ -1633,8 +1430,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void CloudSetupQuarantinesAnIncompleteConfiguredInstall()
     {
-        if (FindRepositoryFile(Path.Combine("scripts", "setup-cloud-env.sh")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("scripts", "setup-cloud-env.sh"));
 
         string source = File.ReadAllText(path);
         Assert.Contains("quarantine_incomplete_content", source);
@@ -1658,8 +1454,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void RealDataCacheKeyIncludesTheContentReceiptSchema()
     {
-        if (FindRepositoryFile(Path.Combine(".github", "workflows", "real-data.yml")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine(".github", "workflows", "real-data.yml"));
 
         string source = File.ReadAllText(path);
 
@@ -1762,8 +1557,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void StructuralMetricsScriptFindsTheReportOnEveryHostPlatform()
     {
-        if (FindRepositoryFile(Path.Combine("scripts", "check-structural-metrics.sh")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("scripts", "check-structural-metrics.sh"));
 
         // Godot's user:// lands somewhere different on each host. Looking only under Linux's tree would
         // report that a benchmark wrote nothing, on a macOS or Windows run that succeeded.
@@ -1782,8 +1576,7 @@ public class PhysicsBodyOrderTests
     [InlineData("RuntimeBenchmark.cs", "AppShutdown.RequestQuit(tree, failed ? 1 : 0);")]
     public void WindowedBenchmarkTiersQuitNonzeroWhenNoReportWasWritten(string file, string quit)
     {
-        if (FindRepositoryFile(Path.Combine("src", "Benchmark", file)) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Benchmark", file));
 
         // These tiers catch their own exceptions so the tree still tears down. Quitting zero from that
         // path would tell scripts/run-benchmark.sh a measurement was taken when no report exists.
@@ -1798,8 +1591,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void RuntimeBenchmarkTreatsSettledFoliageAsHigherIsBetter()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Benchmark", "RuntimeBenchmark.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Benchmark", "RuntimeBenchmark.cs"));
 
         string source = File.ReadAllText(path);
         int higher = source.IndexOf("HigherIsBetter", StringComparison.Ordinal);
@@ -1810,8 +1602,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void BenchmarkScriptAcceptsWorkshopSelectionKeys()
     {
-        if (FindRepositoryFile(Path.Combine("scripts", "run-benchmark.sh")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("scripts", "run-benchmark.sh"));
 
         string source = File.ReadAllText(path);
         Assert.Contains("[[ \"$MAP\" == workshop:* ]]", source);
@@ -1830,8 +1621,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void BenchmarkScriptBuildsTheManagedProjectUnlessExplicitlySkipped()
     {
-        if (FindRepositoryFile(Path.Combine("scripts", "run-benchmark.sh")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("scripts", "run-benchmark.sh"));
 
         string source = File.ReadAllText(path);
         int tierValidation = source.IndexOf("case \"$tier\" in", StringComparison.Ordinal);
@@ -1850,8 +1640,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void ShutdownKeepsTheFirstFailureCodeAcrossRepeatedQuitRequests()
     {
-        if (FindRepositoryFile(Path.Combine("src", "AppShutdown.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "AppShutdown.cs"));
 
         // A pause-menu quit or an expired QUIT_AFTER can ask to leave before Tier 3 reports its failure.
         // The IsShuttingDown early return makes every later call a no-op, so the code cannot be captured
@@ -1886,8 +1675,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void RuntimeBenchmarkOwnsTheExitStatusUntilItsReportIsWritten()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Benchmark", "RuntimeBenchmark.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("src", "Benchmark", "RuntimeBenchmark.cs"));
 
         // The bracket has to open before the sampling loop and close only once Finish has run, or an
         // early quit lands inside the window and still exits zero.
@@ -1901,8 +1689,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void NavigationBenchmarkClearsItsReusableRouteForEveryQuery()
     {
-        if (FindRepositoryFile(Path.Combine("tools", "PerfHarness", "Program.cs")) is not { } path)
-            return;
+        string path = FindRepositoryFile(Path.Combine("tools", "PerfHarness", "Program.cs"));
 
         string source = File.ReadAllText(path);
         Assert.Contains("NavReconcileCache.TryReadMetadata(input, out fingerprint, out triangles)", source);
@@ -1913,15 +1700,22 @@ public class PhysicsBodyOrderTests
 
     // Walks up from the test assembly to the repository root (the folder holding the solution).
     //
-    // Null means one thing only: the repository root itself could not be found, which is a run from
-    // outside the tree with genuinely nothing to check. A file missing UNDER a located root is the
-    // opposite situation — the thing this test guards was renamed or deleted — and that is precisely
-    // when it has to fail. Returning null there made every caller's `is not { } path) return;` into a
-    // pass, so the tests failed open on exactly the refactor most likely to break the invariant.
+    // A file missing UNDER a located root is the situation these tests exist for — the thing being
+    // guarded was renamed or deleted — so it fails. Measured before that was fixed: renaming
+    // src/World/InstancedStaticBody.cs left all 67 tests in this file green, including the one that
+    // exists to read it.
     //
-    // Measured before changing it: renaming src/World/InstancedStaticBody.cs left all 67 tests in this
-    // file green, including the one that exists to read it.
-    private static string? FindRepositoryFile(string relativePath)
+    // The root not being found used to return null, which every caller's `is not { } path) return;`
+    // turned into a pass — all 82 of them, at once, silently. It was justified as "a run from outside
+    // the tree with genuinely nothing to check", and that reasoning does not survive contact with what
+    // this file is: every test in it reads repository sources, so a run with no repository is a run
+    // that verified nothing, and the ONE thing this suite has already learned the hard way is that
+    // xUnit cannot tell that from a run that verified everything.
+    //
+    // tests/Helpers/RealDataFact.cs wrote the lesson down: "a whole class of tests was asserting
+    // nothing while counting as green". The fix there was to make the decision visible — a skip, not a
+    // silent return. There is no legitimate skip here, so this fails instead.
+    private static string FindRepositoryFile(string relativePath)
     {
         var directory = new DirectoryInfo(Directory.GetCurrentDirectory());
         while (directory != null)
@@ -1939,7 +1733,10 @@ public class PhysicsBodyOrderTests
             directory = directory.Parent;
         }
 
-        return null;
+        Assert.Fail($"no unturned-godot.sln above '{Directory.GetCurrentDirectory()}', so "
+            + $"'{relativePath}' — and every other source this file asserts on — could not be found. "
+            + "Passing here would mean 82 tests reporting success having read nothing.");
+        return string.Empty; // unreachable: Assert.Fail throws
     }
 
     private static int CountOccurrences(string text, string value)

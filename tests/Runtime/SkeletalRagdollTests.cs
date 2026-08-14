@@ -48,7 +48,8 @@ public class SkeletalRagdollTests : TestClass
         if (CharacterModel.BuildZombie(Install, isMega: false) is not CharacterSkeleton rig)
             return null;
         RagdollDefinition? definition =
-            RagdollExtractor.Read(Install, RagdollExtractor.ZombiePrefab);
+            RagdollExtractor.Read(Install, RagdollExtractor.ZombiePrefab,
+                ModelExtractor.ReadClassTypeTrees);
         if (definition == null)
         {
             rig.Free();

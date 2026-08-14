@@ -34,7 +34,15 @@ public static class AppShutdown
     // (plain file IO) and nothing else.
     private static readonly System.TimeSpan Grace = System.TimeSpan.FromSeconds(10);
 
-    private static readonly CancellationTokenSource Source = new();
+    // Replaceable rather than readonly, and that is the whole of what ResetForTests changes.
+    //
+    // A CancellationTokenSource is one-shot: once anything cancels it, it stays cancelled. In a process
+    // that quits exactly once that is correct and simpler than the alternative. In a TEST process it
+    // means the first test to call RequestQuit or QuitNow leaves IsShuttingDown true for every test
+    // after it — and IsShuttingDown is read by both guarded log channels, by Track's callers and by every
+    // worker loop, so those tests are all silently running against a different set of behaviours. Nothing
+    // could exercise "quit, then carry on" at all.
+    private static CancellationTokenSource Source = new();
 
     // The background work a quit has to wait for. Held weakly in the sense that finished tasks are
     // dropped on the next inspection; the set never grows past the handful of load-time tasks.
@@ -45,6 +53,33 @@ public static class AppShutdown
     public static bool IsShuttingDown => Source.IsCancellationRequested;
 
     public static CancellationToken Token => Source.Token;
+
+    // Puts the module back to how it starts, for a test that needs to leave and then keep testing.
+    //
+    // Only the shutdown flag and the tracked work are reset. ExitCode and BenchmarkInFlight deliberately
+    // are NOT: the first failure winning over any later request to leave cleanly, and a quit mid-
+    // measurement counting as a failed measurement, are invariants that hold for the life of the process
+    // — a reset that cleared them would let a test prove a rule that production does not follow.
+    //
+    // Named for what it is. Nothing in the game calls it, and nothing should: a running session that
+    // reset this would tell every worker already on its way out that the engine is fine after all.
+    // Raises the flag WITHOUT leaving, which is the other half of what makes the guards observable.
+    //
+    // Every door out of a loaded world cancels the token and then ends the process, so a test that used
+    // one would end the suite. Signalling on its own is the part the guards actually read — and paired
+    // with ResetForTests below, it is what lets a test watch a worker fall silent and then carry on.
+    internal static void SignalForTests() => Source.Cancel();
+
+    internal static void ResetForTests()
+    {
+        CancellationTokenSource previous = Source;
+        Source = new CancellationTokenSource();
+        previous.Dispose();
+        lock (Background)
+        {
+            Background.Clear();
+        }
+    }
 
     // Registers a task the quit must wait for: anything that decodes a bundle, writes the cache, or
     // hands results back to the main thread. Returns the task so call sites can stay one-liners.

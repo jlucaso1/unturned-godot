@@ -3,10 +3,9 @@ using System.Collections.Generic;
 using System.IO;
 using Godot;
 using UnturnedGodot.Assets;
-using UnturnedGodot.Player;
 using UnturnedGodot.Unity;
 
-namespace UnturnedGodot;
+namespace UnturnedGodot.Player;
 
 // Reads Characters/Ragdoll_Zombie out of the game's resources.assets: which bones carry a body, what each
 // collides as, and how the joints between them are limited.
@@ -28,10 +27,16 @@ public static class RagdollExtractor
 
     // The definition for one prefab, or null when the install cannot be read or the prefab is not in it.
     // Null is a session with no skeletal ragdoll, which falls back to tumbling the body as one piece.
-    public static RagdollDefinition? Read(string unturnedPath, string prefabName)
+    //
+    // `classTypeTrees` is asked for the masterbundle's per-class type trees. It is a parameter rather than
+    // a call because the game's implementation caches them under `user://`, and resolving that path needs
+    // the engine — the read itself, and everything below it, does not.
+    public static RagdollDefinition? Read(string unturnedPath, string prefabName,
+        Func<string, IReadOnlyDictionary<int, List<TypeTreeNode>>> classTypeTrees)
     {
         ArgumentNullException.ThrowIfNull(unturnedPath);
         ArgumentNullException.ThrowIfNull(prefabName);
+        ArgumentNullException.ThrowIfNull(classTypeTrees);
 
         string? assetsPath = UnturnedInstall.FindDataFile(unturnedPath, "resources.assets");
         string? bundlePath = UnturnedInstall.FindMasterBundle(unturnedPath);
@@ -42,8 +47,7 @@ public static class RagdollExtractor
         {
             // resources.assets ships with its type trees stripped, so it is decoded with the ones
             // gathered from the masterbundle — the same thing CharacterModel does to read the rigs.
-            IReadOnlyDictionary<int, List<TypeTreeNode>> trees =
-                ModelExtractor.ReadClassTypeTrees(bundlePath);
+            IReadOnlyDictionary<int, List<TypeTreeNode>> trees = classTypeTrees(bundlePath);
             return Read(SerializedFile.Read(File.ReadAllBytes(assetsPath), trees), prefabName);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException)

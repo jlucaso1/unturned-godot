@@ -2,9 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using UnturnedGodot.Data;
-using UnturnedGodot.Unity;
 
-namespace UnturnedGodot;
+namespace UnturnedGodot.Unity;
 
 // Loads the per-GUID collider caches ModelExtractor wrote (<guid>.collider) into memory, so ObjectsBuilder
 // can build each placed object's collision body without touching the masterbundle again.
@@ -73,7 +72,7 @@ public static class ColliderLibrary
         }
 
         if (skipped > 0)
-            Log.Print($"[colliders] dropped {skipped} unreadable cache entr{(skipped == 1 ? "y" : "ies")}; " +
+            HostLog.Warn($"[colliders] dropped {skipped} unreadable cache entr{(skipped == 1 ? "y" : "ies")}; " +
                 "those objects load without collision this run and re-extract on the next.");
         return result;
     }

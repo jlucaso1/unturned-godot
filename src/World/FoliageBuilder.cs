@@ -17,14 +17,14 @@ public static class FoliageBuilder
     // below, and their visibility range includes the chunk + mesh radius so no nearby instance is dropped
     // merely because the aggregate AABB's centre is farther away. The environment override is retained for
     // repeatable profiling on other content.
-    private static readonly int ChunkTiles = EnvInt("UG_FOLIAGE_CHUNK_TILES", 4, 1, 32);
+    private static readonly int ChunkTiles = EnvOption.Whole(System.Environment.GetEnvironmentVariable("UG_FOLIAGE_CHUNK_TILES"), 4, 1, 32);
 
     // Grass/flowers/pebbles are only meaningful up close (Unturned itself fades ground detail out at a
     // short distance). Beyond this, each chunk stops rendering, so the many chunks that carpet the
     // whole island no longer cost draw calls / primitives from elevated or distant views.
-    private static readonly float DrawDistance = EnvFloat("UG_FOLIAGE_DISTANCE", 160f, 32f, 1000f);
+    private static readonly float DrawDistance = EnvOption.Number(System.Environment.GetEnvironmentVariable("UG_FOLIAGE_DISTANCE"), 160f, 32f, 1000f);
     private static readonly float FadeMargin = Math.Min(32f, DrawDistance * 0.25f);
-    private static readonly int PackBatchChunks = EnvInt("UG_FOLIAGE_PACK_BATCH", 256, 1, 65536);
+    private static readonly int PackBatchChunks = EnvOption.Whole(System.Environment.GetEnvironmentVariable("UG_FOLIAGE_PACK_BATCH"), 256, 1, 65536);
     public static int RuntimeChunkTiles => ChunkTiles;
     public static float FadeMarginValue => FadeMargin;
     public static bool SpatialResidencyEnabled =>
@@ -157,18 +157,6 @@ public static class FoliageBuilder
             $"{DrawDistance:0} m range)");
         return root;
     }
-
-    private static int EnvInt(string name, int fallback, int min, int max) =>
-        int.TryParse(System.Environment.GetEnvironmentVariable(name), out int value)
-            ? Math.Clamp(value, min, max)
-            : fallback;
-
-    private static float EnvFloat(string name, float fallback, float min, float max) =>
-        float.TryParse(System.Environment.GetEnvironmentVariable(name),
-            System.Globalization.NumberStyles.Float,
-            System.Globalization.CultureInfo.InvariantCulture, out float value)
-            ? Math.Clamp(value, min, max)
-            : fallback;
 
     // Concatenates a chunk's grouped instances into one MultiMesh instance buffer with a bulk Array.Copy per
     // run — FoliageInstances already hold their transforms in the exact 12-float buffer layout, so no

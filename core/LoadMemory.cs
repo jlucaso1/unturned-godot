@@ -29,7 +29,7 @@ public static class LoadMemory
         // keeps every segment the one-time work grew.
         if (passes == 0)
         {
-            Log.Print($"[mem] {what} reclaim: skipped (UG_RECLAIM_PASSES=0), RSS {before} MB");
+            HostLog.Print($"[mem] {what} reclaim: skipped (UG_RECLAIM_PASSES=0), RSS {before} MB");
             return;
         }
         // Re-armed for each pass: CompactOnce applies to the NEXT blocking gen-2 collection and then
@@ -46,7 +46,7 @@ public static class LoadMemory
             GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
         }
         if (before > 0) // Linux only (from /proc); skip the line where RSS is unavailable
-            Log.Print($"[mem] {what} reclaim: RSS {before} -> {ProcessRssMib()} MB " +
+            HostLog.Print($"[mem] {what} reclaim: RSS {before} -> {ProcessRssMib()} MB " +
                 $"(managed {GC.GetTotalMemory(false) >> 20} MB, {passes} pass(es)) " +
                 $"in {sw.ElapsedMilliseconds} ms");
     }

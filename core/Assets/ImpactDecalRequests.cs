@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using Godot;
 using UnturnedGodot.Assets;
 
 namespace UnturnedGodot;
@@ -14,8 +13,6 @@ namespace UnturnedGodot;
 // fallback back into a second whole-bundle decode for the difference.
 public static class ImpactDecalRequests
 {
-    public static string CacheDirectory => ProjectSettings.GlobalizePath("user://decal_cache");
-
     // The banks a session needs to resolve a surface to its mark. Scanned from the .dat trees, which is
     // a few hundred small files rather than a bundle read.
     public static (PhysicsMaterialBank Materials, ImpactEffectBank Effects) Banks(
