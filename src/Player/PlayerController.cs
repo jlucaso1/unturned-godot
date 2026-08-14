@@ -53,6 +53,21 @@ public partial class PlayerController : CharacterBody3D
     // (you slide) and 1.2x the max speed (you go 20% faster).
     public System.Func<Vector3, CharacterFrictionProperties>? SurfaceFriction { get; set; }
 
+    // The map's own nodes (Environment/Nodes.dat), for the volumes the hands have to obey. Null in a
+    // world with no map behind it — a benchmark, a runtime test — and then no safezone applies, which
+    // is also what a map that declares none produces.
+    //
+    // The whole node set rather than the safezones alone: purchase volumes, arena and deadzones are the
+    // same file and the same "which volume is the player standing in" question, and they arrive here as
+    // they are ported.
+    public UnturnedGodot.Data.LevelNodeSet? Nodes { get; set; }
+
+    // The steepest floor this map lets a player stand on rather than slide down, in degrees. The map's
+    // own Config.json decides it (Max_Walkable_Slope, resolved through
+    // PlayerConfig.ResolveMaxWalkableSlope); 59 is what a map that does not say gets. Read in _Ready, so
+    // it has to be set before the controller joins the tree.
+    public float MaxWalkableSlopeDegrees { get; set; } = PlayerConfig.MaxWalkableSlopeDegrees;
+
     // The shared positional voice pool, for the sounds a gesture makes. The owner plays its own swing
     // straight away for the same reason it animates it straight away: the sound belongs to the frame the
     // button went down, not to the round trip.
@@ -253,7 +268,7 @@ public partial class PlayerController : CharacterBody3D
         CollisionLayer = CollisionLayers.Player;
         CollisionMask = CollisionLayers.CharacterMask; // world + furniture
 
-        FloorMaxAngle = Mathf.DegToRad(PlayerConfig.MaxWalkableSlopeDegrees);
+        FloorMaxAngle = Mathf.DegToRad(MaxWalkableSlopeDegrees);
         FloorSnapLength = 0.5f;
         FloorStopOnSlope = true;
 
@@ -404,9 +419,26 @@ public partial class PlayerController : CharacterBody3D
         bool wasOnFloor = IsOnFloor();
         bool canJump = wasOnFloor && !climbing && inputCaptured && Input.IsKeyPressed(_settings.Jump)
             && _stance is EPlayerStance.Stand or EPlayerStance.Sprint;
-        bool integrate = climbing || PlayerPhysicsActivity.NeedsIntegration(
-            _worldReady, wasOnFloor, moving, canJump, stanceChanged);
         Vector3 velocity = Velocity;
+
+        // The surface under the feet, resolved once per grounded tick because the player walks between
+        // surfaces — and hoisted above the integration test because whether this tick has anything to
+        // solve DEPENDS on it. Nearly every surface leaves Character_Friction_Mode at
+        // ImmediatelyResponsive, which is where a released key means the velocity is already zero;
+        // NeedsIntegration is written for exactly that world.
+        CharacterFrictionProperties friction = wasOnFloor && !climbing
+            ? SurfaceFriction?.Invoke(GlobalPosition) ?? CharacterFrictionProperties.Default
+            : CharacterFrictionProperties.Default;
+
+        // ...and a Custom surface is the world it is not written for. Sliding is precisely velocity that
+        // outlives the input, so an idle grounded tick on ice still has motion to resolve, and skipping
+        // it would freeze the slide the moment the key came up. The velocity really does reach exactly
+        // zero — the deceleration is floored at the desired speed and ClampMagnitude collapses a
+        // non-positive maximum — so this stops on its own rather than integrating for ever.
+        bool sliding = !GroundFriction.IsInstant(friction)
+            && new Vector2(velocity.X, velocity.Z).LengthSquared() > 1e-6f;
+        bool integrate = climbing || sliding || PlayerPhysicsActivity.NeedsIntegration(
+            _worldReady, wasOnFloor, moving, canJump, stanceChanged);
         if (climbing)
         {
             // PlayerMovement.simulate's CLIMB branch: vertical only, at half the climb speed, with no
@@ -418,26 +450,13 @@ public partial class PlayerController : CharacterBody3D
         }
         else if (wasOnFloor)
         {
-            // PlayerMovement.simulate's grounded branch. Nearly every surface leaves
-            // Character_Friction_Mode at ImmediatelyResponsive, which is the instant assignment this
-            // has always done; a surface declaring Custom ramps instead (GroundFriction.Apply ports
-            // both). Resolved per tick because the player walks between surfaces.
-            CharacterFrictionProperties friction =
-                SurfaceFriction?.Invoke(GlobalPosition) ?? CharacterFrictionProperties.Default;
-            if (GroundFriction.IsInstant(friction))
-            {
-                Vector3 ground = PlayerMovement.GroundVelocity(wishDir, speed);
-                velocity.X = ground.X;
-                velocity.Z = ground.Z;
-            }
-            else
-            {
-                Vector3 ramped = GroundFriction.Apply(velocity,
-                    PlayerMovement.GroundVelocity(wishDir, speed), GetFloorNormal(), speed, friction, dt);
-                velocity.X = ramped.X;
-                velocity.Z = ramped.Z;
-            }
-            velocity.Y = canJump ? PlayerConfig.JumpSpeed : -2f; // small downward keeps us snapped to the floor
+            // PlayerMovement.simulate's grounded branch, with the friction resolved above. The instant
+            // surfaces get the assignment this has always done; a surface declaring Custom ramps instead
+            // (GroundFriction.GroundedStep ports both, including what each branch does to the vertical
+            // velocity and the jump that overrides it).
+            velocity = GroundFriction.GroundedStep(velocity,
+                PlayerMovement.GroundVelocity(wishDir, speed), GetFloorNormal(), speed, friction, dt,
+                canJump);
             velocity += _pendingLaunchVelocity;
             _pendingLaunchVelocity = Vector3.Zero;
         }
@@ -718,8 +737,7 @@ public partial class PlayerController : CharacterBody3D
         if (primary == EAttackInputFlags.None && secondary == EAttackInputFlags.None)
             return EPlayerGesture.None;
 
-        EPlayerGesture gesture = _equipment.Simulate(_tick, primary, secondary,
-            new HandState { Stance = _stance });
+        EPlayerGesture gesture = _equipment.Simulate(_tick, primary, secondary, CurrentHandState());
 
         // Chest height, matching what the other clients play for this same swing off the replicated
         // gesture — the owner just does not wait for the round trip to hear it.
@@ -741,6 +759,34 @@ public partial class PlayerController : CharacterBody3D
 
         DrawnRig?.PlayOnce(clip);
         return gesture;
+    }
+
+    // What the hands are allowed to do this tick.
+    //
+    // PlayerMovement keeps the pair `isSafe`/`isSafeInfo` as the player walks:
+    //
+    //     newSafe = LevelNodes.isPointInsideSafezone(transform.position, out isSafeInfo);
+    //
+    // — one query answering both, at the player's own TRANSFORM, which is the feet. So it is asked the
+    // same way here: a node with isHeight false is an infinite cylinder and one with it set is a sphere
+    // around its centre, and where the query is made from is what decides a rooftop.
+    //
+    // The original's isSafeInfo can be null while isSafe is true (a modern SafezoneVolume carrying no
+    // backwards-compatibility node), and the punch gate treats that as the strictest case. Nodes.dat
+    // volumes always resolve, so this caller cannot produce that state — the rule keeps it anyway,
+    // because it is the rule.
+    //
+    // Asked per SWING rather than per tick: SimulateHands returns before this on every tick with no
+    // attack input, which is nearly all of them.
+    private HandState CurrentHandState()
+    {
+        UnturnedGodot.Data.SafezoneNode? safezone = Nodes?.SafezoneAt(GlobalPosition);
+        return new HandState
+        {
+            Stance = _stance,
+            IsSafe = safezone != null,
+            Safezone = safezone,
+        };
     }
 
     private bool UpdateStance(bool moving, bool wantSprint)

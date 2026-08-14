@@ -65,7 +65,28 @@ public static class PlayerConfig
     public const float ThirdPersonUp = 0.25f;
     public const float CameraSweepRadius = 0.39f;  // NEAR_CLIP_SWEEP_RADIUS, pulls the camera in on collision
 
-    public const float MaxWalkableSlopeDegrees = 59f; // default (LevelInfo Max_Walkable_Slope -1 -> 59)
+    // The slope a player may stand on rather than slide down, when the map does not say otherwise
+    // (PlayerMovement.cs:1187, "float maxWalkableSlope = 59;").
+    public const float MaxWalkableSlopeDegrees = 59f;
+
+    // ...and when it does. The game reads the map's own Config.json for it in both places that ask —
+    // the sliding test above and the post-move floor snap (PlayerMovement.cs:1384-1391) — through the
+    // same three-part condition:
+    //
+    //     if (Level.info != null && Level.info.configData != null
+    //         && Level.info.configData.Max_Walkable_Slope > -0.5f)
+    //         maxWalkableSlope = Level.info.configData.Max_Walkable_Slope;
+    //
+    // Note the threshold is -0.5, not 0: LevelInfoConfigData's constructor default is -1, and the test
+    // is written to catch it with float slop rather than to reject every negative. A map asking for a
+    // small negative limit therefore gets it, and everything at or below -0.5 is "unset". NaN fails the
+    // comparison and so reads as unset too, which is the same thing the original does with it.
+    //
+    // Lives here rather than on LevelConfigData so the sentinel is resolved in ONE place: the config
+    // keeps the raw number the file carries, and everything that has to know what a slope limit
+    // actually is asks this.
+    public static float ResolveMaxWalkableSlope(float configured) =>
+        configured > -0.5f ? configured : MaxWalkableSlopeDegrees;
 
     // --- Ladders (PlayerStance.simulate's ladder block, InteractableLadder, Player.teleportToLocation) ---
 

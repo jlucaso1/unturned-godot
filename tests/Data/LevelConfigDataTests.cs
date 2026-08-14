@@ -185,6 +185,79 @@ public class LevelConfigDataTests
         Assert.Equal("\U00010000",
             LevelConfigData.Parse("{ \"Category\": \"\\uD800\\uDC00\" }").Category);
 
+    // ---- how a property name is matched ----------------------------------------------------------
+
+    // The game hands Config.json to Newtonsoft (Level.cs:944), whose JsonPropertyCollection.
+    // GetClosestMatchProperty resolves each JSON property ordinally and then OrdinalIgnoreCase — so a
+    // workshop config spelling the key its own way loads there exactly as the canonical spelling does.
+    // Read case-sensitively, Use_Legacy_Ground fell back to true and marked a loadable Landscape map
+    // unsupported.
+    [Theory]
+    [InlineData("Use_Legacy_Ground")]
+    [InlineData("use_legacy_ground")]
+    [InlineData("USE_LEGACY_GROUND")]
+    [InlineData("uSe_LeGaCy_GrOuNd")]
+    public void PropertyNamesAreMatchedCaseInsensitively(string key) =>
+        Assert.False(LevelConfigData.Parse($"{{ \"{key}\": false }}").UseLegacyGround);
+
+    // Every kind of field goes through the same lookup, so none of them is left case-sensitive.
+    [Fact]
+    public void EveryFieldKindIsMatchedCaseInsensitively()
+    {
+        LevelConfigData config = LevelConfigData.Parse("""
+        {
+            "batching_version": 2,
+            "max_walkable_slope": 45,
+            "category": "Curated",
+            "weather_override": "snow",
+            "asset": { "guid": "d258342682aa44f89b08de0b47797c4e" }
+        }
+        """);
+
+        Assert.Equal(2, config.BatchingVersion);
+        Assert.Equal(45f, config.MaxWalkableSlope);
+        Assert.Equal("Curated", config.Category);
+        Assert.Equal(ELevelWeatherOverride.Snow, config.WeatherOverride);
+        Assert.Equal(Guid.Parse("d258342682aa44f89b08de0b47797c4e"), config.Asset);
+    }
+
+    // Newtonsoft assigns the member once per property it READS, so a document naming one field twice
+    // ends up holding the second value — whichever way round the two casings are written, and whether or
+    // not one of them is the canonical spelling.
+    [Theory]
+    [InlineData("{ \"Use_Legacy_Ground\": true, \"use_legacy_ground\": false }", false)]
+    [InlineData("{ \"use_legacy_ground\": false, \"USE_LEGACY_GROUND\": true }", true)]
+    [InlineData("{ \"Use_Legacy_Ground\": true, \"Use_Legacy_Ground\": false }", false)]
+    public void ARepeatedKeyKeepsTheLastValue(string json, bool expected) =>
+        Assert.Equal(expected, LevelConfigData.Parse(json).UseLegacyGround);
+
+    // The key matching loosened; the VALUE rules did not. A varied casing does not smuggle a number or a
+    // string past the true/false-literals rule, and the constructor default still stands.
+    [Fact]
+    public void ACaseInsensitiveMatchStillObeysTheValueKind()
+    {
+        Assert.True(LevelConfigData.Parse("{ \"use_legacy_ground\": 0 }").UseLegacyGround);
+        Assert.True(LevelConfigData.Parse("{ \"use_legacy_ground\": \"false\" }").UseLegacyGround);
+        Assert.Equal(128, LevelConfigData.Parse("{ \"batching_max_texture_size\": \"256\" }")
+            .BatchingMaxTextureSize);
+        Assert.Null(LevelConfigData.Parse("{ \"category\": 7 }").Category);
+    }
+
+    // A key that merely LOOKS similar is still a different key — the fold is case, not fuzz.
+    [Fact]
+    public void ADifferentKeyIsStillADifferentKey()
+    {
+        Assert.True(LevelConfigData.Parse("{ \"UseLegacyGround\": false }").UseLegacyGround);
+        Assert.True(LevelConfigData.Parse("{ \"Use_Legacy_Ground_\": false }").UseLegacyGround);
+    }
+
+    // An "Asset" that is not an object never reaches EnumerateObject: the bare-string spelling the
+    // game's converter also takes has no properties to walk.
+    [Fact]
+    public void AssetAcceptsTheBareStringSpelling() =>
+        Assert.Equal(Guid.Parse("d258342682aa44f89b08de0b47797c4e"),
+            LevelConfigData.Parse("{ \"ASSET\": \"d258342682aa44f89b08de0b47797c4e\" }").Asset);
+
     [Fact]
     public void MissingFile_YieldsTheDefaults()
     {
@@ -240,6 +313,24 @@ public class LevelConfigDataTests
         Assert.Equal(2, config.BatchingVersion);
         Assert.Equal("Official", config.Category);
         Assert.Equal(Guid.Parse("d258342682aa44f89b08de0b47797c4e"), config.Asset);
+    }
+
+    // PEI leaves Max_Walkable_Slope unset, and so does every other map the game ships — which is why
+    // 59 degrees everywhere went unnoticed for as long as it did, and is exactly why the SENTINEL is
+    // the branch that has to be right: on the shipped content it is the only branch ever taken.
+    [RealDataFact]
+    public void EveryShippedMapLeavesTheSlopeAtItsSentinel()
+    {
+        string maps = Path.Combine(GameData.Install!, "Maps");
+        Assert.True(Directory.Exists(maps), $"expected the game's own maps at {maps}");
+
+        foreach (string map in Directory.GetDirectories(maps))
+        {
+            LevelConfigData config = LevelConfigData.Load(map);
+            Assert.Equal(-1f, config.MaxWalkableSlope);
+            Assert.Equal(UnturnedGodot.Player.PlayerConfig.MaxWalkableSlopeDegrees,
+                UnturnedGodot.Player.PlayerConfig.ResolveMaxWalkableSlope(config.MaxWalkableSlope));
+        }
     }
 
     // And the GUID it names really is the map's LevelAsset, not just a well-formed GUID.

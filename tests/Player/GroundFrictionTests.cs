@@ -430,6 +430,84 @@ public class GroundFrictionTests
         Assert.Equal(4f * 1.2f, result.Length(), 3);
     }
 
+    // ---- the whole grounded step, as the controller applies it ------------------------------------
+
+    // A slope of about 21 degrees, falling away toward +X: walking along +X is walking DOWNhill.
+    private static readonly Vector3 Slope = new Vector3(0.4f, 1f, 0f).Normalized();
+
+    // The port's own floor stick, not the game's: PlayerMovement follows its move with a SphereCast that
+    // lowers the body onto the ground, and Godot's MoveAndSlide has snapping of its own instead.
+    [Fact]
+    public void GroundedStep_Instant_KeepsTheFloorStick()
+    {
+        Vector3 desired = new Vector3(1, 0, 0) * PlayerConfig.SpeedStand;
+
+        Vector3 result = GroundFriction.GroundedStep(Vector3.Zero, desired, Slope,
+            PlayerConfig.SpeedStand, Instant, 0.02f, jump: false);
+
+        Assert.Equal(GroundFriction.FloorStickSpeed, result.Y);
+        // ...and the horizontal half is untouched: still the instant walk along the floor, which on a
+        // slope is the stance speed spread across three axes rather than two.
+        Vector3 along = GroundFriction.Apply(Vector3.Zero, desired, Slope,
+            PlayerConfig.SpeedStand, Instant, 0.02f);
+        Assert.Equal(along.X, result.X, 5);
+        Assert.Equal(along.Z, result.Z, 5);
+        Assert.Equal(PlayerConfig.SpeedStand, along.Length(), 3);
+    }
+
+    // The finding this exists for. Apply returns a velocity in the floor's plane — "note we do not clamp
+    // Y component here so that we can slide off jumps" — and the controller used to copy X and Z out of
+    // it and overwrite Y with the floor stick, so ice on a slope behaved exactly like ice on a plane.
+    [Fact]
+    public void GroundedStep_Custom_KeepsTheVerticalItComputed()
+    {
+        Vector3 desired = new Vector3(1, 0, 0) * PlayerConfig.SpeedStand; // downhill
+        Vector3 velocity = new(3f, 0f, 0f);
+
+        Vector3 expected = GroundFriction.Apply(velocity, desired, Slope,
+            PlayerConfig.SpeedStand, Ice, 0.02f);
+        Vector3 result = GroundFriction.GroundedStep(velocity, desired, Slope,
+            PlayerConfig.SpeedStand, Ice, 0.02f, jump: false);
+
+        Assert.Equal(expected, result);
+        // Which is the slope's own descent rather than the stick: the body follows the ramp.
+        Assert.True(result.Y < 0f, $"a downhill step should carry the slope's descent: {result}");
+        Assert.NotEqual(GroundFriction.FloorStickSpeed, result.Y);
+    }
+
+    // The other direction, which is where the unclamped Y earns its keep: sliding UP an icy ramp leaves
+    // the body with upward velocity to carry off the top, and the floor stick threw it away.
+    [Fact]
+    public void GroundedStep_Custom_CarriesUpwardVelocityOffARamp()
+    {
+        Vector3 uphill = new Vector3(-1, 0, 0) * PlayerConfig.SpeedStand; // against the fall of the slope
+
+        Vector3 result = GroundFriction.GroundedStep(new Vector3(-4f, 0f, 0f), uphill, Slope,
+            PlayerConfig.SpeedStand, Ice, 0.02f, jump: false);
+
+        Assert.True(result.Y > 0f, $"an uphill step should climb: {result}");
+    }
+
+    // "if (inputJump) { ... velocity.y = JUMP ... }", immediately after the friction block — so it
+    // overrides whatever either branch put there, and nothing else about the step changes.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void GroundedStep_JumpOverridesTheVerticalOfEitherBranch(bool custom)
+    {
+        CharacterFrictionProperties friction = custom ? Ice : Instant;
+        Vector3 desired = new Vector3(1, 0, 0) * PlayerConfig.SpeedStand;
+
+        Vector3 jumped = GroundFriction.GroundedStep(Vector3.Zero, desired, Slope,
+            PlayerConfig.SpeedStand, friction, 0.02f, jump: true);
+        Vector3 standing = GroundFriction.GroundedStep(Vector3.Zero, desired, Slope,
+            PlayerConfig.SpeedStand, friction, 0.02f, jump: false);
+
+        Assert.Equal(PlayerConfig.JumpSpeed, jumped.Y);
+        Assert.Equal(standing.X, jumped.X, 5);
+        Assert.Equal(standing.Z, jumped.Z, 5);
+    }
+
     // ---- the two Unity helpers, whose edge cases the step relies on ------------------------------
 
     [Fact]

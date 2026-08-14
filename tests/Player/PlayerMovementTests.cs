@@ -154,4 +154,33 @@ public class PlayerMovementTests
         Assert.Equal(down, d);
         Assert.Equal(up, u);
     }
+
+    // "if (... Level.info.configData.Max_Walkable_Slope > -0.5f) maxWalkableSlope =
+    // Level.info.configData.Max_Walkable_Slope" (PlayerMovement.cs:1187-1191, and again at 1384-1391 for
+    // the floor snap). The threshold is -0.5 rather than 0: the constructor default is -1 and the test is
+    // written to catch it with slop, so a map asking for a small negative limit is honoured.
+    [Theory]
+    [InlineData(-1f, 59f)]      // LevelInfoConfigData's own default: unset
+    [InlineData(-0.5f, 59f)]    // the boundary is exclusive
+    [InlineData(-1000f, 59f)]
+    [InlineData(-0.25f, -0.25f)] // above the sentinel, so it is a real (if absurd) limit
+    [InlineData(0f, 0f)]        // a map on which nothing at all is walkable
+    [InlineData(45f, 45f)]
+    [InlineData(80f, 80f)]
+    public void ResolveMaxWalkableSlope_TakesTheMapsValueUnlessItIsTheSentinel(
+        float configured, float expected) =>
+        Assert.Equal(expected, PlayerConfig.ResolveMaxWalkableSlope(configured));
+
+    // NaN fails the comparison, which is what the original does with it too — a config carrying one is
+    // "unset" rather than a limit no floor can satisfy.
+    [Fact]
+    public void ResolveMaxWalkableSlope_NaNIsUnset() =>
+        Assert.Equal(PlayerConfig.MaxWalkableSlopeDegrees,
+            PlayerConfig.ResolveMaxWalkableSlope(float.NaN));
+
+    // The default a map with no Config.json at all reaches, through the same door.
+    [Fact]
+    public void ResolveMaxWalkableSlope_DefaultConfigIsFiftyNineDegrees() =>
+        Assert.Equal(59f, PlayerConfig.ResolveMaxWalkableSlope(
+            UnturnedGodot.Data.LevelConfigData.Default.MaxWalkableSlope));
 }
