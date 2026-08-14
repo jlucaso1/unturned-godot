@@ -100,7 +100,8 @@ public sealed class MaterialResolver
     // the object's own MeshRenderer material (rocks/trees have no palette). 0 = none.
     private long MaterialForSubmesh(int submeshIndex, MaterialPalette? palette, List<long>? rendererMaterials)
     {
-        if (palette != null && submeshIndex < palette.MaterialPaths.Count)
+        if (palette != null && submeshIndex < palette.MaterialPaths.Count
+            && NamesThisBundle(palette, submeshIndex))
         {
             string matPath = _graph.AssetPrefix +
                 palette.MaterialPaths[submeshIndex].Replace('\\', '/').ToLowerInvariant();
@@ -109,6 +110,30 @@ public sealed class MaterialResolver
         if (rendererMaterials != null && submeshIndex < rendererMaterials.Count)
             return rendererMaterials[submeshIndex];
         return 0;
+    }
+
+    // Whether a palette entry names the bundle this resolver is reading, which is what makes its path
+    // meaningful here. An entry naming another bundle is not resolvable from this graph, and it used to
+    // be looked up against it anyway: the palette short-circuits the renderer's own material, so a miss
+    // returned "no material" and the submesh lost its colour and texture even though the MeshRenderer
+    // beside it knew the answer. Falling through leaves that fallback in reach.
+    //
+    // The comparison is against TextureKey's own tag rule rather than the raw name ("core.masterbundle"
+    // -> "core"), and it accepts the discriminator suffix ContentSource appends for non-core sources:
+    // a workshop bundle's tag is "<name>-<hash>" precisely because bundle names are not unique, so an
+    // equality test would reject every workshop palette that is in fact naming its own bundle.
+    private bool NamesThisBundle(MaterialPalette palette, int submeshIndex)
+    {
+        if (submeshIndex >= palette.MaterialBundles.Count)
+            return true; // no name recorded: the pre-existing behaviour, which is to trust the path
+
+        string name = palette.MaterialBundles[submeshIndex];
+        if (name.Length == 0)
+            return true;
+
+        string tag = TextureKey.TagFor(name);
+        return string.Equals(_bundleTag, tag, StringComparison.Ordinal)
+            || _bundleTag.StartsWith(tag + "-", StringComparison.Ordinal);
     }
 
     private static Dictionary<Guid, MaterialPalette> ScanPalettes(string assetsDir)

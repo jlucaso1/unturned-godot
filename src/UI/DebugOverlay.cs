@@ -35,7 +35,14 @@ public partial class DebugOverlay : CanvasLayer
         if (@event is not InputEventKey { Pressed: true, Echo: false } key)
             return;
         if (key.Keycode == ToggleKey)
+        {
             Visible = !Visible;
+            // Refreshed on the way back on, because _Process no longer runs while hidden: without this
+            // the HUD would reappear showing whatever frame it was switched off during, for up to
+            // UpdateInterval.
+            if (Visible)
+                UpdateText();
+        }
         else if (key.Keycode == Key.F4)
             CopyCameraShotCam();
     }
@@ -60,6 +67,13 @@ public partial class DebugOverlay : CanvasLayer
 
     public override void _Process(double delta)
     {
+        // A hidden CanvasLayer still gets _Process, so an HUD nobody is looking at was reading
+        // /proc/self/status, pulling seven monitors across the interop boundary, building a six-line
+        // string and reshaping a Label five times a second. That is not just wasted: `perf` subtracts
+        // the CPU monitor from the frame, and this work lands INSIDE TimeProcess — so the overlay was
+        // perturbing the very measurement it exists to take. The toggle refreshes on the way back on.
+        if (!Visible)
+            return;
         _accum += delta;
         if (_accum < UpdateInterval)
             return;

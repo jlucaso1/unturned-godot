@@ -285,6 +285,49 @@ public class TextureRegistryTests : TestClass
         Assert.Equal(first, registry.MaterialIdentity("once")); // still answered, from memory
     }
 
+    // A .tex the extraction worker is still writing must not be read.
+    //
+    // The window is real and it is on the path every first-time player takes: ObjectStreamer calls
+    // ApplyAllAvailable from the main thread the moment the meshes land, while its worker is still
+    // creating .tex files with a non-atomic File.Create — and ApplyAllAvailable sweeps EVERY pending key,
+    // not only the ones the worker has signalled. The magic is the first four bytes written, so a
+    // half-written file passes TextureCache.IsCurrent; TextureCache.Read then hands back a byte[] shorter
+    // than its declared length, because BinaryReader.ReadBytes does not throw on a short read, and
+    // Image.CreateFromData rejects it with engine error spam.
+    //
+    // The `.source` sidecar is the proof of commit: the extraction writes it atomically AFTER the
+    // payload, exactly so this is answerable.
+    [Test]
+    public void AHalfWrittenTextureIsRefusedUntilItsWriteIsCommitted()
+    {
+        using var dir = new TempDir();
+        string path = Path.Combine(dir.Path, "streaming.tex");
+        WriteTexture(dir.Path, "streaming", 20, 40, 60);
+
+        // What the worker's File.Create leaves visible mid-write: a valid header, a truncated payload.
+        byte[] complete = File.ReadAllBytes(path);
+        File.Delete(TextureCache.SourcePath(path));
+        File.WriteAllBytes(path, complete[..(complete.Length - 2)]);
+        Assert.True(TextureCache.IsCurrent(path)); // the magic alone still says yes
+
+        var registry = new TextureRegistry(dir.Path);
+        var material = new StandardMaterial3D();
+        registry.Register("streaming", material);
+
+        Assert.False(registry.Apply("streaming"));
+        Assert.Null(material.AlbedoTexture);
+        // Refused, not written off: the key stays pending so the next frame's sweep picks it up. Caching
+        // the miss is what made an earlier version of this poison the texture for the whole session.
+        Assert.Equal(1, registry.PendingKeyCount);
+
+        // The worker finishes: the payload lands and the sidecar commits it.
+        File.WriteAllBytes(path, complete);
+        TextureCache.RecordSource(path, Path.Combine(dir.Path, "some.masterbundle"), stamp: 1);
+
+        Assert.True(registry.Apply("streaming"));
+        Assert.NotNull(material.AlbedoTexture);
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
 
     // A Unity FilterMode.Point texture: the tiny palettes whose UVs park on solid texels.
@@ -292,14 +335,24 @@ public class TextureRegistryTests : TestClass
     {
         using var ms = new MemoryStream();
         TextureCache.Write(ms, new CachedTexture(4, 1, 1, 1, new byte[] { 200, 30, 30, 255 }, filterMode: 0));
-        File.WriteAllBytes(Path.Combine(dir, key + ".tex"), ms.ToArray());
+        Commit(dir, key, ms.ToArray());
     }
 
     private static void WriteTexture(string dir, string key, byte r, byte g, byte b)
     {
         using var ms = new MemoryStream();
         TextureCache.Write(ms, new CachedTexture(4, 1, 1, 1, new byte[] { r, g, b, 255 }));
-        File.WriteAllBytes(Path.Combine(dir, key + ".tex"), ms.ToArray());
+        Commit(dir, key, ms.ToArray());
+    }
+
+    // Payload then sidecar, in that order — a cache entry the extraction has finished writing, which is
+    // what the registry admits. A fixture that wrote only the payload would be modelling a .tex still in
+    // flight, and would then be testing the registry against a state production never leaves behind.
+    private static void Commit(string dir, string key, byte[] payload)
+    {
+        string path = Path.Combine(dir, key + ".tex");
+        File.WriteAllBytes(path, payload);
+        TextureCache.RecordSource(path, Path.Combine(dir, "some.masterbundle"), stamp: 1);
     }
 
     private sealed class TempDir : System.IDisposable

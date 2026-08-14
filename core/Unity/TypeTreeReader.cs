@@ -58,6 +58,12 @@ public static class TypeTreeReader
             case "SInt64": case "long long": value = r.ReadInt64(); break;
             case "UInt64": case "unsigned long long": case "FileSize": value = r.ReadUInt64(); break;
             case "float": value = BitConverterFloat(r); break;
+            // "double" is one of Unity's own common type strings (CommonString), so a tree can name it
+            // even though nothing Unturned ships does today. Without a case it fell to `default`, was
+            // treated as a struct with no children, consumed ZERO bytes, and every field after it in the
+            // object read from the wrong offset — silent corruption rather than an exception, which is
+            // the failure mode worth spending eight bytes of code on.
+            case "double": value = BitConverterDouble(r); break;
             case "bool": value = r.ReadBoolean(); break;
             case "string": value = ReadString(t, r); align = true; break;
             case "TypelessData": value = ReadTypelessData(r); break;
@@ -128,5 +134,13 @@ public static class TypeTreeReader
     {
         uint bits = r.ReadUInt32();
         return System.BitConverter.Int32BitsToSingle((int)bits);
+    }
+
+    // Same shape as the float above: the reader already handles the byte order, so the bits only need
+    // reinterpreting.
+    private static double BitConverterDouble(UnityBinaryReader r)
+    {
+        ulong bits = r.ReadUInt64();
+        return System.BitConverter.Int64BitsToDouble((long)bits);
     }
 }

@@ -83,6 +83,47 @@ public static class UnityMaterial
         return (System.Convert.ToInt32(pptr["m_FileID"]), System.Convert.ToInt64(pptr["m_PathID"]));
     }
 
+    // A texture property's tiling and offset — the m_Scale/m_Offset that sit beside the texture in its
+    // TexEnv entry — or null when the property is not bound. Unity multiplies the mesh's UVs by the scale
+    // and adds the offset before sampling, so a material that tiles its texture four times across a wall
+    // carries (4, 4) here and nothing in the mesh says so. Read separately from GetTexture because they
+    // are needed at different points: the texture id drives extraction, the transform only drawing.
+    public static (Vector2 scale, Vector2 offset)? GetTextureScaleOffset(
+        Dictionary<string, object> material, string property)
+    {
+        if (TexEnv(material, property) is not { } value)
+            return null;
+
+        return (Vector2Of(value, "m_Scale", fallback: 1f), Vector2Of(value, "m_Offset", fallback: 0f));
+    }
+
+    private static Vector2 Vector2Of(Dictionary<string, object> owner, string key, float fallback)
+    {
+        if (!owner.TryGetValue(key, out object? v) || v is not Dictionary<string, object> xy)
+            return new Vector2(fallback, fallback);
+        return new Vector2(ToFloat(xy["x"]), ToFloat(xy["y"]));
+    }
+
+    // The TexEnv entry bound to a property, or null when the material has none.
+    private static Dictionary<string, object>? TexEnv(Dictionary<string, object> material, string property)
+    {
+        if (!material.TryGetValue("m_SavedProperties", out object? sp) ||
+            sp is not Dictionary<string, object> saved ||
+            !saved.TryGetValue("m_TexEnvs", out object? te) ||
+            te is not List<object> texEnvs)
+        {
+            return null;
+        }
+
+        foreach (object entry in texEnvs)
+        {
+            var pair = (Dictionary<string, object>)entry;
+            if ((string)pair["first"] == property)
+                return (Dictionary<string, object>)pair["second"];
+        }
+        return null;
+    }
+
     // The internal file id and path id of the texture bound to a property, (0, 0) when unset.
     public static (int fileId, long pathId) GetTexture(Dictionary<string, object> material, string property)
     {
