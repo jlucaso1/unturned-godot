@@ -231,6 +231,22 @@ public static class MapCatalog
         return (root.GetString("Name"), root.GetString("Description"));
     }
 
+    // Config.json's Allow_Holiday_Redirects (LevelInfo.cs:81, "If true, certain objects redirect to load
+    // others in-game"). One of the three things Level.cs:282 requires before a Christmas_Redirect or a
+    // Halloween_Redirect is followed, so a map that does not say true never has its trees and props
+    // substituted no matter what the calendar says. PEI ships it as true.
+    //
+    // False is the right default rather than a cautious one: Unturned deserializes Config.json onto a
+    // fresh LevelInfoConfigData whose bool fields start false, so a map whose config omits the key — or
+    // that has no config at all — opts out in the game too. Only the maps that ask get substitutions.
+    //
+    // Reads through LevelConfigData like everything else that wants a Config.json field. This used to
+    // open and parse the file itself, alongside a sibling that did the same for Category; both are one
+    // reader now, so a field added to the config is added in one place and every caller's failure
+    // behaviour is the same.
+    public static bool ReadAllowHolidayRedirects(string mapDirectory) =>
+        LevelConfigData.Load(mapDirectory).AllowHolidayRedirects;
+
     // Tile count and the edge of the square the tiles span, in metres.
     private static (int Count, float SizeMetres) MeasureLandscape(string mapDirectory)
     {

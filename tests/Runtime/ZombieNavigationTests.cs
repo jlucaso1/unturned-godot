@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading.Tasks;
 using Chickensoft.GoDotTest;
 using Godot;
@@ -100,20 +101,81 @@ public class ZombieNavigationTests : TestClass
         Assert.Null(ZombieNavigation.TakePreloaded());
     }
 
-    // Preload does not overwrite a park that is already there. Two loads racing — a player backing out
-    // and starting another map before the first finished — must not leave the second holding the first's
-    // data, and the guard is what stops it.
+    // Preloading the same map twice keeps the park it already has, rather than reading the map's whole
+    // navmesh off disk a second time. Two loads racing — a player backing out and starting the same map
+    // again before the first finished — take this path.
     [Test]
-    public void PreloadingTwiceDoesNotOverwriteTheFirstPark()
+    public void PreloadingTheSameMapTwiceKeepsTheFirstPark()
     {
+        using var map = new TempNavLevel(height: 0);
         ZombieNavigation.DiscardPreloaded();
-        ZombieNavigation.Preload("/nonexistent-map");
-        ZombieNavigation.Preload("/another-nonexistent-map");
+        ZombieNavigation.Preload(map.Dir);
+        ZombieNavigation.Preload(map.Dir);
 
-        // Neither map has a navmesh, so the observable part is that this stays survivable and leaves
-        // nothing behind — the claim below is what a session would do next.
+        ZombieNavigation nav = Assert.IsType<ZombieNavigation>(ZombieNavigation.TakePreloaded());
+        // Claiming is a one-shot however many times it was preloaded, or the next map's session would
+        // be handed a router over this one's flags.
         Assert.Null(ZombieNavigation.TakePreloaded());
+        nav.Free();
+    }
+
+    // Preloading a DIFFERENT map replaces the park. This is the case that used to be silently wrong: the
+    // guard only asked whether something was already parked, so a park nobody claimed — a JOIN client, a
+    // FREECAM run, a STEP_PROBE — made the next load return early and hand a hosted session the previous
+    // map's navmesh. Zombies would route over geometry that is not there, in a world that looks fine.
+    //
+    // The first map deliberately ships no navmesh, because that is what makes the difference observable
+    // from outside: a claimed router at all can only have come from re-reading the second one. A claimed
+    // router is not published yet by design (the collision world does not exist), so there is nothing to
+    // ask it about its geometry — the claim itself is the evidence.
+    [Test]
+    public void PreloadingAnotherMapReplacesThePark()
+    {
+        using var empty = new TempNavLevel(height: 0, navmesh: false);
+        using var real = new TempNavLevel(height: 0);
+        ZombieNavigation.DiscardPreloaded();
+        ZombieNavigation.Preload(empty.Dir);
+        ZombieNavigation.Preload(real.Dir);
+
+        ZombieNavigation nav = Assert.IsType<ZombieNavigation>(ZombieNavigation.TakePreloaded());
         Assert.Null(ZombieNavigation.TakePreloaded());
+        nav.Free();
+    }
+
+    // A level directory with one flat flag under Environment/, in the game's own serialized format, so
+    // the preload path reads real bytes rather than being handed a list.
+    private sealed class TempNavLevel : IDisposable
+    {
+        public string Dir { get; }
+
+        public TempNavLevel(int height, bool navmesh = true)
+        {
+            Dir = Directory.CreateTempSubdirectory("navpreload-").FullName;
+            string environment = Path.Combine(Dir, "Environment");
+            Directory.CreateDirectory(environment);
+            if (!navmesh)
+                return; // a map that ships none, which is what a workshop map without Navigation_*.dat is
+            using var w = new BinaryWriter(File.Create(Path.Combine(environment, "Navigation_0.dat")));
+            w.Write((byte)1);
+            foreach (float v in new[] { 0f, height, 0f, 200f, 200f, 200f }) // centre then size
+                w.Write(v);
+            w.Write((byte)1); // tileXCount
+            w.Write((byte)1); // tileZCount
+            w.Write((ushort)3);
+            foreach (ushort t in new ushort[] { 0, 1, 2 })
+                w.Write(t);
+            w.Write((ushort)3);
+            // Int3 millimetres, Unity space: a 20 m triangle around the origin at the given height.
+            foreach ((int x, int y, int z) in new[]
+                { (-10000, height * 1000, -10000), (10000, height * 1000, 10000), (10000, height * 1000, -10000) })
+            {
+                w.Write(x);
+                w.Write(y);
+                w.Write(z);
+            }
+        }
+
+        public void Dispose() => Directory.Delete(Dir, recursive: true);
     }
 
     // --- routing over a floor ------------------------------------------------------------------------

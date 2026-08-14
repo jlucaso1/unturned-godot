@@ -35,7 +35,14 @@ public partial class DebugOverlay : CanvasLayer
         if (@event is not InputEventKey { Pressed: true, Echo: false } key)
             return;
         if (key.Keycode == ToggleKey)
+        {
             Visible = !Visible;
+            // Refreshed on the way back on, because _Process no longer runs while hidden: without this
+            // the HUD would reappear showing whatever frame it was switched off during, for up to
+            // UpdateInterval.
+            if (Visible)
+                UpdateText();
+        }
         else if (key.Keycode == Key.F4)
             CopyCameraShotCam();
     }
@@ -60,6 +67,13 @@ public partial class DebugOverlay : CanvasLayer
 
     public override void _Process(double delta)
     {
+        // A hidden CanvasLayer still gets _Process, so an HUD nobody is looking at was reading
+        // /proc/self/status, pulling seven monitors across the interop boundary, building a six-line
+        // string and reshaping a Label five times a second. That is not just wasted: `perf` subtracts
+        // the CPU monitor from the frame, and this work lands INSIDE TimeProcess — so the overlay was
+        // perturbing the very measurement it exists to take. The toggle refreshes on the way back on.
+        if (!Visible)
+            return;
         _accum += delta;
         if (_accum < UpdateInterval)
             return;
@@ -95,6 +109,25 @@ public partial class DebugOverlay : CanvasLayer
             $"Process RSS {memMb:0.0} MB\n" +
             $"Draw calls {drawCalls:0}   Primitives {primitives:0}\n" +
             $"Render objects {renderObjects:0}   Nodes {nodes:0}\n" +
+            NetLine() + "\n" +
             "F3 toggle HUD   F4 copy camera (SHOT_CAM)";
+    }
+
+    // The netcode's line, in the same place as everything else the project measures.
+    //
+    // Client-side numbers, because this HUD is drawn in a client's frame — the round trip and what this
+    // machine is sending and receiving. A host wanting its SERVER's totals types `net.stats`, which
+    // prints both halves; a line narrow enough to sit beside the frame time cannot carry four.
+    //
+    // Resolved through the group every time rather than held: the session is rebuilt on every map load,
+    // and it does not exist at all in the menu or in a free-camera walkthrough.
+    private string NetLine()
+    {
+        if (!IsInsideTree() || GetTree().GetFirstNodeInGroup(SceneGroups.Network) is not NetworkManager net
+            || net.Client is not { } client)
+        {
+            return "Net  offline";
+        }
+        return UnturnedGodot.Net.NetReport.HudLine(client.Traffic, client.RoundTripSeconds);
     }
 }

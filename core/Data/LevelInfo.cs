@@ -33,6 +33,8 @@ public sealed class LevelInfo
 
     public string HeightmapsDir => System.IO.Path.Combine(Path, "Landscape", "Heightmaps");
     public string SplatmapsDir => System.IO.Path.Combine(Path, "Landscape", "Splatmaps");
+    // Not every map has one: a map with no terrain holes never writes the folder at all.
+    public string HolesDir => System.IO.Path.Combine(Path, "Landscape", "Holes");
     public string ObjectsDat => System.IO.Path.Combine(Path, "Level", "Objects.dat");
 
     private static readonly Regex TileRegex =
@@ -75,4 +77,7 @@ public sealed class LevelInfo
 
     public string SplatmapPath(int x, int y) =>
         System.IO.Path.Combine(SplatmapsDir, $"Tile_{x}_{y}_Source.splatmap");
+
+    public string HolePath(int x, int y) =>
+        System.IO.Path.Combine(HolesDir, LandscapeHoles.FileName(x, y));
 }

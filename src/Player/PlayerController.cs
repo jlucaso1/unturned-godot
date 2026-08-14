@@ -72,8 +72,74 @@ public partial class PlayerController : CharacterBody3D
     private Vector3 AimForward() =>
         UnturnedGodot.Damage.PunchAim.Forward(RotationDegrees.Y, _pitch);
 
-    // Multiplayer session, when hosting or joined: the controller forwards inputs at the 12.5 Hz cadence.
-    public UnturnedGodot.Net.NetClient? Net { get; set; }
+    // Multiplayer session, when hosting or joined: the controller forwards inputs at the 12.5 Hz cadence,
+    // and takes the server's word back when it refuses one of them.
+    public UnturnedGodot.Net.NetClient? Net
+    {
+        get => _net;
+        set
+        {
+            if (_net != null)
+                _net.OnPositionCorrected -= AcceptCorrection;
+            _net = value;
+            if (_net != null)
+                _net.OnPositionCorrected += AcceptCorrection;
+        }
+    }
+
+    private UnturnedGodot.Net.NetClient? _net;
+
+    // Where the server says we are, when it has refused where we said we were. Null when the two agree,
+    // which is almost always.
+    //
+    // This closes the one place the "authoritative server" claim was not true of movement. The server
+    // validates every claimed position against a speed budget and, when it refused one, simply kept the
+    // old position and said nothing — while this controller kept walking. The two then stayed apart, and
+    // it is the SERVER's position that decides punch damage, zombie aggro and stealth radius, so an
+    // honest desync (a stalled host, a step its heightfield solver disagrees with) read to the player as
+    // "my punches miss things standing next to me", with nothing on screen and no counter to point at.
+    private Vector3? _correction;
+
+    // Past this, the divergence is teleported away rather than walked back. Dragging several metres
+    // through whatever is in between looks worse than a jump, and takes long enough that the server
+    // refuses every claim made on the way.
+    private const float CorrectionSnapDistance = 1.5f;
+
+    // How much of the remaining error is taken per second below that distance. A metre closes in about a
+    // fifth of a second — fast enough that the next 12.5 Hz claim is already inside the budget, slow
+    // enough that the sub-centimetre disagreements of a busy frame are not a visible twitch.
+    private const float CorrectionBlendPerSecond = 12f;
+
+    // Below this the two agree well enough to stop. Chasing the last millimetre would leave a correction
+    // pending forever and re-enter the blend on every frame for nothing.
+    private const float CorrectionSettled = 0.01f;
+
+    private void AcceptCorrection(Vector3 position) => _correction = position;
+
+    // Applied before this frame's movement, so the step that follows starts from where the server has us
+    // rather than from where it already disagreed. Velocity is cleared on a snap: whatever momentum
+    // carried us somewhere the server refused is not momentum it accepted either.
+    private void ApplyServerCorrection(float dt)
+    {
+        if (_correction is not { } target)
+            return;
+
+        Vector3 error = target - GlobalPosition;
+        float distance = error.Length();
+        if (distance <= CorrectionSettled)
+        {
+            _correction = null;
+            return;
+        }
+        if (distance > CorrectionSnapDistance)
+        {
+            GlobalPosition = target;
+            Velocity = Vector3.Zero;
+            _correction = null;
+            return;
+        }
+        GlobalPosition += error * Mathf.Min(1f, CorrectionBlendPerSecond * dt);
+    }
 
     // The camera this controller drives, for screen-space passes that must render in front of it.
     public Camera3D Camera => _camera;
@@ -272,6 +338,10 @@ public partial class PlayerController : CharacterBody3D
     {
         long benchmarkStarted = Benchmark.RuntimeCounters.Start();
         float dt = (float)delta;
+
+        // Before anything else this frame: if the server refused where we said we were, start from where
+        // it says we are instead of compounding the disagreement for another step.
+        ApplyServerCorrection(dt);
 
         // Mouse released = a menu owns the input (PauseMenu): freeze movement keys; physics still runs.
         bool inputCaptured = InputCaptured;
@@ -538,7 +608,8 @@ public partial class PlayerController : CharacterBody3D
         };
         _ladderLosRay.From = from;
         _ladderLosRay.To = capsuleCentre;
-        return GetWorld3D().DirectSpaceState.IntersectRay(_ladderLosRay).Count == 0;
+        using Godot.Collections.Dictionary hit = GetWorld3D().DirectSpaceState.IntersectRay(_ladderLosRay);
+        return hit.Count == 0;
     }
 
     private bool HasInteractMountClearance(Vector3 feet) =>
@@ -575,7 +646,13 @@ public partial class PlayerController : CharacterBody3D
         };
         _ladderRay.From = from;
         _ladderRay.To = from + (direction * range);
-        Godot.Collections.Dictionary hit = GetWorld3D().DirectSpaceState.IntersectRay(_ladderRay);
+        // Disposed here, not left to the collector. Every one of these queries returns a fresh native
+        // Variant dictionary behind a finalizable wrapper, and this one runs on every physics tick for
+        // the whole session — 60 finalizable wrappers a second, each surviving to the finalizer queue,
+        // is gen2 work rather than gen0. docs/PROFILING.md priced the same shape in navigation
+        // reconciliation at ~1.6 MB/s of RSS growth; TryResolve copies out what it needs, so the values
+        // and the answer are identical either way.
+        using Godot.Collections.Dictionary hit = GetWorld3D().DirectSpaceState.IntersectRay(_ladderRay);
         return LadderVolumes.TryResolve(hit, out LadderContact contact) ? contact : null;
     }
 
@@ -620,9 +697,17 @@ public partial class PlayerController : CharacterBody3D
     private bool IsCapsuleOccupied(Vector3 feet) => !HasCapsuleClearance(feet, PlayerConfig.HeightStand);
 
     // PlayerStance.hasHeightClearanceAtPosition, for a capsule of the given height standing at `feet`.
-    private bool HasCapsuleClearance(Vector3 feet, float height) =>
-        GetWorld3D().DirectSpaceState
-            .IntersectShape(LadderCapsuleQuery(feet, height), 1).Count == 0;
+    // The result is a native array like the ray dictionaries above, and nothing indexes into it, so
+    // releasing the array releases everything the query produced. It goes through the cast because
+    // Array<T> is a typed view over one Godot.Collections.Array and only the untyped one carries
+    // Dispose — the conversion hands back that same instance rather than a copy.
+    private bool HasCapsuleClearance(Vector3 feet, float height)
+    {
+        Godot.Collections.Array<Godot.Collections.Dictionary> overlaps =
+            GetWorld3D().DirectSpaceState.IntersectShape(LadderCapsuleQuery(feet, height), 1);
+        using var owned = (Godot.Collections.Array)overlaps;
+        return overlaps.Count == 0;
+    }
 
     // Runs the hands for one simulation tick and plays whatever they did. The owner acts on its own
     // decision immediately rather than waiting for the server to confirm it, exactly as PlayerEquipment
@@ -716,7 +801,10 @@ public partial class PlayerController : CharacterBody3D
         }
         _clearanceShape!.Height = targetHeight;
         _clearanceQuery.Transform = new Transform3D(Basis.Identity, GlobalPosition + (Vector3.Up * (targetHeight * 0.5f)));
-        return GetWorld3D().DirectSpaceState.IntersectShape(_clearanceQuery, 1).Count == 0;
+        Godot.Collections.Array<Godot.Collections.Dictionary> overlaps =
+            GetWorld3D().DirectSpaceState.IntersectShape(_clearanceQuery, 1);
+        using var owned = (Godot.Collections.Array)overlaps; // see HasCapsuleClearance for the cast
+        return overlaps.Count == 0;
     }
 
     private void UpdateCamera(float dt)
@@ -823,11 +911,15 @@ public partial class PlayerController : CharacterBody3D
         _cameraRay ??= new PhysicsRayQueryParameters3D { CollisionMask = CollisionMask, Exclude = SelfExclude };
         _cameraRay.From = origin;
         _cameraRay.To = target;
-        Godot.Collections.Dictionary hit = GetWorld3D().DirectSpaceState.IntersectRay(_cameraRay);
-        if (hit.Count > 0)
+        // Third person runs this every physics tick, so the wrapper is released here for the same reason
+        // ProbeLadder's is: unconditional, 60 Hz, for as long as the camera stays behind the shoulder.
+        using (Godot.Collections.Dictionary hit = GetWorld3D().DirectSpaceState.IntersectRay(_cameraRay))
         {
-            var point = (Vector3)hit["position"];
-            target = point + ((origin - point).Normalized() * PlayerConfig.CameraSweepRadius);
+            if (hit.Count > 0)
+            {
+                var point = (Vector3)hit["position"];
+                target = point + ((origin - point).Normalized() * PlayerConfig.CameraSweepRadius);
+            }
         }
         _camera.GlobalPosition = target;
     }

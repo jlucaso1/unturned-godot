@@ -21,6 +21,7 @@ public class ServerResourceLimitsTests
         private static int NextId;
         private readonly int _id = ++NextId;
         public int Id => _id;
+        public NetTraffic Traffic { get; } = new();
         public void Send(byte[] payload, ESendType sendType) { }
         public void Close() { }
     }
@@ -35,6 +36,8 @@ public class ServerResourceLimitsTests
         public void Message(FakeConnection c, byte[] payload) =>
             Events.Enqueue(new ServerTransportEvent(ETransportEvent.Message, c, payload));
 
+        public NetTraffic Traffic { get; } = new();
+        public System.Func<byte[], byte[]?>? AnswerConnectionless { get; set; }
         public bool TryReceive(out ServerTransportEvent evt) => Events.TryDequeue(out evt);
         public void Update(double now) { }
         public void Close() { }
@@ -135,10 +138,15 @@ public class ServerResourceLimitsTests
     }
 
     // A name is the only unbounded string a peer puts into server state, and Welcome names every joined
-    // player. Left unbounded, one oversized name makes the Welcome sent to everyone who joins afterwards
-    // exceed the transport's payload cap — those clients are admitted and then time out without joining.
+    // player. The clamp keeps one listing bounded; the split keeps the ROSTER deliverable.
+    //
+    // Fitting the transport's 16 KiB cap was never enough. A full roster of clamped names is about
+    // 12.5 KB, which is nine IP fragments that must all arrive — retransmitted whole every quarter
+    // second until acked, so on a link with any loss a busy server's Welcome could simply never
+    // complete, and each retry was another 12.5 KB burst aimed at the client already struggling. What
+    // has to hold is that every PIECE fits the path, not that the whole fits the transport.
     [Fact]
-    public void AFullRosterOfMaximumNamesStillFitsInOneDatagram()
+    public void AFullRosterOfMaximumNamesShipsInUnfragmentedPieces()
     {
         var roster = new List<PlayerListing>();
         string longest = new string('W', NetMessages.MaxNameBytes * 4); // clamped down on admission
@@ -152,13 +160,25 @@ public class ServerResourceLimitsTests
             });
         }
 
-        // Through WriteWelcome because WriteListing is private, and measuring the real encoded datagram
-        // is the point: the assertion is that the clamp keeps a full roster deliverable.
-        byte[] welcome = NetMessages.WriteWelcome(1, tick: 0, rosterVersion: 0, roster);
+        // Through the writers because WriteListing is private, and measuring the real encoded datagrams
+        // is the point.
+        List<byte[]> chunks = NetMessages.WriteWelcomeChunks(1, tick: 0, rosterVersion: 0, roster);
 
-        Assert.True(welcome.Length < UdpServerTransport.MaxPayloadBytes,
-            $"a full roster is {welcome.Length} bytes, past the " +
-            $"{UdpServerTransport.MaxPayloadBytes}-byte transport cap");
+        Assert.True(chunks.Count > 1, "a full roster is more than one datagram; the test proves nothing "
+            + "if it never split");
+        int listed = 0;
+        foreach (byte[] chunk in chunks)
+        {
+            Assert.True(chunk.Length <= NetChunks.MaxPayloadBytes,
+                $"a roster chunk is {chunk.Length} bytes, past the {NetChunks.MaxPayloadBytes}-byte "
+                + "path budget: that datagram is IP-fragmented, and losing any fragment loses all of it");
+            (byte _, uint _, uint _, uint _, byte _, byte chunkCount, List<PlayerListing> read) =
+                NetMessages.ReadWelcome(chunk);
+            Assert.Equal(chunks.Count, chunkCount); // every piece says how many there are
+            listed += read.Count;
+        }
+
+        Assert.Equal(PlayerIdPool.Capacity, listed); // and between them they name the whole roster
     }
 
     [Fact]

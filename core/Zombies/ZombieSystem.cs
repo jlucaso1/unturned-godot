@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using Godot;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Config;
@@ -161,6 +162,15 @@ public sealed class ZombieInstance
     public float LeaveDelay;          // Zombie.leave: stand still this long, then walk to LeaveTo
     public Vector3 LeaveTo;
     public bool RepathGranted;        // this tick's path-query token (granted round-robin)
+
+    // The behaviour state ZombieHost last replicated for this body. It lives here rather than in a
+    // dictionary on the host because it is one byte with exactly this zombie's lifetime, and the host
+    // reads it once per zombie per tick over the WHOLE LEVEL's population — including the hundreds
+    // standing idle in regions no player is anywhere near. That was a hash lookup each, ~12,500 a
+    // second on a map like PEI, to learn a byte that was already sitting beside the state it is
+    // compared against. Replication state, so it is deliberately not part of a repro dump: a replay
+    // restores the simulation and the host resends the regions from scratch.
+    public EZombieState LastSentState;
     public readonly List<Vector3> PathPoints = new(); // the Seeker's current route over the navmesh
     public int CurrentWaypointIndex;  // LegacyAIPathNoRedist.currentWaypointIndex
     public bool TargetReached;        // LegacyAIPathNoRedist.targetReached
@@ -307,6 +317,22 @@ public delegate bool ZombieNavmeshSegmentProbe(Vector3 from, Vector3 to, float r
 // resolve to the right one. Null falls back to the terrain heightfield alone.
 public delegate bool ZombieGroundSnap(Vector3 position, out float y);
 
+// The two costs one authoritative tick's zombie work splits into. They are reported separately because
+// they are unrelated work with unrelated fixes: Brain is detection, steering, the collision resolver and
+// the ground snap, all of it proportional to the population, while PathQuery is the A* over the baked
+// graph, capped at MaxRepathsPerTick however many zombies there are. Together they were previously
+// invisible: the host runs inside NetServer.Update, so the whole simulation was reported as networking.
+public enum EZombieCost
+{
+    Brain,
+    PathQuery,
+}
+
+// Where those costs are reported to, in Stopwatch ticks. Deliberately an instance field on the system
+// rather than a static, so two systems in one process (a HUNT_PROBE beside the real population, or two
+// maps across a session) cannot pool their numbers into one reading.
+public delegate void ZombieCostSink(EZombieCost cost, long elapsedTicks);
+
 // The server-side zombie brain: spawning per ZombieManager.generateZombies, aggro per AlertTool,
 // hunting per Zombie.cs (approach paths, 64 m give-up, leave retreats, swing cadence). Movement is
 // Unturned's NonPathfindingZombieMovementComponent — straight-line seek, 720°/s turning, and the
@@ -433,6 +459,12 @@ public sealed partial class ZombieSystem
 
     // Fires when a zombie's swing lands (attackTime/2 after it starts): (zombie, player id, damage).
     public Action<ZombieInstance, byte, byte>? OnAttack;
+
+    // Opt-in cost reporting (Tier 3). Null — the production default until a benchmark installs one —
+    // costs one field read per tick and per granted repath, and no clock read at all. Installed, it costs
+    // two Stopwatch.GetTimestamp() calls at each of those points: 12.5 of the first a second and at most
+    // MaxRepathsPerTick times that of the second, against a tick measured in milliseconds.
+    public ZombieCostSink? Costs;
 
     public IReadOnlyList<NavFlag>? Navmesh => _navmesh; // for route endpoint projection and repro capture
 
@@ -602,6 +634,10 @@ public sealed partial class ZombieSystem
 
     public void Tick(IReadOnlyList<ZombiePlayerView> players, float dt)
     {
+        // Read the sink once and time against that read, so installing or removing one mid-tick cannot
+        // report an interval measured against a clock that was never started.
+        ZombieCostSink? costs = Costs;
+        long brainStarted = costs == null ? 0L : Stopwatch.GetTimestamp();
         // The bug-repro recorder brackets the tick here (ZombieSystemState.cs): everything below is
         // what a dump has to be able to put back, and the state it must be put back to is this one.
         Observer?.BeginTick(this, players, dt);
@@ -615,9 +651,16 @@ public sealed partial class ZombieSystem
         // so fixed simulation order cannot let one permanently blocked zombie starve the rest.
         _collisionDetourGranted = null;
         float oldestBlocked = BlockedRouteTimeout - MathF.Max(0f, dt);
-        for (int i = 0; i < _zombies.Count; i++)
+        // Last tick's path-query tokens are cleared in the same sweep. They used to have a pass of
+        // their own further down, and nothing between the two touches the flag — Detect changes aggro
+        // and state, never a token — so this is one traversal of the level's population instead of two.
+        // Each was trivial per element and the level's whole population long: on a map with the default
+        // 64 zombies per region across PEI's 19, four full sweeps ran before a single body was moved.
+        int count = _zombies.Count;
+        for (int i = 0; i < count; i++)
         {
             ZombieInstance candidate = _zombies[i];
+            candidate.RepathGranted = false;
             if (candidate.PathPoints.Count == 0
                 || candidate.State is not (EZombieState.Chase or EZombieState.Attack or EZombieState.Return)
                 || candidate.BlockedRouteTime + 1e-6f < oldestBlocked)
@@ -648,17 +691,20 @@ public sealed partial class ZombieSystem
         // due, then run Behave in FIXED order. (Rotating Behave itself shared the budget but also
         // reordered movement and the order-dependent zombie-zombie collision — the whole simulation
         // changed with the rotation. Only the tokens rotate now.)
-        int count = _zombies.Count;
-        for (int i = 0; i < count; i++)
-            _zombies[i].RepathGranted = false;
         if (count > 0 && _pathReadyThisTick)
         {
             _repathCursor %= count;
             int granted = 0;
             int nextCursor = _repathCursor;
+            // Walked with a wrapping index rather than a modulo per element. The sequence is identical
+            // — it starts at the cursor and wraps once — and it is the level's whole population long,
+            // so the division was being paid for every idle body on the map to reach the few hunters.
+            int at = _repathCursor;
             for (int i = 0; i < count && granted < MaxRepathsPerTick; i++)
             {
-                ZombieInstance z = _zombies[(_repathCursor + i) % count];
+                ZombieInstance z = _zombies[at];
+                if (++at == count)
+                    at = 0;
                 // A staggered body will not run Move this tick, so a token spent on it is a token the
                 // hunters behind it in the queue do not get — and the budget is what keeps a blocked
                 // horde from stalling the tick.
@@ -668,7 +714,7 @@ public sealed partial class ZombieSystem
                 {
                     z.RepathGranted = true;
                     granted++;
-                    nextCursor = (_repathCursor + i + 1) % count; // the queue resumes after the last grant
+                    nextCursor = at; // the queue resumes after the last grant
                 }
             }
             if (granted > 0)
@@ -682,6 +728,7 @@ public sealed partial class ZombieSystem
         }
         CurrentZombie = null;
         Observer?.EndTick(this);
+        costs?.Invoke(EZombieCost.Brain, Stopwatch.GetTimestamp() - brainStarted);
     }
 
     private int _repathCursor;
@@ -1125,7 +1172,13 @@ public sealed partial class ZombieSystem
                     queryFrom = snappedFrom;
             }
             _scratchPath.Clear();
-            if (pathQuery(queryFrom, queryTo, _scratchPath, zombie.Radius) && _scratchPath.Count > 0)
+            // Measured around the query alone, not around the snapping above it: the two are separate
+            // costs with separate fixes, and folding the endpoint snap in here is what let it hide.
+            ZombieCostSink? costs = Costs;
+            long queryStarted = costs == null ? 0L : Stopwatch.GetTimestamp();
+            bool routed = pathQuery(queryFrom, queryTo, _scratchPath, zombie.Radius);
+            costs?.Invoke(EZombieCost.PathQuery, Stopwatch.GetTimestamp() - queryStarted);
+            if (routed && _scratchPath.Count > 0)
             {
                 // Storeys can share the same XZ. A downstairs endpoint directly below an upstairs
                 // target is not complete and must not veto the real route via stairs.

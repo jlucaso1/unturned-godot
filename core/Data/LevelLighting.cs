@@ -139,13 +139,22 @@ public sealed class LevelLighting
 
         var times = new LightingKeyframe[TimeCount];
         for (int i = 0; i < TimeCount; i++)
-            times[i] = ReadKeyframe(r);
+            times[i] = ReadKeyframe(r, version);
 
         return new LevelLighting(version, azimuth, bias, fade, timeOfDay, seaLevel, times, moonPhase);
     }
 
+    // Fog written before the file format reached 12 means something else than fog written after, and
+    // LevelLighting.cs:1546 says why in one line: "Switched from height fog to distance fog, so we
+    // reduce the intensity on all maps." A height-fog density read as a distance-fog density is far too
+    // thick — up to three times, since the clamp caps values that go to 1.0 — so the game ceilings every
+    // pre-12 keyframe and this port has to as well. Every official map is version 12 and untouched by
+    // it; a workshop map saved before that update is what this is for.
+    private const byte DistanceFogVersion = 12;
+    private const float LegacyMaxFog = 0.33f;
+
     // A keyframe is the 12 ELightingColor entries (RGB) followed by the 5 ELightingSingle scalars.
-    private static LightingKeyframe ReadKeyframe(BinaryReader r)
+    private static LightingKeyframe ReadKeyframe(BinaryReader r, byte version)
     {
         var colors = new Color[ColorsPerKeyframe];
         for (int i = 0; i < ColorsPerKeyframe; i++)
@@ -156,6 +165,10 @@ public sealed class LevelLighting
         float clouds = r.ReadSingle();
         float shadows = r.ReadSingle();
         float rays = r.ReadSingle();
+
+        // ELightingSingle.FOG, which is this scalar and not the FOG colour above.
+        if (version < DistanceFogVersion)
+            fogDensity = Math.Min(fogDensity, LegacyMaxFog);
 
         return new LightingKeyframe(
             sun: colors[0], sea: colors[1], fog: colors[2],

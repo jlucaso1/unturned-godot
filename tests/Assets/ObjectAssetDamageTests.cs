@@ -66,14 +66,34 @@ public class ObjectAssetDamageTests
             Vulnerable_To_Fists true
             """).VulnerableToFists);
 
-    // Unturned writes several of its booleans as bare keys, and its own reader accepts both spellings.
+    // A BARE flag is not an opt-in. Unturned reads this field with ParseBool and a false default
+    // (ResourceAsset.cs:477), and ParseBool falls back on that default whenever TryParseBool fails —
+    // which it does for the null a valueless key holds (DatValueEx.cs:134-160). The booleans Unturned
+    // really does write by presence are the ones it reads with ContainsKey instead
+    // (ResourceAsset.cs:483, 506; ObjectAsset.cs:1154, 1165-1167). This one is spelled out or it is off.
     [Fact]
-    public void ABareFlagCountsAsTrue() =>
-        Assert.True(Parse("""
+    public void ABareFlagIsNotAnOptIn() =>
+        Assert.False(Parse("""
             GUID 40ce1b8f427d4188930df302423f6d1d
             Type Resource
             Health 100
             Vulnerable_To_Fists
+            """).VulnerableToFists);
+
+    // The spellings DatValueEx.TryParseBool accepts as a single character, which bool.TryParse does not.
+    [Theory]
+    [InlineData("y", true)]
+    [InlineData("t", true)]
+    [InlineData("1", true)]
+    [InlineData("n", false)]
+    [InlineData("f", false)]
+    [InlineData("0", false)]
+    public void ReadsTheSingleLetterSpellings(string raw, bool expected) =>
+        Assert.Equal(expected, Parse($"""
+            GUID 40ce1b8f427d4188930df302423f6d1d
+            Type Resource
+            Health 100
+            Vulnerable_To_Fists {raw}
             """).VulnerableToFists);
 
     [Fact]
