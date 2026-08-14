@@ -109,13 +109,12 @@ const TILES = [
 
 // Config.json, read with comments and trailing commas allowed on the desktop and neither in JSON.parse.
 //
-// Use_Legacy_Ground shares this axis rather than getting one of its own, because it and Category come
-// out of the SAME parse: a document that fails, or that is not an object, loses both together, while a
-// Category the desktop cannot decode must NOT cost the map its terrain declaration.
-//
-// Without the rows that declare Landscape, every generated map defaults to legacy terrain and
-// `supported` is false on both sides for all 400 — agreement no port could fail. The differential has
-// to see a true before it means anything.
+// Two fields come out of this file, and they fail differently. Category is cosmetic. Use_Legacy_Ground
+// decides whether the map is SUPPORTED at all, and it defaults to true — so every row that does not
+// spell it out is a legacy map, and a map with no Config.json is unsupported however many tiles it
+// ships. The rows below cover both, and cross them: a config whose Category cannot be read must still
+// yield its Use_Legacy_Ground, because failing the config wholesale would demote a loadable map over a
+// bad character in an unrelated field.
 const CONFIG = [
     { label: "none", files: {} },
     { label: "plain", files: { "Config.json": '{"Category":"Official"}' } },
@@ -126,25 +125,37 @@ const CONFIG = [
     { label: "not-an-object", files: { "Config.json": '["Category"]' } },
     { label: "malformed", files: { "Config.json": "{" } },
     { label: "surrogate", files: { "Config.json": '{"Category":"\\ud800"}' } },
-    // The declaration itself. False is a Landscape map — the only way `supported` is ever true — and
-    // the rest are values LevelConfigData.Bool refuses to coerce: it tests JsonElement.ValueKind, where
-    // JavaScript would call the string "false" truthy and the number 0 falsy.
-    { label: "landscape", files: { "Config.json": '{"Category":"Official","Use_Legacy_Ground":false}' } },
+    // The modern map: Landscape tiles, so its tiles decide whether it loads.
+    { label: "landscape", files: { "Config.json": '{"Use_Legacy_Ground":false}' } },
+    { label: "landscape-official", files: { "Config.json": '{"Category":"Official","Use_Legacy_Ground":false}' } },
+    // Said out loud, which must read the same as not saying it.
     { label: "legacy-explicit", files: { "Config.json": '{"Use_Legacy_Ground":true}' } },
-    { label: "landscape-string", files: { "Config.json": '{"Use_Legacy_Ground":"false"}' } },
-    { label: "landscape-number", files: { "Config.json": '{"Use_Legacy_Ground":0}' } },
-    { label: "landscape-null", files: { "Config.json": '{"Use_Legacy_Ground":null}' } },
-    // A Landscape declaration next to a category the desktop cannot decode. The surrogate costs the
-    // category and nothing else, so a map with tiles is still supported — which is the whole reason the
-    // C# catches that exception per string instead of around the parse.
+    // The branch that separates LevelConfigData.Bool from JavaScript truthiness. Read as truthiness, 0
+    // is false and the map is Landscape; the desktop takes only the true/false literals and falls back,
+    // so it stays legacy. The string is the same trap from the other side.
+    { label: "ground-zero", files: { "Config.json": '{"Use_Legacy_Ground":0}' } },
+    { label: "ground-string", files: { "Config.json": '{"Use_Legacy_Ground":"false"}' } },
+    { label: "ground-null", files: { "Config.json": '{"Use_Legacy_Ground":null}' } },
+    // The declaration behind the two relaxation passes. Every other row above states it in plain JSON,
+    // so relaxJson dropping or corrupting a key would still be caught for Category and missed for this
+    // one — and this is the key that decides whether the map loads at all.
+    { label: "ground-relaxed", files: { "Config.json": '{/* c */"Use_Legacy_Ground":false,//x\n}' } },
+    // A Category that cannot be decoded next to a ground that can. The desktop catches the surrogate per
+    // string, so this map is Landscape with no category — not a map that lost its config.
     {
-        label: "landscape-surrogate-category",
+        label: "surrogate-with-ground",
         files: { "Config.json": '{"Category":"\\ud800","Use_Legacy_Ground":false}' },
     },
-    // And the declaration behind the relaxations, so the terrain answer survives the comment and
-    // trailing-comma passes rather than only the category doing so.
-    { label: "landscape-comments", files: { "Config.json": '{/* c */"Use_Legacy_Ground":false,//x\n}' } },
 ];
+
+// What the scripted collisions below are written against.
+//
+// Those rows use their `tiles` field as the supported/unsupported knob — "none" is the placeholder that
+// a later folder of the same name supersedes, "one" is the map that supersedes it. That only works on a
+// map the catalogue could support, and support now starts at the map's own declaration: with no
+// Config.json every scripted folder is legacy, every one of them is unsupported, and the placeholder
+// logic they exist to exercise never branches. So they are all authored as Landscape maps.
+const LANDSCAPE = { files: { "Config.json": '{"Use_Legacy_Ground":false}' } };
 
 // The artwork the menu shows, which is three independent File.Exists calls.
 const ART = [
@@ -311,6 +322,7 @@ function makeCase(next, index) {
             emit(baseFor(folder.root, folder.name, folder.nested), [
                 LEVEL[0], // a scripted folder is always a map; that is what makes it a placeholder
                 { files: { "English.dat": `Name ${folder.display}\nDescription Scripted.\n` } },
+                LANDSCAPE, // so that `tiles` below is what decides supported, as these rows intend
                 TILES.find((entry) => entry.label === folder.tiles) ?? TILES[0],
             ]);
         }

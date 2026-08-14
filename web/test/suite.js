@@ -133,7 +133,6 @@ export async function runSuite(manifest) {
     await phase("rangeReads", () => rangeReads(manifest));
     await phase("tileNaming", tileNaming);
     await phase("relaxedConfigJson", relaxedConfigJson);
-    await phase("terrainDeclaration", terrainDeclaration);
     await phase("bomDecoding", bomDecoding);
     await phase("menuOrdering", menuOrdering);
     await phase("caseFolding", caseFolding);
@@ -148,13 +147,16 @@ export async function runSuite(manifest) {
 
 // A map folder with the given tiles, plus the files every map has.
 //
-// A map given tiles also declares Use_Legacy_Ground false, because that is what a real Landscape map
-// ships and it is the map's own declaration — not the presence of tiles on disk — that decides which
-// terrain system loads it. A fixture holding tiles while its config says "legacy" would describe a map
-// the desktop marks unplayable, so the `supported` assertions below would be pinning the wrong thing.
+// Including a Config.json that declares Landscape terrain, because a map that ships Landscape tiles is
+// one. Support starts at the map's own Use_Legacy_Ground (see readMap) and that field defaults to true,
+// so a fixture without a config is a legacy map whatever it puts under Landscape/Heightmaps — which
+// would make every tile-naming and placeholder assertion below pass for the same uninteresting reason.
 function mapTree(prefix, tiles) {
-    const tree = { [`${prefix}/Level.dat`]: "", [`${prefix}/English.dat`]: "Name A Map" };
-    if (tiles.length > 0) tree[`${prefix}/Config.json`] = '{"Use_Legacy_Ground":false}';
+    const tree = {
+        [`${prefix}/Level.dat`]: "",
+        [`${prefix}/English.dat`]: "Name A Map",
+        [`${prefix}/Config.json`]: '{"Use_Legacy_Ground":false}',
+    };
     for (const tile of tiles) tree[`${prefix}/Landscape/Heightmaps/${tile}`] = "";
     return tree;
 }
@@ -277,64 +279,6 @@ async function relaxedConfigJson() {
         equal(`${label} in a category reads as the desktop reads it`, result.maps[0]?.category, expected);
         equal(`${label} still leaves the map listed`, result.maps[0]?.folderName, "Surrogate");
     }
-}
-
-// Use_Legacy_Ground is the authority on which terrain system a map uses — LevelGround.load returns
-// early into loadTrees() on it — so MapEntry.IsSupported is `!UsesLegacyGround && TileCount > 0`. This
-// port used to answer with the tile count alone, which made the browser call a map with tiles and no
-// config playable while the desktop, reading the config, called it legacy.
-async function terrainDeclaration() {
-    const tiles = { "Landscape/Heightmaps/Tile_0_0_Source.heightmap": "" };
-    const probe = async (prefix, config) =>
-        (await probeInstall(
-            syntheticFs({
-                "Bundles/core_linux.masterbundle": "",
-                [`Maps/${prefix}/Level.dat`]: "",
-                ...Object.fromEntries(
-                    Object.entries(tiles).map(([name, body]) => [`Maps/${prefix}/${name}`, body]),
-                ),
-                ...(config === null ? {} : { [`Maps/${prefix}/Config.json`]: config }),
-            }),
-            { platform: "linux" },
-        )).maps[0];
-
-    equal(
-        "tiles alone do not make a map playable",
-        (await probe("Undeclared", null))?.supported,
-        false,
-    );
-    equal(
-        "a map that declares Landscape is playable",
-        (await probe("Landscape", '{"Use_Legacy_Ground":false}'))?.supported,
-        true,
-    );
-    equal(
-        "a map that declares legacy is not",
-        (await probe("Legacy", '{"Use_Legacy_Ground":true}'))?.supported,
-        false,
-    );
-    // LevelConfigData.Bool tests JsonElement.ValueKind rather than coercing, so none of these is a
-    // boolean and all of them leave the default (legacy) standing. JavaScript would call the string
-    // "false" truthy and the number 0 falsy, which is exactly the disagreement being ruled out.
-    for (const [label, raw] of [
-        ["a string", '"false"'],
-        ["a number", "0"],
-        ["null", "null"],
-        ["an object", "{}"],
-    ]) {
-        equal(
-            `${label} is not a boolean, so the map stays legacy`,
-            (await probe("Coerced", `{"Use_Legacy_Ground":${raw}}`))?.supported,
-            false,
-        );
-    }
-    // The declaration and the category come out of one parse, but a category the desktop cannot decode
-    // must not cost the map its terrain answer — the C# catches that per string for this reason.
-    const surrogate = await probe("Both", '{"Category":"\\uD800","Use_Legacy_Ground":false}');
-    equal("a bad category does not demote the terrain", surrogate?.supported, true);
-    equal("and the category itself is still dropped", surrogate?.category, null);
-    // A config that cannot parse at all loses both, taking LevelConfigData.Default.
-    equal("an unparseable config falls back to legacy", (await probe("Broken", "{"))?.supported, false);
 }
 
 // File.ReadAllText picks the encoding from a byte-order mark; File.text() is UTF-8 whatever the bytes

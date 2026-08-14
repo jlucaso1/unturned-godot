@@ -100,9 +100,6 @@ export async function readMap(fs, mapPath, source) {
     const folder = normalize(mapPath).split("/").pop() ?? "";
     const localization = await readLocalization(fs, mapPath);
     const { count, sizeMetres } = await measureLandscape(fs, mapPath);
-    // ONE read of Config.json for the whole entry, because MapCatalog.Read takes one LevelConfigData:
-    // the category and the terrain declaration come out of the same document, and reading it twice
-    // would let a file that parses differently on the second pass make them disagree.
     const config = await readConfig(fs, mapPath);
 
     return {
@@ -118,16 +115,17 @@ export async function readMap(fs, mapPath, source) {
         category: config.category,
         tileCount: count,
         sizeMetres,
-        usesLegacyGround: config.usesLegacyGround,
         // Pre-2020 maps store terrain as one legacy Unity Terrain instead of Landscape tiles; this port
         // does not read those, so they are listed and marked rather than hidden.
         //
-        // MapEntry.IsSupported: `!UsesLegacyGround && TileCount > 0`. The map's OWN declaration decides
-        // which terrain system it is authored for — LevelGround.load returns early into loadTrees() on
-        // Use_Legacy_Ground — and the tiles have to be on disk for the loader that reads them to have
-        // anything to read. This used to be `count > 0` alone, which made the browser call a map with
-        // tiles and no config supported while the desktop, reading the config, called it legacy.
-        supported: !config.usesLegacyGround && count > 0,
+        // The map's own Config.json decides that, not the presence of tiles — LevelGround.load returns
+        // early into loadTrees() when Use_Legacy_Ground is false, and everything past that early return
+        // builds the legacy ground. Inferring it from a glob answered a different question: a Landscape
+        // map whose tiles could not be listed read as legacy, and a legacy map is not a map that happens
+        // to have no tiles, it needs a different loader. The tiles still have to be there for the loader
+        // that reads them to have anything to read, so both halves are required. Mirrors
+        // MapEntry.IsSupported.
+        supported: !config.useLegacyGround && count > 0,
         iconPath: await existingFile(fs, mapPath, "Icon.png"),
         previewPath: await existingFile(fs, mapPath, "Preview.png"),
         chartPath: await existingFile(fs, mapPath, "Chart.png"),
@@ -159,57 +157,54 @@ async function readLocalization(fs, mapPath) {
     return { name: values.get("Name") ?? null, description: values.get("Description") ?? null };
 }
 
-// LevelConfigData's own constructor defaults, which is what the game reads for a map with no config at
-// all — and what LevelConfigData.Default hands back for one it cannot parse. Use_Legacy_Ground defaults
-// to TRUE, so a map that ships tiles but never declares itself is legacy terrain on both sides. That is
-// the game's answer too: Unturned deserializes onto a fresh LevelInfoConfigData whose Use_Legacy_Ground
-// the constructor sets true.
-const CONFIG_DEFAULTS = Object.freeze({ category: null, usesLegacyGround: true });
+// The map's Config.json, read once for every field the catalogue takes from it — mirrors
+// LevelConfigData.Load, down to what each failure falls back to.
+//
+// The fields this returns are the ones the browser's map list shows or decides on. LevelConfigData
+// reads a good deal more (the LevelAsset GUID, the water and clip-border systems, the batching
+// version); those belong to the loader, not the catalogue, and are not modelled here.
+//
+// Every fallback is LevelInfoConfigData's own constructor default, which is what the game reads for a
+// map whose config is missing, unreadable or malformed — Newtonsoft leaves the constructed instance
+// alone on a parse failure, so such a map is loaded rather than skipped.
+const CONFIG_DEFAULT = { category: null, useLegacyGround: true };
 
-// LevelConfigData.Load + Parse, for the two fields the catalogue reads. A missing, unreadable or
-// malformed file takes the defaults above, exactly as the C# does — including a root that parses but is
-// not an object, which JsonDocument accepts and LevelConfigData then rejects.
 async function readConfig(fs, mapPath) {
     const text = await safe(fs.readText(join(mapPath, "Config.json")), null);
-    if (text === null) return CONFIG_DEFAULTS;
+    if (text === null) return CONFIG_DEFAULT;
 
     let root;
     try {
         root = JSON.parse(relaxJson(text));
     } catch {
-        // A map whose config will not parse still loads, on the terrain system the defaults name.
-        return CONFIG_DEFAULTS;
+        // A map whose config will not parse still loads, on the defaults.
+        return CONFIG_DEFAULT;
     }
-    // `root.ValueKind != JsonValueKind.Object`. Arrays, strings and numbers are all valid JSON and none
-    // of them is a config; null is typeof "object" in JavaScript and has to be excluded by hand.
-    if (root === null || typeof root !== "object" || Array.isArray(root)) return CONFIG_DEFAULTS;
+    // JsonDocument.Parse accepts a bare array or scalar; LevelConfigData.Parse then refuses anything but
+    // an object and returns its defaults, so a config of `[1,2]` reads as no config at all.
+    if (root === null || typeof root !== "object" || Array.isArray(root)) return CONFIG_DEFAULT;
 
-    return { category: readCategory(root), usesLegacyGround: readBool(root, "Use_Legacy_Ground", true) };
+    return {
+        category: readCategory(root),
+        // LevelConfigData.Bool takes only the JSON true/false literals; a key spelled with a number, a
+        // string "false" or null keeps the default. Reading it as JavaScript truthiness instead would
+        // make `"Use_Legacy_Ground": 0` unsupported here and supported on the desktop.
+        useLegacyGround: readBool(root, "Use_Legacy_Ground", true),
+    };
 }
 
-// LevelConfigData.Bool: only the JSON literals `true` and `false` answer. A number, a string — even
-// "true" — or a null leaves the caller's fallback standing, because JsonElement.ValueKind is checked
-// rather than the value being coerced. JavaScript would happily call all of those truthy or falsy.
 function readBool(root, key, fallback) {
     const value = root[key];
-    if (value === true) return true;
-    if (value === false) return false;
-    return fallback;
+    return typeof value === "boolean" ? value : fallback;
 }
 
-// LevelConfigData.String -> Text: not a string is null, and a string that cannot be decoded is null too.
-//
-// The catch in the C# is per STRING rather than around the whole parse, and that split has to survive
-// the port: a config whose Category holds an unpaired surrogate still has a perfectly good
-// Use_Legacy_Ground, and failing the document wholesale would quietly demote a Landscape map to legacy
-// terrain over a bad character in an unrelated field. Reading the two fields independently here is what
-// reproduces that — `readBool` above never sees the category's problem.
 function readCategory(root) {
-    const value = root.Category;
-    if (typeof value !== "string") return null;
-    // JsonElement.GetString() throws on a value holding an unpaired surrogate — `\uD800` with no low
-    // half — where JSON.parse hands it back happily. The desktop has no category for such a config.
-    return hasUnpairedSurrogate(value) ? null : value;
+    if (typeof root.Category !== "string") return null;
+    // JsonElement.GetString() refuses a value holding an unpaired surrogate — `\uD800` with no low
+    // half — where JSON.parse hands it back happily. The desktop therefore has no category for such
+    // a config, so neither does this. LevelConfigData catches that per STRING, so it costs the
+    // category and nothing else — Use_Legacy_Ground above still reads.
+    return hasUnpairedSurrogate(root.Category) ? null : root.Category;
 }
 
 // A string that cannot be encoded as UTF-8, because a surrogate is missing its partner.
