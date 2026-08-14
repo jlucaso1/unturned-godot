@@ -7,6 +7,31 @@ using UnturnedGodot.Data;
 
 namespace UnturnedGodot.Assets;
 
+// SDG.Unturned.EPhysicsMaterialCharacterFrictionMode.
+public enum EPhysicsMaterialCharacterFrictionMode
+{
+    // "Velocity is directly set to input velocity." The default, and what every surface that does not
+    // say otherwise uses — which is why walking here has always been instant.
+    ImmediatelyResponsive = 0,
+
+    // "Velocity is affected by acceleration and deceleration." Ice is the shipped example.
+    Custom = 1,
+}
+
+// PhysicMaterialCustomData.GetCharacterFrictionProperties' return value: the resolved friction for one
+// surface, after the fallback chain has been walked.
+public readonly record struct CharacterFrictionProperties(
+    EPhysicsMaterialCharacterFrictionMode Mode,
+    float AccelerationMultiplier,
+    float DecelerationMultiplier,
+    float MaxSpeedMultiplier)
+{
+    // The values the original seeds the struct with before the walk, and therefore what an unknown
+    // material name resolves to.
+    public static readonly CharacterFrictionProperties Default =
+        new(EPhysicsMaterialCharacterFrictionMode.ImmediatelyResponsive, 1f, 1f, 1f);
+}
+
 // Mirrors SDG.Unturned.PhysicsMaterialAsset: maps the Unity PhysicMaterial names a surface can carry to
 // per-event audio definitions (FootstepWalk/FootstepRun/BipedLand/...), with a Fallback chain to a base
 // material (e.g. Peaks_Grass_Dry -> Foliage).
@@ -26,18 +51,50 @@ public sealed class PhysicsMaterialAsset
     // surfaces leave no mark in the game either.
     public Guid ImpactEffect { get; }
 
+    // --- Character friction (PhysicsMaterialAsset.cs:21-45) ---
+    //
+    // "For custom friction mode, multiplies character acceleration / deceleration / max speed." Each is
+    // NULLABLE in the original, and the nullability is load-bearing: GetCharacterFrictionProperties
+    // walks the fallback chain and takes the first asset carrying a value for each property
+    // INDEPENDENTLY, so an asset setting only the deceleration inherits the other two from its fallback
+    // rather than resetting them to 1. A plain float defaulting to 1 cannot express that.
+    public EPhysicsMaterialCharacterFrictionMode CharacterFrictionMode { get; }
+    public float? CharacterAccelerationMultiplier { get; }
+    public float? CharacterDecelerationMultiplier { get; }
+    public float? CharacterMaxSpeedMultiplier { get; }
+
+    // "If true, crops can be planted on this material." Read but not spent — farming does not exist
+    // here, and this is the field it will read when it does.
+    public bool? IsArable { get; }
+
+    // "If true, oil drills can be placed on this material."
+    public bool? HasOil { get; }
+
+    // The EffectAsset a driving tire kicks up off this surface. Vehicles are scenery here, so nothing
+    // plays it yet.
+    public Guid TireMotionEffect { get; }
+
     // The directory this asset was scanned from. The audio it names lives in the bundle of whichever
     // content source owns that directory, which is not always the game's own.
     public string Directory { get; internal set; } = string.Empty;
 
     private PhysicsMaterialAsset(Guid guid, List<string> unityNames, Guid fallback,
-        Dictionary<string, string> audioDefs, Guid impactEffect)
+        Dictionary<string, string> audioDefs, Guid impactEffect, Guid tireMotionEffect,
+        EPhysicsMaterialCharacterFrictionMode frictionMode, float? acceleration, float? deceleration,
+        float? maxSpeed, bool? isArable, bool? hasOil)
     {
         Guid = guid;
         UnityNames = unityNames;
         Fallback = fallback;
         AudioDefs = audioDefs;
         ImpactEffect = impactEffect;
+        TireMotionEffect = tireMotionEffect;
+        CharacterFrictionMode = frictionMode;
+        CharacterAccelerationMultiplier = acceleration;
+        CharacterDecelerationMultiplier = deceleration;
+        CharacterMaxSpeedMultiplier = maxSpeed;
+        IsArable = isArable;
+        HasOil = hasOil;
     }
 
     public static bool TryParse(DatDictionary root, [MaybeNullWhen(false)] out PhysicsMaterialAsset asset)
@@ -67,10 +124,56 @@ public sealed class PhysicsMaterialAsset
                     audioDefs[key] = path;
 
         data.TryGetGuid("WipDoNotUseTemp_BulletImpactEffect", out Guid impactEffect);
+        data.TryGetGuid("TireMotionEffect", out Guid tireMotionEffect);
 
-        asset = new PhysicsMaterialAsset(guid, names, fallback, audioDefs, impactEffect);
+        // PopulateAsset only reads the three multipliers when Character_Friction_Mode is present AND is
+        // not ImmediatelyResponsive — an asset that spells out a multiplier without switching mode has
+        // it ignored outright, so reading it here would invent a value the game does not have.
+        var frictionMode = EPhysicsMaterialCharacterFrictionMode.ImmediatelyResponsive;
+        float? acceleration = null, deceleration = null, maxSpeed = null;
+        if (data.ContainsKey("Character_Friction_Mode"))
+        {
+            frictionMode = ParseFrictionMode(data.GetString("Character_Friction_Mode"));
+            if (frictionMode != EPhysicsMaterialCharacterFrictionMode.ImmediatelyResponsive)
+            {
+                acceleration = Optional(data, "Character_Acceleration_Multiplier");
+                deceleration = Optional(data, "Character_Deceleration_Multiplier");
+                maxSpeed = Optional(data, "Character_Max_Speed_Multiplier");
+            }
+        }
+
+        asset = new PhysicsMaterialAsset(guid, names, fallback, audioDefs, impactEffect, tireMotionEffect,
+            frictionMode, acceleration, deceleration, maxSpeed,
+            OptionalBool(data, "IsArable"), OptionalBool(data, "HasOil"));
         return true;
     }
+
+    // ParseEnum<EPhysicsMaterialCharacterFrictionMode>: Unturned's enum parse is case-insensitive and
+    // falls back to the default (ImmediatelyResponsive) for a spelling it does not know.
+    private static EPhysicsMaterialCharacterFrictionMode ParseFrictionMode(string? raw) =>
+        Enum.TryParse(raw, ignoreCase: true, out EPhysicsMaterialCharacterFrictionMode mode)
+            ? mode
+            : EPhysicsMaterialCharacterFrictionMode.ImmediatelyResponsive;
+
+    // "if (p.data.ContainsKey(key)) x = ParseFloat(key)" — an ABSENT key stays null, which is what lets
+    // the fallback chain supply it instead.
+    //
+    // The presence of the key is tested separately from the parse of its value, and here that is
+    // load-bearing rather than pedantic: null routes the property to the fallback asset, while a
+    // present-but-unparseable key is a value of ZERO in the original (ParseFloat's own default) and
+    // stops the walk. A zero acceleration multiplier is a surface a character cannot accelerate on;
+    // collapsing it to null would quietly hand the walk to Gravel instead.
+    private static float? Optional(DatDictionary data, string key)
+    {
+        if (!data.ContainsKey(key))
+            return null;
+        return data.TryGetSingle(key, out float value) ? value : 0f;
+    }
+
+    // Same split for the flags. GetBool's own default is false, which is what ParseBool yields for a
+    // key that is present and does not parse, so the two agree once the absent case is handled here.
+    private static bool? OptionalBool(DatDictionary data, string key) =>
+        data.ContainsKey(key) ? data.GetBool(key) : null;
 }
 
 // The registry PhysicMaterialCustomData builds: physic-material NAME (case-insensitive, from UnityNames)
@@ -168,6 +271,96 @@ public sealed class PhysicsMaterialBank
         {
             if (asset.ImpactEffect != Guid.Empty)
                 return asset.ImpactEffect;
+            asset = asset.Fallback != Guid.Empty && _byGuid.TryGetValue(asset.Fallback, out PhysicsMaterialAsset? fb)
+                ? fb
+                : null;
+        }
+        return Guid.Empty;
+    }
+
+    // PhysicMaterialCustomData.GetCharacterFrictionProperties (PhysicMaterialCustomData.cs:76-125).
+    //
+    // Not the same walk the audio takes. The audio stops at the first asset that answers; this one
+    // resolves FOUR properties independently, each taking the first asset along the chain that carries
+    // it, and only stops early once all four are settled. That is why the nullable fields on the asset
+    // matter: Ice sets a deceleration and a max speed, and anything it did not set comes from Gravel.
+    //
+    // An unknown material name returns Default, i.e. the instant movement everything had before.
+    public CharacterFrictionProperties FindCharacterFriction(string materialName)
+    {
+        if (!_byName.TryGetValue(materialName, out PhysicsMaterialAsset? asset))
+            return CharacterFrictionProperties.Default;
+
+        CharacterFrictionProperties properties = CharacterFrictionProperties.Default;
+        bool hasMode = false, hasAccel = false, hasDecel = false, hasMaxSpeed = false;
+
+        for (int hops = 0; asset != null && hops < 8; hops++) // hop cap guards a fallback cycle
+        {
+            // "if (!hasMode && info.characterFrictionMode != ImmediatelyResponsive)" — the default mode
+            // does not count as an answer, so a Custom fallback still reaches a surface that left the
+            // key out entirely.
+            if (!hasMode && asset.CharacterFrictionMode != EPhysicsMaterialCharacterFrictionMode.ImmediatelyResponsive)
+            {
+                properties = properties with { Mode = asset.CharacterFrictionMode };
+                hasMode = true;
+            }
+            if (!hasAccel && asset.CharacterAccelerationMultiplier is { } accel)
+            {
+                properties = properties with { AccelerationMultiplier = accel };
+                hasAccel = true;
+            }
+            if (!hasDecel && asset.CharacterDecelerationMultiplier is { } decel)
+            {
+                properties = properties with { DecelerationMultiplier = decel };
+                hasDecel = true;
+            }
+            if (!hasMaxSpeed && asset.CharacterMaxSpeedMultiplier is { } maxSpeed)
+            {
+                properties = properties with { MaxSpeedMultiplier = maxSpeed };
+                hasMaxSpeed = true;
+            }
+            if (hasMode && hasAccel && hasDecel && hasMaxSpeed)
+                break;
+
+            asset = asset.Fallback != Guid.Empty && _byGuid.TryGetValue(asset.Fallback, out PhysicsMaterialAsset? fb)
+                ? fb
+                : null;
+        }
+
+        return properties;
+    }
+
+    // PhysicMaterialCustomData.IsArable / HasOil: the first asset along the chain that has an opinion
+    // wins, and false when nothing does. Neither is spent yet — farming and oil drills do not exist
+    // here — so these exist to keep the fields from being read off disk and discarded again.
+    public bool FindIsArable(string materialName) => FindFlag(materialName, static a => a.IsArable);
+
+    public bool FindHasOil(string materialName) => FindFlag(materialName, static a => a.HasOil);
+
+    private bool FindFlag(string materialName, Func<PhysicsMaterialAsset, bool?> select)
+    {
+        if (!_byName.TryGetValue(materialName, out PhysicsMaterialAsset? asset))
+            return false;
+        for (int hops = 0; asset != null && hops < 8; hops++)
+        {
+            if (select(asset) is { } value)
+                return value;
+            asset = asset.Fallback != Guid.Empty && _byGuid.TryGetValue(asset.Fallback, out PhysicsMaterialAsset? fb)
+                ? fb
+                : null;
+        }
+        return false;
+    }
+
+    // PhysicMaterialCustomData.GetTireMotionEffect: same walk as the impact effect.
+    public Guid FindTireMotionEffect(string materialName)
+    {
+        if (!_byName.TryGetValue(materialName, out PhysicsMaterialAsset? asset))
+            return Guid.Empty;
+        for (int hops = 0; asset != null && hops < 8; hops++)
+        {
+            if (asset.TireMotionEffect != Guid.Empty)
+                return asset.TireMotionEffect;
             asset = asset.Fallback != Guid.Empty && _byGuid.TryGetValue(asset.Fallback, out PhysicsMaterialAsset? fb)
                 ? fb
                 : null;

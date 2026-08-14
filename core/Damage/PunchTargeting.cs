@@ -79,10 +79,17 @@ public static class PunchTargeting
     // the bone collider, which on every zombie prefab is Flesh.
     //
     // The original has a second case: a RADIOACTIVE zombie answers "Alien_Dynamic" whatever its colliders
-    // say. This port's EZombieSpeciality carries no radioactive kind yet, so there is nothing to branch
-    // on; the constant is named beside this one so the branch has somewhere obvious to land.
+    // say (Zombie.cs:255, `isRadioactive ? AlienDynamicRef : FleshDynamicRef`). EZombieSpeciality now
+    // carries the kinds that are radioactive, so SurfaceFor is that branch rather than a note about it.
     public const string ZombieSurface = "Flesh";
     public const string RadioactiveZombieSurface = "Alien_Dynamic";
+
+    // Which of the two a given zombie reports. Note this is the SPECIALITY's own radioactivity: the
+    // original reads Zombie.isRadioactive, which is `zombieRegion.isRadioactive` — a region property
+    // that a horde beacon also sets. Beacons do not exist here, so the speciality is the whole of it,
+    // and an ACID zombie is the case that actually occurs on PEI.
+    public static string SurfaceFor(EZombieSpeciality speciality) =>
+        speciality.IsRadioactive() ? RadioactiveZombieSurface : ZombieSurface;
 
     // The whole cast: whichever of the zombie population and the solid world the ray meets first.
     //

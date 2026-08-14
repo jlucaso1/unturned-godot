@@ -21,10 +21,11 @@ public static class PunchDamageResolver
     // faces. Both are Godot-space and horizontal; a swing that agrees with the facing landed on the
     // zombie's BACK, which is the backstab.
     //
-    // `armor` is getZombieArmor: the armor value of the clothing the zombie is wearing in the slot that
-    // covers the limb that was hit (pants for legs, shirt for arms, gear for the spine). Nothing reads
-    // ItemClothingAsset yet, so callers pass 1 and every limb is bare — which is also what the original
-    // computes for a zombie whose slot rolled empty, and most of them do.
+    // `armor` is getZombieArmor: the armor value of the clothing the zombie wears in the slot covering
+    // the limb that was hit — pants for legs, shirt for arms, hat for the skull, and the spine stacking
+    // a vest onto the shirt. ZombieArmor.For computes it from what the zombie actually rolled at spawn;
+    // 1 stays the default and means bare, which is what the original returns for a zombie whose slot
+    // rolled empty, and most of them do.
     public static ushort Zombie(ELimb limb, Vector3 direction, Vector3 zombieForward,
         float times = 1f, float armor = 1f, ModeDamageConfig? config = null)
     {

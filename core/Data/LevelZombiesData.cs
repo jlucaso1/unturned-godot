@@ -15,8 +15,20 @@ public sealed class ZombieTable
     public ushort Health;
     public byte Damage;
     public byte LootIndex;
+
+    // ZombieTable.lootID: the spawn table a killed zombie of this kind rolls its drop from. Read but not
+    // yet spent — nothing drops loot here, and the drop path is what would spend it.
+    public ushort LootId;
+
     public uint Xp;
     public float Regen;
+
+    // ZombieTable.difficultyGUID: the ZombieDifficultyAsset this table spawns under. It is the other
+    // half of ZombieManager.GetDifficultyInBoundForTable — the navigation bound names one and so does
+    // the table, and the level asset's ZombieDifficultyAssetPrioritization decides which wins. Parsed
+    // and thrown away until now, which is what forced the speciality chances to be constants.
+    public Guid DifficultyGuid;
+
     public readonly List<(float Chance, List<ushort> Items)> Slots = new();
 }
 
@@ -71,7 +83,10 @@ public static class LevelZombiesData
             table.Damage = d[pos++];
             table.LootIndex = d[pos++];
             if (version > 6)
-                pos += 2; // loot table id
+            {
+                table.LootId = BitConverter.ToUInt16(d, pos);
+                pos += 2;
+            }
             table.Xp = version > 7 ? BitConverter.ToUInt32(d, pos) : (table.IsMega ? 40u : 3u);
             if (version > 7)
                 pos += 4;
@@ -81,8 +96,8 @@ public static class LevelZombiesData
                 table.Regen = BitConverter.ToSingle(d, pos);
                 pos += 4;
             }
-            if (version > 8)
-                ReadBlockString(d, ref pos); // difficulty GUID
+            if (version > 8 && Guid.TryParse(ReadBlockString(d, ref pos), out Guid difficulty))
+                table.DifficultyGuid = difficulty;
 
             byte slotCount = d[pos++];
             for (int s = 0; s < slotCount; s++)

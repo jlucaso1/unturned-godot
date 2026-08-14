@@ -38,9 +38,19 @@ public static class PlayerConfig
     public const float TerminalVelocity = -100f;   // vertical velocity clamp
     public const float JumpSpeed = 7f;             // PlayerMovement.JUMP, m/s
 
-    // Airborne horizontal strafing (base accel 8, base decel 2, m/s²); ground movement is instant (no ramp).
+    // Airborne horizontal strafing (base accel 8, base decel 2, m/s²).
     public const float AirAcceleration = 8f;
     public const float AirDeceleration = 2f;
+
+    // Ground movement is instant ONLY on a surface whose physics material leaves
+    // Character_Friction_Mode at ImmediatelyResponsive — which is nearly every surface, and is why this
+    // used to read as an unconditional "no ramp". A surface declaring Custom instead ramps, and
+    // PlayerMovement.cs:1255 names the base rate: "Base deceleration is 2.0 m/s²".
+    //
+    // The acceleration has no constant of its own — "Questionable units-wise, but pretend base
+    // acceleration is proportional to desired speed. For example if walk speed is 4.5 m/s then
+    // acceleration is 4.5 m/s²" (PlayerMovement.cs:1264). See GroundFriction for the whole step.
+    public const float GroundBaseDeceleration = 2f;
 
     // First-person eye height per stance (PlayerLook.HEIGHT_LOOK_*), m. Lerped toward at EyeLerpRate.
     public const float EyeHeightStand = 1.75f;

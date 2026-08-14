@@ -39,9 +39,16 @@ public sealed class MapEntry
     public string? PreviewPath { get; init; }
     public string? ChartPath { get; init; }
 
-    // Pre-2020 maps store terrain as a single legacy heightmap instead of Landscape tiles, which this
-    // port does not read yet. They are listed but cannot be loaded.
-    public bool IsSupported => TileCount > 0;
+    // Config.json's Use_Legacy_Ground: the map declares which terrain system it is authored for.
+    public bool UsesLegacyGround { get; init; } = true;
+
+    // Pre-2020 maps store terrain as a single legacy Unity Terrain instead of Landscape tiles, which
+    // this port does not read yet. They are listed but cannot be loaded.
+    //
+    // The map's own declaration decides that (LevelGround.load's `if (!Use_Legacy_Ground)` early
+    // return), and the tiles have to actually be on disk for the loader that reads them to have
+    // anything to read — a map may declare Landscape and still ship no readable tile.
+    public bool IsSupported => !UsesLegacyGround && TileCount > 0;
 }
 
 // Finds the maps installed on this machine: the ones shipped with the game, the ones the game copied
@@ -182,6 +189,7 @@ public static class MapCatalog
         string folder = Path.GetFileName(Path.TrimEndingDirectorySeparator(mapDirectory));
         (string? localizedName, string? description) = ReadLocalization(mapDirectory);
         (int tiles, float size) = MeasureLandscape(mapDirectory);
+        LevelConfigData config = LevelConfigData.Load(mapDirectory);
 
         return new MapEntry
         {
@@ -190,7 +198,8 @@ public static class MapCatalog
             DisplayName = string.IsNullOrWhiteSpace(localizedName) ? folder : localizedName,
             Source = source,
             Description = description,
-            Category = ReadCategory(mapDirectory),
+            Category = config.Category,
+            UsesLegacyGround = config.UseLegacyGround,
             TileCount = tiles,
             SizeMetres = size,
             IconPath = ExistingFile(mapDirectory, "Icon.png"),
@@ -222,65 +231,21 @@ public static class MapCatalog
         return (root.GetString("Name"), root.GetString("Description"));
     }
 
-    // Config.json's Category ("Official", "Curated", ...). Unknown or malformed config is not fatal.
-    private static string? ReadCategory(string mapDirectory)
-    {
-        string? category = null;
-        ReadConfig(mapDirectory, root =>
-        {
-            if (root.TryGetProperty("Category", out JsonElement value) && value.ValueKind == JsonValueKind.String)
-                category = value.GetString();
-        });
-        return category;
-    }
-
     // Config.json's Allow_Holiday_Redirects (LevelInfo.cs:81, "If true, certain objects redirect to load
     // others in-game"). One of the three things Level.cs:282 requires before a Christmas_Redirect or a
     // Halloween_Redirect is followed, so a map that does not say true never has its trees and props
     // substituted no matter what the calendar says. PEI ships it as true.
     //
     // False is the right default rather than a cautious one: Unturned deserializes Config.json onto a
-    // fresh LevelConfigData whose bool fields start false, so a map whose config omits the key — or that
-    // has no config at all — opts out in the game too. Only the maps that ask get substitutions.
-    public static bool ReadAllowHolidayRedirects(string mapDirectory)
-    {
-        bool allow = false;
-        ReadConfig(mapDirectory, root =>
-        {
-            if (root.TryGetProperty("Allow_Holiday_Redirects", out JsonElement value))
-                allow = value.ValueKind == JsonValueKind.True;
-        });
-        return allow;
-    }
-
-    // The one place Config.json is opened, so every field reads it under the same failure rules: a map
-    // whose config is missing or malformed still loads, with `read` simply never called.
-    private static void ReadConfig(string mapDirectory, Action<JsonElement> read)
-    {
-        string? text = TryReadAllText(Path.Combine(mapDirectory, "Config.json"));
-        if (text == null)
-            return;
-
-        try
-        {
-            using JsonDocument document = JsonDocument.Parse(text,
-                new JsonDocumentOptions { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip });
-            if (document.RootElement.ValueKind == JsonValueKind.Object)
-                read(document.RootElement);
-        }
-        catch (JsonException)
-        {
-            // A map we cannot read the config of still loads; the category is cosmetic, and a holiday
-            // substitution left unapplied keeps the map's own authored objects.
-        }
-        catch (InvalidOperationException)
-        {
-            // GetString() throws this, not JsonException, when the value holds an unpaired surrogate
-            // ("Cannot read incomplete UTF-16 JSON text as string"). Parse accepts the escape, so the
-            // throw lands here rather than above -- and without this catch it left ReadCategory, left
-            // Read, and left Scan, so one hand-edited workshop config took the whole map list down.
-        }
-    }
+    // fresh LevelInfoConfigData whose bool fields start false, so a map whose config omits the key — or
+    // that has no config at all — opts out in the game too. Only the maps that ask get substitutions.
+    //
+    // Reads through LevelConfigData like everything else that wants a Config.json field. This used to
+    // open and parse the file itself, alongside a sibling that did the same for Category; both are one
+    // reader now, so a field added to the config is added in one place and every caller's failure
+    // behaviour is the same.
+    public static bool ReadAllowHolidayRedirects(string mapDirectory) =>
+        LevelConfigData.Load(mapDirectory).AllowHolidayRedirects;
 
     // Tile count and the edge of the square the tiles span, in metres.
     private static (int Count, float SizeMetres) MeasureLandscape(string mapDirectory)

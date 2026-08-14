@@ -1,4 +1,5 @@
 using System;
+using UnturnedGodot.Data;
 
 namespace UnturnedGodot.Player;
 
@@ -89,6 +90,27 @@ public readonly record struct HandState
     // it yet; it is here so the gate exists at the point that will need it rather than being retrofitted
     // around the caller.
     public bool IsBusy { get; init; }
+
+    // player.movement.isSafe: the player stands inside one of the map's SAFEZONE nodes. The nodes were
+    // parsed and discarded until now, so this could not be answered; LevelNodes keeps them.
+    public bool IsSafe { get; init; }
+
+    // player.movement.isSafeInfo: WHICH safezone, so its own flags can be read. Mirrors the original's
+    // pair exactly, including that the two can disagree — isSafe without info is a real state there.
+    //
+    //     if (player.movement.isSafe)
+    //         if (asset == null)
+    //             if (player.movement.isSafeInfo == null || player.movement.isSafeInfo.noWeapons)
+    //                 return; // no punching
+    //
+    // Note the `== null` half: a safezone whose details cannot be resolved is treated as the STRICTEST
+    // case, not the most permissive, and NoWeaponsHere below keeps that direction.
+    public SafezoneNode? Safezone { get; init; }
+
+    // The whole of the condition above, so the gate reads as one rule rather than as two fields the
+    // caller has to combine correctly.
+    public bool PunchForbiddenBySafezone =>
+        IsSafe && Safezone is not { NoWeapons: false };
 }
 
 // Ports the punch half of PlayerEquipment.simulate: the per-tick decision of whether an attack input
@@ -134,6 +156,10 @@ public sealed class PlayerEquipment
     private bool TryPunch(uint tick, in HandState hands)
     {
         if (hands.IsBusy || hands.Stance == EPlayerStance.Prone)
+            return false;
+        // "if (player.movement.isSafe) ... return; // no punching". With nothing equipped — which is
+        // always, here — a safezone that forbids weapons forbids the fist too.
+        if (hands.PunchForbiddenBySafezone)
             return false;
         // Wrap-safe: the counter is a uint that runs for the length of a session, and unsigned
         // subtraction gives the elapsed ticks correctly across its wrap.

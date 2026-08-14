@@ -43,9 +43,12 @@ public class ZombieSystemTests
         new(type, new Vector3(x, 5f, -z));
 
     private static ZombieSystem SpawnOne(out ZombieInstance zombie,
-        List<NavBound>? bounds = null, ZombieTable? table = null, int seed = 1)
+        List<NavBound>? bounds = null, ZombieTable? table = null, int seed = 1, bool fullMoon = false)
     {
-        var system = new ZombieSystem(new[] { table ?? Table() }, bounds ?? TwoBounds(), FlatGround);
+        var system = new ZombieSystem(new[] { table ?? Table() }, bounds ?? TwoBounds(), FlatGround)
+        {
+            IsFullMoon = fullMoon,
+        };
         system.Spawn(new[] { At(0, 0) }, new Random(seed));
         zombie = Assert.Single(system.Zombies);
         zombie.Speciality = EZombieSpeciality.Normal; // pin the speed for deterministic motion asserts
@@ -136,14 +139,17 @@ public class ZombieSystemTests
             spawns.Add(At((i % 20) * 9 - 90, (i / 20) * 9 - 90));
         system.Spawn(spawns, new Random(42));
 
-        int[] byKind = new int[4];
+        var byKind = new Dictionary<EZombieSpeciality, int>();
         foreach (ZombieInstance z in system.Zombies)
-            byKind[(int)z.Speciality]++;
-        Assert.True(byKind[(int)EZombieSpeciality.Normal] > 0);
-        Assert.True(byKind[(int)EZombieSpeciality.Crawler] > 0);
-        Assert.True(byKind[(int)EZombieSpeciality.Sprinter] > 0);
-        Assert.Equal(0, byKind[(int)EZombieSpeciality.Mega]);
-        Assert.True(byKind[(int)EZombieSpeciality.Normal] > byKind[(int)EZombieSpeciality.Crawler]);
+            byKind[z.Speciality] = byKind.GetValueOrDefault(z.Speciality) + 1;
+        int Count(EZombieSpeciality kind) => byKind.GetValueOrDefault(kind);
+
+        // The NORMAL mode block weights crawler and sprinter at 0.15 each, leaving 0.625 for normal.
+        Assert.True(Count(EZombieSpeciality.Normal) > 0);
+        Assert.True(Count(EZombieSpeciality.Crawler) > 0);
+        Assert.True(Count(EZombieSpeciality.Sprinter) > 0);
+        Assert.Equal(0, Count(EZombieSpeciality.Mega));
+        Assert.True(Count(EZombieSpeciality.Normal) > Count(EZombieSpeciality.Crawler));
         Assert.All(system.Zombies, z => Assert.InRange(z.Move, 0, 3));
         Assert.All(system.Zombies, z => Assert.InRange(z.Idle, 0, 2));
         Assert.True(system.Zombies.Select(z => z.Move).Distinct().Count() > 1); // actually rolled
@@ -1428,9 +1434,14 @@ public class ZombieSystemTests
             y = 5f;
             return true;
         };
-        foreach (ZombieInstance zombie in system.Zombies)
+        // Z is pinned along with everything else this fixture pins. It used to be left at whatever the
+        // spawn roll picked, which made the whole test depend on which ten of the forty points came up
+        // — and therefore on how many random draws Create happens to consume before the position pick
+        // of the NEXT body. A crowd two metres apart in front of one wall is what the budget is about.
+        for (int i = 0; i < system.Zombies.Count; i++)
         {
-            zombie.Position = new Vector3(14.7f, 5f, zombie.Position.Z);
+            ZombieInstance zombie = system.Zombies[i];
+            zombie.Position = new Vector3(14.7f, 5f, -9f + (i * 2f));
             zombie.State = EZombieState.Chase;
             zombie.TargetPlayer = player.Id;
             zombie.Yaw = -90f;
@@ -2917,8 +2928,26 @@ public class ZombieSystemTests
         }
     }
 
+    // Zombie.cs:2448 reads `isHyper`, and Zombie.isHyper is `zombieRegion.isHyper`, which is
+    // `LightingManager.isFullMoon || hasBeacon` (ZombieRegion.cs:59) — NOT the navigation flag's
+    // hyperAgro. A full moon is what makes a zombie hit half again as hard.
     [Fact]
-    public void HyperTerritory_Amplifies_Damage()
+    public void FullMoon_Amplifies_Damage()
+    {
+        ZombieSystem system = SpawnOne(out ZombieInstance zombie, fullMoon: true);
+        var hits = new List<byte>();
+        system.OnAttack += (z, p, damage) => hits.Add(damage);
+
+        var player = Player(1, new Vector3(0.8f, 5, 0));
+        for (int i = 0; i < 5; i++)
+            system.Tick(new[] { player }, 0.1f);
+        Assert.Equal(15, Assert.Single(hits)); // 10 x 1.5 hyper
+    }
+
+    // And the navigation flag alone does not, which is the half the port had backwards: it stamped
+    // hyperAgro into the instance's IsHyper, so a hyper-agro bound hit 50% harder in broad daylight.
+    [Fact]
+    public void HyperAgroBound_AloneDoesNotAmplifyDamage()
     {
         List<NavBound> bounds = TwoBounds();
         bounds[0].HyperAgro = true;
@@ -2929,7 +2958,7 @@ public class ZombieSystemTests
         var player = Player(1, new Vector3(0.8f, 5, 0));
         for (int i = 0; i < 5; i++)
             system.Tick(new[] { player }, 0.1f);
-        Assert.Equal(15, Assert.Single(hits)); // 10 x 1.5 hyper
+        Assert.Equal(10, Assert.Single(hits)); // the table's own damage, unamplified
     }
 
     [Fact]
