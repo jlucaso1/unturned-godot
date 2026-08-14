@@ -1,3 +1,4 @@
+using System;
 using System.Runtime.InteropServices;
 using UnturnedGodot.Benchmark;
 using Xunit;
@@ -10,8 +11,11 @@ namespace UnturnedGodot.Tests.Benchmark;
 // file a line at a time — a string per line until VmRSS: turned up two thirds of the way down, then a
 // string[] and a string per field of the line that matched. It reads the file into one reused buffer and
 // scans it now, which changes what is allocated and must not change what is answered. So what is pinned
-// here is the parse, against the shapes a real status file and a broken one take, plus the live figure
-// end to end: /proc where there is one, WorkingSet64 where there is not.
+// here is the parse, against the shapes a real status file and a broken one take.
+//
+// The whole point of the strictness below: a wrong answer here does not look like a failure, it looks
+// like the process shed memory. Every rejection case is therefore its own test, because each one is a
+// route to a plausible-but-false number rather than to the WorkingSet64 fallback.
 public class ProcessMemoryTests
 {
     // The line as the kernel writes it: a tab, then leading spaces that pad the number into a column.
@@ -19,7 +23,8 @@ public class ProcessMemoryTests
     public void TheKernelsOwnLineIsRead()
     {
         Assert.True(ProcessMemory.TryReadVmRss(
-            "Name:\tgodot\nVmPeak:\t 2097152 kB\nVmRSS:\t  345052 kB\nThreads:\t28\n"u8, out long bytes));
+            "Name:\tgodot\nVmPeak:\t 2097152 kB\nVmRSS:\t  345052 kB\nThreads:\t28\n"u8,
+            reachedEnd: true, out long bytes));
         Assert.Equal(345052L * 1024, bytes);
     }
 
@@ -28,7 +33,8 @@ public class ProcessMemoryTests
     [Fact]
     public void TheKeyOnTheFirstLineIsRead()
     {
-        Assert.True(ProcessMemory.TryReadVmRss("VmRSS:\t     4 kB\n"u8, out long bytes));
+        Assert.True(ProcessMemory.TryReadVmRss("VmRSS:\t     4 kB\n"u8, reachedEnd: true,
+            out long bytes));
         Assert.Equal(4L * 1024, bytes);
     }
 
@@ -38,68 +44,142 @@ public class ProcessMemoryTests
     [Fact]
     public void AKeyInTheMiddleOfALineIsNotTheOne()
     {
-        Assert.False(ProcessMemory.TryReadVmRss("HugetlbVmRSS:\t 99 kB\n"u8, out long bytes));
+        Assert.False(ProcessMemory.TryReadVmRss("HugetlbVmRSS:\t 99 kB\n"u8, reachedEnd: true,
+            out long bytes));
         Assert.Equal(0, bytes);
     }
 
-    // Nothing to read: a status file without the field, one whose value is missing, and a buffer that
-    // ran out mid-file. Each sends the caller to the portable fallback rather than to a wrong number.
+    // Nothing to read: a status file without the field, one whose value is missing, an empty read, and a
+    // buffer that ran out inside the key itself. Each sends the caller to the portable fallback.
     [Fact]
     public void AnUnreadableValueFallsThrough()
     {
-        Assert.False(ProcessMemory.TryReadVmRss("Name:\tgodot\nThreads:\t28\n"u8, out _));
-        Assert.False(ProcessMemory.TryReadVmRss("VmRSS:\t kB\n"u8, out _));
-        Assert.False(ProcessMemory.TryReadVmRss(""u8, out _));
-        Assert.False(ProcessMemory.TryReadVmRss("Name:\tgodot\nVmR"u8, out _));
+        Assert.False(ProcessMemory.TryReadVmRss("Name:\tgodot\nThreads:\t28\n"u8, true, out _));
+        Assert.False(ProcessMemory.TryReadVmRss("VmRSS:\t kB\n"u8, true, out _));
+        Assert.False(ProcessMemory.TryReadVmRss(""u8, true, out _));
+        Assert.False(ProcessMemory.TryReadVmRss("Name:\tgodot\nVmR"u8, false, out _));
     }
 
-    // The last line of the file has no trailing newline to stop at.
+    // The last line of the file has no trailing newline to stop at, and that is legitimate — but only
+    // because the read reached the end of the file. See the next test for why the flag has to say so.
     [Fact]
     public void TheLastLineNeedsNoTrailingNewline()
     {
-        Assert.True(ProcessMemory.TryReadVmRss("Name:\tgodot\nVmRSS:\t 128 kB"u8, out long bytes));
+        Assert.True(ProcessMemory.TryReadVmRss("Name:\tgodot\nVmRSS:\t 128 kB"u8, reachedEnd: true,
+            out long bytes));
         Assert.Equal(128L * 1024, bytes);
     }
 
-    // The portable fallback, reached directly. On Linux the /proc read above always succeeds, so nothing
-    // else in this suite ever runs it — and a fallback that only runs on the platforms CI does not cover
-    // is one that breaks exactly when it is finally needed.
+    // A read that stopped INSIDE the number must be refused, not rounded off.
+    //
+    // A status file longer than the buffer — a process with a long Groups: line pushing VmRSS: down the
+    // file — can end the read part-way through the digits. Taking what is there would report 123 kB for
+    // a real 123456 kB: three orders of magnitude low, silently, on the HUD and in every benchmark
+    // report that samples it. The identical span WITH the end of the file behind it is the control, and
+    // it parses — so what is being rejected is the truncation, not the shape of the line.
+    [Fact]
+    public void DigitsCutOffByTheBufferAreRefused()
+    {
+        ReadOnlySpan<byte> cut = "Name:\tgodot\nGroups:\t4 24 27 30\nVmRSS:\t  123"u8;
+
+        Assert.False(ProcessMemory.TryReadVmRss(cut, reachedEnd: false, out long bytes));
+        Assert.Equal(0, bytes);
+
+        Assert.True(ProcessMemory.TryReadVmRss(cut, reachedEnd: true, out long whole));
+        Assert.Equal(123L * 1024, whole);
+    }
+
+    // A line the read DID get to the end of is complete whether or not the file was, so a mid-file
+    // truncation elsewhere must not reject a value that has its own newline behind it.
+    [Fact]
+    public void ATruncatedFileStillReadsAValueThatIsWhole()
+    {
+        Assert.True(ProcessMemory.TryReadVmRss("VmRSS:\t  345052 kB\nThreads:\t2"u8,
+            reachedEnd: false, out long bytes));
+        Assert.Equal(345052L * 1024, bytes);
+    }
+
+    // A number that parses as a long but cannot become bytes is refused before the multiply, which would
+    // otherwise wrap to a negative or absurdly small figure rather than throw. No real VmRSS is within
+    // exabytes of this — which is exactly why the wrap would never be spotted.
+    [Fact]
+    public void AValueTooLargeToConvertIsRefused()
+    {
+        Assert.False(ProcessMemory.TryReadVmRss("VmRSS:\t 9223372036854775807 kB\n"u8, true, out long b));
+        Assert.Equal(0, b);
+
+        // One kB below the limit still converts, so the guard rejects the overflow and nothing else.
+        long biggest = long.MaxValue / 1024;
+        Assert.True(ProcessMemory.TryReadVmRss(
+            System.Text.Encoding.ASCII.GetBytes($"VmRSS:\t {biggest} kB\n"), true, out long ok));
+        Assert.Equal(biggest * 1024, ok);
+    }
+
+    // And end to end against the real process, on whatever platform this is running on: a live figure,
+    // through /proc where there is one and through WorkingSet64 where there is not.
+    [Fact]
+    public void TheLiveProcessReportsSomething()
+    {
+        Assert.True(ProcessMemory.RssBytes() > 0);
+    }
+
+    // The parser against THIS kernel's actual status file, rather than against a hand-written one.
+    //
+    // Every other case here is a shape someone typed out, so all of them together still prove nothing
+    // about the file the HUD really reads — the layout is a kernel detail (field order, padding, which
+    // fields exist at all) and the whole method is built around it. Skips where there is no /proc, which
+    // is how the rest of the suite stays green on Windows and macOS.
+    [Fact]
+    public void TheRealStatusFileParsesToWhatItSays()
+    {
+        if (!System.IO.File.Exists("/proc/self/status"))
+            return;
+
+        // ONE snapshot, parsed two ways. Reading the file twice is a race against the thing it reports:
+        // the first draft of this test did, and failed by 12 KB — three pages the process happened to
+        // touch in between — which is a real reading of a real number and no defect at all.
+        byte[] status = System.IO.File.ReadAllBytes("/proc/self/status");
+        Assert.True(ProcessMemory.TryReadVmRss(status, reachedEnd: true, out long bytes),
+            "the parser did not find VmRSS in this kernel's own status file");
+
+        // The same bytes, the dull way, and the same answer required.
+        foreach (string line in System.Text.Encoding.ASCII.GetString(status).Split('\n'))
+        {
+            if (!line.StartsWith("VmRSS:", StringComparison.Ordinal))
+                continue;
+            string[] fields = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            Assert.Equal(long.Parse(fields[1], System.Globalization.CultureInfo.InvariantCulture) * 1024,
+                bytes);
+            return;
+        }
+
+        Assert.Fail("this kernel's status file has no VmRSS line, so the assertion above proved nothing");
+    }
+
+    // The portable fallback, reached directly. On Linux the /proc read always succeeds, so nothing else
+    // in this suite ever runs it — and a fallback that only runs on the platforms CI does not cover is
+    // one that breaks exactly when it is finally needed.
     [Fact]
     public void TheWorkingSetFallbackAnswersOnItsOwn()
     {
         Assert.InRange(ProcessMemory.WorkingSetBytes(), 1L << 20, 1L << 40);
     }
 
-    [Fact]
-    public void ReportsAPlausiblePositiveSize()
-    {
-        long bytes = ProcessMemory.RssBytes();
-
-        // A running .NET process is never under a megabyte, and never over a terabyte. The bounds are
-        // this loose on purpose: what would be a regression is 0 (the read broke) or a nonsense scale
-        // (KiB reported as bytes), and both are outside them.
-        Assert.InRange(bytes, 1L << 20, 1L << 40);
-    }
-
     // Both readers have to agree about the unit. The /proc line is in KiB and the fallback is in bytes,
     // and a missing multiply there would read as a process using a thousandth of its real memory.
     [Fact]
-    public void AgreesWithTheProcessesOwnWorkingSet()
+    public void TheTwoReadersAgreeAboutTheUnit()
     {
         long reported = ProcessMemory.RssBytes();
-        using var self = System.Diagnostics.Process.GetCurrentProcess();
 
         // Same order of magnitude. They are two samples of a moving number, so this cannot be equality —
         // but a unit mistake would be off by 1024, which is well outside a factor of eight.
-        Assert.InRange(reported, self.WorkingSet64 / 8, self.WorkingSet64 * 8);
+        Assert.InRange(reported, ProcessMemory.WorkingSetBytes() / 8, ProcessMemory.WorkingSetBytes() * 8);
     }
 
     [Fact]
-    public void IsAnsweredOnEveryPlatformRatherThanLinuxAlone()
+    public void TheLiveProcessIsAnsweredOnEveryPlatform()
     {
-        // On Linux this comes from /proc; everywhere else it comes from the fallback. Either way it is a
-        // number, which is what distinguishes it from LoadMemory.ProcessRssMib — that one is a Linux
-        // diagnostic and deliberately answers 0 elsewhere.
         Assert.True(ProcessMemory.RssBytes() > 0,
             RuntimeInformation.IsOSPlatform(OSPlatform.Linux)
                 ? "/proc/self/status should have answered on Linux"

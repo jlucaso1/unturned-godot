@@ -154,6 +154,7 @@ public class ZombieHostTests
         public readonly ZombieSystem System;
         public readonly List<NetClient> Clients = new();
         public readonly List<LoopbackClientTransport> Transports = new();
+        public readonly ZombieHost Host;
         public double Now = 5000.0;
 
         private readonly int _boundCount;
@@ -171,7 +172,7 @@ public class ZombieHostTests
             System = new ZombieSystem(new[] { table }, bounds, FlatGround);
             Server = new NetServer(ServerTransport,
                 new ServerSimulation(new HeightfieldMoveSolver(FlatGround)), Spawn, Level);
-            _ = new ZombieHost(System, Server);
+            Host = new ZombieHost(System, Server);
         }
 
         private static List<NavBound> DefaultBounds(int boundCount)
@@ -457,6 +458,33 @@ public class ZombieHostTests
         batches.Clear();
         Pump(h, 5); // steady idle afterwards: zero bandwidth
         Assert.Empty(batches);
+    }
+
+    // What each client has been told now lives on the zombie rather than in a table keyed on its id, so
+    // this is what says the two mean the same thing. Loading a bug-repro dump replaces the population
+    // but leaves the host standing, and a body that survives that has to be forgotten with the rest:
+    // the settle-to-Idle edge is only worth a snapshot when the client was told something else first.
+    [Fact]
+    public void ResendingRegions_ForgetsWhatEachSurvivingZombieWasLastTold()
+    {
+        var h = new Harness();
+        h.Populate(4);
+        ZombieInstance zombie = Assert.Single((IEnumerable<ZombieInstance>)h.System.Zombies);
+
+        (_, _, List<List<ZombieSnapshotState>> batches) = Join(h, "A");
+        Pump(h, 2);
+        zombie.State = EZombieState.Return;
+        zombie.LeaveTo = zombie.Position + new Vector3(40f, 0, 0); // far enough not to arrive
+        Pump(h, 2);
+        Assert.Contains(batches.SelectMany(b => b),
+            s => s.Id == zombie.Id && s.State == EZombieState.Return);
+
+        h.Host.ResendRegions();
+        zombie.State = EZombieState.Idle;
+        zombie.LeaveDelay = 0f;
+        batches.Clear();
+        Pump(h, 5);
+        Assert.DoesNotContain(batches.SelectMany(b => b), s => s.Id == zombie.Id);
     }
 
     [Fact]

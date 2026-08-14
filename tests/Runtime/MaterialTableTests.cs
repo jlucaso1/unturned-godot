@@ -256,11 +256,16 @@ public class MaterialTableTests : TestClass
     private static CachedSubmesh Submesh(string textureKey, Color? color = null) =>
         new(new[] { 0, 1, 2 }, color ?? Colors.White, textureKey, UnityMaterial.Blend.Opaque);
 
+    // Payload then sidecar, in that order — an entry the extraction has finished writing. TextureRegistry
+    // reads the sidecar as the proof that the payload is committed rather than still streaming, so a
+    // fixture without one models a .tex in flight and never applies.
     private static void WriteTexture(string dir, string key, byte r, byte g, byte b)
     {
         using var ms = new MemoryStream();
         TextureCache.Write(ms, new CachedTexture(4, 1, 1, 1, new byte[] { r, g, b, 255 }));
-        File.WriteAllBytes(Path.Combine(dir, key + ".tex"), ms.ToArray());
+        string path = Path.Combine(dir, key + ".tex");
+        File.WriteAllBytes(path, ms.ToArray());
+        TextureCache.RecordSource(path, Path.Combine(dir, "some.masterbundle"), stamp: 1);
     }
 
     private sealed class TempDir : System.IDisposable

@@ -182,6 +182,7 @@ public class PlayerIdExhaustionTests
         private readonly int _id = ++NextId;
         public bool Closed;
         public int Id => _id;
+        public NetTraffic Traffic { get; } = new();
         public readonly List<byte[]> Sent = new();
         public void Send(byte[] payload, ESendType sendType) => Sent.Add(payload);
         public void Close() => Closed = true;
@@ -204,6 +205,8 @@ public class PlayerIdExhaustionTests
         public void Disconnect(FakeConnection c) =>
             Events.Enqueue(new ServerTransportEvent(ETransportEvent.Disconnected, c, Array.Empty<byte>()));
 
+        public NetTraffic Traffic { get; } = new();
+        public System.Func<byte[], byte[]?>? AnswerConnectionless { get; set; }
         public bool TryReceive(out ServerTransportEvent evt) => Events.TryDequeue(out evt);
         public void Update(double now) { }
         public void Close() { }

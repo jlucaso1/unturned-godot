@@ -87,10 +87,22 @@ Assert.False(hunter.IsSpinningInPlace);
 Assert.True(hunter.NetDisplacementMetres > 5f);
 ```
 
-A dump carries a slice of the map's own navmesh and collision, which is game content, so real dumps
-belong in an issue rather than in this repository (see [NOTICE.md](../NOTICE.md)). The suite's own
-end-to-end coverage builds its world from scratch instead: `tests/Repro/ReproRoundTripTests.cs`
-records a session, captures it, replays it and asserts the two agree.
+That is not a sketch — it is `tests/Repro/ReproFixtureDumpTests.cs`, running against a dump committed
+at `tests/Fixtures/repro-hunt-past-a-pole.json`. Read that pair before writing your own: it is the
+whole path from a file somebody handed you to an assertion about what the simulation did.
+
+A dump carries a slice of the map's own navmesh and collision, which is game content, so **real** dumps
+belong in an issue rather than in this repository (see [NOTICE.md](../NOTICE.md)). That fixture can be
+committed because it is synthetic — a flat ground plane and one box called `pole`, on a level named
+`TestField`, built by `tests/Repro/ReproWorlds.cs` — and one of its tests asserts exactly that, so a
+re-recording taken against a real map fails rather than quietly landing game content in the tree. Keep
+that shape if you add another.
+
+The suite covers the round trip separately, without any file at all:
+`tests/Repro/ReproRoundTripTests.cs` records a session, captures it, replays it and asserts the two
+agree. The two are not redundant — that one proves capture and replay agree in memory, this one is the
+only test that reads a dump the process did not just write, which is the only thing a bug report ever
+does.
 
 ### In the game
 

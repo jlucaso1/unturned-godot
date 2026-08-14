@@ -5,8 +5,13 @@
 An experiment: load a real [Unturned](https://store.steampowered.com/app/304930/Unturned/) map (terrain,
 objects, foliage, roads, lighting, audio, characters, zombies) straight out of your Steam install and run
 it in [Godot 4.7](https://godotengine.org/) (.NET / C#). Every file format is re-implemented from scratch
-and checked byte-for-byte against the game's own data, using
+against the game's own data, using
 [U3-SDK](https://github.com/SmartlyDressedGames/U3-SDK) as the reference for how each one is serialized.
+The suite checks the parsers two ways: hermetic tests over fixtures it builds itself, and
+[`[RealDataFact]`](tests/Helpers/RealDataFact.cs) tests that decode the shipped bundles and assert against
+what Unity actually wrote. The second kind is what a fixture cannot do — a decoder and a fixture builder
+written from the same misreading agree with each other — and it is why the mesh, quantized-mesh and Crunch
+decoders are checked against real content rather than only against this repo's idea of the format.
 
 > **Unofficial, and not a game.** This is a hobby port/experiment, not affiliated with or endorsed by
 > Smartly Dressed Games. It ships **no** game content: you need your own copy of Unturned installed
@@ -26,7 +31,7 @@ and checked byte-for-byte against the game's own data, using
 | **Audio** | Footsteps/landings resolved through the terrain splat like `PhysicsTool.GetTerrainMaterialName`, clips extracted from the master bundle's FSB5 banks |
 | **Zombies** | Spawn tables, navigation bounds and the pre-baked navmeshes; detection, hunting and the `Zombie.cs` animation set |
 | **Vehicles** | The map's own `Spawns/Vehicles.dat` rolled through its spawn tables and redirectors, as many as the level's size allows, each drawn from its real `Vehicle.prefab`. Parked scenery for now: no driving, physics or damage |
-| **Multiplayer** | Authoritative server + snapshot-interpolated clients over UDP; singleplayer is the same stack over loopback. Listen server, dedicated server and join-by-address all work |
+| **Multiplayer** | Authoritative server + snapshot-interpolated clients over UDP; singleplayer is the same stack over loopback. Listen server, dedicated server and join-by-address all work. Movement is client-simulated and server-validated, Unturned's own `forceTrustClient` shape: the client resolves collision against the full world and the server checks each claimed position against a speed budget, correcting the player back when it refuses one. `net.stats` and the `F3` HUD say what the wire is costing |
 
 Goal order is **parity first, then performance**, and a performance HUD (`F3`) is on hand so the numbers stay
 in view.
@@ -42,13 +47,15 @@ in view.
   source there is, and nothing yet gives the player a health bar of their own. Vehicles spawn and
   render, but they are scenery: nothing drives, collides with or damages them, and a vehicle sits at the
   height its spawnpoint was authored at instead of settling onto the ground as its rigidbody would.
-- **First-person arms**: the swing animates in first person, but what it animates is the third-person
-  body drawn from inside its own head, not the game's purpose-built arms. The `Viewmodel` rig carries a
-  single renderer whose skin weights live in the compressed vertex stream this port does not decode yet,
-  so it imports as an unposable bind-pose mesh. The stand-in rig does ride its own skull the way the game
-  parents its `ViewmodelCamera` under `firstSkeleton/Spine/Skull`, so the framing holds across stances and
-  through a swing; what cannot be borrowed is that camera's authored *rotation*, which only means something
-  on the rig it was authored against. `UG_VIEWMODEL_OFFSET="x,y,z"` nudges it meanwhile.
+- **First-person arms**: the `Viewmodel` rig now imports with its skin, so the arms are the game's own
+  rather than the third-person body drawn from inside its own head. Its renderer is authored at **two**
+  bone influences per vertex where the body uses four, and the mesh reader accepted only four — so its
+  weights decoded as nothing and it came in as an unposable bind-pose mesh. (The old note here blamed a
+  compressed vertex stream; the data was inline and uncompressed all along, just two wide.) What still
+  cannot be borrowed is the authored *rotation* of the prefab's `ViewmodelCamera`, which only means
+  something on the rig it was authored against — the rig does ride its own skull the way the game parents
+  that camera under `firstSkeleton/Spine/Skull`, so the framing holds across stances and through a swing.
+  `UG_VIEWMODEL_OFFSET="x,y,z"` nudges it meanwhile.
 - **Breaking the world visually**: a punched tree or rubble pile loses health on the server and the
   destruction is reported (`PUNCH_LOG=1`), but the placement is still drawn. Objects are rendered as
   batched `MultiMesh` instances with no per-instance handle, so removing one — or swapping a felled tree
@@ -165,6 +172,7 @@ can actually do.
 | sun | `sun.enabled`, `sun.shadows.enabled`, `sun.shadows.distance`, `sun.shadows.cascades` (1/2/4 — each split is another pass over its slice of the casters), `sun.shadows.blend` (cross-fade the cascade seam; on costs a second shadow lookup in the band) |
 | environment | `env.sky.enabled`, `env.fog.enabled`, `env.volumetric.enabled`, `env.ssao.enabled`, `env.ssil.enabled`, `env.glow.enabled` |
 | renderer | `r.scale`, `r.msaa`, `r.taa.enabled`, `r.occlusion.enabled`, `r.lod.threshold`, `r.shadow.atlas` (positional), `r.shadow.directional` (the sun's shadow map edge — cleared and written every frame, so it is memory bandwidth first), `r.shadow.filter` (taps per shadowed pixel), `r.debug` (overdraw/wireframe), `r.vsync.enabled`, `r.fps.max` |
+| net | `net.stats` — bytes and datagrams per second in each direction, split by message type, plus the round trip and the six drop counters. **Read-only**, the same standing `perf` has: it observes what the session already did and cannot move a byte of it |
 | commands | `help`, `list`, `find <text>`, `reset <name\|all>`, `perf`, `copy`, `clear`, `quit` |
 
 `help` and `list` are the authority — the table above is a map, not a manual. `find shadow` answers "what
@@ -348,6 +356,9 @@ node web/test/run.mjs
 
 # The browser's .dat port against core/Dat/DatParser.cs, over generated documents.
 node web/test/differential.mjs
+
+# The browser's install/map catalogue against core/'s, over generated install trees written to disk.
+node web/test/catalog-differential.mjs
 
 # The browser's casing tables against the BCL, over every code point.
 node web/test/casing.mjs

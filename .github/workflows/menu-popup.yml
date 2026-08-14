@@ -1,0 +1,143 @@
+name: Boot menu popup gate
+
+# scripts/check-menu-popup-errors.sh has existed, and has never once run.
+#
+# It guards a class of bug that reproduces ONLY in a release export — an engine Popup whose
+# disconnect fails there and nowhere else (godotengine/godot#87626), so hovering the map list spams
+# stderr in the shipped build and is clean in every debug run and every unit test. To see it the gate
+# needs an exported release binary, a real pointer and a display: Godot export templates, Xvfb and
+# xdotool. Nothing in the repo fetched the templates and no workflow installed xdotool, so the
+# script's prerequisite check was the whole story — it printed "skipped" and exited 0, everywhere,
+# forever, while the repo's documentation implied the bug was covered.
+#
+# This is that gate actually running.
+#
+# WHY ITS OWN WORKFLOW, ON A SCHEDULE, RATHER THAN A JOB ON EVERY PULL REQUEST
+#
+# Two reasons, and the second is temporary:
+#
+#  1. It needs the game content (~200 MB) AND a release export. ci.yml is hermetic by design and has
+#     no content, so the runtime job there cannot host it however much Xvfb it already installs.
+#     real-data.yml has the content, but that workflow is already the expensive half of every pull
+#     request and this adds an export on top.
+#
+#  2. As of this commit the Linux release export DOES NOT BUILD, for a reason that sits outside this
+#     workflow and outside the script:
+#
+#       unturned-godot.csproj targets Godot.NET.Sdk/4.7.1 and core/UnturnedGodot.Core.csproj pins
+#       GodotSharp 4.7.1 — consistent with each other. But scripts/install-godot.sh pins the ENGINE at
+#       4.7-stable, which is 4.7.0 and ships GodotSharp 4.7.0. Godot 4.7.1-stable exists upstream.
+#       When that older editor opens the project to export it, it rewrites the csproj's SDK version
+#       DOWN to its own 4.7.0 — a real edit, left in the working tree — and the restore then fails with
+#       NU1605 (GodotSharp downgrade 4.7.1 -> 4.7.0) because core still wants 4.7.1.
+#
+#     What makes it invisible is that the exporter does not treat that as fatal: it logs "Failed to
+#     build project", downgrades the run to "completed with warnings", writes a .pck with no managed
+#     assemblies, and EXITS ZERO. The binary then dies on launch with "ERROR: .NET: Assemblies not
+#     found". check-menu-popup-errors.sh now reads the export log rather than the exit status, so it
+#     fails loudly instead of driving a corpse — but it does fail, and will until the engine pin is
+#     brought to 4.7.1.
+#
+#     run-godot-tests.sh is unaffected and green (595 tests): it loads a pre-built assembly and never
+#     exports, so the rewrite never happens there. Exporting is the only path that touches it.
+#
+# So: this gate now runs, and currently reports that the release export is broken — which is the truth
+# and is exactly what a gate is for. Once the engine pin is fixed, move this into real-data.yml's
+# structural job (it already has the content, Godot and Xvfb) and delete this file: a gate that blocks
+# a merge is worth more than one that reports a week later.
+
+on:
+  schedule:
+    # Weekly, an hour after real-data.yml's own weekly run so the two do not contend for the content
+    # cache they share.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: menu-popup-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  popup-errors:
+    name: exported menu prints no signal-disconnect errors
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - uses: actions/cache@v6
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'Directory.Build.props', 'nuget.config') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Cache the downloader and Godot
+        uses: actions/cache@v6
+        with:
+          path: build/tools
+          key: tools-${{ hashFiles('scripts/fetch-game-data.sh', 'scripts/install-godot.sh') }}
+
+      - name: Resolve the content cache key
+        id: content-key
+        run: echo "key=$(./scripts/fetch-game-data.sh --manifest-key)" >> "$GITHUB_OUTPUT"
+
+      # Same receipt namespace and restore/save split as real-data.yml's jobs; see the comments there.
+      - name: Restore the game content
+        uses: actions/cache/restore@v6
+        with:
+          path: build/game-data
+          key: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-
+          restore-keys: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-
+
+      - name: Fetch the game content
+        id: content
+        run: |
+          if ./scripts/fetch-game-data.sh --verify 2> /dev/null; then
+            echo "Restored content verified; skipping the download."
+          else
+            ./scripts/fetch-game-data.sh
+            echo "downloaded=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save the game content
+        if: steps.content.outputs.downloaded == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: build/game-data
+          key: unturned-content-receipt-v2-${{ steps.content-key.outputs.key }}-${{ github.run_id }}-${{ github.job }}
+
+      # install-godot.sh brings Xvfb along with the software Vulkan driver; xdotool is the one thing
+      # neither it nor any other script installs, and its absence alone was enough to make the gate skip.
+      - name: Install Godot, Xvfb and xdotool
+        run: |
+          ./scripts/install-godot.sh
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xdotool
+
+      # ONE file out of the 1.2 GB .tpz, by HTTP range request: ~28 MB and about five seconds, so this
+      # needs no cache entry of its own and cannot crowd out the content cache. See the script.
+      - name: Install the Linux export template
+        run: ./scripts/check-menu-popup-errors.sh --install-templates
+
+      # The script self-skips when a prerequisite is missing, which is right on a developer's machine
+      # and useless here: every prerequisite is installed above, so a skip means one of those steps
+      # silently stopped working and the gate has gone back to proving nothing.
+      - name: Drive the exported boot menu
+        env:
+          UNTURNED_PATH: ${{ github.workspace }}/build/game-data
+        run: |
+          set -o pipefail
+          ./scripts/check-menu-popup-errors.sh --keep 2>&1 | tee "$RUNNER_TEMP/popup-check.log"
+          if grep -q '\[popup-check\] skipped:' "$RUNNER_TEMP/popup-check.log"; then
+            echo "::error::The popup gate skipped; every prerequisite is installed, so it was supposed to run."
+            exit 1
+          fi

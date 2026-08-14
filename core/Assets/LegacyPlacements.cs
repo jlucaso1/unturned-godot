@@ -57,8 +57,11 @@ public static class LegacyPlacements
             // age do not have, so those maps never turn substitution on in the first place.
             if (holidays.AllowRedirects)
             {
-                if (Substitute(db, redirects, guid, holidays.Active) is not { } substitute)
+                if (Substitute(db, redirects, guid, holidays.Active, AssetFamily.Object)
+                    is not { } substitute)
+                {
                     continue;
+                }
                 // "id = redirect.id; GUID = redirect.GUID" — assigned unconditionally, because the map
                 // hands back the ORIGINAL asset for anything it does not substitute, and the game takes
                 // that asset's id either way.
@@ -110,7 +113,7 @@ public static class LegacyPlacements
             // December on a map whose pines redirect to snowy ones the install is missing.
             if (holidays.AllowRedirects)
             {
-                if (Substitute(db, redirects, guid, holidays.Active, EObjectType.Resource)
+                if (Substitute(db, redirects, guid, holidays.Active, AssetFamily.Resource)
                     is not { } substitute)
                 {
                     continue;
@@ -176,22 +179,55 @@ public static class LegacyPlacements
     // the ways a lookup can come up empty — an unknown original and an unknown target — collapse into
     // the single null the game treats them as.
     private static ObjectAsset? Substitute(ObjectAssetDatabase db, Dictionary<Guid, ObjectAsset?> memo,
-        Guid guid, ENPCHoliday active, EObjectType? required = null)
+        Guid guid, ENPCHoliday active, AssetFamily required)
     {
         if (memo.TryGetValue(guid, out ObjectAsset? cached))
             return cached;
 
         ObjectAsset? result = null;
-        if (db.ResolveByGuid(guid) is { } original && (required == null || original.Type == required))
+        if (Matching(db.ResolveByGuid(guid), required) is { } original)
         {
             Guid target = original.GetHolidayRedirect(active);
             // "Does not have a redirect for this event, so use the original tree." A named target that
             // resolves to nothing is the drop instead: Unturned logs "Missing holiday redirect" and
             // leaves the asset null, which the loader reads as "skip this placement".
-            result = target == Guid.Empty ? original : db.ResolveByGuid(target);
+            //
+            // The TARGET is type-checked as well as the original, and that is not belt-and-braces. The
+            // game resolves it through AssetReference<ResourceAsset>/<ObjectAsset>, which is typed: a
+            // tree whose Christmas_Redirect names an object, a vehicle or an NPC comes back unresolved
+            // and the tree is dropped. Checking only the original would let that placement through and
+            // then hand an unrelated asset a tree's transform, vertical offset and mesh.
+            result = target == Guid.Empty ? original : Matching(db.ResolveByGuid(target), required);
         }
 
         memo[guid] = result;
         return result;
     }
+
+    // Which of Unturned's asset CLASSES a redirect is allowed to land on. This port keeps resources,
+    // vehicles and objects in one table tagged by EObjectType, where the game has ResourceAsset,
+    // VehicleAsset and ObjectAsset as separate types — so the distinction the typed AssetReference makes
+    // for free has to be made explicitly here.
+    private enum AssetFamily
+    {
+        // ObjectAsset proper: the editor categories Small/Medium/Large plus NPC and Decal, which are
+        // ObjectAssets in the game too. Vehicles and their redirectors are not, and neither are
+        // resources. Unknown is excluded as well: an unrecognised Type is not evidence of an object.
+        Object,
+
+        // ResourceAsset: the harvestables under Bundles/Trees.
+        Resource,
+    }
+
+    private static ObjectAsset? Matching(ObjectAsset? asset, AssetFamily required) => asset switch
+    {
+        null => null,
+        { Type: EObjectType.Resource } => required == AssetFamily.Resource ? asset : null,
+        {
+            Type: EObjectType.Small or EObjectType.Medium or EObjectType.Large or EObjectType.Npc
+            or EObjectType.Decal
+        } => required == AssetFamily.Object ? asset : null,
+        // Vehicle, VehicleRedirector and Unknown belong to neither family.
+        _ => null,
+    };
 }
