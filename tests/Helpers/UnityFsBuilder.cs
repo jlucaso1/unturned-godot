@@ -19,6 +19,13 @@ public sealed class UnityFsBuilder
     public bool Lz4Blocks { get; set; }            // LZ4-encode the (single) data block
     public bool PaddingAtStart { get; set; }       // set flag 0x200 (align blocks to 16)
 
+    // Overrides the sizes the (single, uncompressed) block declares in blocks-info, without writing that
+    // many bytes. A bundle claiming a block at or above 2 GiB is the case the reader has to refuse rather
+    // than truncate to a negative int, and it is the one case a fixture cannot honestly produce: building
+    // it for real would mean a 2 GiB allocation in the test run.
+    public uint? DeclaredBlockUncompressedSize { get; set; }
+    public uint? DeclaredBlockCompressedSize { get; set; }
+
     public UnityFsBuilder Add(string name, byte[] data)
     {
         _files.Add((name, data));
@@ -67,8 +74,8 @@ public sealed class UnityFsBuilder
             {
                 int size = System.Math.Min(per, remaining);
                 remaining -= size;
-                WriteU32Be(info, (uint)size);      // uncompressed size
-                WriteU32Be(info, (uint)size);      // compressed size (== uncompressed; block flag 0)
+                WriteU32Be(info, DeclaredBlockUncompressedSize ?? (uint)size);
+                WriteU32Be(info, DeclaredBlockCompressedSize ?? (uint)size); // == uncompressed; flag 0
                 WriteU16Be(info, 0);               // block flags: no compression
             }
         }

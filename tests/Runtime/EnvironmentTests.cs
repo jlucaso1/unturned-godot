@@ -340,37 +340,36 @@ public class EnvironmentTests : TestClass
     // SUN_SHAFTS_DEBUG traces why nothing is visible — the effect's failure mode is "I see nothing",
     // which is indistinguishable from it being switched off. It runs inside _Process, so a throw there
     // would take the frame down rather than a diagnostic.
+    //
+    // The flag is captured when the pass is BUILT rather than re-read per frame, so the variable has to
+    // be set around SunShafts.Create — which is what the nesting below is for. Reading it every frame is
+    // what this used to do, and it was the only per-frame OS.GetEnvironment in src/.
     [Test]
     public async Task TheShaftDebugTraceRunsOnEveryBranch()
     {
-        DayNightController cycle = await WithEnvironment("SUN_SHAFTS", "1", async () =>
-        {
-            DayNightController built = DayNightController.Build(Lighting(), waterMaterial: null);
-            TestScene.AddChild(built);
-            return built;
-        });
-        SunShafts shafts = FindShafts(cycle)!;
+        DayNightController cycle = await WithEnvironment("SUN_SHAFTS_DEBUG", "1", () =>
+            WithEnvironment("SUN_SHAFTS", "1", async () =>
+            {
+                DayNightController built = DayNightController.Build(Lighting(), waterMaterial: null);
+                TestScene.AddChild(built);
+                await NextFrame(); // no camera yet: the "no camera attached" branch
 
-        await WithEnvironment("SUN_SHAFTS_DEBUG", "1", async () =>
-        {
-            await NextFrame(); // no camera yet: the "no camera attached" branch
+                var camera = new Camera3D { Current = true };
+                TestScene.AddChild(camera);
+                built.AttachCamera(camera);
+                var sun = built.GetNode<DirectionalLight3D>("Sun");
 
-            var camera = new Camera3D { Current = true };
-            TestScene.AddChild(camera);
-            cycle.AttachCamera(camera);
-            var sun = cycle.GetNode<DirectionalLight3D>("Sun");
+                camera.LookAtFromPosition(Vector3.Zero, -sun.GlobalTransform.Basis.Z * 4096f);
+                await NextFrame(); // sun behind the camera: the branch that reports where it actually is
 
-            camera.LookAtFromPosition(Vector3.Zero, -sun.GlobalTransform.Basis.Z * 4096f);
-            await NextFrame(); // sun behind the camera: the branch that reports where it actually is
+                camera.LookAtFromPosition(Vector3.Zero, sun.GlobalTransform.Basis.Z * 4096f);
+                await NextFrame(); // and the one that reports the uv it settled on
 
-            camera.LookAtFromPosition(Vector3.Zero, sun.GlobalTransform.Basis.Z * 4096f);
-            await NextFrame(); // and the one that reports the uv it settled on
+                camera.QueueFree();
+                return built;
+            }));
 
-            camera.QueueFree();
-            return true;
-        });
-
-        Assert.NotNull(shafts);
+        Assert.NotNull(FindShafts(cycle));
         cycle.QueueFree();
     }
 

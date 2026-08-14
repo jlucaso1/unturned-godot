@@ -60,9 +60,15 @@ public static class LevelObjects
                     ushort count = river.ReadUInt16();
                     for (int i = 0; i < count; i++)
                     {
+                        // Rounded on the way in, exactly where Unturned rounds them
+                        // (LevelObjects.cs:652 and :656): an editor leaves a wall at 89.9997 degrees and
+                        // 1.0000001 scale, and two of those that should be coplanar instead z-fight or
+                        // show a hairline of daylight between them. See UnityRounding.
                         Vector3 position = river.ReadSingleVector3();
-                        Vector3 euler = river.ReadEulerDegrees();
-                        Vector3 scale = version > 3 ? river.ReadSingleVector3() : Vector3.One;
+                        Vector3 euler = UnityRounding.RoundIfNearlyAxisAligned(river.ReadEulerDegrees());
+                        Vector3 scale = version > 3
+                            ? UnityRounding.RoundIfNearlyEqualToOne(river.ReadSingleVector3())
+                            : Vector3.One;
                         ushort id = river.ReadUInt16();
 
                         if (version >= 6 && version <= 9)

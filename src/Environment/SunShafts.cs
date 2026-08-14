@@ -57,12 +57,24 @@ public partial class SunShafts : Node3D
     private Camera3D? _camera;
     private DirectionalLight3D _sun = null!;
 
+    // Read once when the pass is built, not once per rendered frame.
+    //
+    // `OS.GetEnvironment` is a marshalled call that hands back a Godot String and converts it to a
+    // managed one, and _Process was making it every frame to decide whether to log a diagnostic that is
+    // off — the only per-frame GetEnvironment left in src/, out of 137 call sites. Every other flag in
+    // the project is read once and kept (TextureRegistry, ModelLibrary, FoliageBuilder all do this).
+    // Kept on the instance rather than in a static initializer for one reason: a SunShafts is built once
+    // per world, so the saving is the same, and the runtime test that walks all three debug branches can
+    // still set the variable around the build instead of needing it set before the assembly loads.
+    private bool _debug;
+
     // Everything is built here rather than in _Ready: the day/night cycle pushes its first Configure
     // while wiring the world up, before this node has entered the tree, and a half-built pass would
     // throw straight through the caller.
     public static SunShafts Create(DirectionalLight3D sun)
     {
         var shafts = new SunShafts { Name = "SunShafts", _sun = sun };
+        shafts._debug = EnvFlag.IsOn(OS.GetEnvironment("SUN_SHAFTS_DEBUG"), whenUnset: false);
         shafts._material = new ShaderMaterial { Shader = new Shader { Code = ShaderCode } };
         shafts._quad = new MeshInstance3D
         {
@@ -101,10 +113,9 @@ public partial class SunShafts : Node3D
 
     public override void _Process(double delta)
     {
-        bool debug = EnvFlag.IsOn(OS.GetEnvironment("SUN_SHAFTS_DEBUG"), whenUnset: false);
         if (_camera == null || !IsInstanceValid(_camera))
         {
-            if (debug)
+            if (_debug)
                 Log.Print("[shafts] no camera attached");
             _quad.Visible = false;
             return;
@@ -115,7 +126,7 @@ public partial class SunShafts : Node3D
         Vector3 sunWorld = _camera.GlobalPosition + (_sun.GlobalTransform.Basis.Z * 4096f);
         if (_camera.IsPositionBehind(sunWorld))
         {
-            if (debug)
+            if (_debug)
             {
                 // Report where it actually is, so a screenshot can be aimed at it.
                 Vector3 d = (sunWorld - _camera.GlobalPosition).Normalized();
@@ -137,7 +148,7 @@ public partial class SunShafts : Node3D
 
         _quad.Visible = true;
         _material.SetShaderParameter("sun_screen", screen / size);
-        if (debug)
+        if (_debug)
             Log.Print($"[shafts] sun uv=({screen.X / size.X:0.###},{screen.Y / size.Y:0.###}) " +
                 $"intensity={_material.GetShaderParameter("intensity")} visible={_quad.Visible}");
     }

@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using Godot;
@@ -30,11 +31,21 @@ public readonly struct PlacedRoad
     public readonly bool IsLoop;
     public readonly IReadOnlyList<RoadJoint> Joints;
 
-    public PlacedRoad(int material, bool isLoop, IReadOnlyList<RoadJoint> joints)
+    // From Paths.dat version 6 a road may name a RoadAsset instead of an index into the legacy
+    // Roads.dat table, and the two disagree about everything that matters: RoadAsset carries its own
+    // Width, Depth, OffsetAlongNormal, RepeatDistanceScale and texture (Bundles/RoadAsset.cs), so a road
+    // rendered off the legacy table's entry number instead comes out the wrong width, at the wrong
+    // height and with the wrong surface. Empty means the road really does use the legacy table — which
+    // is every one of PEI's 23 roads, so nothing shipped changes shape today; a map that migrated to
+    // RoadAssets is what this is kept for.
+    public readonly Guid RoadAssetGuid;
+
+    public PlacedRoad(int material, bool isLoop, IReadOnlyList<RoadJoint> joints, Guid roadAssetGuid = default)
     {
         Material = material;
         IsLoop = isLoop;
         Joints = joints;
+        RoadAssetGuid = roadAssetGuid;
     }
 }
 
@@ -105,8 +116,7 @@ public static class LevelRoads
             ushort length = river.ReadUInt16();
             byte material = river.ReadByte();
             bool isLoop = version > 2 && river.ReadBoolean();
-            if (version >= PathsAddedRoadAsset)
-                river.ReadGuid(); // road asset ref (unused; legacy materials drive rendering)
+            Guid roadAssetGuid = version >= PathsAddedRoadAsset ? river.ReadGuid() : Guid.Empty;
 
             var joints = new RoadJoint[length];
             for (int step = 0; step < length; step++)
@@ -124,7 +134,7 @@ public static class LevelRoads
                 bool ignoreTerrain = version > 3 && river.ReadBoolean();
                 joints[step] = new RoadJoint(vertex, tangent0, tangent1, offset, ignoreTerrain);
             }
-            result.Add(new PlacedRoad(material, isLoop, joints));
+            result.Add(new PlacedRoad(material, isLoop, joints, roadAssetGuid));
         }
         return result;
     }
