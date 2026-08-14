@@ -23,6 +23,11 @@ public sealed class NetServer
         // ARRIVED — an echo that went quiet whenever a frame was dropped would read as a lost link.
         public bool HasInputFrame;
         public uint LastInputFrame;
+
+        // The region this connection was last told about. A change means it has been told nothing about
+        // where it now is, so the next snapshot for that region has to be the whole of it rather than
+        // what changed. Starts at NoRegion, so a freshly admitted player is a change by definition.
+        public int LastRegion = NoRegion;
     }
 
     private readonly IServerTransport _transport;
@@ -173,9 +178,7 @@ public sealed class NetServer
             double stepAt = _nextTick;
             _nextTick += ServerSimulation.TickRate;
             List<PlayerSnapshotState> states = _simulation.Step(stepAt);
-            if (states.Count > 0)
-                foreach (byte[] chunk in NetMessages.WriteStateUpdates(_simulation.Tick, states))
-                    Broadcast(chunk, ESendType.Unreliable);
+            BroadcastStates(states);
             // Everyone but the player who threw it: the owner started its own animation on the frame the
             // button went down, and playing this too would restart the swing a round-trip later.
             foreach (PlayerGestureEvent gesture in _simulation.Gestures)
@@ -381,6 +384,180 @@ public sealed class NetServer
         _rosterVersion++;
         Broadcast(NetMessages.WritePlayerLeft(_rosterVersion, session.PlayerId), ESendType.Reliable);
     }
+
+    // Which region a position belongs to, for filtering the snapshot stream by interest. Null means one
+    // region containing everyone, which is the honest answer for a level with no navigation data — and
+    // the exact behaviour this had before.
+    //
+    // Supplied rather than computed here because the bounds belong to the level, and the server is
+    // engine-free and level-agnostic. ZombieHost already computes exactly this per player for its own
+    // replication and is what wires it up.
+    public Func<Vector3, byte>? RegionOf;
+
+    // The region every player shares when there is nothing to divide them by.
+    private const byte OneRegion = 0;
+
+    // Not a region: what a session's last region reads as before it has had one.
+    private const int NoRegion = -1;
+
+    // How often a region's snapshot is sent in full rather than as what changed.
+    //
+    // The delta below is the difference between a standing player costing 16 bytes a tick and costing
+    // nothing, which at population is most of the stream. But the stream is unreliable: a client that
+    // loses the datagram carrying a player's last movement would otherwise hold them at a stale position
+    // until they moved again, which for a player who has stopped is forever. A full send once a second
+    // bounds that, and costs one ordinary tick's worth of bytes per second per region.
+    public const int FullResyncTicks = 12; // ~0.96 s
+
+    // One region's replication state: who is listening, what was last sent about each player, and when
+    // it was last sent in full.
+    private sealed class Region
+    {
+        public readonly List<ITransportConnection> Listeners = new();
+        public readonly Dictionary<byte, PlayerSnapshotState> LastSent = new();
+        public readonly List<PlayerSnapshotState> Pending = new();
+        public uint LastFullTick;
+        public bool ForceFull;
+    }
+
+    private readonly Dictionary<byte, Region> _regions = new();
+    private readonly Dictionary<byte, byte> _playerRegions = new();
+    private readonly List<byte> _emptyRegions = new();
+
+    // The state broadcast, filtered by interest and by change.
+    //
+    // It used to be one payload sent to every connection: every client learned every player's position
+    // at 12.5 Hz regardless of distance, and every field every tick regardless of whether it had moved.
+    // At the transport's own 254-player ceiling that is 4 KB per datagram times 254 clients times
+    // 12.5 Hz — about 12.9 MB/s of egress, every datagram of it IP-fragmented. Zombies had interest
+    // management (ZombieHost, by nav bound) and impacts had it; players did not.
+    //
+    // Two filters, and they compose. The region filter turns O(players^2) into O(players * players in
+    // the region), and pays one payload build per REGION rather than one for everyone. The change filter
+    // then drops players who are byte-identical to what that region was last told.
+    //
+    // The change filter is per region rather than per connection, which is what keeps the payload
+    // shareable: a per-connection filter would force a fresh serialization per client per tick and give
+    // back most of what the region filter just won. Everyone in a region has been sent the same
+    // datagrams, so "what this region was last told" is well defined — and a connection that has just
+    // arrived forces a full send, so it never inherits a delta it did not receive the base of.
+    private void BroadcastStates(List<PlayerSnapshotState> states)
+    {
+        _playerRegions.Clear();
+        foreach (Region region in _regions.Values)
+        {
+            region.Listeners.Clear();
+            region.Pending.Clear();
+        }
+
+        for (int i = 0; i < states.Count; i++)
+            _playerRegions[states[i].PlayerId] =
+                RegionOf is { } of ? of(states[i].Position) : OneRegion;
+
+        foreach ((ITransportConnection conn, Session session) in _sessions)
+        {
+            if (!session.Joined)
+                continue;
+            // A player with no state this tick (admitted between the step and here) listens to the
+            // region everyone shares, which is also where they will be next tick if there are no bounds.
+            byte at = _playerRegions.GetValueOrDefault(session.PlayerId, OneRegion);
+            Region region = RegionAt(at);
+            region.Listeners.Add(conn);
+            if (session.LastRegion == at)
+                continue;
+            // Crossing a border, or being heard from for the first time: this connection has been told
+            // nothing about the region it is now in, so the next payload has to be the whole of it.
+            session.LastRegion = at;
+            region.ForceFull = true;
+        }
+
+        for (int i = 0; i < states.Count; i++)
+        {
+            PlayerSnapshotState state = states[i];
+            Region region = RegionAt(_playerRegions[state.PlayerId]);
+            if (region.Listeners.Count == 0)
+                continue; // nobody can see this player; serializing them would be work for no reader
+            region.Pending.Add(state);
+        }
+
+        foreach ((byte at, Region region) in _regions)
+        {
+            if (region.Listeners.Count == 0)
+            {
+                // Nobody left. Its delta baseline describes datagrams sent to connections that have
+                // gone, and keeping it would let a returning listener be handed a delta whose base it
+                // never received — the entry is dropped rather than reset, so the table stays the size
+                // of the populated map rather than the whole one.
+                _emptyRegions.Add(at);
+                continue;
+            }
+
+            bool full = region.ForceFull
+                || unchecked(_simulation.Tick - region.LastFullTick) >= FullResyncTicks;
+            region.ForceFull = false;
+            if (full)
+                region.LastFullTick = _simulation.Tick;
+
+            // Players who left this region since the last tick have to be forgotten, or their entry
+            // would suppress the first snapshot they get when they come back unchanged.
+            if (region.LastSent.Count != region.Pending.Count)
+                PruneLeavers(region);
+
+            var send = new List<PlayerSnapshotState>(region.Pending.Count);
+            for (int i = 0; i < region.Pending.Count; i++)
+            {
+                PlayerSnapshotState state = region.Pending[i];
+                if (!full && region.LastSent.TryGetValue(state.PlayerId, out PlayerSnapshotState last)
+                    && Unchanged(last, state))
+                {
+                    continue;
+                }
+                region.LastSent[state.PlayerId] = state;
+                send.Add(state);
+            }
+
+            if (send.Count == 0)
+                continue; // a region where nothing moved costs nothing
+
+            foreach (byte[] chunk in NetMessages.WriteStateUpdates(_simulation.Tick, send))
+                foreach (ITransportConnection conn in region.Listeners)
+                    conn.Send(chunk, ESendType.Unreliable);
+        }
+
+        foreach (byte at in _emptyRegions)
+            _regions.Remove(at);
+        _emptyRegions.Clear();
+    }
+
+    private Region RegionAt(byte at)
+    {
+        if (!_regions.TryGetValue(at, out Region? region))
+            _regions[at] = region = new Region();
+        return region;
+    }
+
+    private static void PruneLeavers(Region region)
+    {
+        var gone = new List<byte>();
+        foreach (byte id in region.LastSent.Keys)
+        {
+            bool present = false;
+            for (int i = 0; i < region.Pending.Count && !present; i++)
+                present = region.Pending[i].PlayerId == id;
+            if (!present)
+                gone.Add(id);
+        }
+        foreach (byte id in gone)
+            region.LastSent.Remove(id);
+    }
+
+    // Byte-identical as the wire would encode it: the position verbatim (it is not quantized) and the
+    // three bytes the angles and flags pack into. Comparing the encoded form rather than the state is
+    // what makes "identical" mean "the datagram would be the same", which is the only thing worth
+    // skipping — a sub-degree turn that quantizes to the same byte is not a change anyone can see.
+    private static bool Unchanged(in PlayerSnapshotState a, in PlayerSnapshotState b) =>
+        a.Position == b.Position && a.Pitch == b.Pitch && a.Yaw == b.Yaw && a.Stance == b.Stance
+        && a.Moving == b.Moving && a.Grounded == b.Grounded;
 
     // Tells a player where the server actually has them, when their claim was refused.
     //

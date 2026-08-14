@@ -56,6 +56,12 @@ public class ServerTickPacingTests
     }
 
     // A server with one joined player, its clock anchored at `now`.
+    //
+    // These tests count TICKS rather than state-update datagrams. They used to count datagrams, which
+    // was the same number back when every tick broadcast every player unconditionally. It is not any
+    // more: the snapshot stream skips players whose quantized state is byte-identical to what their
+    // region was last told, so a motionless player produces one datagram and then silence — which is
+    // the point of the filter, and would make these read as "the loop stopped ticking".
     private static (NetServer Server, FakeConnection Player) Joined(double now)
     {
         var transport = new FakeServerTransport();
@@ -74,8 +80,11 @@ public class ServerTickPacingTests
     {
         (NetServer server, FakeConnection player) = Joined(1000.0);
 
+        uint before = server.Tick;
         server.Update(1060.0); // 60 s gone: 750 ticks' worth of "missed" time
 
+        Assert.True(server.Tick - before <= NetServer.MaxCatchUpTicks,
+            $"ran {server.Tick - before} ticks in one Update");
         Assert.True(player.Count(ENetMessage.StateUpdate) <= NetServer.MaxCatchUpTicks,
             $"broadcast {player.Count(ENetMessage.StateUpdate)} state updates in one Update");
     }
@@ -88,10 +97,11 @@ public class ServerTickPacingTests
         (NetServer server, FakeConnection player) = Joined(1000.0);
         server.Update(1060.0);
         player.Sent.Clear();
+        uint before = server.Tick;
 
         server.Update(1060.0 + ServerSimulation.TickRate);
 
-        Assert.Equal(1, player.Count(ENetMessage.StateUpdate));
+        Assert.Equal(1u, server.Tick - before);
     }
 
     // The catch-up itself stays: a few ticks of ordinary jitter are still made up, or the simulation
@@ -100,16 +110,18 @@ public class ServerTickPacingTests
     public void OrdinaryJitter_IsStillCaughtUp()
     {
         (NetServer server, FakeConnection player) = Joined(1000.0);
+        uint before = server.Tick;
 
         server.Update(1000.0 + (ServerSimulation.TickRate * 3)); // three ticks late
 
-        Assert.Equal(3, player.Count(ENetMessage.StateUpdate));
+        Assert.Equal(3u, server.Tick - before);
     }
 
     [Fact]
     public void SteadyPacing_TicksExactlyOncePerTickRate()
     {
         (NetServer server, FakeConnection player) = Joined(1000.0);
+        uint before = server.Tick;
 
         double now = 1000.0;
         for (int i = 0; i < 10; i++)
@@ -118,7 +130,7 @@ public class ServerTickPacingTests
             server.Update(now);
         }
 
-        Assert.Equal(10, player.Count(ENetMessage.StateUpdate));
+        Assert.Equal(10u, server.Tick - before);
     }
 
     // Catch-up steps are separate instants, not the same one repeated. The trusted-position budget is

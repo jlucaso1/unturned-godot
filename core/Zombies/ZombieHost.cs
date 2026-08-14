@@ -45,6 +45,11 @@ public sealed class ZombieHost
         // stun at all. Wiring it to the host that already owns the zombie wire is what makes that
         // impossible to forget.
         system.Stunned += ReportStunned;
+        // The nav bounds are the only division of the map either side has, and this host already
+        // computes one per player per tick for its own replication. Handing the same function to the
+        // server lets the PLAYER snapshot stream be filtered by region too — it was the last broadcast
+        // still going to every connection regardless of distance. See NetServer.RegionOf.
+        server.RegionOf = system.BoundOf;
         server.OnTick += Tick;
         // A (re)admitted player starts from scratch: the self-healing rejoin implies the client lost
         // state (and dropped its avatars), so clearing our tracking makes the next tick resend the
