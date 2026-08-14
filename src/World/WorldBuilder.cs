@@ -50,16 +50,22 @@ public static class WorldBuilder
         CollisionFieldBuilder? navigationField = null)
     {
         IReadOnlyList<ContentSource> sources = ContentSource.Discover(unturnedPath);
-        List<PlacedObject> objects = LevelObjects.Load(level.ObjectsDat);
-        List<PlacedTree> trees = LevelTrees.Load(System.IO.Path.Combine(level.Path,
-            "Terrain", "Trees.dat"));
-
         ObjectAssetDatabase db = ContentExtraction.ScanAssets(sources);
-        int legacy = LegacyPlacements.ResolveGuids(objects, db)
-            + LegacyPlacements.AppendTrees(trees, objects, db);
-        if (legacy > 0)
-            Log.Print($"[server] Legacy placements resolved by id: {legacy}");
-        HashSet<Guid> needed = db.ResolvePlacementGuids(objects);
+        // No foliage GUIDs: the authority needs bodies, and grass has none. Everything else — the trees,
+        // the legacy ids, the vehicles, the NPCs leaving the list — follows the same sequence the
+        // interactive build does, which is the point of resolving it in one place.
+        //
+        // Two of those the server did not do before. Partitioning the NPCs takes forty GUIDs out of the
+        // needed set that nothing could ever extract (the ledger is unchanged either way: an NPC asset is
+        // neither a resource nor rubble, so it was never breakable). Rolling the vehicles puts a bounded
+        // handful back in — the server builds no body for them, since they are rigidbodies in Unturned —
+        // which costs one cold-cache pass over a few more prefabs and leaves the two worlds resolving the
+        // same map from the same sequence.
+        LevelContent content = LevelContentPlan.Resolve(sources, level, db, foliageGuids: null);
+        List<PlacedObject> objects = content.Objects;
+        if (content.LegacyResolved > 0)
+            Log.Print($"[server] Legacy placements resolved by id: {content.LegacyResolved}");
+        HashSet<Guid> needed = content.NeededGuids;
         selectedGuids = needed;
 
         string cacheDir = ProjectSettings.GlobalizePath("user://model_cache");
@@ -253,24 +259,16 @@ public static class WorldBuilder
         // The game's bundle plus any workshop mod that ships one: a workshop map places objects whose
         // prefabs live in the mod's bundle, not the game's.
         System.Collections.Generic.IReadOnlyList<ContentSource> sources = ContentSource.Discover(unturnedPath);
-        // Trees are Unturned "resources" placed via a separate file; render them alongside objects so
-        // the map isn't bare. They share the object transform, asset db and mesh pipeline.
-        List<PlacedObject> objects = LevelObjects.Load(level.ObjectsDat);
-        // The trees join them below, once the asset database can tell a pre-GUID one's RESOURCE id from
-        // the object that shares its number (see LegacyPlacements).
-        List<PlacedTree> trees = LevelTrees.Load(System.IO.Path.Combine(level.Path, "Terrain", "Trees.dat"));
 
-        // Scan the object/tree asset DB on a worker thread: on the warm path db is only consumed after the
-        // main-thread ModelLibrary.Load below (for fallback-box coloring), so the scan overlaps that load and
-        // is effectively free. The cold extraction branch resolves it explicitly before use.
+        // Scan the object/tree asset DB on a worker thread so it overlaps the foliage read below. The scan
+        // walks several thousand .dat files and is the longer of the two; LevelContentPlan needs both.
         var dbTask = System.Threading.Tasks.Task.Run(() => ContentExtraction.ScanAssets(sources));
-        Log.Print($"[unturned-godot] Placed objects: {objects.Count + trees.Count} (incl. {trees.Count} trees)");
 
         string cacheDir = ProjectSettings.GlobalizePath("user://model_cache");
         string textureCacheDir = ProjectSettings.GlobalizePath("user://texture_cache");
 
-        // Resolve the foliage types the map's Foliage.blob uses, so their meshes are extracted too. Scanned
-        // across every source: a workshop map's foliage assets sit next to its own bundle, not the game's.
+        // The foliage types the map's Foliage.blob scatters. Which loader reads them is a streaming
+        // decision; resolving those GUIDs to assets is LevelContentPlan's.
         string foliagePath = System.IO.Path.Combine(level.Path, "Foliage.blob");
         LevelFoliageChunks? foliageData = null;
         FoliageResidencyIndex? foliageIndex = null;
@@ -289,35 +287,20 @@ public static class WorldBuilder
             foliageData = LevelFoliageChunks.Load(foliagePath, FoliageBuilder.RuntimeChunkTiles);
         }
         IReadOnlyList<Guid>? foliageGuids = foliageIndex?.AssetGuids ?? foliageData?.AssetGuids;
-        var foliageAssets = foliageGuids != null
-            ? FoliageAsset.ScanSources(sources, new HashSet<Guid>(foliageGuids))
-            : new Dictionary<Guid, FoliageAsset.Owned>();
 
-        // The vehicles the map starts with, rolled from its own tables. A spawned vehicle is a GUID and a
-        // transform like any other placement, so its mesh joins the same needed set, the same extraction
-        // plan and the same batching — only the scene root is its own.
+        // Everything the map places, in the one order that resolves it correctly. See LevelContentPlan.
         ObjectAssetDatabase db = dbTask.Result;
-        List<PlacedObject> vehicles = VehicleSpawnPlan.Load(level, sources, db);
+        LevelContent content = LevelContentPlan.Resolve(sources, level, db, foliageGuids);
+        List<PlacedObject> objects = content.Objects;
+        List<PlacedObject> vehicles = content.Vehicles;
+        List<PlacedObject> npcs = content.Npcs;
+        IReadOnlyDictionary<Guid, FoliageAsset.Owned> foliageAssets = content.FoliageAssets;
+        HashSet<Guid> neededGuids = content.NeededGuids;
+
+        Log.Print($"[unturned-godot] Placed objects: {objects.Count + npcs.Count}");
         Log.Print($"[unturned-godot] Vehicles: {vehicles.Count} spawned");
-
-        // A pre-GUID map names its objects and trees by legacy id; the needed set below is keyed on GUIDs,
-        // so those placements borrow theirs from the asset database first — and the trees join the list
-        // here, resolved through the resource namespace rather than the object one.
-        int legacy = LegacyPlacements.ResolveGuids(objects, db)
-            + LegacyPlacements.AppendTrees(trees, objects, db);
-        if (legacy > 0)
-            Log.Print($"[unturned-godot] Legacy placements resolved by id: {legacy}");
-
-        // NPCs leave the list before the needed set is built, not after: they resolve to the player rig
-        // rather than to an extracted mesh, so a GUID left in here is one the extraction plan chases on
-        // every load and ObjectsBuilder then draws as a box (see NpcPlacements).
-        List<PlacedObject> npcs = NpcPlacements.Partition(objects, db);
-
-        HashSet<Guid> neededGuids = db.ResolvePlacementGuids(objects);
-        foreach (PlacedObject v in vehicles)
-            neededGuids.Add(v.Guid);
-        foreach (Guid g in foliageAssets.Keys) // resolved foliage types only (see ObjectStreamer)
-            neededGuids.Add(g);
+        if (content.LegacyResolved > 0)
+            Log.Print($"[unturned-godot] Legacy placements resolved by id: {content.LegacyResolved}");
 
         // Parse the 1.4 GB bundle once, then reuse the compact per-GUID mesh + texture cache. This is the
         // synchronous full build (used by the benchmark and the warm path); the interactive cold load

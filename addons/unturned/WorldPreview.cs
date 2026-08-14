@@ -60,30 +60,21 @@ public static class WorldPreview
     private static CachePlan PlanFor(string unturnedPath, string mapPath)
     {
         IReadOnlyList<ContentSource> sources = ContentSource.Discover(unturnedPath);
-        var assetsDirs = new string[sources.Count];
-        for (int i = 0; i < sources.Count; i++)
-            assetsDirs[i] = sources[i].AssetsDir;
-
         ObjectAssetDatabase assets = ContentExtraction.ScanAssets(sources);
-        // With the asset database, so a pre-GUID map's legacy ids resolve into the needed set rather than
-        // dropping out of it (see LegacyPlacements).
-        HashSet<Guid> needed = MapAssetSet.Collect(mapPath, assets, assetsDirs);
-        // The map's vehicles need their prefabs cached too, and MapAssetSet cannot roll for them from a
-        // map folder alone — resolving a spawn table takes the installed sources and the asset database.
-        // Left out, the dock would call a map fully cached while every vehicle was still missing.
-        foreach (PlacedObject vehicle in VehicleSpawnPlan.Load(new LevelInfo(mapPath), sources, assets))
-            needed.Add(vehicle.Guid);
 
-        var foliageGuids = LevelFoliageChunks.ReadAssetGuids(Path.Combine(mapPath, "Foliage.blob"));
-        var foliage = foliageGuids is { } guids
-            ? FoliageAsset.ScanSources(sources, new HashSet<Guid>(guids))
-            : new Dictionary<Guid, FoliageAsset.Owned>();
+        // Through the same resolve the build itself uses, so what the dock calls "cached" is measured
+        // against the exact set the build will ask for — the vehicles rolled from the map's own tables
+        // included, and the NPC characters excluded. Counted, they left the dock reporting forty meshes
+        // permanently missing on Russia: an NPC ships no prefab, so nothing can ever extract one.
+        // The blob's header alone is read for the foliage GUIDs; nothing here draws an instance.
+        LevelContent content = LevelContentPlan.Resolve(sources, new LevelInfo(mapPath), assets,
+            LevelFoliageChunks.ReadAssetGuids(Path.Combine(mapPath, "Foliage.blob")));
 
         Dictionary<string, TerrainLayerPlan.BundleWants> terrainLayers = MissingTerrainLayers(mapPath, sources);
         var bundlesOwingLayers = new HashSet<string>(terrainLayers.Keys, StringComparer.Ordinal);
         List<ContentExtraction.BundlePlan> bundles = ContentExtraction.Plan(sources, CacheDir,
-            TextureCacheDir, needed, assets, foliage, bundlesOwingLayers);
-        return new CachePlan(bundles, terrainLayers, needed.Count);
+            TextureCacheDir, content.NeededGuids, assets, content.FoliageAssets, bundlesOwingLayers);
+        return new CachePlan(bundles, terrainLayers, content.NeededGuids.Count);
     }
 
     private static Dictionary<string, TerrainLayerPlan.BundleWants> MissingTerrainLayers(string mapPath,
@@ -249,36 +240,28 @@ public static class WorldPreview
         return root;
     }
 
-    // The map's placed objects plus everything needed to turn them into nodes, all read off disk.
-    private sealed record Placements(List<PlacedObject> Objects, List<PlacedObject> Vehicles,
-        ObjectAssetDatabase Db, LevelFoliage? Foliage, HashSet<Guid> Needed);
+    // The map's placed objects plus everything needed to turn them into nodes, all read off disk. The
+    // foliage rides alongside the LevelContent rather than inside it: LevelContentPlan resolves which
+    // foliage ASSETS a map needs, and this is the scattered instance data the preview then draws.
+    private sealed record Placements(LevelContent Content, LevelFoliageChunks? Foliage);
 
+    // Deliberately nothing but the two reads and the shared resolve. This used to be its own copy of the
+    // sequence and had drifted into three visible bugs — the NPCs were never partitioned out, so the
+    // preview drew Russia's forty characters as placeholder boxes and re-chased their GUIDs through the
+    // extraction plan on every preview; the needed set came from the raw placement GUIDs, so the
+    // stale-GUID-to-legacy-id fallback never ran; and the foliage GUIDs went in unresolved.
     private static Placements ReadPlacements(string unturnedPath, LevelInfo level)
     {
-        List<PlacedObject> objects = LevelObjects.Load(level.ObjectsDat);
-        List<PlacedTree> trees = LevelTrees.Load(Path.Combine(level.Path, "Terrain", "Trees.dat"));
-
         IReadOnlyList<ContentSource> sources = ContentSource.Discover(unturnedPath);
         ObjectAssetDatabase db = ContentExtraction.ScanAssets(sources);
-        // Pre-GUID maps place by legacy id; the needed set below is keyed on GUIDs, and a tree's id comes
-        // from a different namespace than an object's (see LegacyPlacements).
-        LegacyPlacements.ResolveGuids(objects, db);
-        LegacyPlacements.AppendTrees(trees, objects, db);
-        LevelFoliage? foliage = LevelFoliage.Load(Path.Combine(level.Path, "Foliage.blob"));
-        // The roll is seeded, so the preview shows the same vehicles a session would.
-        List<PlacedObject> vehicles = VehicleSpawnPlan.Load(level, sources, db);
-
-        var needed = new HashSet<Guid>();
-        foreach (PlacedObject o in objects)
-            needed.Add(o.Guid);
-        foreach (PlacedObject v in vehicles)
-            needed.Add(v.Guid);
-        if (foliage != null)
-            foreach (Guid guid in foliage.AssetGuids)
-                needed.Add(guid);
-        needed.Remove(Guid.Empty);
-
-        return new Placements(objects, vehicles, db, foliage, needed);
+        // The same chunked loader the game uses. LevelFoliage.Load, which this read before, hands back a
+        // flat instance list the runtime FoliageBuilder overload no longer takes — and a preview that
+        // draws its grass differently from the session is not previewing the session.
+        LevelFoliageChunks? foliage = LevelFoliageChunks.Load(Path.Combine(level.Path, "Foliage.blob"),
+            FoliageBuilder.RuntimeChunkTiles);
+        // The vehicle roll inside is seeded, so the preview shows the same vehicles a session would.
+        return new Placements(
+            LevelContentPlan.Resolve(sources, level, db, foliage?.AssetGuids), foliage);
     }
 
     private static async System.Threading.Tasks.Task BuildObjectsAsync(Node3D root, Placements placements,
@@ -291,7 +274,8 @@ public static class WorldPreview
         {
             // Staged: realises the ArrayMeshes in batches, yielding to the editor's render loop between
             // them. This is the slice that would otherwise stall the window the longest.
-            meshLibrary = await ModelLibrary.LoadStagedAsync(CacheDir, registry, yieldOn, placements.Needed);
+            meshLibrary = await ModelLibrary.LoadStagedAsync(CacheDir, registry, yieldOn,
+                placements.Content.NeededGuids);
         }
         catch (Exception e)
         {
@@ -310,7 +294,7 @@ public static class WorldPreview
             try
             {
                 lod1Library = await ModelLibrary.LoadStagedAsync(CacheDir, registry, yieldOn,
-                    placements.Needed, ModelExtractor.Lod1Suffix);
+                    placements.Content.NeededGuids, ModelExtractor.Lod1Suffix);
             }
             catch (Exception e)
             {
@@ -322,20 +306,28 @@ public static class WorldPreview
 
         // No collider library: nothing simulates in the editor, so the shapes and their BVH are pure cost.
         var noColliders = new Dictionary<Guid, List<CachedCollider>>();
+        LevelContent content = placements.Content;
         if (options.Objects)
             Try(report, "objects", () =>
             {
-                root.AddChild(ObjectsBuilder.Build(placements.Objects, placements.Db, meshLibrary, noColliders,
+                root.AddChild(ObjectsBuilder.Build(content.Objects, content.Db, meshLibrary, noColliders,
                     out int withMesh, lod1Library));
-                int missing = placements.Objects.Count - withMesh;
-                report.Add($"  {withMesh}/{placements.Objects.Count} objects, {meshLibrary.Count} unique meshes" +
+                int missing = content.Objects.Count - withMesh;
+                report.Add($"  {withMesh}/{content.Objects.Count} objects, {meshLibrary.Count} unique meshes" +
                     (missing > 0 ? $" ({missing} as fallback boxes — warm the cache to fill them in)" : ""));
 
                 // Under the objects toggle, because that is what they are here: static placements sharing
                 // the same library, the same batching and the same fallback boxes.
-                root.AddChild(WorldBuilder.BuildVehicles(placements.Vehicles, placements.Db, meshLibrary,
+                root.AddChild(WorldBuilder.BuildVehicles(content.Vehicles, content.Db, meshLibrary,
                     noColliders, lod1Library));
-                report.Add($"  {placements.Vehicles.Count} vehicles");
+                report.Add($"  {content.Vehicles.Count} vehicles");
+
+                // Said rather than silently dropped. An NPC ships no prefab of its own — it is the player
+                // rig wearing what its .dat names — and building that here would mean importing the
+                // character resources the preview deliberately never extracts. What it is NOT any more is
+                // forty placeholder boxes and forty GUIDs the cache reports missing on every preview.
+                if (content.Npcs.Count > 0)
+                    report.Add($"  {content.Npcs.Count} NPC characters not drawn (no prefab; see NpcPlacements)");
             });
 
         if (options.Foliage)
