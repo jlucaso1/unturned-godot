@@ -90,7 +90,20 @@ public static class ObjectsBuilder
     {
         var root = new Node3D { Name = label };
 
+        // Two groupings, because "has geometry to draw" and "has shapes to collide with" are two different
+        // questions about a GUID and the cache answers them separately. They used to be one map, admitting
+        // a GUID if it had a mesh OR — only on a build with rendering off — a collider. That made the same
+        // building solid on a dedicated server and walk-through on the host's own screen: an asset whose
+        // .collider is cached but whose mesh does not realise (ModelLibrary.Build hands back no importer
+        // when every submesh has fewer than three indices, or when the cache entry holds no vertices at
+        // all) fell out of the render build's map entirely, so it got no static body and no ladder volume.
+        //
+        // Neither of those paths invalidates the cache entry, and neither should: the geometry is
+        // faithfully what the bundle contained rather than damaged, so re-extracting would produce the
+        // same empty mesh — and RemoveCachedAsset would take the .collider with it, which is the half that
+        // works. Using it is the fix.
         var byMesh = new Dictionary<Guid, List<Transform3D>>();
+        var byCollider = new Dictionary<Guid, List<Transform3D>>();
         // Which group the console reaches this build's DRAWN geometry through — the batches and the
         // placeholder boxes, and deliberately not the root they hang off. The NPC root is attached to
         // that same root by both build paths, and it has a switch of its own: grouping the root would
@@ -108,17 +121,16 @@ public static class ObjectsBuilder
         foreach (PlacedObject obj in objects)
         {
             Transform3D transform = ObjectPlacement.ComputeTransform(obj);
-            if (obj.Guid != Guid.Empty && (meshLibrary.ContainsKey(obj.Guid)
-                || (!renderGeometry && colliderLibrary.ContainsKey(obj.Guid))))
-            {
-                if (!byMesh.TryGetValue(obj.Guid, out List<Transform3D>? list))
-                    byMesh[obj.Guid] = list = new List<Transform3D>();
-                list.Add(transform);
-            }
-            else if (renderGeometry)
-            {
+            bool drawn = obj.Guid != Guid.Empty && renderGeometry && meshLibrary.ContainsKey(obj.Guid);
+            if (drawn)
+                Group(byMesh, obj.Guid, transform);
+            if (obj.Guid != Guid.Empty && colliderLibrary.ContainsKey(obj.Guid))
+                Group(byCollider, obj.Guid, transform);
+            // A collider-only placement still draws its placeholder box. It is a cache miss as far as the
+            // renderer is concerned, and the box is how the player is told so; solid but invisible would
+            // be the worse of the two failures.
+            if (!drawn && renderGeometry)
                 fallback.Add((transform, ObjectColor.ForAsset(db.Resolve(obj.Guid, obj.Id))));
-            }
         }
 
         var collision = new Node3D { Name = label + "Collision" };
@@ -216,7 +228,7 @@ public static class ObjectsBuilder
                     + $"batches share {submitted.Count} co-located mesh batches");
         }
 
-        foreach ((Guid guid, List<Transform3D> transforms) in byMesh)
+        foreach ((Guid guid, List<Transform3D> transforms) in byCollider)
         {
             // Only LARGE/MEDIUM objects block the player (SMALL objects have their collider stripped in
             // Unturned). Resources (trees/rocks/bushes) have no such gate: ResourceSpawnpoint instantiates
@@ -225,24 +237,22 @@ public static class ObjectsBuilder
             // Felling/mining swaps a dead resource to its Stump prefab; that's a future damage system.
             // LARGE/MEDIUM bodies also carry the vision-blocker layer bit: RayMasks.BLOCK_VISION is
             // exactly LARGE | MEDIUM, so zombie alert rays must see these and nothing else.
-            ObjectAsset? asset = colliderLibrary.ContainsKey(guid) ? db.Resolve(guid, 0) : null;
-            EObjectType? type = asset?.Type;
+            ObjectAsset? asset = db.Resolve(guid, 0);
             if (asset != null)
                 navigationField?.RecordCollisionPolicy(guid,
                     ObjectCollisionPolicy.PhysicsLayer(asset));
-            if (colliderLibrary.TryGetValue(guid, out List<CachedCollider>? colliders))
-            {
-                // Ladders first, and deliberately outside the type gate below: what Unturned strips from a
-                // purely visual object is the collider on its ROOT, and a ladder's climbing volume hangs
-                // off a child. BuildCollision skips these, so a ladder is climbable and never solid.
-                BuildLadderVolumes(ladders, colliders, transforms);
 
-                if (type is EObjectType.Large or EObjectType.Medium or EObjectType.Resource)
-                {
-                    uint layer = ObjectCollisionPolicy.PhysicsLayer(asset!);
-                    BuildCollision(collision, collisionOwner, ref collisionBodyCount, guid, colliders,
-                        transforms, layer, collisionShapes);
-                }
+            List<CachedCollider> colliders = colliderLibrary[guid]; // byCollider is keyed off it
+            // Ladders first, and deliberately outside the type gate below: what Unturned strips from a
+            // purely visual object is the collider on its ROOT, and a ladder's climbing volume hangs
+            // off a child. BuildCollision skips these, so a ladder is climbable and never solid.
+            BuildLadderVolumes(ladders, colliders, transforms);
+
+            if (asset?.Type is EObjectType.Large or EObjectType.Medium or EObjectType.Resource)
+            {
+                uint layer = ObjectCollisionPolicy.PhysicsLayer(asset);
+                BuildCollision(collision, collisionOwner, ref collisionBodyCount, guid, colliders,
+                    transforms, layer, collisionShapes);
             }
         }
         if (ladders.Count > 0)
@@ -343,6 +353,13 @@ public static class ObjectsBuilder
         for (int surface = 0; surface < mesh.GetSurfaceCount(); surface++)
             triangles += mesh.SurfaceGetArrayIndexLen(surface) / 3;
         return triangles;
+    }
+
+    private static void Group(Dictionary<Guid, List<Transform3D>> by, Guid guid, Transform3D transform)
+    {
+        if (!by.TryGetValue(guid, out List<Transform3D>? list))
+            by[guid] = list = new List<Transform3D>();
+        list.Add(transform);
     }
 
     // The spatial policy itself lives in core/, where each of its properties can be asserted on its own
