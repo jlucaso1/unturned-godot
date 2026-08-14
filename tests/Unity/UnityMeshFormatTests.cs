@@ -464,6 +464,58 @@ public class UnityMeshFormatTests
         Assert.Equal(new[] { 5, 6, 7, 8 }, m.BoneIndices);
     }
 
+    // A 1-vertex rig whose BlendWeight/BlendIndices channels declare `influences` components rather than
+    // four: position in stream 0, the skin in stream 1 as `influences` floats then `influences` UInt32s.
+    private static Dictionary<string, object> RigWithInfluences(int influences, float[] weights, int[] bones)
+    {
+        var vd = new byte[16 + (influences * 8)]; // stream 1 starts at 16, aligned after 12-byte stream 0
+        Buffer.BlockCopy(new[] { 1f, 2f, 3f }, 0, vd, 0, 12);
+        for (int i = 0; i < influences; i++)
+        {
+            BitConverter.GetBytes(weights[i]).CopyTo(vd, 16 + (i * 4));
+            BitConverter.GetBytes(bones[i]).CopyTo(vd, 16 + (influences * 4) + (i * 4));
+        }
+
+        var channels = new List<object> { Channel(0, 0, 0, 3) };
+        for (int i = 1; i < 12; i++)
+            channels.Add(Channel(0, 0, 0, 0));
+        channels.Add(Channel(1, 0, 0, influences));                    // ch12 BlendWeight
+        channels.Add(Channel(1, influences * 4, 10, influences));      // ch13 BlendIndices (UInt32)
+
+        var bindPose = new Dictionary<string, object>();
+        for (int row = 0; row < 4; row++)
+            for (int col = 0; col < 4; col++)
+                bindPose[$"e{row}{col}"] = row == col ? 1f : 0f;
+
+        Dictionary<string, object> mesh = Mesh(0, vd, 1, Indices(0, 0, 0));
+        ((Dictionary<string, object>)mesh["m_VertexData"])["m_Channels"] = channels;
+        ((Dictionary<string, object>)mesh["m_VertexData"])["m_DataSize"] = vd;
+        mesh["m_BindPose"] = new List<object> { bindPose };
+        return mesh;
+    }
+
+    [Fact]
+    public void TwoInfluenceRig_DecodesItsWeightsIntoTheFourSlotLayout()
+    {
+        // Unity writes as many influences as the mesh's import settings asked for, and the unused slots
+        // are simply not in the buffer — a two-influence mesh has a 16-byte skin stream where a
+        // four-influence one has 32. Insisting on four decoded no weights at all for such a mesh, which
+        // is what left the game's own first-person Viewmodel arms importing as a bind-pose shell.
+        UnityMesh m = UnityMesh.Read(RigWithInfluences(2, new[] { 0.75f, 0.25f }, new[] { 3, 5 }));
+
+        Assert.Equal(new[] { 0.75f, 0.25f, 0f, 0f }, m.BoneWeights);
+        Assert.Equal(new[] { 3, 5, 0, 0 }, m.BoneIndices);
+    }
+
+    [Fact]
+    public void OneInfluenceRig_DecodesItsSingleWeight()
+    {
+        UnityMesh m = UnityMesh.Read(RigWithInfluences(1, new[] { 1f }, new[] { 7 }));
+
+        Assert.Equal(new[] { 1f, 0f, 0f, 0f }, m.BoneWeights);
+        Assert.Equal(new[] { 7, 0, 0, 0 }, m.BoneIndices);
+    }
+
     [Fact]
     public void NonSkinnedMesh_HasNoBoneData()
     {

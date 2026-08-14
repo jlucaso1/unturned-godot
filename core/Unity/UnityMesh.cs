@@ -301,7 +301,18 @@ public sealed class UnityMesh
         return values;
     }
 
-    // 4 float bone weights per vertex (BlendWeight channel), flattened; empty when absent.
+    // Bone weights (BlendWeight channel), flattened to four per vertex; empty when absent.
+    //
+    // The channel's own dimension is how many influences each vertex carries, and it is NOT always four.
+    // Unity writes as many as the mesh's import settings asked for, and the rest of the slot is simply not
+    // in the buffer — a two-influence mesh has a 16-byte skin stream where a four-influence one has 32.
+    // Requiring four dropped every such mesh's skin on the floor, and the game ships two of them in
+    // resources.assets: the first-person Viewmodel arms (464 vertices, 16 bind poses) and one more rig
+    // beside them, both authored at two influences. That is the whole of the README's "skin weights the
+    // port does not decode yet" — the data is inline and uncompressed, it is just two wide.
+    //
+    // The unread slots stay zero, which is what they mean: Unity normalizes a vertex's weights across the
+    // influences it declares, so two that sum to 1 are complete on their own.
     private static float[] ReadFloat4Channel(List<object> channels, int index, byte[] buffer,
         int vertexCount, int[] strides, int[] streamOffsets)
     {
@@ -309,25 +320,29 @@ public sealed class UnityMesh
             return Array.Empty<float>();
         var ch = (Dictionary<string, object>)channels[index];
         int format = ToInt(ch["format"]);
-        if (Dimension(ch) < 4 || !IsFloatFormat(format))
+        int dim = Dimension(ch);
+        if (dim < 1 || !IsFloatFormat(format))
             return Array.Empty<float>();
 
         int stream = ToInt(ch["stream"]);
         int stride = strides[stream];
         int baseOffset = streamOffsets[stream] + ToInt(ch["offset"]);
         int size = FormatSize[format];
+        int influences = Math.Min(dim, BonesPerVertex);
 
-        var values = new float[vertexCount * 4];
+        var values = new float[vertexCount * BonesPerVertex];
         for (int v = 0; v < vertexCount; v++)
         {
             int p = baseOffset + v * stride;
-            for (int c = 0; c < 4; c++)
-                values[v * 4 + c] = ReadComponent(buffer, p + c * size, format);
+            for (int c = 0; c < influences; c++)
+                values[(v * BonesPerVertex) + c] = ReadComponent(buffer, p + (c * size), format);
         }
         return values;
     }
 
-    // 4 bone indices per vertex (BlendIndices channel; UInt8/16/32), flattened; empty when absent.
+    // Bone indices (BlendIndices channel; UInt8/16/32), flattened to four per vertex; empty when absent.
+    // Same dimension rule as the weights above — the two channels always agree about how many influences
+    // a vertex has, so an index whose weight was not written stays 0 and contributes nothing.
     private static int[] ReadInt4Channel(List<object> channels, int index, byte[] buffer,
         int vertexCount, int[] strides, int[] streamOffsets)
     {
@@ -335,22 +350,24 @@ public sealed class UnityMesh
             return Array.Empty<int>();
         var ch = (Dictionary<string, object>)channels[index];
         int format = ToInt(ch["format"]);
+        int dim = Dimension(ch);
         // The mirror of the float channels' guard: bone ids are integers, and a float format here would
         // be read at the wrong width by ReadIntComponent.
-        if (Dimension(ch) < 4 || IsFloatFormat(format))
+        if (dim < 1 || IsFloatFormat(format))
             return Array.Empty<int>();
 
         int stream = ToInt(ch["stream"]);
         int stride = strides[stream];
         int baseOffset = streamOffsets[stream] + ToInt(ch["offset"]);
         int size = FormatSize[format];
+        int influences = Math.Min(dim, BonesPerVertex);
 
-        var values = new int[vertexCount * 4];
+        var values = new int[vertexCount * BonesPerVertex];
         for (int v = 0; v < vertexCount; v++)
         {
             int p = baseOffset + v * stride;
-            for (int c = 0; c < 4; c++)
-                values[v * 4 + c] = ReadIntComponent(buffer, p + c * size, format);
+            for (int c = 0; c < influences; c++)
+                values[(v * BonesPerVertex) + c] = ReadIntComponent(buffer, p + (c * size), format);
         }
         return values;
     }
