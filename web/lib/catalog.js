@@ -100,6 +100,7 @@ export async function readMap(fs, mapPath, source) {
     const folder = normalize(mapPath).split("/").pop() ?? "";
     const localization = await readLocalization(fs, mapPath);
     const { count, sizeMetres } = await measureLandscape(fs, mapPath);
+    const config = await readConfig(fs, mapPath);
 
     return {
         folderName: folder,
@@ -111,12 +112,20 @@ export async function readMap(fs, mapPath, source) {
         displayName: isNullOrWhiteSpace(localization.name) ? folder : localization.name,
         source,
         description: localization.description,
-        category: await readCategory(fs, mapPath),
+        category: config.category,
         tileCount: count,
         sizeMetres,
-        // Pre-2020 maps store terrain as one legacy heightmap instead of Landscape tiles; this port does
-        // not read those, so they are listed and marked rather than hidden.
-        supported: count > 0,
+        // Pre-2020 maps store terrain as one legacy Unity Terrain instead of Landscape tiles; this port
+        // does not read those, so they are listed and marked rather than hidden.
+        //
+        // The map's own Config.json decides that, not the presence of tiles — LevelGround.load returns
+        // early into loadTrees() when Use_Legacy_Ground is false, and everything past that early return
+        // builds the legacy ground. Inferring it from a glob answered a different question: a Landscape
+        // map whose tiles could not be listed read as legacy, and a legacy map is not a map that happens
+        // to have no tiles, it needs a different loader. The tiles still have to be there for the loader
+        // that reads them to have anything to read, so both halves are required. Mirrors
+        // MapEntry.IsSupported.
+        supported: !config.useLegacyGround && count > 0,
         iconPath: await existingFile(fs, mapPath, "Icon.png"),
         previewPath: await existingFile(fs, mapPath, "Preview.png"),
         chartPath: await existingFile(fs, mapPath, "Chart.png"),
@@ -148,20 +157,54 @@ async function readLocalization(fs, mapPath) {
     return { name: values.get("Name") ?? null, description: values.get("Description") ?? null };
 }
 
-async function readCategory(fs, mapPath) {
+// The map's Config.json, read once for every field the catalogue takes from it — mirrors
+// LevelConfigData.Load, down to what each failure falls back to.
+//
+// The fields this returns are the ones the browser's map list shows or decides on. LevelConfigData
+// reads a good deal more (the LevelAsset GUID, the water and clip-border systems, the batching
+// version); those belong to the loader, not the catalogue, and are not modelled here.
+//
+// Every fallback is LevelInfoConfigData's own constructor default, which is what the game reads for a
+// map whose config is missing, unreadable or malformed — Newtonsoft leaves the constructed instance
+// alone on a parse failure, so such a map is loaded rather than skipped.
+const CONFIG_DEFAULT = { category: null, useLegacyGround: true };
+
+async function readConfig(fs, mapPath) {
     const text = await safe(fs.readText(join(mapPath, "Config.json")), null);
-    if (text === null) return null;
+    if (text === null) return CONFIG_DEFAULT;
+
+    let root;
     try {
-        const config = JSON.parse(relaxJson(text));
-        if (typeof config?.Category !== "string") return null;
-        // JsonElement.GetString() refuses a value holding an unpaired surrogate — `\uD800` with no low
-        // half — where JSON.parse hands it back happily. The desktop therefore has no category for such
-        // a config, so neither does this.
-        return hasUnpairedSurrogate(config.Category) ? null : config.Category;
+        root = JSON.parse(relaxJson(text));
     } catch {
-        // A map whose config will not parse still loads; the category is cosmetic.
-        return null;
+        // A map whose config will not parse still loads, on the defaults.
+        return CONFIG_DEFAULT;
     }
+    // JsonDocument.Parse accepts a bare array or scalar; LevelConfigData.Parse then refuses anything but
+    // an object and returns its defaults, so a config of `[1,2]` reads as no config at all.
+    if (root === null || typeof root !== "object" || Array.isArray(root)) return CONFIG_DEFAULT;
+
+    return {
+        category: readCategory(root),
+        // LevelConfigData.Bool takes only the JSON true/false literals; a key spelled with a number, a
+        // string "false" or null keeps the default. Reading it as JavaScript truthiness instead would
+        // make `"Use_Legacy_Ground": 0` unsupported here and supported on the desktop.
+        useLegacyGround: readBool(root, "Use_Legacy_Ground", true),
+    };
+}
+
+function readBool(root, key, fallback) {
+    const value = root[key];
+    return typeof value === "boolean" ? value : fallback;
+}
+
+function readCategory(root) {
+    if (typeof root.Category !== "string") return null;
+    // JsonElement.GetString() refuses a value holding an unpaired surrogate — `\uD800` with no low
+    // half — where JSON.parse hands it back happily. The desktop therefore has no category for such
+    // a config, so neither does this. LevelConfigData catches that per STRING, so it costs the
+    // category and nothing else — Use_Legacy_Ground above still reads.
+    return hasUnpairedSurrogate(root.Category) ? null : root.Category;
 }
 
 // A string that cannot be encoded as UTF-8, because a surrogate is missing its partner.
