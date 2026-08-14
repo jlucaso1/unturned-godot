@@ -68,14 +68,15 @@ public static class NetReport
                 Bytes(traffic.SentBytes), Bytes(traffic.ReceivedBytes),
                 traffic.SentDatagrams, traffic.ReceivedDatagrams));
 
-            // The six counters that were only ever asserted on in tests. Every one of them means
+            // The counters that were only ever asserted on in tests. Every one of them means
             // "something on this link is not what the protocol expects", and a session where they are
             // all zero is the only session whose other numbers can be read at face value.
             lines.Add(string.Format(CultureInfo.InvariantCulture,
                 "server  malformed {0}  oversized {1}  refused-connections {2}  refused-sends {3}  "
-                + "rejected-positions {4}",
+                + "rejected-positions {4}  unauthenticated-inputs {5}",
                 server.MalformedPacketsDropped, traffic.OversizedDropped, traffic.RefusedConnections,
-                traffic.RefusedSends, server.RejectedPositions));
+                traffic.RefusedSends, server.RejectedPositions,
+                server.UnauthenticatedInputsDropped));
             lines.Add("server  " + Breakdown(traffic));
         }
 

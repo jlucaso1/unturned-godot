@@ -172,6 +172,10 @@ public sealed class NetClient
     private readonly (uint Frame, double SentAt)[] _sentFrames = new (uint, double)[32];
     private int _sentAt;
 
+    // The four bytes this session was admitted under, repeated on every Input so a stranger who guessed
+    // our endpoint cannot send frames as us. See NetMessages.WriteWelcome.
+    private uint _sessionToken;
+
     // How much of a new reading is taken. Round trips jitter hard — one datagram queued behind a burst
     // is not a slower link — and a ping that jumps with every sample is unreadable and useless as an
     // input to an adaptive interpolation delay. An eighth settles in about a second at this cadence.
@@ -207,7 +211,9 @@ public sealed class NetClient
     {
         _sentFrames[_sentAt] = (input.Frame, now);
         _sentAt = (_sentAt + 1) % _sentFrames.Length;
-        _transport.Send(NetMessages.WriteInput(input), ESendType.Unreliable);
+        // The token the Welcome handed us. Before it is known this is zero, which the server refuses —
+        // correctly, since a frame sent before admission names no session anyway.
+        _transport.Send(NetMessages.WriteInput(input, _sessionToken), ESendType.Unreliable);
     }
 
     public void Update(double now)
@@ -255,6 +261,9 @@ public sealed class NetClient
             // Corrections are dated in the old host's tick space, and a restarted one counts from zero.
             HasCorrection = false;
             CorrectionTick = 0;
+            // And the token belongs to the session that ended. Zero until the next Welcome mints one,
+            // which is exactly the state a client that has never been admitted is in.
+            _sessionToken = 0;
             // Everything else keyed on ids this server handed out has to start over too, for the same
             // reason the roster versions do — a restarted host numbers its zombies from zero again, and a
             // subscriber holding the old session's ids would judge the new session's by them.
@@ -287,9 +296,13 @@ public sealed class NetClient
                         break;
                     }
 
-                    (byte id, uint welcomeTick, uint rosterVersion, byte chunkIndex, byte chunkCount,
-                        List<PlayerListing> players) = welcome;
+                    (byte id, uint sessionToken, uint welcomeTick, uint rosterVersion, byte chunkIndex,
+                        byte chunkCount, List<PlayerListing> players) = welcome;
                     PlayerId = id;
+                    // Every chunk carries it, and a re-admission mints a new one, so taking it from
+                    // whichever chunk arrives keeps the client on the current token rather than the one
+                    // its first datagram happened to carry.
+                    _sessionToken = sessionToken;
                     Joined = true;
                     _lastStateAt = now;
 
@@ -526,8 +539,8 @@ public sealed class NetClient
         Func<byte[], (byte PlayerId, uint Tick, UnturnedGodot.Player.EPlayerGesture Gesture)>
             ReadPlayerGesture = NetMessages.ReadPlayerGesture;
     private static readonly
-        Func<byte[], (byte PlayerId, uint Tick, uint RosterVersion, byte ChunkIndex, byte ChunkCount,
-            List<PlayerListing> Players)> ReadWelcome = NetMessages.ReadWelcome;
+        Func<byte[], (byte PlayerId, uint SessionToken, uint Tick, uint RosterVersion, byte ChunkIndex,
+            byte ChunkCount, List<PlayerListing> Players)> ReadWelcome = NetMessages.ReadWelcome;
     private static readonly Func<byte[], (uint RosterVersion, uint Tick, PlayerListing Player)>
         ReadPlayerJoined = NetMessages.ReadPlayerJoined;
     private static readonly Func<byte[], JoinRejection> ReadReject = NetMessages.ReadReject;

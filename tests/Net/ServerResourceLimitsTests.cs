@@ -37,6 +37,7 @@ public class ServerResourceLimitsTests
             Events.Enqueue(new ServerTransportEvent(ETransportEvent.Message, c, payload));
 
         public NetTraffic Traffic { get; } = new();
+        public System.Func<byte[], byte[]?>? AnswerConnectionless { get; set; }
         public bool TryReceive(out ServerTransportEvent evt) => Events.TryDequeue(out evt);
         public void Update(double now) { }
         public void Close() { }
@@ -171,7 +172,7 @@ public class ServerResourceLimitsTests
             Assert.True(chunk.Length <= NetChunks.MaxPayloadBytes,
                 $"a roster chunk is {chunk.Length} bytes, past the {NetChunks.MaxPayloadBytes}-byte "
                 + "path budget: that datagram is IP-fragmented, and losing any fragment loses all of it");
-            (byte _, uint _, uint _, byte _, byte chunkCount, List<PlayerListing> read) =
+            (byte _, uint _, uint _, uint _, byte _, byte chunkCount, List<PlayerListing> read) =
                 NetMessages.ReadWelcome(chunk);
             Assert.Equal(chunks.Count, chunkCount); // every piece says how many there are
             listed += read.Count;

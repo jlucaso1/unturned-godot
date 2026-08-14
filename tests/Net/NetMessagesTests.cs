@@ -118,8 +118,9 @@ public class NetMessagesTests
         };
         byte[] p = NetMessages.WriteWelcome(9, 1234, 77, players);
 
-        (byte id, uint tick, uint rosterVersion, byte chunkIndex, byte chunkCount,
+        (byte id, uint sessionToken, uint tick, uint rosterVersion, byte chunkIndex, byte chunkCount,
             List<PlayerListing> read) = NetMessages.ReadWelcome(p);
+        Assert.Equal(0u, sessionToken); // not written by this caller, so it round-trips as zero
         // A roster small enough for one datagram still says so: chunk 0 of 1.
         Assert.Equal(0, chunkIndex);
         Assert.Equal(1, chunkCount);

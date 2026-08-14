@@ -49,12 +49,24 @@ public class StateInterestTests
 
         public int StateUpdates() =>
             Sent.Count(p => NetMessages.TypeOf(p) == ENetMessage.StateUpdate);
+
+        // The token this connection was admitted under, read back off its own Welcome — the same way
+        // these tests already read back the player id the server assigned. Remembered once: these tests
+        // clear Sent to measure a window, and a real client does not forget its token when the datagram
+        // that carried it scrolls out of view.
+        private uint _token;
+
+        public uint SessionToken() => _token != 0
+            ? _token
+            : _token = NetMessages
+                .ReadWelcome(Sent.First(p => NetMessages.TypeOf(p) == ENetMessage.Welcome)).SessionToken;
     }
 
     private sealed class FakeServerTransport : IServerTransport
     {
         public readonly Queue<ServerTransportEvent> Events = new();
         public NetTraffic Traffic { get; } = new();
+        public System.Func<byte[], byte[]?>? AnswerConnectionless { get; set; }
 
         public void Connect(FakeConnection c) =>
             Events.Enqueue(new ServerTransportEvent(ETransportEvent.Connected, c, Array.Empty<byte>()));
@@ -93,11 +105,12 @@ public class StateInterestTests
             return conn;
         }
 
-        // A trusted-position claim, the shape a real client sends. Frames increase globally so nothing
-        // is refused by the freshness guard.
+        // A trusted-position claim, the shape a real client sends: with the session token the Welcome
+        // handed this connection, which the server checks before it decodes anything else. Frames
+        // increase globally so nothing is refused by the freshness guard.
         public void Claim(FakeConnection conn, Vector3 position) =>
             Transport.Message(conn, NetMessages.WriteInput(new InputCommand(_frame++, 0, 0, false, false,
-                0, 90, EPlayerStance.Stand, position)));
+                0, 90, EPlayerStance.Stand, position), conn.SessionToken()));
 
         public void Tick(int rounds = 1)
         {

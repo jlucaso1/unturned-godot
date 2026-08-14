@@ -29,6 +29,12 @@ public class ServerTickPacingTests
         public void Close() { }
 
         public int Count(ENetMessage type) => Sent.Count(p => NetMessages.TypeOf(p) == type);
+
+        // The token this connection was admitted under, read back off its own Welcome. An Input that
+        // does not carry it is refused before it is decoded, which is the point of it.
+        public uint SessionToken() =>
+            NetMessages.ReadWelcome(Sent.First(p => NetMessages.TypeOf(p) == ENetMessage.Welcome))
+                .SessionToken;
     }
 
     private sealed class FakeServerTransport : IServerTransport
@@ -42,6 +48,7 @@ public class ServerTickPacingTests
             Events.Enqueue(new ServerTransportEvent(ETransportEvent.Message, c, payload));
 
         public NetTraffic Traffic { get; } = new();
+        public System.Func<byte[], byte[]?>? AnswerConnectionless { get; set; }
         public bool TryReceive(out ServerTransportEvent evt) => Events.TryDequeue(out evt);
         public void Update(double now) { }
         public void Close() { }
@@ -148,10 +155,14 @@ public class ServerTickPacingTests
         transport.Connect(conn);
 
         const double start = 1000.0;
+        // Admitted first, because an Input has to carry the session token the Welcome mints — the
+        // server checks it before decoding anything else about the frame.
         transport.Message(conn, NetMessages.WriteHello("A", Level));
+        server.Update(start - ServerSimulation.TickRate);
+        uint token = conn.SessionToken();
         transport.Message(conn, NetMessages.WriteInput(new InputCommand(0, 0, 0, false, false, 0, 90,
-            EPlayerStance.Stand, Vector3.Zero)));
-        server.Update(start); // admitted, baseline claim accepted
+            EPlayerStance.Stand, Vector3.Zero), token));
+        server.Update(start); // baseline claim accepted
 
         // Four claims — the whole jitter buffer. The first spends nearly the entire stall allowance;
         // each of the rest asks for another tick's worth on top, which is only affordable if every step
@@ -161,7 +172,7 @@ public class ServerTickPacingTests
         {
             float metres = tickBudget * (3.9f + (0.95f * (frame - 1)));
             transport.Message(conn, NetMessages.WriteInput(new InputCommand(frame, 0, -1, false, true, 0, 90,
-                EPlayerStance.Sprint, new Vector3(0, 0, -metres))));
+                EPlayerStance.Sprint, new Vector3(0, 0, -metres)), token));
         }
 
         double elapsed = ServerSimulation.TickRate * (NetServer.MaxCatchUpTicks - 1);
@@ -190,8 +201,10 @@ public class ServerTickPacingTests
 
         const double start = 1000.0;
         transport.Message(conn, NetMessages.WriteHello("A", Level));
+        server.Update(start - ServerSimulation.TickRate); // admitted, so the session token exists
+        uint token = conn.SessionToken();
         transport.Message(conn, NetMessages.WriteInput(new InputCommand(0, 0, 0, false, false, 0, 90,
-            EPlayerStance.Stand, Vector3.Zero)));
+            EPlayerStance.Stand, Vector3.Zero), token));
         server.Update(start);
 
         // Five seconds of host stall. The client sprinted straight through it; what reaches the server
@@ -201,7 +214,7 @@ public class ServerTickPacingTests
         {
             float seconds = (float)stall - ((ServerSimulation.MaxQueuedInputs - frame) * ServerSimulation.TickRate);
             transport.Message(conn, NetMessages.WriteInput(new InputCommand(frame, 0, -1, false, true, 0, 90,
-                EPlayerStance.Sprint, new Vector3(0, 0, -PlayerConfig.SpeedSprint * seconds))));
+                EPlayerStance.Sprint, new Vector3(0, 0, -PlayerConfig.SpeedSprint * seconds)), token));
         }
 
         server.Update(start + stall);

@@ -24,6 +24,10 @@ public sealed class NetServer
         public bool HasInputFrame;
         public uint LastInputFrame;
 
+        // The four bytes this client must repeat on every Input it sends. Minted on admission and
+        // carried by the Welcome; see NetMessages.WriteWelcome for why it exists.
+        public uint Token;
+
         // The region this connection was last told about. A change means it has been told nothing about
         // where it now is, so the next snapshot for that region has to be the whole of it rather than
         // what changed. Starts at NoRegion, so a freshly admitted player is a change by definition.
@@ -66,8 +70,13 @@ public sealed class NetServer
     public NetTraffic Traffic => _transport.Traffic;
 
     // Trusted positions the simulation refused for not being finite. Reads through to the simulation so
-    // the six counters that describe a sick session are all reachable from one place.
+    // the counters that describe a sick session are all reachable from one place.
     public long RejectedPositions => _simulation.RejectedPositions;
+
+    // Input frames that named a live session but carried the wrong token. Non-zero means somebody is
+    // sending this port frames for a player they are not — a spoofer, or a client that kept talking
+    // across a re-admission it did not notice.
+    public long UnauthenticatedInputsDropped { get; private set; }
 
     // Transport events handled per Update. Comfortably above what a full server generates at its own
     // cadence, so it bounds a flood without shaping normal traffic.
@@ -126,10 +135,29 @@ public sealed class NetServer
         _simulation = simulation;
         _spawnPosition = spawnPosition;
         _levelName = levelName;
+        // The pre-handshake question a stranger is allowed to ask, answered without the transport
+        // allocating anything for them. See IServerTransport.AnswerConnectionless.
+        _transport.AnswerConnectionless = AnswerConnectionless;
     }
+
+    // What a peer with no connection may be told, which is exactly one thing: which map this is and how
+    // full it is. Anything else returns null and falls through to the ordinary connection path, so this
+    // widens nothing — it only moves the cheapest and most common pre-join exchange off the table that
+    // was exhaustible.
+    private byte[]? AnswerConnectionless(byte[] payload)
+    {
+        if (payload.Length == 0 || (ENetMessage)payload[0] != ENetMessage.ServerInfoRequest)
+            return null;
+        return NetMessages.WriteServerInfo(_levelName, PlayerCount, FreePlayerSlotsAt(_now));
+    }
+
+    // The clock of the last Update, for the connectionless answer above: it is served from inside the
+    // transport's pump, which has no `now` of its own to hand over.
+    private double _now;
 
     public void Update(double now)
     {
+        _now = now;
         _transport.Update(now);
 
         // Drain what is queued, but not without limit: how much work this loop does was decided entirely by
@@ -284,7 +312,7 @@ public sealed class NetServer
                             if (other.Joined && other != session)
                                 roster.Add(Listing(other, _simulation.GetState(other.PlayerId)));
                         foreach (byte[] chunk in NetMessages.WriteWelcomeChunks(session.PlayerId,
-                            _simulation.Tick, _rosterVersion, roster))
+                            _simulation.Tick, _rosterVersion, roster, session.Token))
                         {
                             connection.Send(chunk, ESendType.Reliable);
                         }
@@ -293,6 +321,24 @@ public sealed class NetServer
                     break;
                 }
             case ENetMessage.Input when session.Joined:
+                // The session token first, and before anything else about the frame is decoded.
+                //
+                // A connection is keyed by (address, port) alone, so anyone who guessed a client's
+                // ephemeral port could inject Input frames AS that player — walk them around inside the
+                // speed budget, spend their punch allowance — with nothing secret to forge. Checking the
+                // token here costs a four-byte read at a fixed offset and makes that a number they were
+                // never told as well as a port they guessed.
+                if (!MalformedPacket.TryDecode(payload, ReadInputToken, out uint token))
+                {
+                    MalformedPacketsDropped++;
+                    break;
+                }
+                if (token != session.Token)
+                {
+                    UnauthenticatedInputsDropped++;
+                    break;
+                }
+
                 // Dated by when it ARRIVED, not by the last tick: the swing rate limit is measured in
                 // real seconds, and a stall is exactly when the two stop being the same thing.
                 if (MalformedPacket.TryDecode(payload, ReadInput, out InputCommand input))
@@ -330,6 +376,7 @@ public sealed class NetServer
     private static readonly Func<byte[], (byte Version, string Name, string Level)> ReadHello =
         NetMessages.ReadHello;
     private static readonly Func<byte[], InputCommand> ReadInput = NetMessages.ReadInput;
+    private static readonly Func<byte[], uint> ReadInputToken = NetMessages.ReadInputSessionToken;
 
     // False when there is no id left to give — the caller refuses the join. Ids come from a pool and go
     // back on disconnect: a bare incrementing byte wrapped after 255 admissions and handed a live
@@ -343,6 +390,7 @@ public sealed class NetServer
         session.PlayerId = playerId;
         session.Name = NetMessages.ClampName(name);
         session.Joined = true;
+        session.Token = NextToken();
         PlayerCount++;
         _simulation.AddPlayer(session.PlayerId, _spawnPosition);
 
@@ -358,7 +406,7 @@ public sealed class NetServer
         // Chunked: a full roster is nine IP fragments as one datagram, retransmitted whole every
         // quarter second until acked. See NetMessages.WriteWelcomeChunks.
         foreach (byte[] chunk in NetMessages.WriteWelcomeChunks(session.PlayerId, _simulation.Tick,
-            _rosterVersion, existing))
+            _rosterVersion, existing, session.Token))
         {
             connection.Send(chunk, ESendType.Reliable);
         }
@@ -611,6 +659,26 @@ public sealed class NetServer
         foreach ((ITransportConnection conn, Session session) in _sessions)
             if (session.Joined && session.PlayerId != playerId)
                 conn.Send(payload, sendType);
+    }
+
+    // Four bytes a guesser was never told. Not cryptography and not meant to be: it turns "guess a
+    // 16-bit ephemeral port" into "guess that and a 32-bit number", which is the whole distance between
+    // something anyone can do by accident and something they have to mean. Drawn from the system CSPRNG
+    // rather than a seeded Random, because a predictable token is not a token.
+    //
+    // Never zero, so "this session has no token yet" stays distinguishable from a token that happens to
+    // be zero — and so a frame written by a client that never received a Welcome cannot pass by default.
+    private static uint NextToken()
+    {
+        Span<byte> bytes = stackalloc byte[4];
+        uint token;
+        do
+        {
+            System.Security.Cryptography.RandomNumberGenerator.Fill(bytes);
+            token = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+        }
+        while (token == 0);
+        return token;
     }
 
     private static PlayerListing Listing(Session session, in PlayerMoveState state) => new()

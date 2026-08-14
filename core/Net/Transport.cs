@@ -53,6 +53,21 @@ public interface IServerTransport
     // scanning them, so reading it costs nothing however many players are on.
     NetTraffic Traffic { get; }
 
+    // Answers a datagram from a peer the transport has never heard from, WITHOUT allocating anything
+    // for it: given the payload, return a reply to send straight back, or null to fall through to the
+    // ordinary "make a connection" path.
+    //
+    // This exists because the connection table was exhaustible before any handshake. A Connection plus
+    // its ReliableChannel was allocated on the first datagram from any endpoint, held for the 15 s
+    // silence timeout, and capped at 256 — so roughly 18 datagrams a second from forged or many sources
+    // held every slot permanently, with no handshake to authenticate against. The bulk of legitimate
+    // pre-handshake traffic is one message, ServerInfoRequest ("which map are you running?"), and it
+    // needs no connection at all: it is a question with a one-datagram answer.
+    //
+    // Set by the server, honoured by the transport, so what the answer IS stays in the protocol layer
+    // and the socket layer only decides when to ask.
+    Func<byte[], byte[]?>? AnswerConnectionless { get; set; }
+
     bool TryReceive(out ServerTransportEvent evt);
     void Update(double now); // drives retransmissions and timeouts; no-op for loopback
     void Close();
@@ -80,6 +95,21 @@ public sealed class CompositeServerTransport : IServerTransport
     // is one number whether the session is solo, listen or dedicated.
     public NetTraffic Traffic { get; } = new();
 
+    // Forwarded to every child, and to any child added later: "open to LAN" attaches a UDP listener to
+    // an already-running server, and that listener is precisely the one that needs it.
+    public Func<byte[], byte[]?>? AnswerConnectionless
+    {
+        get => _answerConnectionless;
+        set
+        {
+            _answerConnectionless = value;
+            foreach (IServerTransport transport in _transports)
+                transport.AnswerConnectionless = value;
+        }
+    }
+
+    private Func<byte[], byte[]?>? _answerConnectionless;
+
     public CompositeServerTransport(params IServerTransport[] transports)
     {
         _transports = new List<IServerTransport>(transports);
@@ -93,6 +123,7 @@ public sealed class CompositeServerTransport : IServerTransport
     {
         ArgumentNullException.ThrowIfNull(transport);
         transport.Traffic.Parent = Traffic;
+        transport.AnswerConnectionless = _answerConnectionless;
         _transports.Add(transport);
     }
 

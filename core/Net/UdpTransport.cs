@@ -57,6 +57,9 @@ public sealed class UdpServerTransport : IServerTransport
     // type, plus the drop counters below.
     public NetTraffic Traffic { get; } = new();
 
+    // See IServerTransport: answers a stranger's question without allocating a connection for them.
+    public Func<byte[], byte[]?>? AnswerConnectionless { get; set; }
+
     // Datagrams dropped for exceeding MaxPayloadBytes, and only those. Reaching the queued-byte or
     // queued-event budget stops the pump instead: those datagrams are never read, so they stay in the
     // socket's receive buffer for the OS to discard and there is nothing here to count. Worth being
@@ -171,6 +174,30 @@ public sealed class UdpServerTransport : IServerTransport
             string key = remote.ToString();
             if (!_connections.TryGetValue(key, out Connection? connection))
             {
+                // Answered before anything is allocated, if the server recognises it as a question that
+                // needs no connection. This is what stops the pre-handshake table being exhaustible:
+                // the bulk of legitimate traffic from strangers is "which map are you running?", and
+                // serving that out of a Connection meant every asker held one of 256 slots for 15 s.
+                //
+                // Only an UNRELIABLE frame qualifies. A reliable one wants an ack, and acking is
+                // per-connection state by definition — which is the thing being avoided. ServerQuery
+                // sends this unreliably and retries on its own schedule, which is what a query does.
+                if (AnswerConnectionless is { } answer
+                    && datagram.Length >= 2 && datagram[0] == ReliableChannel.ChannelUnreliable
+                    && answer(datagram[1..]) is { } reply)
+                {
+                    // One datagram out for one datagram in, to the address that asked, and nothing
+                    // retained. Framed by hand because there is no channel here to do it — that is the
+                    // point. The read budget (MaxReadsPerPump) is what bounds how often this can happen.
+                    var framed = new byte[reply.Length + 1];
+                    framed[0] = ReliableChannel.ChannelUnreliable;
+                    reply.CopyTo(framed, 1);
+                    Traffic.RecordReceived(NetTraffic.TypeOf(datagram[1..]), received);
+                    Traffic.RecordSent(NetTraffic.TypeOf(reply), framed.Length);
+                    TrySendTo(framed, new IPEndPoint(remote.Address, remote.Port));
+                    continue;
+                }
+
                 _perAddress.TryGetValue(remote.Address, out int fromAddress);
                 if (_connections.Count >= MaxConnections || fromAddress >= MaxConnectionsPerAddress)
                 {

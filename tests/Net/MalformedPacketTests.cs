@@ -33,6 +33,7 @@ public class MalformedPacketTests
             Events.Enqueue(new ServerTransportEvent(ETransportEvent.Message, c, payload));
 
         public NetTraffic Traffic { get; } = new();
+        public System.Func<byte[], byte[]?>? AnswerConnectionless { get; set; }
         public bool TryReceive(out ServerTransportEvent evt) => Events.TryDequeue(out evt);
         public void Update(double now) { }
         public void Close() { }

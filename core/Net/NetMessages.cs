@@ -257,7 +257,14 @@ public static class NetMessages
     // Version 14 adds InputEcho and PositionCorrection. A version 13 client would drop both as unknown
     // types: it would report no ping at all (harmless) and would never be corrected when the server
     // refuses its position (not harmless — that is the divergence the message exists to close).
-    public const byte ProtocolVersion = 14;
+    // Version 15 moves bytes rather than adding types, three times over. Welcome gains "chunk k of n"
+    // and a session token, so a version 14 client would read the roster three bytes short and every
+    // field after them would be garbage. Input gains the session token in the same place, so a
+    // version 14 client's frames would be refused by a version 15 server as unauthenticated even if
+    // they parsed. And ServerInfoRequest is now sent unreliably, which a version 14 server answers
+    // identically — that half is compatible, and it is the half that has to be, since a query happens
+    // before either end knows the other's version.
+    public const byte ProtocolVersion = 15;
 
     // Two level names denote the same world. The name on the wire is the map's FOLDER name — the one
     // identity that survives the trip between two machines (paths and workshop ids do not) — and it
@@ -399,8 +406,9 @@ public static class NetMessages
     // describes the newer world. The simulation tick cannot answer that: several membership events
     // happen inside ONE server frame (a joined client re-Hellos while a new player is admitted), so
     // they share a tick and the tie goes to whichever arrives last. A per-event counter has no ties.
-    // type 1 + id 1 + tick 4 + rosterVersion 4 + chunk index 1 + chunk count 1 + listing count 1.
-    private const int WelcomeHeaderBytes = 13;
+    // type 1 + id 1 + session token 4 + tick 4 + rosterVersion 4 + chunk index 1 + chunk count 1 +
+    // listing count 1.
+    private const int WelcomeHeaderBytes = 17;
 
     // The widest a listing can encode to: id 1 + a length-prefixed name (one prefix byte, since 32 is
     // under the 7-bit-encoded single-byte limit) + position 12 + pitch 1 + yaw 1 + stance 1.
@@ -424,20 +432,30 @@ public static class NetMessages
     // in chunk 1. The index also lets the reassembly survive reordering, which reliable delivery permits
     // — it retransmits, it does not order.
     public static List<byte[]> WriteWelcomeChunks(byte playerId, uint tick, uint rosterVersion,
-        IReadOnlyList<PlayerListing> players)
+        IReadOnlyList<PlayerListing> players, uint sessionToken = 0)
     {
         ArgumentNullException.ThrowIfNull(players);
         int chunkCount = Math.Max(1,
             (players.Count + MaxListingsPerDatagram - 1) / MaxListingsPerDatagram);
         int index = 0;
         return NetChunks.Split(players, MaxListingsPerDatagram,
-            chunk => WriteWelcome(playerId, tick, rosterVersion, chunk, (byte)index++, (byte)chunkCount));
+            chunk => WriteWelcome(playerId, tick, rosterVersion, chunk, (byte)index++, (byte)chunkCount,
+                sessionToken));
     }
 
     // One chunk. The default index/count describe a single-chunk roster, which is what every caller
     // outside the split above means and what the overwhelming majority of real rosters are.
+    // SESSION TOKEN: four bytes minted here and carried by every Input the client sends afterwards.
+    //
+    // A connection is keyed by (address, port) and nothing else, so anyone who guessed a client's
+    // ephemeral port could inject Input frames AS that player — walk them around inside the speed
+    // budget, spend their punch allowance — with no secret to forge. Four bytes is not cryptography and
+    // is not meant to be: it turns "guess a 16-bit port" into "guess a 16-bit port and a 32-bit number
+    // you were never told", which is the difference between a nuisance somebody can do by accident and
+    // one they have to mean.
     public static byte[] WriteWelcome(byte playerId, uint tick, uint rosterVersion,
-        IReadOnlyList<PlayerListing> players, byte chunkIndex = 0, byte chunkCount = 1)
+        IReadOnlyList<PlayerListing> players, byte chunkIndex = 0, byte chunkCount = 1,
+        uint sessionToken = 0)
     {
         ArgumentNullException.ThrowIfNull(players);
         if (players.Count > MaxListingsPerDatagram)
@@ -448,6 +466,7 @@ public static class NetMessages
         using var w = new BinaryWriter(ms);
         w.Write((byte)ENetMessage.Welcome);
         w.Write(playerId);
+        w.Write(sessionToken);
         w.Write(tick);
         w.Write(rosterVersion);
         w.Write(chunkIndex);
@@ -458,11 +477,12 @@ public static class NetMessages
         return ms.ToArray();
     }
 
-    public static (byte PlayerId, uint Tick, uint RosterVersion, byte ChunkIndex, byte ChunkCount,
-        List<PlayerListing> Players) ReadWelcome(byte[] payload)
+    public static (byte PlayerId, uint SessionToken, uint Tick, uint RosterVersion, byte ChunkIndex,
+        byte ChunkCount, List<PlayerListing> Players) ReadWelcome(byte[] payload)
     {
         using BinaryReader r = Reader(payload);
         byte id = r.ReadByte();
+        uint sessionToken = r.ReadUInt32();
         uint tick = r.ReadUInt32();
         uint rosterVersion = r.ReadUInt32();
         byte chunkIndex = r.ReadByte();
@@ -471,7 +491,7 @@ public static class NetMessages
         var players = new List<PlayerListing>(count);
         for (int i = 0; i < count; i++)
             players.Add(ReadListing(r));
-        return (id, tick, rosterVersion, chunkIndex, chunkCount, players);
+        return (id, sessionToken, tick, rosterVersion, chunkIndex, chunkCount, players);
     }
 
     // `tick` is the simulation tick this player was admitted on. It travels with the roster entry because
@@ -512,43 +532,74 @@ public static class NetMessages
         return (r.ReadUInt32(), r.ReadByte());
     }
 
-    public static byte[] WriteInput(in InputCommand input)
+    // The bytes an Input frame spends before its first variable-width field: type 1 + session token 4 +
+    // frame 4 + inputX 1 + inputY 1 + flags 1 + yaw 1 + pitch 1 + stance 1.
+    private const int InputFixedBytes = 15;
+
+    // The session token sits immediately after the type byte so it can be checked at a fixed offset,
+    // before anything else about the frame is decoded or any session is looked up. See WriteWelcome for
+    // what the token is and why an Input carries one.
+    private const int InputTokenOffset = 1;
+
+    // Whoever a datagram claims to be, without decoding the rest of it.
+    //
+    // Connections are keyed by (address, port) alone, so anyone who guessed a client's ephemeral port
+    // could inject Input frames AS that player — move them inside the speed budget, spend their punch
+    // allowance — with no secret to forge. This is that secret, and it is checked first because the
+    // point is to spend nothing on a frame that fails it.
+    public static uint ReadInputSessionToken(byte[] payload)
     {
-        using var ms = new MemoryStream();
-        using var w = new BinaryWriter(ms);
-        w.Write((byte)ENetMessage.Input);
-        w.Write(input.Frame);
-        w.Write(input.InputX);
-        w.Write(input.InputY);
+        ArgumentNullException.ThrowIfNull(payload);
+        return payload.Length < InputTokenOffset + 4
+            ? throw new InvalidDataException("Input payload is too short to carry a session token.")
+            : BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(InputTokenOffset));
+    }
+
+    // Rebuilt 12.5 times a second for the whole session, so it writes into an exact-sized array like
+    // WriteStateUpdate rather than growing a MemoryStream through a BinaryWriter and then copying the
+    // result out of it — four allocations a frame, for a payload whose width is known from its flags.
+    public static byte[] WriteInput(in InputCommand input, uint sessionToken = 0)
+    {
+        int size = InputFixedBytes + (input.HasSwing ? 4 : 0) + (input.HasPosition ? 12 : 0);
+        var payload = new byte[size];
+        payload[0] = (byte)ENetMessage.Input;
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(InputTokenOffset), sessionToken);
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(5), input.Frame);
+        payload[9] = unchecked((byte)input.InputX);
+        payload[10] = unchecked((byte)input.InputY);
         // A swing is announced by a flag bit and paid for by one extra byte, the same shape the trusted
         // position already uses: the frames that carry one are a handful per session, and every other
         // input frame stays exactly the width it was.
-        w.Write((byte)((input.Jump ? 1 : 0) | (input.Sprint ? 2 : 0) | (input.HasPosition ? 4 : 0)
-            | (input.Grounded ? 8 : 0) | (input.HasSwing ? 16 : 0)));
-        w.Write(input.Yaw);
-        w.Write(input.Pitch);
-        w.Write((byte)input.Stance);
+        payload[11] = (byte)((input.Jump ? 1 : 0) | (input.Sprint ? 2 : 0) | (input.HasPosition ? 4 : 0)
+            | (input.Grounded ? 8 : 0) | (input.HasSwing ? 16 : 0));
+        payload[12] = input.Yaw;
+        payload[13] = input.Pitch;
+        payload[14] = (byte)input.Stance;
+        int o = InputFixedBytes;
         if (input.HasSwing)
         {
-            w.Write((byte)(((input.SwingSequence & 0x7F) << 1) | (input.SwingFist == EPlayerPunch.Right ? 1 : 0)));
+            payload[o] = (byte)(((input.SwingSequence & 0x7F) << 1)
+                | (input.SwingFist == EPlayerPunch.Right ? 1 : 0));
             // The swing's own aim, so a repeat that arrives first is still judged by the frame that
             // threw it. Three bytes on the handful of frames a session's punches occupy.
-            w.Write(input.SwingYaw);
-            w.Write(input.SwingPitch);
-            w.Write((byte)input.SwingStance);
+            payload[o + 1] = input.SwingYaw;
+            payload[o + 2] = input.SwingPitch;
+            payload[o + 3] = (byte)input.SwingStance;
+            o += 4;
         }
         if (input.HasPosition)
         {
-            w.Write(input.Position.X);
-            w.Write(input.Position.Y);
-            w.Write(input.Position.Z);
+            BinaryPrimitives.WriteSingleLittleEndian(payload.AsSpan(o), input.Position.X);
+            BinaryPrimitives.WriteSingleLittleEndian(payload.AsSpan(o + 4), input.Position.Y);
+            BinaryPrimitives.WriteSingleLittleEndian(payload.AsSpan(o + 8), input.Position.Z);
         }
-        return ms.ToArray();
+        return payload;
     }
 
     public static InputCommand ReadInput(byte[] payload)
     {
         using BinaryReader r = Reader(payload);
+        r.ReadUInt32(); // the session token, already checked by whoever accepted this frame
         uint frame = r.ReadUInt32();
         sbyte x = r.ReadSByte();
         sbyte y = r.ReadSByte();

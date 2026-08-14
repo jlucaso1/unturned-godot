@@ -206,6 +206,7 @@ public class PlayerIdExhaustionTests
             Events.Enqueue(new ServerTransportEvent(ETransportEvent.Disconnected, c, Array.Empty<byte>()));
 
         public NetTraffic Traffic { get; } = new();
+        public System.Func<byte[], byte[]?>? AnswerConnectionless { get; set; }
         public bool TryReceive(out ServerTransportEvent evt) => Events.TryDequeue(out evt);
         public void Update(double now) { }
         public void Close() { }

@@ -15,6 +15,11 @@ public sealed class LoopbackServerTransport : IServerTransport
 
     public NetTraffic Traffic { get; } = new();
 
+    // Nothing to answer connectionlessly: a loopback peer only exists once CreateClient has made it a
+    // connection, so there is no such thing here as a datagram from a stranger. Held so a server can set
+    // it uniformly across whatever transports it is composed of.
+    public Func<byte[], byte[]?>? AnswerConnectionless { get; set; }
+
     // Creates the client end of a new connection; the server sees Connected on its next drain.
     public LoopbackClientTransport CreateClient()
     {
