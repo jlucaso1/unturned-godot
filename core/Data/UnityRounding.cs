@@ -22,27 +22,98 @@ public static class UnityRounding
     // GetRoundedIfNearlyAxisAligned's default, in degrees.
     public const float AngleToleranceDegrees = 0.05f;
 
-    // The SDK rounds a Quaternion; this port carries a rotation as the three Euler degrees the file
-    // itself stores, so the round trip through a quaternion is skipped. It does not change the answer:
-    // Unity's decision is made on `quaternion.eulerAngles`, which differs from the raw angles only by
-    // wrapping them into [0, 360), and both the comparison (Mathf.DeltaAngle) and the rounding (to a
-    // multiple of 90) are wrap-invariant — -90 and 270 round to themselves and describe one rotation.
+    // The SDK rounds a Quaternion, and the decision is made on `quaternion.eulerAngles` — so the raw
+    // triple the file stores has to go through the quaternion first, because those two are NOT the same
+    // triple wrapped into [0, 360).
+    //
+    // At Unity's Euler singularity they can disagree completely. `(90, 44.99, -45)` describes the same
+    // orientation as `(90, 89.99, 0)`, and only the second reads as nearly axis-aligned: the first has
+    // two 45-degree components and a component-wise test leaves the drift in place, which is exactly the
+    // near-square wall this rounding exists to rescue. Canonicalising first makes the answer depend on
+    // the orientation rather than on which of its spellings the editor happened to serialize.
+    //
+    // The unrounded return is the caller's ORIGINAL triple, not the canonical one: the SDK returns the
+    // quaternion it was given, and `Quaternion.Euler(raw)` is that same rotation, so re-spelling a
+    // rotation this function decided not to touch would be a change the game does not make.
     public static Vector3 RoundIfNearlyAxisAligned(Vector3 eulerDegrees,
         float toleranceDegrees = AngleToleranceDegrees)
     {
+        Vector3 canonical = UnityEulerAngles(UnityMath.EulerToUnityQuaternion(eulerDegrees));
+
+        // Wrapped again after the snap, because a canonical angle just under 360 rounds UP to it and 360
+        // is not a spelling Unity ever reports. The SDK stores the quaternion so the distinction never
+        // surfaces there — Quaternion.Euler(0, 90, 360) is Quaternion.Euler(0, 90, 0) — but this port
+        // stores the angles, and 360 would be a value no `.eulerAngles` read could have produced.
         var rounded = new Vector3(
-            RoundToRightAngle(eulerDegrees.X),
-            RoundToRightAngle(eulerDegrees.Y),
-            RoundToRightAngle(eulerDegrees.Z));
+            Wrap360(RoundToRightAngle(canonical.X)),
+            Wrap360(RoundToRightAngle(canonical.Y)),
+            Wrap360(RoundToRightAngle(canonical.Z)));
 
         // All three axes or none: a transform that is square on two axes and deliberately tilted on the
         // third is a slope, not a misaligned wall, and snapping the two would move the object.
-        return IsAngleNearlyEqual(eulerDegrees.X, rounded.X, toleranceDegrees)
-            && IsAngleNearlyEqual(eulerDegrees.Y, rounded.Y, toleranceDegrees)
-            && IsAngleNearlyEqual(eulerDegrees.Z, rounded.Z, toleranceDegrees)
+        return IsAngleNearlyEqual(canonical.X, rounded.X, toleranceDegrees)
+            && IsAngleNearlyEqual(canonical.Y, rounded.Y, toleranceDegrees)
+            && IsAngleNearlyEqual(canonical.Z, rounded.Z, toleranceDegrees)
                 ? rounded
                 : eulerDegrees;
     }
+
+    // Unity's `Quaternion.eulerAngles`: the ZXY decomposition that inverts Quaternion.Euler, wrapped
+    // into [0, 360). Written out because there is no managed Unity here to ask, and because the
+    // singularity branch is the whole reason the canonicalisation above matters.
+    //
+    // With R = Ry·Rx·Rz, the useful elements fall out directly: R12 is -sin(x), the first column of row
+    // one carries cos(x)·sin(z) against cos(x)·cos(z), and R02/R22 carry sin(y)·cos(x) against
+    // cos(y)·cos(x). When cos(x) collapses — the tilt is straight up or straight down — y and z stop
+    // being separable and Unity attributes the whole remaining turn to y, which is how (90, 44.99, -45)
+    // becomes (90, 89.99, 0).
+    // The arithmetic is widened to double and narrowed at the end, because asin is ill-conditioned
+    // exactly where this matters: near the poles its derivative runs away, so an error of one float ulp
+    // in the input comes out multiplied by roughly a thousand.
+    //
+    // Widening does not make a pole exact, and it is not meant to. The quaternion arrives already built
+    // in float, and sqrt of its ~1e-7 error is ~0.03 degrees, so `Quaternion.Euler(90, 30, -20)`
+    // decomposes to 89.968 here — and to the same 89.968 in Unity, which runs the identical float
+    // round trip. That is the game's own number and is left alone. What the widening buys is not adding
+    // a SECOND helping of the same error on top, which would push the total past the caller's
+    // 0.05-degree budget and stop near-square placements at the pole from snapping at all.
+    public static Vector3 UnityEulerAngles(Quaternion q)
+    {
+        double qx = q.X, qy = q.Y, qz = q.Z, qw = q.W;
+        double r00 = 1d - (2d * ((qy * qy) + (qz * qz)));
+        double r01 = 2d * ((qx * qy) - (qw * qz));
+        double r02 = 2d * ((qx * qz) + (qw * qy));
+        double r10 = 2d * ((qx * qy) + (qw * qz));
+        double r11 = 1d - (2d * ((qx * qx) + (qz * qz)));
+        double r12 = 2d * ((qy * qz) - (qw * qx));
+        double r22 = 1d - (2d * ((qx * qx) + (qy * qy)));
+
+        double sinX = Math.Clamp(-r12, -1d, 1d);
+        double x = Math.Asin(sinX);
+        double y, z;
+        if (Math.Abs(sinX) < GimbalLockSin)
+        {
+            z = Math.Atan2(r10, r11);
+            y = Math.Atan2(r02, r22);
+        }
+        else
+        {
+            // Straight up or straight down: z folds into y, and its sign follows the tilt's.
+            z = 0d;
+            y = Math.Atan2(Math.Sign(sinX) * r01, r00);
+        }
+
+        return new Vector3(Wrap360(RadToDeg(x)), Wrap360(RadToDeg(y)), Wrap360(RadToDeg(z)));
+    }
+
+    // Unity treats the decomposition as degenerate slightly before the poles rather than exactly at
+    // them, because near them y and z are numerically indistinguishable long before cos(x) reaches zero.
+    private const double GimbalLockSin = 0.99999d;
+
+    private static float RadToDeg(double radians) => (float)(radians * (180d / Math.PI));
+
+    // Unity reports Euler angles in [0, 360), so a rotation authored as -90 comes back as 270.
+    private static float Wrap360(float degrees) => Repeat(degrees, 360f);
 
     // Vector3Ex.GetRoundedIfNearlyEqualToOne: per-component, and to -1 as readily as to 1, because a
     // mirrored placement is authored as a negative scale. A component near neither is left alone, so an

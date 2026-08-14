@@ -500,4 +500,73 @@ public class LegacyPlacementsTests
         Assert.Equal(100f, Assert.Single(placements).Position.Y);
         Assert.Equal(Guid.Empty, placements[0].Guid);
     }
+
+    [Fact]
+    public void AppendTrees_DropsATreeWhoseRedirectTargetIsNotAResource()
+    {
+        // Unturned resolves the target through AssetReference<ResourceAsset>, which is TYPED: a
+        // Christmas_Redirect naming an object, a vehicle or an NPC comes back unresolved and the tree is
+        // dropped. Checking only the original would let the placement through and then hand a house a
+        // tree's transform, vertical offset and mesh.
+        var pine = Guid.NewGuid();
+        var house = Guid.NewGuid();
+        var placements = new List<PlacedObject>();
+        var db = DatabaseWith(
+            Asset(pine, 30, "Resource", $"Christmas_Redirect {house:N}\n"),
+            Asset(house, 31, "Medium"));
+
+        LegacyPlacements.AppendTrees(new[] { TreeAt(pine, Vector3.Zero, Vector3.One) }, placements, db,
+            new HolidayPolicy(ENPCHoliday.Christmas, allowRedirects: true));
+
+        Assert.Empty(placements);
+    }
+
+    [Fact]
+    public void ResolveGuids_DropsAnObjectWhoseRedirectTargetIsNotAnObject()
+    {
+        // The mirror, through AssetReference<ObjectAsset>: a resource or a vehicle is not an ObjectAsset
+        // in the game, however alike they look in this port's single tagged table.
+        var plain = Guid.NewGuid();
+        var tree = Guid.NewGuid();
+        var placements = new List<PlacedObject> { Placement(1, plain) };
+        var db = DatabaseWith(
+            Asset(plain, 1, "Medium", $"Christmas_Redirect {tree:N}\n"),
+            Asset(tree, 2, "Resource"));
+
+        LegacyPlacements.ResolveGuids(placements, db,
+            new HolidayPolicy(ENPCHoliday.Christmas, allowRedirects: true));
+
+        Assert.Empty(placements);
+    }
+
+    [Fact]
+    public void ResolveGuids_DropsAnObjectPlacementThatNamesAVehicleWhileRedirecting()
+    {
+        // Vehicles are VehicleAsset, not ObjectAsset, so they belong to neither redirect family: the
+        // ORIGINAL failing the type check is the same drop as a missing asset.
+        var vehicle = Guid.NewGuid();
+        var placements = new List<PlacedObject> { Placement(1, vehicle) };
+        var db = DatabaseWith(Asset(vehicle, 1, "SDG.Unturned.VehicleAsset, Assembly-CSharp"));
+
+        LegacyPlacements.ResolveGuids(placements, db,
+            new HolidayPolicy(ENPCHoliday.Christmas, allowRedirects: true));
+
+        Assert.Empty(placements);
+    }
+
+    [Fact]
+    public void ResolveGuids_KeepsAnNpcOrDecalWhileRedirecting()
+    {
+        // NPC and Decal ARE editor categories of ObjectAsset in Unturned, so they stay in the object
+        // family and a redirect-enabled holiday must not quietly delete them.
+        var npc = Guid.NewGuid();
+        var decal = Guid.NewGuid();
+        var placements = new List<PlacedObject> { Placement(1, npc), Placement(2, decal) };
+        var db = DatabaseWith(Asset(npc, 1, "NPC"), Asset(decal, 2, "Decal"));
+
+        LegacyPlacements.ResolveGuids(placements, db,
+            new HolidayPolicy(ENPCHoliday.Christmas, allowRedirects: true));
+
+        Assert.Equal(2, placements.Count);
+    }
 }
