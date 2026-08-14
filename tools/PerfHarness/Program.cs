@@ -60,6 +60,8 @@ public static class Program
             NavigationCacheSuite(map);
         if (all || wanted.Contains("navprobe"))
             NavigationProbeSuite(map);
+        if (all || wanted.Contains("navsnap"))
+            NavigationSnapSuite(map);
         if (all || wanted.Contains("repro"))
             ReproSuite();
         if (all || wanted.Contains("bundle"))
@@ -362,6 +364,78 @@ public static class Program
         }
         Console.WriteLine($"  hands {confirm:N0}/{faces:N0} faces ({100.0 * confirm / faces:0.0}%) to the "
             + $"physics server; {uncertain:N0} uncertain probes, {unknown:N0} faces with no surface found");
+        Console.WriteLine();
+    }
+
+    // What a repath pays BEFORE the pathfinder is asked anything.
+    //
+    // `ZombieSystem.Move` snaps both ends of every granted repath onto the navmesh with
+    // `LevelNavmesh.SnapXZ`, and that cost sits outside the ~1.3 ms median the repath budget is priced
+    // against — it runs before `pathQuery` is called. The comment on `MaxRepathsPerTick` therefore
+    // accounts for the search and not for this. Two figures come out of here: how long one snap takes on
+    // the map's own navmesh, and what a saturated repath budget (8 repaths x 2 endpoints, 12.5 times a
+    // second) therefore costs per server tick.
+    //
+    // The points are drawn from the mesh itself and then pushed off it, because the two branches of
+    // SnapXZ have very different costs: a contained point can stop looking at one triangle's worth of
+    // arithmetic, while a point off the mesh runs three edge projections for every triangle it visits.
+    // A suite that only sampled centroids would price the cheap half and call it the answer.
+    private static void NavigationSnapSuite(string? map)
+    {
+        string? environment = map == null ? null : Path.Combine(map, "Environment");
+        if (Skip("navsnap", environment != null && Directory.Exists(environment) ? map : null, out string _))
+            return;
+
+        List<NavFlag> flags = LevelNavmesh.Load(environment!);
+        if (flags.Count == 0)
+        {
+            Console.WriteLine("== navsnap: SKIP (this map ships no navmesh) ==\n");
+            return;
+        }
+
+        int triangles = 0;
+        foreach (NavFlag flag in flags)
+            triangles += flag.Triangles.Length / 3;
+
+        // Deterministic and spread over every flag, so one dense region cannot stand in for the map.
+        var onMesh = new List<Vector3>();
+        var offMesh = new List<Vector3>();
+        foreach (NavFlag flag in flags)
+        {
+            int count = flag.Triangles.Length / 3;
+            if (count == 0)
+                continue;
+            for (int i = 0; i < 24; i++)
+            {
+                int triangle = (i * 7919) % count;
+                Vector3 centre = (flag.Vertices[flag.Triangles[triangle * 3]]
+                    + flag.Vertices[flag.Triangles[(triangle * 3) + 1]]
+                    + flag.Vertices[flag.Triangles[(triangle * 3) + 2]]) / 3f;
+                onMesh.Add(centre);
+                // Far enough off the surface to miss every triangle, close enough that a real zombie
+                // pushed off the mesh by collision could be standing there.
+                offMesh.Add(centre + new Vector3(((i % 5) - 2) * 3.5f, 1.5f, ((i % 7) - 3) * 3.5f));
+            }
+        }
+
+        Console.WriteLine($"== navsnap: {triangles:N0} navmesh triangles across {flags.Count} flags ==");
+        double contained = Bench($"SnapXZ, on the mesh ({onMesh.Count} points)", () =>
+        {
+            foreach (Vector3 point in onMesh)
+                LevelNavmesh.SnapXZ(flags, point, out _);
+        }, warmup: 1, iters: 7);
+        double edge = Bench($"SnapXZ, off the mesh ({offMesh.Count} points)", () =>
+        {
+            foreach (Vector3 point in offMesh)
+                LevelNavmesh.SnapXZ(flags, point, out _);
+        }, warmup: 1, iters: 7);
+
+        double perSnapMs = ((contained / onMesh.Count) + (edge / offMesh.Count)) / 2.0;
+        // ZombieSystem: MaxRepathsPerTick repaths, two endpoints each, on the 12.5 Hz authoritative tick.
+        const int Endpoints = ZombieSystem.MaxRepathsPerTick * 2;
+        Console.WriteLine($"  {1000.0 / Math.Max(1e-9, perSnapMs):N0} snaps/s; a saturated repath "
+            + $"budget ({Endpoints} endpoints) costs {perSnapMs * Endpoints:0.000} ms per server tick, "
+            + $"{perSnapMs * Endpoints / ServerSimulation.TickRate:0.0} ms/s");
         Console.WriteLine();
     }
 
