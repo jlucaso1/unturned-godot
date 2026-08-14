@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.Threading;
+using UnturnedGodot.Zombies;
 
 namespace UnturnedGodot.Benchmark;
 
@@ -16,6 +17,13 @@ public static class RuntimeCounters
         PlayerMoveAndSlide,
         PlayerStep,
         NavigationReconcile,
+        // The server-side zombie simulation, which NetworkServer used to swallow whole. NetServer.Update
+        // raises OnTick, ZombieHost answers it, and everything under that — detection, steering, the
+        // move resolver, the ground snap and the pathfinding — was being reported as networking. These
+        // two split the population-proportional half (Brain) from the budgeted A* (ZombiePathQuery), so
+        // a change to either one is visible against the other instead of against the wire.
+        ZombieBrain,
+        ZombiePathQuery,
         ZombiesView,
         Count,
     }
@@ -65,6 +73,13 @@ public static class RuntimeCounters
             observed = prior;
         }
     }
+
+    // The sink ZombieSystem.Costs is given. Core cannot see this class — it is engine-free and this lives
+    // beside the engine — so the brain reports through a delegate it is handed, and the mapping from its
+    // own vocabulary to the counters lives here. Cached in a static field because the system holds it for
+    // the session: allocating one per install would be one allocation, but per tick would be a leak.
+    public static readonly ZombieCostSink ZombieCosts = (cost, ticks) => RecordTicks(
+        cost == EZombieCost.PathQuery ? Counter.ZombiePathQuery : Counter.ZombieBrain, ticks);
 
     public static Sample Read(Counter counter)
     {

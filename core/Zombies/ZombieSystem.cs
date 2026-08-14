@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using Godot;
 using UnturnedGodot.Data;
 using UnturnedGodot.Net;
@@ -207,6 +208,22 @@ public delegate bool ZombieNavmeshSegmentProbe(Vector3 from, Vector3 to, float r
 // resolve to the right one. Null falls back to the terrain heightfield alone.
 public delegate bool ZombieGroundSnap(Vector3 position, out float y);
 
+// The two costs one authoritative tick's zombie work splits into. They are reported separately because
+// they are unrelated work with unrelated fixes: Brain is detection, steering, the collision resolver and
+// the ground snap, all of it proportional to the population, while PathQuery is the A* over the baked
+// graph, capped at MaxRepathsPerTick however many zombies there are. Together they were previously
+// invisible: the host runs inside NetServer.Update, so the whole simulation was reported as networking.
+public enum EZombieCost
+{
+    Brain,
+    PathQuery,
+}
+
+// Where those costs are reported to, in Stopwatch ticks. Deliberately an instance field on the system
+// rather than a static, so two systems in one process (a HUNT_PROBE beside the real population, or two
+// maps across a session) cannot pool their numbers into one reading.
+public delegate void ZombieCostSink(EZombieCost cost, long elapsedTicks);
+
 // The server-side zombie brain: spawning per ZombieManager.generateZombies, aggro per AlertTool,
 // hunting per Zombie.cs (approach paths, 64 m give-up, leave retreats, swing cadence). Movement is
 // Unturned's NonPathfindingZombieMovementComponent — straight-line seek, 720°/s turning, and the
@@ -307,6 +324,12 @@ public sealed partial class ZombieSystem
 
     // Fires when a zombie's swing lands (attackTime/2 after it starts): (zombie, player id, damage).
     public Action<ZombieInstance, byte, byte>? OnAttack;
+
+    // Opt-in cost reporting (Tier 3). Null — the production default until a benchmark installs one —
+    // costs one field read per tick and per granted repath, and no clock read at all. Installed, it costs
+    // two Stopwatch.GetTimestamp() calls at each of those points: 12.5 of the first a second and at most
+    // MaxRepathsPerTick times that of the second, against a tick measured in milliseconds.
+    public ZombieCostSink? Costs;
 
     public IReadOnlyList<NavFlag>? Navmesh => _navmesh; // for route endpoint projection and repro capture
 
@@ -414,6 +437,10 @@ public sealed partial class ZombieSystem
 
     public void Tick(IReadOnlyList<ZombiePlayerView> players, float dt)
     {
+        // Read the sink once and time against that read, so installing or removing one mid-tick cannot
+        // report an interval measured against a clock that was never started.
+        ZombieCostSink? costs = Costs;
+        long brainStarted = costs == null ? 0L : Stopwatch.GetTimestamp();
         // The bug-repro recorder brackets the tick here (ZombieSystemState.cs): everything below is
         // what a dump has to be able to put back, and the state it must be put back to is this one.
         Observer?.BeginTick(this, players, dt);
@@ -494,6 +521,7 @@ public sealed partial class ZombieSystem
         }
         CurrentZombie = null;
         Observer?.EndTick(this);
+        costs?.Invoke(EZombieCost.Brain, Stopwatch.GetTimestamp() - brainStarted);
     }
 
     private int _repathCursor;
@@ -933,7 +961,13 @@ public sealed partial class ZombieSystem
                     queryFrom = snappedFrom;
             }
             _scratchPath.Clear();
-            if (pathQuery(queryFrom, queryTo, _scratchPath, zombie.Radius) && _scratchPath.Count > 0)
+            // Measured around the query alone, not around the snapping above it: the two are separate
+            // costs with separate fixes, and folding the endpoint snap in here is what let it hide.
+            ZombieCostSink? costs = Costs;
+            long queryStarted = costs == null ? 0L : Stopwatch.GetTimestamp();
+            bool routed = pathQuery(queryFrom, queryTo, _scratchPath, zombie.Radius);
+            costs?.Invoke(EZombieCost.PathQuery, Stopwatch.GetTimestamp() - queryStarted);
+            if (routed && _scratchPath.Count > 0)
             {
                 // Storeys can share the same XZ. A downstairs endpoint directly below an upstairs
                 // target is not complete and must not veto the real route via stairs.

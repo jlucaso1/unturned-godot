@@ -25,6 +25,11 @@ public sealed class ZombieNavigation
 
     public bool IsReady => !_disposed && _ready && _bakedGraph != null;
 
+    // Pooled A* workspaces the graph holds across every flag. Reported by Tier 3 because the pool is
+    // never drained: it grows to the concurrency the session actually reached and stays there, and until
+    // now the only figure for it was an estimate.
+    public int SearchWorkspaceCount => _bakedGraph?.SearchWorkspaceCount ?? 0;
+
     public static ZombieNavigation? Build(IReadOnlyList<NavFlag>? flags,
         ZombieMoveResolver? moveResolver = null, string? levelDir = null)
     {

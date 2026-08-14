@@ -62,6 +62,13 @@ public partial class NetworkManager : Node
 
     public static double Now => Time.GetTicksMsec() / 1000.0;
 
+    public override void _Ready() => AddToGroup(SceneGroups.Network);
+
+    // A* search workspaces the baked graph is holding: three int/float arrays per triangle each, pooled
+    // per flag and never drained, so this is the only reading of what pathfinding retains for the rest
+    // of the session. Zero on a client, which has no graph.
+    public int SearchWorkspaceCount => _zombieNavigation?.SearchWorkspaceCount ?? 0;
+
     public void Configure(HeightmapSampler heights, Vector3 spawn)
     {
         _spawn = spawn;
@@ -124,6 +131,9 @@ public partial class NetworkManager : Node
             PunchDamage = AttachPunchDamage(zombies: null, host: null);
             return;
         }
+        // Tier 3's split of this session's zombie CPU. Installed unconditionally: the counters behind it
+        // early-out while they are off, so a production run pays two clock reads on the 12.5 Hz tick.
+        zombies.Costs = Benchmark.RuntimeCounters.ZombieCosts;
         ZombiePhysics.Attach(zombies, () => GetViewport()?.World3D, _ground);
         // The pre-baked navmesh drives the Seeker port: zombies path around buildings and props
         // exactly over the triangles the original game baked. Prefer the data parsed at the start of the
