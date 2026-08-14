@@ -32,8 +32,11 @@ public static class MapAssetSet
         IReadOnlyList<PlacedTree> trees = LevelTrees.Load(Path.Combine(level.Path, "Terrain", "Trees.dat"));
         if (db != null)
         {
-            LegacyPlacements.ResolveGuids(placements, db);
-            LegacyPlacements.AppendTrees(trees, placements, db);
+            // The map's own holiday policy, so the cache this reports on is the one the map would
+            // actually load: out of season a Christmas prop is not placed, and its mesh is not needed.
+            var holidays = HolidayPolicy.ForMap(level.Path);
+            LegacyPlacements.ResolveGuids(placements, db, holidays);
+            LegacyPlacements.AppendTrees(trees, placements, db, holidays);
         }
         else
         {
