@@ -160,20 +160,31 @@ public sealed class TextureRegistry
 
         (ImageTexture? tex, int filterMode) loaded = (null, 1);
         string path = Path.Combine(_textureCacheDir, textureKey + ".tex");
-        if (File.Exists(path) && TextureCache.IsCurrent(path)) // stale formats re-extract on the next pass
+        if (IsCommitted(path)) // stale formats and half-written files re-extract/retry on the next pass
         {
-            using FileStream stream = File.OpenRead(path);
-            CachedTexture ct = CachedTexture.Decoded(TextureCache.Read(stream));
-            string content = DeduplicateGpu
-                ? ExactContentKey.Image(ct.Format, ct.Width, ct.Height, ct.MipCount, ct.Pixels)
-                : textureKey;
-            if (!_imagesByContent.TryGetValue(content, out ImageTexture? image))
+            try
             {
-                image = ModelLibrary.BuildTexture(ct);
-                if (image != null)
-                    _imagesByContent[content] = image;
+                using FileStream stream = File.OpenRead(path);
+                CachedTexture ct = CachedTexture.Decoded(TextureCache.Read(stream));
+                string content = DeduplicateGpu
+                    ? ExactContentKey.Image(ct.Format, ct.Width, ct.Height, ct.MipCount, ct.Pixels)
+                    : textureKey;
+                if (!_imagesByContent.TryGetValue(content, out ImageTexture? image))
+                {
+                    image = ModelLibrary.BuildTexture(ct);
+                    if (image != null)
+                        _imagesByContent[content] = image;
+                }
+                loaded = (image, ct.FilterMode);
             }
-            loaded = (image, ct.FilterMode);
+            // The writer holds its .tex with FileShare.None, so on Windows the file can become
+            // unopenable between the check above and the open here. Nothing about this key is decided
+            // by that: it stays pending and the next frame's Apply tries again.
+            catch (System.Exception e) when (e is IOException or System.UnauthorizedAccessException
+                or InvalidDataException)
+            {
+                loaded = (null, 1);
+            }
         }
         // A miss during cold streaming is temporary: the mesh phase runs before most of the .resS tail
         // has been written. Caching null here made the later ready notification reuse the miss forever.
@@ -182,4 +193,22 @@ public sealed class TextureRegistry
             _loaded[textureKey] = loaded;
         return loaded;
     }
+
+    // Whether a cached texture is finished being written, not merely started.
+    //
+    // The magic alone cannot answer that: it is the FIRST four bytes the writer emits, so a .tex the
+    // extraction worker is part-way through passes TextureCache.IsCurrent while the payload behind the
+    // header is short. TextureCache.Read then hands back a byte[] shorter than its declared length —
+    // ReadBytes does not throw on a short read — and Image.CreateFromData rejects it, which on a cold
+    // load turns into engine error spam and a wasted decode for every key ApplyAllAvailable happens to
+    // sweep mid-write. (ApplyAllAvailable sweeps every pending key, not just the ones the worker has
+    // signalled, and OnMeshesExtractedAsync calls it while the texture tail is still streaming.)
+    //
+    // The extraction already built the proof: TextureCache.RecordSource writes a `.source` sidecar
+    // atomically AFTER the payload, precisely so a reader can tell a committed entry from one in flight
+    // (see ModelExtractor.AlreadyCached). Both texture-cache writers record it, and
+    // TextureDependencyIndex.MissingTextureIds treats a .tex without a current sidecar as owed — so the
+    // set this admits is exactly the set the extraction plan considers already present.
+    private static bool IsCommitted(string texturePath) =>
+        File.Exists(TextureCache.SourcePath(texturePath)) && TextureCache.IsCurrent(texturePath);
 }

@@ -52,6 +52,43 @@ const PIECES = [
     ",Name LeadingComma",
     "",
     "   ",
+
+    // Below: one piece per divergence this harness could not see before, because both sides shared the
+    // defect. A generated corpus only rules out what it can generate, and none of these shapes was
+    // reachable from the pieces above — so each is written out rather than hoped for.
+
+    // An unbalanced '}' mid-document. The root body has no closer to find, so everything after it is
+    // still read; returning there truncated the document.
+    "Name Before\n}\nDescription After",
+    "Sub\n{\nX 1\n}\n}\nName After",
+
+    // A blank line between key and bracket. At most ONE line break may separate them, so this leaves
+    // Name a scalar and the block unintroduced.
+    "Name Kept\n\n{\nDescription Buried\n}",
+    "Name\n\n[\nitem\n]",
+    "Name Kept\n{\nDescription Inline\n}",
+
+    // Unrecognized escapes keep their backslash — the workshop file paths 3.23.7.0 broke.
+    "Name Some\\Path",
+    "Name C:\\Users\\Maps\\Icon.png",
+    'Name "C:\\Users\\Maps"',
+    "Name Trailing\\",
+    'Name "Trailing\\',
+    'Name "Escaped\\"Quote"',
+    "Name Escaped\\\"Quote",
+
+    // Mismatched closers, which decide whether the words after them are keys or list values.
+    "Metadata\n[\n}\nName Fake\n]",
+    "Metadata\n{\n]\nName Real\n}",
+    "Metadata\n[\n[\n}\nName Fake\n]\n]",
+
+    // A key with no value at all: DatValue(null), not an empty string.
+    "Name",
+    "Name\nDescription Blurb",
+
+    // Whitespace that SkipSpacesAndTabs does not skip, so no value starts on it.
+    "Name\u000bPlain",
+    "Name\u00a0Plain",
 ];
 
 // A deterministic generator: the same documents on every run and every machine, so a failure is a bug
@@ -121,6 +158,17 @@ foreach (string text in cases)
     {
         ["Name"] = parsed.GetString("Name"),
         ["Description"] = parsed.GetString("Description"),
+        // Presence as well as content, because the two are no longer the same question: a key written
+        // with no value holds null, and so reads back exactly like a key that is not there. Without
+        // this the harness cannot see a document losing its keys — which is what an early return on a
+        // stray '}' does, and what it could not see before.
+        //
+        // TryGetString rather than ContainsKey, because that is the question the browser can answer:
+        // its DatValues keeps the root's SCALARS and drops a key that turns out to hold a block, so
+        // "present and a value" is the shared vocabulary. Whether a block is a list or a dictionary is
+        // not something the browser models, and the harness does not invent an answer for it.
+        ["HasName"] = parsed.TryGetString("Name", out _) ? "yes" : "no",
+        ["HasDescription"] = parsed.TryGetString("Description", out _) ? "yes" : "no",
     });
 }
 File.WriteAllText(args[0], JsonSerializer.Serialize(outcomes));
@@ -150,14 +198,19 @@ File.WriteAllText(args[0], JsonSerializer.Serialize(outcomes));
     const failures = [];
     for (let n = 0; n < cases.length; n++) {
         const values = parseDatTopLevel(cases[n]);
-        for (const key of ["Name", "Description"]) {
+        const mine = {
+            Name: values.get("Name") ?? null,
+            Description: values.get("Description") ?? null,
+            HasName: values.has("Name") ? "yes" : "no",
+            HasDescription: values.has("Description") ? "yes" : "no",
+        };
+        for (const key of ["Name", "Description", "HasName", "HasDescription"]) {
             checked++;
-            const mine = values.get(key) ?? null;
-            if (mine !== expected[n][key]) {
+            if (mine[key] !== expected[n][key]) {
                 failures.push(
                     `case ${n} [${key}]\n  input:    ${JSON.stringify(cases[n])}\n` +
                         `  desktop:  ${JSON.stringify(expected[n][key])}\n` +
-                        `  browser:  ${JSON.stringify(mine)}`,
+                        `  browser:  ${JSON.stringify(mine[key])}`,
                 );
             }
         }

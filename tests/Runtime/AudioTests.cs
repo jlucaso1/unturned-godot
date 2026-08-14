@@ -178,13 +178,17 @@ public class AudioTests : TestClass
     {
         using var dir = new TempDir();
         WriteDef(dir.Path, "footstep", volume: 1f, minPitch: 1f, maxPitch: 1f);
-        OneShotAudio audio = OneShotAudio.Create(new AudioDefLibrary(dir.Path));
-        TestScene.AddChild(audio);
 
+        // Set around Create rather than around Play: the flag is captured when the service is built, so
+        // that a sound in a firefight does not pay for an environment lookup to decide it has nothing to
+        // say. Reading it per Play is what this used to do.
         string previous = OS.GetEnvironment("AUDIO_DEBUG");
         OS.SetEnvironment("AUDIO_DEBUG", "1");
+        OneShotAudio audio;
         try
         {
+            audio = OneShotAudio.Create(new AudioDefLibrary(dir.Path));
+            TestScene.AddChild(audio);
             Assert.True(audio.Play("footstep", new Vector3(1f, 2f, 3f), 1f, 32f));
             Assert.Equal(new Vector3(1f, 2f, 3f), Voices(audio)[0].GlobalPosition);
         }

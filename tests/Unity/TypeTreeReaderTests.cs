@@ -189,6 +189,27 @@ public class TypeTreeReaderTests
     }
 
     [Fact]
+    public void ReadsDouble_AndKeepsTheFieldsAfterItInStep()
+    {
+        // "double" is one of Unity's own common type strings, so a tree can name it. Without a case it
+        // fell to `default`, was treated as a struct with no children and consumed ZERO bytes — so the
+        // int after it read the double's first four bytes and every later field was off by eight. The
+        // trailing field is the whole point of this test: the defect was never in the double itself.
+        var nodes = new List<TypeTreeNode>
+        {
+            N(0, "Base", "Base"),
+            N(1, "double", "d"),
+            N(1, "int", "after"),
+        };
+        byte[] bytes = new RiverBytes().Double(-1234.5678).Int32(42).ToArray();
+
+        Dictionary<string, object> d = Read(nodes, bytes);
+
+        Assert.Equal(-1234.5678, Assert.IsType<double>(d["d"]), 9);
+        Assert.Equal(42, d["after"]);
+    }
+
+    [Fact]
     public void ReadsTypelessData()
     {
         var nodes = new List<TypeTreeNode>

@@ -15,13 +15,22 @@ public readonly struct PlacedTree
     public readonly ushort Id;             // legacy identifier (pre-GUID maps)
     public readonly Guid Guid;             // modern identifier
 
-    public PlacedTree(Vector3 position, Vector3 euler, Vector3 scale, Guid guid, ushort id = 0)
+    // The file this tree came out of predates version 8, so the identity rotation and unit scale above
+    // are placeholders rather than authored values: the file stored neither, and Unturned derives both
+    // from the asset and the position instead (LevelGround.cs:782, and again at 873 and 908 for the
+    // region encodings). Nothing here can do that derivation — it needs the ResourceAsset — so the fact
+    // that it is still owed travels with the tree until LegacyPlacements has the asset database.
+    public readonly bool NeedsLegacyRotationAndScale;
+
+    public PlacedTree(Vector3 position, Vector3 euler, Vector3 scale, Guid guid, ushort id = 0,
+        bool needsLegacyRotationAndScale = false)
     {
         Position = position;
         EulerDegrees = euler;
         Scale = scale;
         Id = id;
         Guid = guid;
+        NeedsLegacyRotationAndScale = needsLegacyRotationAndScale;
     }
 }
 
@@ -61,7 +70,8 @@ public static class LevelTrees
 
             Vector3 euler = Vector3.Zero;
             Vector3 scale = Vector3.One;
-            if (version >= RotationAndScaleVersion)
+            bool needsLegacy = version < RotationAndScaleVersion;
+            if (!needsLegacy)
             {
                 euler = river.ReadEulerDegrees();
                 scale = river.ReadSingleVector3();
@@ -71,14 +81,15 @@ public static class LevelTrees
 
             // Unturned discards trees with no asset.
             if (guid != Guid.Empty)
-                result.Add(new PlacedTree(position, euler, scale, guid));
+                result.Add(new PlacedTree(position, euler, scale, guid, id: 0, needsLegacy));
         }
 
         return result;
     }
 
-    // The pre-7 encoding: one ushort count per region of the 64x64 grid, then that region's trees. Neither
-    // rotation nor scale exists yet (both arrived in 8), so every tree stands upright at its authored size.
+    // The pre-7 encoding: one ushort count per region of the 64x64 grid, then that region's trees.
+    // Neither rotation nor scale exists yet (both arrived in 8), so every tree here is flagged as still
+    // owing both — LegacyPlacements derives them from the asset once it has one.
     private static List<PlacedTree> LoadRegions(River river, byte version, List<PlacedTree> result)
     {
         for (int x = 0; x < WorldSize; x++)
@@ -95,7 +106,10 @@ public static class LevelTrees
 
                     // Unturned discards trees with no asset; before 6 that identity is the legacy id alone.
                     if (guid != Guid.Empty || id != 0)
-                        result.Add(new PlacedTree(position, Vector3.Zero, Vector3.One, guid, id));
+                    {
+                        result.Add(new PlacedTree(position, Vector3.Zero, Vector3.One, guid, id,
+                            needsLegacyRotationAndScale: true));
+                    }
                 }
             }
         }
