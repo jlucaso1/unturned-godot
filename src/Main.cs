@@ -239,7 +239,7 @@ public partial class Main : Node3D
             AddChild(world.Objects);
             AddChild(world.Vehicles);
             AddChild(world.Foliage);
-            AddSubsystem("roads", () => RoadsBuilder.Build(environmentDir, world.Heights));
+            AddSubsystem("roads", () => RoadsBuilder.Build(environmentDir, world.Heights, unturnedPath));
             StandardMaterial3D water = AddWater(lighting);
             AddSubsystem("nodes", () => NodesBuilder.Build(environmentDir));
             RunSubsystem("environment", () => SetupEnvironment(lighting, water, unturnedPath));
@@ -751,7 +751,7 @@ public partial class Main : Node3D
 
         loading.SetStatus("Roads and water…");
         await NextFrame();
-        AddSubsystem("roads", () => RoadsBuilder.Build(environmentDir, heights));
+        AddSubsystem("roads", () => RoadsBuilder.Build(environmentDir, heights, unturnedPath));
         StandardMaterial3D waterMat = AddWater(lighting);
         AddSubsystem("nodes", () => NodesBuilder.Build(environmentDir));
         RunSubsystem("environment", () => SetupEnvironment(lighting, waterMat, unturnedPath));

@@ -32,9 +32,13 @@ public static class MapAssetSet
         IReadOnlyList<PlacedTree> trees = LevelTrees.Load(Path.Combine(level.Path, "Terrain", "Trees.dat"));
         if (db != null)
         {
-            // The map's own holiday policy, so the cache this reports on is the one the map would
-            // actually load: out of season a Christmas prop is not placed, and its mesh is not needed.
-            var holidays = HolidayPolicy.ForMap(level.Path);
+            // Restrictions on, substitutions OFF — the editor policy, and deliberately not the map's
+            // own. Level.cs:282 gates redirects on `isEditor == false`, and this method's caller is the
+            // editor dock; WorldPreview.ReadPlacements already takes the no-redirect path. Letting the
+            // map's Allow_Holiday_Redirects through here would have the dock's "Warm cache" extract the
+            // seasonal variants every December while the preview asks for the authored originals and
+            // drew them as fallback boxes.
+            var holidays = HolidayPolicy.FromClock();
             LegacyPlacements.ResolveGuids(placements, db, holidays);
             LegacyPlacements.AppendTrees(trees, placements, db, holidays);
         }
