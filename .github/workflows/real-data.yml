@@ -329,6 +329,12 @@ jobs:
       - name: Check the structural metrics
         env:
           UNTURNED_PATH: ${{ github.workspace }}/build/game-data
+          # Pinned to "no holiday", because the counts below it are placement counts and the holiday
+          # gating is real: Halloween would add 31 objects, Christmas 336, and June turns on a
+          # PRIDE_MONTH asset. Without the pin the recorded baseline is only true for the ~46 weeks a
+          # year nothing is running, and this job would go red on October 20th having found nothing
+          # wrong -- which is how a gate teaches people to ignore it. Recorded with the same pin.
+          UG_HOLIDAY: None
         run: ./scripts/check-structural-metrics.sh
 
       # The runtime suite's other half. Most of what src/ does is decode the game's own bundle formats,
