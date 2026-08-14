@@ -186,3 +186,160 @@ public class LightingCycleTests
         Assert.Equal(expected.B, got.B, 3);
     }
 }
+
+// LightingManager's gameplay clock: the latch that advances the moon at each new night, and the two
+// predicates the zombie population reads off it. Ported from LightingManager.updateLighting
+// (LightingManager.cs:513-575) and ReceiveInitialLightingState (LightingManager.cs:386-387).
+public class DayNightClockTests
+{
+    private const float ClockBias = 0.6f;
+
+    private static DayNightClock At(float time, int phase = 0) =>
+        new(ClockBias, time, phase);
+
+    // One second of a 3600-second cycle, so a test can step the clock in cycle units rather than in
+    // guessed wall time.
+    private static float Seconds(float cycleFraction) =>
+        cycleFraction * LightingCycle.DefaultCycleSeconds;
+
+    [Fact]
+    public void ConstructorWrapsTheTimeAndThePhase()
+    {
+        Assert.Equal(0.25f, new DayNightClock(ClockBias, 1.25f, 0).TimeOfDay, 4);
+        Assert.Equal(0.75f, new DayNightClock(ClockBias, -0.25f, 0).TimeOfDay, 4);
+        Assert.Equal(2, new DayNightClock(ClockBias, 0f, 7).MoonPhase);      // 7 % 5
+        Assert.Equal(3, new DayNightClock(ClockBias, 0f, -2).MoonPhase);     // -2 -> 3
+        Assert.Equal(ClockBias, new DayNightClock(ClockBias, 0f, 0).Bias);
+    }
+
+    // onLevelLoaded starts a server with isCycled false and lets the first updateLighting latch it, so a
+    // clock built at night is NOT cycled until it has been advanced once. That is what makes the phase
+    // advance on the server's first frame rather than the saved phase being taken as the live one.
+    [Fact]
+    public void ANewClockAtNightIsNotYetCycled()
+    {
+        DayNightClock clock = At(0.9f, LightingCycle.FullMoonPhase);
+
+        Assert.True(clock.IsNighttime);
+        Assert.False(clock.IsCycled);
+        Assert.False(clock.IsFullMoon);
+    }
+
+    // The dusk edge: isCycled latches and the moon advances one slice. Phase 1 -> 2 is the full moon.
+    [Fact]
+    public void CrossingDuskAdvancesTheMoonOnceAndLatches()
+    {
+        DayNightClock clock = At(0.59f, 1);
+        clock.Advance(Seconds(0.02f));
+
+        Assert.True(clock.IsCycled);
+        Assert.Equal(LightingCycle.FullMoonPhase, clock.MoonPhase);
+        Assert.True(clock.IsFullMoon);
+        Assert.True(clock.IsNighttime);
+
+        // And it is an EDGE: staying in the night does not keep advancing it.
+        clock.Advance(Seconds(0.1f));
+        Assert.Equal(LightingCycle.FullMoonPhase, clock.MoonPhase);
+    }
+
+    // "if (moon < MOON_CYCLES - 1) moon++ else moon = 0" — the wrap at the end of the cycle.
+    [Fact]
+    public void TheMoonPhaseWrapsAtTheEndOfItsCycle()
+    {
+        DayNightClock clock = At(0.59f, LightingCycle.MoonPhaseCount - 1);
+        clock.Advance(Seconds(0.02f));
+
+        Assert.Equal(0, clock.MoonPhase);
+        Assert.False(clock.IsFullMoon);
+    }
+
+    // Dawn drops the latch — which is what turns the full moon off — without touching the phase.
+    [Fact]
+    public void CrossingDawnDropsTheLatchAndTheFullMoon()
+    {
+        DayNightClock clock = At(0.59f, 1);
+        clock.Advance(Seconds(0.02f));
+        Assert.True(clock.IsFullMoon);
+
+        clock.Advance(Seconds(0.5f)); // 0.61 -> 0.11: past midnight, into the new day
+        Assert.True(clock.IsDaytime);
+        Assert.False(clock.IsCycled);
+        Assert.False(clock.IsFullMoon);
+        Assert.Equal(LightingCycle.FullMoonPhase, clock.MoonPhase); // the phase itself is kept
+
+        // And the next dusk advances it again, so nights keep stepping through the cycle.
+        clock.Advance(Seconds(0.5f));
+        Assert.Equal(3, clock.MoonPhase);
+    }
+
+    // DAY_SPEED. The same wall time covers more of the cycle, and the latch still fires exactly once.
+    [Fact]
+    public void SpeedScalesHowFarOneAdvanceMoves()
+    {
+        DayNightClock slow = At(0.1f);
+        DayNightClock fast = At(0.1f);
+        slow.Advance(Seconds(0.01f));
+        fast.Advance(Seconds(0.01f), speed: 10f);
+
+        Assert.Equal(0.11f, slow.TimeOfDay, 4);
+        Assert.Equal(0.2f, fast.TimeOfDay, 4);
+    }
+
+    // Assigning the time is ReceiveInitialLightingState's shape: re-derive isCycled from where the clock
+    // now stands, but do NOT advance the phase — a clock that was jumped has not lived through a dusk.
+    [Fact]
+    public void AssigningTheTimeReDerivesTheLatchWithoutAdvancingTheMoon()
+    {
+        DayNightClock clock = At(0.1f, LightingCycle.FullMoonPhase);
+        Assert.False(clock.IsFullMoon);
+
+        clock.TimeOfDay = 0.9f;
+        Assert.True(clock.IsCycled);
+        Assert.True(clock.IsFullMoon);
+        Assert.Equal(LightingCycle.FullMoonPhase, clock.MoonPhase); // unchanged
+
+        clock.TimeOfDay = 1.1f; // wraps to 0.1
+        Assert.Equal(0.1f, clock.TimeOfDay, 4);
+        Assert.False(clock.IsCycled);
+        Assert.False(clock.IsFullMoon);
+    }
+
+    // Sync alone, for a clock that is pinned rather than assigned (TIME_OF_DAY freezes the cycle, and a
+    // frozen clock never runs an edge of its own).
+    [Fact]
+    public void SyncLatchesAPinnedClockWithoutAdvancingIt()
+    {
+        DayNightClock clock = At(0.9f);
+        clock.SetMoonPhase(LightingCycle.FullMoonPhase);
+        Assert.False(clock.IsFullMoon);
+
+        clock.Sync();
+
+        Assert.True(clock.IsCycled);
+        Assert.True(clock.IsFullMoon);
+        Assert.Equal(0.9f, clock.TimeOfDay, 4);
+    }
+
+    [Fact]
+    public void SetMoonPhaseWraps()
+    {
+        DayNightClock clock = At(0.1f);
+        clock.SetMoonPhase(LightingCycle.MoonPhaseCount + 2);
+        Assert.Equal(2, clock.MoonPhase);
+        clock.SetMoonPhase(-1);
+        Assert.Equal(LightingCycle.MoonPhaseCount - 1, clock.MoonPhase);
+    }
+
+    // Exactly at the bias is neither daytime nor cycled — the original's asymmetry, preserved by the
+    // clock because it delegates both predicates to LightingCycle.
+    [Fact]
+    public void ExactlyAtTheBiasIsNeitherDaytimeNorCycled()
+    {
+        DayNightClock clock = At(0.1f);
+        clock.TimeOfDay = ClockBias;
+
+        Assert.False(clock.IsDaytime);
+        Assert.True(clock.IsNighttime);
+        Assert.False(clock.IsCycled);
+    }
+}

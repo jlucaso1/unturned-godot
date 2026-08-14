@@ -178,7 +178,7 @@ public class ZombieSpecialityRollTests
     {
         ZombieTable table = Table(PassiveGuid);
         ZombieDifficultyAsset? resolved =
-            System(table, Bounds(MilitaryGuid), Bank()).DifficultyFor(0, table);
+            System(table, Bounds(MilitaryGuid), Bank()).DifficultyFor(0, table, forSpawnOverrides: true);
 
         Assert.Equal(MilitaryGuid, resolved!.Guid);
     }
@@ -190,7 +190,7 @@ public class ZombieSpecialityRollTests
     {
         ZombieTable table = Table(MilitaryGuid);
         ZombieDifficultyAsset? resolved =
-            System(table, Bounds(PassiveGuid), Bank()).DifficultyFor(0, table);
+            System(table, Bounds(PassiveGuid), Bank()).DifficultyFor(0, table, forSpawnOverrides: true);
 
         Assert.Equal(MilitaryGuid, resolved!.Guid);
     }
@@ -211,7 +211,8 @@ public class ZombieSpecialityRollTests
     public void NoBankAtAll_UsesTheModeConfig()
     {
         ZombieTable table = Table(MilitaryGuid);
-        Assert.Null(System(table, Bounds(MilitaryGuid)).DifficultyFor(0, table));
+        Assert.Null(System(table, Bounds(MilitaryGuid))
+            .DifficultyFor(0, table, forSpawnOverrides: true));
     }
 
     // A bound index past the list must not throw; the table's asset is still consulted.
@@ -220,7 +221,7 @@ public class ZombieSpecialityRollTests
     {
         ZombieTable table = Table(MilitaryGuid);
         ZombieDifficultyAsset? resolved =
-            System(table, Bounds(), Bank()).DifficultyFor(9, table);
+            System(table, Bounds(), Bank()).DifficultyFor(9, table, forSpawnOverrides: true);
 
         Assert.Equal(MilitaryGuid, resolved!.Guid);
     }
@@ -296,6 +297,234 @@ public class ZombieSpecialityRollTests
         ZombieInstance zombie = Assert.Single(system.Zombies);
         Assert.False(zombie.IsHyper);
         Assert.Equal(2.1f, zombie.VerticalAttackRange, 3);
+    }
+
+    // Zombie.isHyper is LIVE: LightingManager broadcasts onMoonUpdated and ZombieRegion turns it into
+    // onHyperUpdated, so a population spawned in daylight becomes hyper when the moon comes up. Stamped
+    // at spawn — which is what this was — the full moon never reached a single zombie, because nothing
+    // in this port respawns one.
+    [Fact]
+    public void TheMoonRisingMakesTheEXISTINGPopulationHyper()
+    {
+        ZombieTable table = Table();
+        ZombieSystem system = new(new[] { table }, Bounds(), FlatGround);
+        system.Spawn(Enumerable.Range(0, 12)
+            .Select(i => new ZombieSpawnpointData(0, new Vector3(i * 4f - 20f, 0, 0))).ToList(),
+            new Random(4));
+        Assert.NotEmpty(system.Zombies);
+        Assert.All(system.Zombies, z => Assert.False(z.IsHyper));
+
+        system.IsFullMoon = true;
+        Assert.All(system.Zombies, z => Assert.True(z.IsHyper));
+        Assert.All(system.Zombies, z => Assert.Equal(3.5f, z.VerticalAttackRange, 3));
+
+        // And dawn takes it back off them.
+        system.IsFullMoon = false;
+        Assert.All(system.Zombies, z => Assert.False(z.IsHyper));
+    }
+
+    // "isHyper => zombieRegion.isHyper && speciality != BOSS_ALL && speciality != BOSS_BUAK_FINAL": the
+    // two exclusions survive the live update, not just the spawn stamp.
+    [Fact]
+    public void TheTwoNeverHyperBossesStayOrdinaryUnderTheMoon()
+    {
+        ZombieTable table = Table();
+        ZombieSystem system = new(new[] { table }, Bounds(), FlatGround);
+        system.Spawn(new[] { new ZombieSpawnpointData(0, Vector3.Zero) }, new Random(1));
+        ZombieInstance zombie = Assert.Single(system.Zombies);
+
+        zombie.Speciality = EZombieSpeciality.BossAll;
+        system.IsFullMoon = true;
+        Assert.False(zombie.IsHyper);
+
+        zombie.Speciality = EZombieSpeciality.BossBuakFinal;
+        system.IsFullMoon = false;
+        system.IsFullMoon = true;
+        Assert.False(zombie.IsHyper);
+
+        zombie.Speciality = EZombieSpeciality.BossFire; // an ordinary boss IS hyper
+        system.IsFullMoon = false;
+        system.IsFullMoon = true;
+        Assert.True(zombie.IsHyper);
+    }
+
+    // Assigning the same value is a no-op, which is what lets a host push this from every tick.
+    [Fact]
+    public void AnUnchangedMoonDoesNotRestampThePopulation()
+    {
+        ZombieTable table = Table();
+        ZombieSystem system = new(new[] { table }, Bounds(), FlatGround) { IsFullMoon = true };
+        system.Spawn(new[] { new ZombieSpawnpointData(0, Vector3.Zero) }, new Random(1));
+        ZombieInstance zombie = Assert.Single(system.Zombies);
+
+        zombie.IsHyper = false;  // a value only a re-stamp could put back
+        system.IsFullMoon = true;
+        Assert.False(zombie.IsHyper);
+    }
+
+    // ---- population size and the boss cap -------------------------------------------------------
+
+    // "Mathf.CeilToInt(levelSpawnpoints.Count * Provider.modeConfigData.Zombies.Spawn_Chance)": the
+    // MODE's chance, not a constant. EASY thins the population and HARD swells it, which is most of what
+    // picking a difficulty is supposed to do to a map.
+    [Theory]
+    [InlineData(EGameMode.Normal, 5)] // ceil(20 * 0.25)
+    [InlineData(EGameMode.Easy, 4)]   // ceil(20 * 0.2)
+    [InlineData(EGameMode.Hard, 6)]   // ceil(20 * 0.3)
+    public void SpawnChance_ComesFromTheModeConfig(EGameMode mode, int expected)
+    {
+        ZombieTable table = Table();
+        ZombieSystem system = new(new[] { table }, Bounds(), FlatGround)
+        {
+            ModeConfig = ModeConfigData.For(mode),
+        };
+        system.Spawn(Enumerable.Range(0, 20)
+            .Select(i => new ZombieSpawnpointData(0, new Vector3(i * 4f - 40f, 0, 0))).ToList(),
+            new Random(9));
+
+        Assert.Equal(expected, system.Zombies.Count);
+    }
+
+    // A custom Config.json is a dial, not a choice between three presets.
+    [Fact]
+    public void SpawnChance_HonoursACustomValue()
+    {
+        ZombieTable table = Table();
+        ZombieSystem system = new(new[] { table }, Bounds(), FlatGround)
+        {
+            ModeConfig = ModeConfigData.Normal with
+            {
+                Zombies = ModeConfigData.Normal.Zombies with { SpawnChance = 1f },
+            },
+        };
+        system.Spawn(Enumerable.Range(0, 20)
+            .Select(i => new ZombieSpawnpointData(0, new Vector3(i * 4f - 40f, 0, 0))).ToList(),
+            new Random(9));
+
+        Assert.Equal(20, system.Zombies.Count);
+    }
+
+    // "regionMaxBossZombies >= 0 && speciality.IsBoss() && region.aliveBossZombieCount >=
+    // regionMaxBossZombies -> continue". A bound capped at one boss starts with exactly one however hard
+    // its difficulty rolls them.
+    [Fact]
+    public void BossCap_LimitsHowManyBossesABoundStartsWith()
+    {
+        var bank = new ZombieDifficultyBank();
+        bank.AddIfAbsent(Asset(MilitaryGuid, "\tBoss_Fire_Chance 1\n"));
+        List<NavBound> bounds = Bounds(MilitaryGuid);
+        bounds[0].MaxBossZombies = 1;
+
+        ZombieTable table = Table();
+        ZombieSystem system = new(new[] { table }, bounds, FlatGround) { Difficulties = bank };
+        system.Spawn(Enumerable.Range(0, 40)
+            .Select(i => new ZombieSpawnpointData(0, new Vector3(i * 4f - 80f, 0, 0))).ToList(),
+            new Random(6));
+
+        // One boss, and nothing else at all: every remaining draw rolls a boss too, is rejected, and
+        // spends its spawnpoint. Draining the pool is the original's own outcome — the `continue` costs
+        // the spawnpoint and the while loop ends when there are none left.
+        Assert.Single(system.Zombies);
+        Assert.True(system.Zombies[0].Speciality.IsBoss());
+    }
+
+    // With bosses merely LIKELY rather than certain, the cap takes the surplus and the region still
+    // fills to its ordinary size — a rejected boss costs a spawnpoint but not a slot.
+    [Fact]
+    public void BossCap_LeavesTheRegionRoomToFillUp()
+    {
+        var bank = new ZombieDifficultyBank();
+        bank.AddIfAbsent(Asset(MilitaryGuid, "\tBoss_Fire_Chance 0.5\n"));
+        List<NavBound> bounds = Bounds(MilitaryGuid);
+        bounds[0].MaxBossZombies = 1;
+
+        ZombieTable table = Table();
+        ZombieSystem system = new(new[] { table }, bounds, FlatGround) { Difficulties = bank };
+        system.Spawn(Enumerable.Range(0, 40)
+            .Select(i => new ZombieSpawnpointData(0, new Vector3(i * 4f - 80f, 0, 0))).ToList(),
+            new Random(6));
+
+        Assert.Equal(10, system.Zombies.Count); // ceil(40 * 0.25)
+        Assert.Single(system.Zombies, z => z.Speciality.IsBoss());
+    }
+
+    // Negative is uncapped (FlagData's own default for a map saved before the field existed).
+    [Fact]
+    public void BossCap_NegativeMeansUncapped()
+    {
+        var bank = new ZombieDifficultyBank();
+        bank.AddIfAbsent(Asset(MilitaryGuid, "\tBoss_Fire_Chance 1\n"));
+        List<NavBound> bounds = Bounds(MilitaryGuid);
+        Assert.Equal(-1, bounds[0].MaxBossZombies);
+
+        ZombieTable table = Table();
+        ZombieSystem system = new(new[] { table }, bounds, FlatGround) { Difficulties = bank };
+        system.Spawn(Enumerable.Range(0, 40)
+            .Select(i => new ZombieSpawnpointData(0, new Vector3(i * 4f - 80f, 0, 0))).ToList(),
+            new Random(6));
+
+        Assert.Equal(10, system.Zombies.Count);
+        Assert.All(system.Zombies, z => Assert.True(z.Speciality.IsBoss()));
+    }
+
+    // A cap of zero admits none at all, and the pool is drained trying — the bound ends up empty rather
+    // than looping forever.
+    [Fact]
+    public void BossCap_OfZeroAdmitsNone()
+    {
+        var bank = new ZombieDifficultyBank();
+        bank.AddIfAbsent(Asset(MilitaryGuid, "\tBoss_Fire_Chance 1\n"));
+        List<NavBound> bounds = Bounds(MilitaryGuid);
+        bounds[0].MaxBossZombies = 0;
+
+        ZombieTable table = Table();
+        ZombieSystem system = new(new[] { table }, bounds, FlatGround) { Difficulties = bank };
+        system.Spawn(Enumerable.Range(0, 40)
+            .Select(i => new ZombieSpawnpointData(0, new Vector3(i * 4f - 80f, 0, 0))).ToList(),
+            new Random(6));
+
+        Assert.Empty(system.Zombies);
+    }
+
+    // ---- the level asset's prioritization -------------------------------------------------------
+
+    // TableOverridesNavmesh reverses the lookup: the table's asset wins and the bound's is the fallback.
+    [Fact]
+    public void TableOverridesNavmesh_ReversesTheLookup()
+    {
+        ZombieTable table = Table(MilitaryGuid);
+        ZombieSystem system = System(table, Bounds(PassiveGuid), Bank());
+        system.DifficultyPrioritization =
+            EZombieDifficultyAssetPrioritization.TableOverridesNavmesh;
+
+        Assert.Equal(MilitaryGuid, system.DifficultyFor(0, table, forSpawnOverrides: true)!.Guid);
+
+        // And the default ordering, on the same pair, resolves the same asset only because the bound's
+        // declines to override — swap the two round and the orderings genuinely disagree.
+        ZombieTable other = Table(PassiveGuid);
+        ZombieSystem navmeshFirst = System(other, Bounds(MilitaryGuid), Bank());
+        Assert.Equal(MilitaryGuid, navmeshFirst.DifficultyFor(0, other, forSpawnOverrides: true)!.Guid);
+
+        ZombieSystem tableFirst = System(other, Bounds(MilitaryGuid), Bank());
+        tableFirst.DifficultyPrioritization =
+            EZombieDifficultyAssetPrioritization.TableOverridesNavmesh;
+        // The table's asset declines to override the spawn chance, so the spawn roll falls through to
+        // the bound's — that is the `forSpawnOverrides` clause, not the ordering.
+        Assert.Equal(MilitaryGuid, tableFirst.DifficultyFor(0, other, forSpawnOverrides: true)!.Guid);
+        // ...but the STUN threshold does not ask for spawn overrides, so it keeps the table's.
+        Assert.Equal(PassiveGuid, tableFirst.DifficultyFor(0, other, forSpawnOverrides: false)!.Guid);
+    }
+
+    // forSpawnOverrides false is Zombie.updateDifficulty's call: an asset that declines to override the
+    // spawn chance is still this zombie's difficulty for everything else it decides.
+    [Fact]
+    public void NotForSpawnOverrides_KeepsANonOverridingAsset()
+    {
+        ZombieTable table = Table(MilitaryGuid);
+        ZombieSystem system = System(table, Bounds(PassiveGuid), Bank());
+
+        Assert.Equal(MilitaryGuid, system.DifficultyFor(0, table, forSpawnOverrides: true)!.Guid);
+        Assert.Equal(PassiveGuid, system.DifficultyFor(0, table, forSpawnOverrides: false)!.Guid);
     }
 
     // ---- the speciality tables the expanded enum brought with it --------------------------------
@@ -376,14 +605,20 @@ public class ZombieWorldLoadTests
 
         ZombieSystem? system = ZombieWorld.Load(
             GameData.Map("PEI")!, FlatGround, new Random(1),
-            difficulties: bank, mode: hard, isNighttime: true, isFullMoon: true, clothing: clothing);
+            difficulties: bank, mode: hard, isNighttime: true, isFullMoon: true, clothing: clothing,
+            prioritization: EZombieDifficultyAssetPrioritization.TableOverridesNavmesh);
 
         Assert.NotNull(system);
         Assert.Same(bank, system!.Difficulties);
         Assert.Same(clothing, system.Clothing);
         Assert.Equal(hard, system.ModeConfig);
+        // Zombie.askDamage's two mode switches ride the same config: HARD cannot stun at all.
+        Assert.False(system.CanStun);
+        Assert.True(system.OnlyCriticalStuns);
         Assert.True(system.IsNighttime);
         Assert.True(system.IsFullMoon);
+        Assert.Equal(EZombieDifficultyAssetPrioritization.TableOverridesNavmesh,
+            system.DifficultyPrioritization);
         // The full moon was set BEFORE Spawn, so the population it generated carries it.
         Assert.NotEmpty(system.Zombies);
         Assert.All(system.Zombies, z => Assert.True(z.IsHyper));
@@ -400,8 +635,30 @@ public class ZombieWorldLoadTests
         Assert.Null(system!.Difficulties);
         Assert.Null(system.Clothing);
         Assert.Equal(ModeConfigData.Normal, system.ModeConfig);
+        Assert.True(system.CanStun);
+        Assert.False(system.OnlyCriticalStuns);
+        Assert.Equal(EZombieDifficultyAssetPrioritization.NavmeshOverridesTable,
+            system.DifficultyPrioritization);
         Assert.False(system.IsNighttime);
         Assert.False(system.IsFullMoon);
         Assert.All(system.Zombies, z => Assert.False(z.IsHyper));
+    }
+
+    // The mode config decides the population's SIZE, so a real map loaded on EASY carries fewer zombies
+    // than the same map on HARD. Pinned against the map rather than a synthetic bound because this is
+    // the number an operator changes a difficulty to change.
+    [RealDataFact(Map = "PEI")]
+    public void ZombieWorld_SizesThePopulationFromTheModeConfig()
+    {
+        int easy = Count(EGameMode.Easy);
+        int normal = Count(EGameMode.Normal);
+        int hard = Count(EGameMode.Hard);
+
+        Assert.True(easy < normal, $"EASY spawned {easy}, NORMAL {normal}");
+        Assert.True(normal < hard, $"NORMAL spawned {normal}, HARD {hard}");
+
+        static int Count(EGameMode mode) =>
+            ZombieWorld.Load(GameData.Map("PEI")!, FlatGround, new Random(1),
+                mode: ModeConfigData.For(mode))!.Zombies.Count;
     }
 }

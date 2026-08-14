@@ -17,12 +17,18 @@ public static class ZombieWorld
     // `mode`, which is Provider.modeConfigData; PEI names no difficulty asset at all, so that fallback
     // is the ordinary case rather than a degraded one.
     //
-    // `isNighttime` and `isFullMoon` are LightingManager's, sampled once at generation because that is
-    // when generateZombieSpeciality reads them. The Dying Light volatiles are night-only, and a full
-    // moon makes the whole population hyper.
+    // `isNighttime` and `isFullMoon` are LightingManager's. The Dying Light volatiles are night-only, so
+    // the roll reads the first at generation; the second is the population's LIVE hyper state, which the
+    // host keeps pushing as its clock advances (ZombieSystem.IsFullMoon), and what is passed here is
+    // merely the value it starts at.
+    //
+    // `prioritization` is the map's LevelAsset declaration. Defaulted rather than resolved in here
+    // because the resolution needs the installed content sources, which only the host has.
     public static ZombieSystem? Load(string levelDir, GroundSampler ground, Random random,
         ZombieDifficultyBank? difficulties = null, ModeConfigData? mode = null,
-        bool isNighttime = false, bool isFullMoon = false, ClothingArmorDatabase? clothing = null)
+        bool isNighttime = false, bool isFullMoon = false, ClothingArmorDatabase? clothing = null,
+        EZombieDifficultyAssetPrioritization prioritization =
+            EZombieDifficultyAssetPrioritization.NavmeshOverridesTable)
     {
         List<ZombieTable> tables =
             LevelZombiesData.LoadTables(Path.Combine(levelDir, "Spawns", "Zombies.dat"));
@@ -37,12 +43,21 @@ public static class ZombieWorld
         // triangles for the host's pathfinding regions. Optional — old maps may not ship it.
         List<NavFlag> navmesh = LevelNavmesh.Load(Path.Combine(levelDir, "Environment"));
 
-        // Set before Spawn: every one of these is read by the speciality roll, which runs per zombie
-        // inside it.
+        ModeConfigData config = mode ?? ModeConfigData.Normal;
+
+        // Set before Spawn: the speciality roll, the population size and the boss cap all read from here
+        // and all run per zombie inside it.
         var system = new ZombieSystem(tables, bounds, ground, navmesh.Count > 0 ? navmesh : null)
         {
             Difficulties = difficulties,
-            ModeConfig = mode ?? ModeConfigData.Normal,
+            DifficultyPrioritization = prioritization,
+            ModeConfig = config,
+            // Zombie.askDamage's two mode switches (Zombie.cs:1041-1048). They stay settable on the
+            // system because a test pins them directly, but a HOST has exactly one source for them and
+            // it is the same config block everything else here comes from — left unset, a HARD server
+            // kept NORMAL's stagger.
+            CanStun = config.Zombies.CanStun,
+            OnlyCriticalStuns = config.Zombies.OnlyCriticalStuns,
             IsNighttime = isNighttime,
             IsFullMoon = isFullMoon,
             // Only the damage path reads this, not the roll, so it may arrive after Spawn — but it is

@@ -293,6 +293,55 @@ public class NetworkManagerTests : TestClass
         Assert.True(session.Net.IsActive);
     }
 
+    // The moon reaches the horde AFTER it was spawned. Zombie.isHyper is a live property and
+    // LightingManager broadcasts onMoonUpdated on the edge, so a session that started in daylight still
+    // gets a hyper population when the full moon comes up — and since nothing in this port respawns a
+    // zombie, a value stamped at spawn was the only value any zombie would ever have.
+    [Test]
+    public async Task TheMoonRisingReachesAPopulationThatIsAlreadyStanding()
+    {
+        if (!RealMap(out string levelDir))
+            return;
+
+        // The map's real cycle, with the phase pinned to the full moon. PEI is saved at 0.32 against a
+        // bias of 0.64, so it starts in broad daylight and no moon is up yet.
+        using var moonPhase = new EnvFlagScope("MOON_PHASE", LightingCycle.FullMoonPhase.ToString());
+        LevelLighting? lighting = LevelLighting.Load(
+            System.IO.Path.Combine(levelDir, "Environment", "Lighting.dat"));
+        Assert.NotNull(lighting);
+
+        using var session = new Session(TestScene);
+        session.Net.StartSingleplayer("Player");
+        await session.PhysicsFrame();
+
+        DayNightController cycle = DayNightController.Build(lighting, waterMaterial: null);
+        TestScene.AddChild(cycle);
+        try
+        {
+            Assert.True(cycle.IsDaytime);
+            Assert.False(cycle.IsFullMoon);
+
+            session.Net.HostZombies(levelDir, dayNight: cycle);
+            await session.PhysicsFrame();
+
+            Assert.NotNull(session.Net.Zombies);
+            Assert.NotEmpty(session.Net.Zombies!.Zombies);
+            Assert.All(session.Net.Zombies.Zombies, z => Assert.False(z.IsHyper));
+
+            // Night falls on a population that is already standing there.
+            cycle.TimeOfDay = 0.9f;
+            Assert.True(cycle.IsFullMoon, "the fixture did not actually produce a full moon");
+
+            await session.PhysicsFrame();
+            Assert.All(session.Net.Zombies.Zombies, z => Assert.True(z.IsHyper));
+            Assert.True(session.Net.Zombies.IsNighttime);
+        }
+        finally
+        {
+            cycle.QueueFree();
+        }
+    }
+
     // And reconciling that map's navmesh against the world runs rather than being skipped. The pass is
     // what makes the baked graph agree with the objects standing on it; a session that skipped it would
     // route zombies through every building on the map.

@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using Godot;
+using UnturnedGodot.Config;
 using UnturnedGodot.Data;
 using UnturnedGodot.Net;
 
@@ -116,29 +117,40 @@ public partial class NetworkManager : Node
     //
     // `unturnedPath` is the install the map's content sources come from, so the map's own
     // ZombieDifficultyAssets can be scanned; `dayNight` supplies LightingManager's time of day, which
-    // the speciality roll reads. Both are optional, and skipping them yields the mode config's own
-    // weights — which is exactly what a map naming no difficulty asset gets anyway, PEI included.
+    // the speciality roll reads and which keeps driving the population's hyper state afterwards. Both
+    // are optional, and skipping them yields the mode config's own weights — which is exactly what a map
+    // naming no difficulty asset gets anyway, PEI included.
     public void HostZombies(string levelDir, string? unturnedPath = null,
         DayNightController? dayNight = null)
     {
         if (_server == null)
             return;
+        _dayNight = dayNight;
+        // Provider.modeConfigData: the operator's own Config.json, if this install has one. It decides
+        // the population's size, its speciality weights, its swing damage and its stagger — none of
+        // which could be configured at all while this was pinned to the ported NORMAL block.
+        ModeConfigData mode = ServerModeConfig(unturnedPath);
         // A generator whose whole state is one integer, so a bug-repro dump can carry the sequence the
         // session was on rather than re-rolling from scratch (Repro.ReproRandom). ZOMBIE_SEED pins it.
         var random = Repro.ReproRandom.ForSession(OS.GetEnvironment("ZOMBIE_SEED"), out ulong seed);
+        // Discovered once. Three separate scans of the same install used to run here, and the difficulty
+        // prioritization would have made it four.
+        System.Collections.Generic.IReadOnlyList<UnturnedGodot.Assets.ContentSource> sources =
+            unturnedPath is { Length: > 0 }
+                ? UnturnedGodot.Assets.ContentSource.Discover(unturnedPath)
+                : System.Array.Empty<UnturnedGodot.Assets.ContentSource>();
         UnturnedGodot.Zombies.ZombieSystem? zombies = UnturnedGodot.Zombies.ZombieWorld.Load(
             levelDir, _ground, random,
-            difficulties: unturnedPath is { Length: > 0 }
-                ? UnturnedGodot.Assets.ZombieDifficultyBank.ScanContentSources(
-                    UnturnedGodot.Assets.ContentSource.Discover(unturnedPath))
+            difficulties: sources.Count > 0
+                ? UnturnedGodot.Assets.ZombieDifficultyBank.ScanContentSources(sources)
                 : null,
-            mode: null, // nothing writes a server Config.json yet, so this is the ported NORMAL block
+            mode: mode,
             isNighttime: dayNight?.IsNighttime ?? false,
             isFullMoon: dayNight?.IsFullMoon ?? false,
-            clothing: unturnedPath is { Length: > 0 }
-                ? UnturnedGodot.Assets.ClothingArmorDatabase.ScanContentSources(
-                    UnturnedGodot.Assets.ContentSource.Discover(unturnedPath))
-                : null);
+            clothing: sources.Count > 0
+                ? UnturnedGodot.Assets.ClothingArmorDatabase.ScanContentSources(sources)
+                : null,
+            prioritization: UnturnedGodot.Assets.LevelDifficultyPrioritization.ForMap(levelDir, sources));
         if (zombies == null)
         {
             Log.PushWarning("[zombies] level ships no zombie data; skipping");
@@ -148,6 +160,7 @@ public partial class NetworkManager : Node
             PunchDamage = AttachPunchDamage(zombies: null, host: null);
             return;
         }
+        _zombies = zombies;
         // Tier 3's split of this session's zombie CPU. Installed unconditionally: the counters behind it
         // early-out while they are off, so a production run pays two clock reads on the 12.5 Hz tick.
         zombies.Costs = Benchmark.RuntimeCounters.ZombieCosts;
@@ -272,9 +285,54 @@ public partial class NetworkManager : Node
         _ => "no reason given.",
     };
 
+    // The server's own gameplay config: Provider.modeConfigData, read from
+    // <install>/Servers/<id>/Config.json. `UG_SERVER_ID` names the savedata entry (Provider.serverID)
+    // and `UG_GAME_MODE` picks which of the file's three mode sections applies (Provider.mode). Both
+    // default to what an operator who has configured nothing gets, which is the ported NORMAL block.
+    //
+    // The same file for a listen server as for a dedicated one — see ModeConfigData.ServerConfigPath for
+    // why the retail client's own Worlds/Singleplayer_<n> save is deliberately not the fallback.
+    public static ModeConfigData ServerModeConfig(string? unturnedPath)
+    {
+        string serverId = OS.GetEnvironment("UG_SERVER_ID") is { Length: > 0 } id ? id : DefaultServerId;
+        EGameMode mode =
+            System.Enum.TryParse(OS.GetEnvironment("UG_GAME_MODE"), ignoreCase: true, out EGameMode parsed)
+            && System.Enum.IsDefined(parsed)
+                ? parsed
+                : EGameMode.Normal;
+        ModeConfigData config = ModeConfigData.ForServer(unturnedPath, serverId, mode);
+        // Said out loud only when it CHANGES something. An unconfigured NORMAL host is every default
+        // run, and a line on every start is a line nobody reads.
+        if (config != ModeConfigData.Normal)
+            Log.Print($"[net] gameplay config: {mode} mode from "
+                + $"{ModeConfigData.ServerConfigPath(unturnedPath ?? "", serverId)}");
+        return config;
+    }
+
+    // Provider.serverID's own default for a host that names none.
+    public const string DefaultServerId = "unturned";
+
+    // The clock the hosted population's hyper state follows. Held rather than sampled once at spawn:
+    // LightingManager broadcasts onMoonUpdated whenever the moon changes and ZombieRegion turns that
+    // into onHyperUpdated, so a session that started in daylight still gets a hyper population when the
+    // full moon comes up. Nothing here respawns a zombie, so without this the moon never reached one.
+    private DayNightController? _dayNight;
+    private UnturnedGodot.Zombies.ZombieSystem? _zombies;
+
+    // This session's zombie population, or null on a client and on a map that ships none. Handed out for
+    // the same reason `Server` is: it is the session's own state, and the things that want to look at it
+    // (a diagnostic, a test asking whether the moon reached the horde) are not worth a callback each.
+    public UnturnedGodot.Zombies.ZombieSystem? Zombies => _zombies;
+
     public override void _PhysicsProcess(double delta)
     {
         double now = Now;
+        // Assigning an unchanged value costs one comparison; the population is only walked on the edge.
+        if (_zombies != null && _dayNight != null)
+        {
+            _zombies.IsFullMoon = _dayNight.IsFullMoon;
+            _zombies.IsNighttime = _dayNight.IsNighttime;
+        }
         long serverStarted = Benchmark.RuntimeCounters.Start();
         _server?.Update(now);
         Benchmark.RuntimeCounters.Record(Benchmark.RuntimeCounters.Counter.NetworkServer, serverStarted);

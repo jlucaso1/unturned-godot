@@ -29,7 +29,7 @@ decoders are checked against real content rather than only against this repo's i
 | **Player** | Port of `PlayerMovement`/`PlayerLook`/`PlayerStance` with the game's own constants; real character model, skeleton and animations; first/third person. Left click throws a punch (`PlayerEquipment`), animated from either camera and replicated so everyone sees it — the swing is mixed onto the swinging arm alone (`mixAnimation`/`AddMixingTransform`), so the walk or sprint cycle runs on underneath it; ladders are climbable — walk into one or look at it and interact, both through the game's own climb rules |
 | **Damage** | `PlayerEquipment`'s punch table, ported number for number: 15 base scaled per limb, 20 to a resource, 5 to a destructible object, 2 to a buildable, and the vehicle turned off. Zombies carry the map's own table health and die to it; trees and rubble carry theirs off the asset `.dat` (`Health`, `Vulnerable_To_Fists`, `Rubble_Health`, `Rubble_Blade_ID`). A zombie's clothing armors it (`DamageTool.getZombieArmor`): the `Armor` off each `ItemClothingAsset` it rolled, pants for legs, shirt for arms, hat for the skull, and a vest stacked onto the shirt for the spine |
 | **Audio** | Footsteps/landings resolved through the terrain splat like `PhysicsTool.GetTerrainMaterialName`, clips extracted from the master bundle's FSB5 banks |
-| **Zombies** | Spawn tables, navigation bounds and the pre-baked navmeshes; detection, hunting and the `Zombie.cs` animation set. Specialities are rolled the way `ZombieManager.generateZombieSpeciality` rolls them — one draw over a weighted table, from the map's own `ZombieDifficultyAsset` when a bound or table names one and from the mode config otherwise — and a full moon makes the population hyper |
+| **Zombies** | Spawn tables, navigation bounds and the pre-baked navmeshes; detection, hunting and the `Zombie.cs` animation set. Specialities are rolled the way `ZombieManager.generateZombieSpeciality` rolls them — one draw over a weighted table, from the map's own `ZombieDifficultyAsset` when a bound or table names one (in the order the map's `LevelAsset` declares) and from the server's mode config otherwise, which also sizes the population. A full moon makes the population hyper, and it does so *when the moon rises*, not only when it was already up at spawn |
 | **Vehicles** | The map's own `Spawns/Vehicles.dat` rolled through its spawn tables and redirectors, as many as the level's size allows, each drawn from its real `Vehicle.prefab`. Parked scenery for now: no driving, physics or damage |
 | **Multiplayer** | Authoritative server + snapshot-interpolated clients over UDP; singleplayer is the same stack over loopback. Listen server, dedicated server and join-by-address all work. Movement is client-simulated and server-validated, Unturned's own `forceTrustClient` shape: the client resolves collision against the full world and the server checks each claimed position against a speed budget, correcting the player back when it refuses one. `net.stats` and the `F3` HUD say what the wire is costing |
 
@@ -56,8 +56,9 @@ in view.
   flanker's stalk/friendly visibility switch, a boss's stomps and projectiles — and none of it is
   ported. They are rolled anyway rather than folded into NORMAL, because dropping a rolled speciality
   silently changes the distribution of the ones that remain. What *does* already follow from the
-  speciality: bosses are mega-width and mega-reach (`Zombie.isMega`), and an acid or nuclear zombie
-  reports the `Alien_Dynamic` surface a hit on it leaves.
+  speciality: bosses are mega-width, mega-reach and mega-*sized* (`Zombie.isMega`), they shrug off the
+  mega stun threshold, a navigation bound's `MaxBossZombies` caps how many of them it starts with, and
+  an acid or nuclear zombie reports the `Alien_Dynamic` surface a hit on it leaves.
 - **Item assets**: only clothing `Armor` is read, by a deliberately minimal reader that exists because
   the zombie damage path needed exactly that one number. Meshes, blueprints, calibers — the whole
   `ItemAsset` family — are still unread, and that reader should be absorbed by a real item database
@@ -243,6 +244,17 @@ holiday out of season, or — which `-Holiday` cannot say — pin it to *no* hol
 screenshot has no tinsel in it. The holiday gates whether a map's seasonal props exist at all),
 `NAV_DEBUG=1`, `NAV_PREVIEW=1` (`NAV_XRAY`, `NAV_LIFT`, `NAV_RIM`, `NAV_BEACONS`, `NAV_BOUNDS`),
 `AUDIO_DEBUG=1`, `UG_CONSOLE="<console line>"`, `SHOW_CONSOLE=1`, `REPRO_*` ([docs/REPRO.md](docs/REPRO.md)).
+
+**Gameplay config.** A host reads `Provider.modeConfigData` from `<install>/Servers/<id>/Config.json`,
+the same file Unturned's own dedicated server writes. What it currently reaches is the zombie
+population: its density (`Spawn_Chance`), its speciality weights, `Damage_Multiplier` and the two stun
+switches. (`Min_Natural_Vehicles` is threaded as far as `VehicleSpawnPlan` but no production caller
+passes it yet — vehicle spawning is still client-side world construction.) `UG_SERVER_ID=<id>` picks
+the entry (default `unturned`) and `UG_GAME_MODE=Easy|Normal|Hard` picks the section inside it (default
+`Normal`). Nothing is read when the file is absent, which is every default run. The retail client's own
+`Worlds/Singleplayer_<n>` save is deliberately *not* a fallback: this port shares nothing else in that
+folder, and inheriting only its gameplay dials would let an unrelated value in someone's save quietly
+change what a screenshot or a benchmark spawns.
 
 ### Export
 
