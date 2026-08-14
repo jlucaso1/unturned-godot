@@ -555,14 +555,58 @@ public static class ModelLibrary
                 pixels = ArgbToRgba(cached.Pixels);
                 format = Image.Format.Rgba8;
                 break;
+            case 7: format = Image.Format.Rgb565; break;
             case 10: format = Image.Format.Dxt1; break;
             case 12: format = Image.Format.Dxt5; break;
+            case 14: // BGRA32: the same swizzle case as ARGB32, from the other end
+                pixels = BgraToRgba(cached.Pixels);
+                format = Image.Format.Rgba8;
+                break;
             case 25: format = Image.Format.BptcRgba; break;
-            default: return null; // unsupported (e.g. crunched) -> no texture
+            // BC4/BC5 are the single- and two-channel block formats: masks, and the normal maps whose
+            // X and Y are stored with Z rebuilt in the shader. Godot's RGTC formats are the same blocks.
+            case 26: format = Image.Format.RgtcR; break;
+            case 27: format = Image.Format.RgtcRg; break;
+            default:
+                WarnUnsupportedTextureFormat(cached.Format);
+                return null;
         }
 
         Image image = Image.CreateFromData(cached.Width, cached.Height, cached.MipCount > 1, format, pixels);
         return ImageTexture.CreateFromImage(image);
+    }
+
+    // Formats already reported, so the log carries one line per format rather than one per texture.
+    private static readonly HashSet<int> ReportedTextureFormats = new();
+
+    // An unsupported format used to `return null` in silence, which reaches the player as a prop that
+    // renders flat with nothing anywhere saying why — the one failure in this file that leaves no trace at
+    // all. Naming the format is what turns "this crate looks wrong" into a number to look up in Unity's
+    // TextureFormat enum. Still one texture lost either way: the alternative to a tinted surface is no
+    // surface, and the tint is the palette's own colour.
+    private static void WarnUnsupportedTextureFormat(int format)
+    {
+        lock (ReportedTextureFormats)
+        {
+            if (!ReportedTextureFormats.Add(format))
+                return;
+        }
+        Log.Print($"[models] texture format {format} is not decoded; those surfaces draw untextured. "
+            + "The number is Unity's TextureFormat enum.");
+    }
+
+    // Reorders B,G,R,A bytes to R,G,B,A across every pixel (all mip levels), for Unity's BGRA32 format.
+    private static byte[] BgraToRgba(byte[] bgra)
+    {
+        var rgba = new byte[bgra.Length];
+        for (int i = 0; i + 3 < bgra.Length; i += 4)
+        {
+            rgba[i + 0] = bgra[i + 2]; // R
+            rgba[i + 1] = bgra[i + 1]; // G
+            rgba[i + 2] = bgra[i + 0]; // B
+            rgba[i + 3] = bgra[i + 3]; // A
+        }
+        return rgba;
     }
 
     // Reorders A,R,G,B bytes to R,G,B,A across every pixel (all mip levels), for Unity's ARGB32 format.

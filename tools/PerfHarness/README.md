@@ -9,7 +9,7 @@ dotnet run -c Release --project tools/PerfHarness -- foliage lz4 # a subset
 ```
 
 Suites: `lz4` (synthetic, no data needed), `foliage`, `heightmap`, `splat`, `objects`, `dat`,
-`meshcache`, `previews`, `navcache`, `navprobe`, `repro`, `bundle`. The Unturned install resolves through
+`meshcache`, `previews`, `navcache`, `navprobe`, `navsnap`, `zombietick`, `repro`, `bundle`. The Unturned install resolves through
 `UnturnedInstall` — `UNTURNED_PATH`, else the Steam libraries for this OS (Linux/Windows/macOS, extra
 drives included); the map from `MAP` (default `PEI`).
 
@@ -24,6 +24,25 @@ thread: it probes the map's real navmesh against a `CollisionField` built from t
 reports both the throughput and how many faces still have to be confirmed against the physics server.
 Object colliders are built by the game rather than by Core, so the field here is terrain-only — the probe
 count is the real one, and the confirmation rate is a floor.
+
+`navsnap` prices `LevelNavmesh.SnapXZ` on the map's own navmesh. Every granted repath snaps both of its
+endpoints, and that cost sits OUTSIDE the ~1.3 ms `MapGetPath` median `ZombieSystem.MaxRepathsPerTick` is
+budgeted against — it runs before the query is issued, so nothing in the tier reports counted it. The
+suite samples on the mesh and off it separately, because the two branches cost very differently: a
+contained point is answered by one cell's worth of arithmetic, while a point off the mesh runs three edge
+projections per triangle it visits. It ends by converting the per-snap figure into what a saturated
+repath budget (8 repaths, 2 endpoints each, 12.5 times a second) costs per server tick, which is the
+number to compare across a change.
+
+`zombietick` runs the map's real zombie world — tables, spawnpoints, nav bounds, pre-baked navmesh — with
+every body in the busiest region hunting, and reports the tick split through the same `ZombieSystem.Costs`
+sink Tier 3's `ZombieBrain` / `ZombiePathQuery` counters read. It exists because Tier 3 cannot reach this
+case: its session spawns a stationary player at the map's spawn and nothing ever aggros, so
+`ZombiePathQuery` reads zero there. A second pass replicates the spawnpoints and lifts `MaxZombies` to the
+255 a region can actually hold — both caps have to move, since `generateZombies` takes the min of the flag
+cap and a quarter of the eligible points, and on PEI the points bind first. Each pass prints how many
+zombies ended up chasing and attacking, because "hunting" is a starting condition and not a promise: aggro
+is re-earned every detect pass and given up past 64 m.
 
 Three diagnostics print a shape rather than a time and only run when named: `nav` (why the baked graph
 picked a direction, `NAV_POINT=x,y,z`), `ress` and `lzma` (both below).

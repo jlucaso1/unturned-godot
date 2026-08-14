@@ -27,7 +27,22 @@ the game has ample median headroom.
 The project runs Godot's 3D physics server on its supported separate thread. Direct-space queries must
 therefore originate from a physics notification; code started by an idle-frame signal should await the next
 `physics_frame` first. Tier 3's subsystem counters expose navigation reconciliation, player physics,
-`MoveAndSlide`, step-up, networking and zombie-view costs independently.
+`MoveAndSlide`, step-up, networking, the zombie brain, its pathfinding and zombie-view costs independently.
+
+**Read `NetworkServer` with `ZombieBrain` beside it.** The zombie host answers `NetServer.Update`'s
+`OnTick`, so the whole server-side simulation happens inside the counter that wraps `_server.Update`, and
+`NetworkServer` on a hosted session is mostly not networking. On an idle PEI Tier 3 (headless-interactive,
+GPU-less container, 12 s) `NetworkServer` reads 17.4 ms total against `ZombieBrain`'s 7.9 ms — 45% of it —
+with a population that never aggros. `ZombiePathQuery` is inside `ZombieBrain` in turn, so the three are
+nested and adding them double-counts.
+
+That idle case is also the limit of what Tier 3 can say about zombies: it spawns a stationary player at
+the map's spawn, nothing hunts, and `ZombiePathQuery` reads a true zero. `PerfHarness -- zombietick` is
+where a hunting horde is priced, over the map's real population and without an engine.
+
+`runtime.nav.searchWorkspaces` is the pathfinder's retained A* state — three arrays per triangle per
+workspace, pooled per flag and never drained. It is a count rather than a timing and reproduces for the
+same load. Zero on a session that never routed anything, which is what an idle Tier 3 reports.
 
 Add `--write-baseline` to record the current numbers as the new baseline.
 
@@ -109,6 +124,42 @@ dotnet run -c Release --project tools/PerfHarness -- foliage lz4
 
 Micro-benchmarks the Core parsers against the real game data. See `tools/PerfHarness/README.md`. Each
 suite skips cleanly when its input is missing, so it runs on any machine with some subset of the data.
+
+### What a server tick's zombie work actually costs
+
+Two suites price the halves the Tier 3 counters split, and they exist because the tier cannot reach the
+interesting case on its own: its session never aggros anything.
+
+`navsnap` prices `LevelNavmesh.SnapXZ`, which every granted repath runs on both of its endpoints before
+the pathfinder is asked anything. That put it outside the ~1.3 ms `MapGetPath` median
+`ZombieSystem.MaxRepathsPerTick` is budgeted against, and nothing measured it. Measured on PEI's own
+navmesh (42,642 triangles across 19 flags) on a 4-vCPU container:
+
+| 456 points | flat scan over every triangle | uniform XZ buckets |
+|---|---:|---:|
+| on the mesh | 28.6 ms | 1.2 ms |
+| off the mesh | 29.8 ms | 3.9 ms |
+| a saturated repath budget (16 endpoints) | 1.02 ms per server tick | 0.09 ms |
+
+The two rows are separated because the branches cost differently: a contained point is answered by one
+cell's worth of arithmetic, while a point off the mesh runs three edge projections per triangle visited.
+
+`zombietick` runs the map's real zombie world with the busiest region hunting, and reports the tick
+through the same sink the counters read. Same machine, PEI:
+
+| | zombies | busiest region | `ZombieBrain` | of which `ZombiePathQuery` |
+|---|---:|---:|---:|---:|
+| the map's own spawnpoints | 373 | 60 | 0.048 ms/tick | 0.006 ms |
+| spawnpoints x24, `MaxZombies` 255 | 4,149 | 255 | 0.150 ms/tick | 0.013 ms |
+
+**That second row is the answer to two questions that look alarming on paper.** Zombie-zombie separation
+is O(n²) with no broad phase — every zombie that steps tests against every zombie in its region — and at
+the 255 a region can actually hold that is around 65,000 tests a tick. It is inside the 0.150 ms above,
+against an 80 ms tick, so a broad phase would be optimizing three tenths of one percent of the budget on
+a population no shipped map reaches. Same for the pooled A* workspaces: `PerfHarness -- nav` reports
+**2 retained** after 32 serial routes on PEI, and `runtime.nav.searchWorkspaces` reports zero on an idle
+session, against the ~355 MB a fully simulated PEI holds. Both were estimated as possible problems and
+both are measured as not. Re-measure before believing either one has changed.
 
 ### Where the cold load's decode time actually goes
 

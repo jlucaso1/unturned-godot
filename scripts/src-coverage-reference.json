@@ -7,8 +7,8 @@
     "Measured hermetically (the runtime suite alone, no game content), so a pull",
     "request can reproduce it."
   ],
-  "lineRate": 52.21,
-  "branchRate": 39.83,
+  "lineRate": 52.89,
+  "branchRate": 40.79,
   "optedOutLines": 0,
   "optedOutFiles": 0
 }

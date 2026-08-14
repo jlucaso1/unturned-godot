@@ -82,6 +82,39 @@ public class ObjectStreamerTests : TestClass
         streamer.QueueFree();
     }
 
+    // The streamer's cancellation source is a LINKED one, and a linked source registers a callback on
+    // the static AppShutdown source that only Dispose removes — cancelling does not. So it has to be
+    // disposed, once per streamer, on whichever of its two exits actually happens; every load leaves a
+    // dead registration on a process-lifetime static behind if it is not.
+    //
+    // Both exits are real. BackToMenu cancels the streamer and then frees it; a quit tears the tree down
+    // without cancelling anything; and a load that fails before the streamer joins the tree is cancelled
+    // and never gets an _ExitTree at all. Disposing is not consequence-free either — Cancel() and .Token
+    // both throw on a disposed source — so what these two pin is that the pair is quiet in either order.
+    [Test]
+    public async Task LeavingTheTreeAndThenCancellingIsQuiet()
+    {
+        var streamer = new ObjectStreamer { Name = "ObjectStreamer" };
+        TestScene.AddChild(streamer);
+        TestScene.RemoveChild(streamer); // _ExitTree: the linked registration is released here
+
+        await streamer.CancelAsync(); // ...and Cancel() throws on a source already disposed
+
+        streamer.QueueFree();
+    }
+
+    [Test]
+    public async Task CancellingAndThenLeavingTheTreeIsQuiet()
+    {
+        var streamer = new ObjectStreamer { Name = "ObjectStreamer" };
+        TestScene.AddChild(streamer);
+
+        await streamer.CancelAsync(); // the failed-load path releases it here...
+        TestScene.RemoveChild(streamer); // ...so _ExitTree must not release it a second time
+
+        streamer.QueueFree();
+    }
+
     // Beginning without a prepare is not a crash. It is what a caller that failed to read the level does,
     // and the load has to end rather than wait forever on a decode nobody started.
     [Test]
