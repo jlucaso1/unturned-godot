@@ -555,15 +555,7 @@ public partial class Main : Node3D
         catch (System.Exception e)
         {
             Log.PrintErr($"[unturned-godot] Failed to load {_mapName}: {e}");
-            if (_headlessInteractive)
-            {
-                // The way back is a button, and this session has neither a display to draw it on nor an
-                // input to press it with. Reporting on screen would leave a benchmark waiting on a
-                // loading screen that can never resolve, so fail the process instead.
-                AppShutdown.QuitNow(GetTree(), 1);
-                return;
-            }
-            loading.Fail($"{e.GetType().Name}: {e.Message}", BackToMenu);
+            Failures.Fatal(loading, $"{e.GetType().Name}: {e.Message}", BackToMenu);
         }
     }
 
@@ -624,14 +616,7 @@ public partial class Main : Node3D
     private bool FailJoin(LoadingScreen loading, string message)
     {
         Log.PrintErr($"[net] could not join: {message}");
-        if (_headlessInteractive)
-        {
-            // No display to show the screen on and no input to press its button with; the same reason
-            // a failed world build ends the process in this mode.
-            AppShutdown.QuitNow(GetTree(), 1);
-            return false;
-        }
-        loading.Fail(message, BackToMenu, "Could not join.");
+        Failures.Fatal(loading, message, BackToMenu, "Could not join.");
         return false;
     }
 
@@ -676,21 +661,10 @@ public partial class Main : Node3D
             return;
         _joinRefused = true; // one screen per session; BackToMenu clears it for the next attempt
 
-        if (_headlessInteractive)
-        {
-            // Same reason FailJoin quits: no display for the screen, no input for its button. A
-            // benchmark would otherwise wait on an overlay nothing can ever dismiss.
-            Log.PrintErr($"[net] the server refused the join: {NetworkManager.Describe(rejection)}");
-            AppShutdown.QuitNow(GetTree(), 1);
-            return;
-        }
-
-        // The player was walking when this arrived, so the cursor is captured and the button under it
-        // is unclickable. Release it, exactly as the menu and the pause screen do.
-        Input.MouseMode = Input.MouseModeEnum.Visible;
-        var screen = new LoadingScreen { Name = "JoinRefused" };
-        AddChild(screen);
-        screen.Fail(NetworkManager.Describe(rejection), BackToMenu, "The server refused the join:");
+        // Logged in both modes, not just the headless one: the reason the server gave is the only record
+        // of why a session ended, and a player who read it off the screen and then quit has nothing else.
+        Log.PrintErr($"[net] the server refused the join: {NetworkManager.Describe(rejection)}");
+        Failures.Fatal(null, NetworkManager.Describe(rejection), BackToMenu, "The server refused the join:");
     }
 
     // Returns to the map browser after a failed load, clearing whatever the attempt already built.
@@ -698,6 +672,13 @@ public partial class Main : Node3D
     private bool _returningToMenu;
     private bool _joinRefused;
     private bool _headlessInteractive;
+
+    // Which of the two is in play follows the mode flag, and is decided per failure rather than cached:
+    // the flag is settled early in _Ready, but a reporter built and kept before that would answer for the
+    // wrong mode on exactly the path that exists to report one. Both are a few bytes and no work.
+    private IFailureReporter Failures => _headlessInteractive
+        ? new HeadlessFailureReporter(GetTree())
+        : new InteractiveFailureReporter(this);
 
     private async void BackToMenu()
     {
