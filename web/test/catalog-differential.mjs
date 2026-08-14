@@ -136,6 +136,10 @@ const CONFIG = [
     { label: "ground-zero", files: { "Config.json": '{"Use_Legacy_Ground":0}' } },
     { label: "ground-string", files: { "Config.json": '{"Use_Legacy_Ground":"false"}' } },
     { label: "ground-null", files: { "Config.json": '{"Use_Legacy_Ground":null}' } },
+    // The declaration behind the two relaxation passes. Every other row above states it in plain JSON,
+    // so relaxJson dropping or corrupting a key would still be caught for Category and missed for this
+    // one — and this is the key that decides whether the map loads at all.
+    { label: "ground-relaxed", files: { "Config.json": '{/* c */"Use_Legacy_Ground":false,//x\n}' } },
     // A Category that cannot be decoded next to a ground that can. The desktop catches the surrogate per
     // string, so this map is Landscape with no category — not a map that lost its config.
     {

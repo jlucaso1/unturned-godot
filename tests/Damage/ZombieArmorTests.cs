@@ -164,6 +164,48 @@ public class ClothingArmorDatabaseTests
         Assert.False(ClothingArmorDatabase.Empty.IsVest(180));
     }
 
+    // A mod is not obliged to keep its clothing under Items/, and the two installed here do not: one
+    // uses "Clothes/", the other has clothing under NPCs/ as well as Items/. The scan therefore starts
+    // at the source root, which is the directory the game itself hands to the asset worker.
+    [Fact]
+    public void ScanContentSources_ReadsClothingOutsideAnItemsFolder()
+    {
+        using var dir = new TempDir();
+        string install = Path.Combine(dir.Path, "steamapps", "common", "Unturned");
+        dir.Write(Path.Combine("steamapps", "common", "Unturned", "Bundles", "Items", "Shirts", "Tee",
+            "Tee.dat"), Dat("Shirt", 180, "Armor 0.95\n"));
+        string item = Path.Combine("steamapps", "workshop", "content", "304930", "9001");
+        dir.Write(Path.Combine(item, "MasterBundle.dat"), "Asset_Bundle_Name dfadmintools\n");
+        dir.Write(Path.Combine(item, "Clothes", "Vest_Admin", "Vest_Admin.dat"),
+            Dat("Vest", 30000, "Armor 0.1\n"));
+
+        ClothingArmorDatabase database = ClothingArmorDatabase.ScanContentSources(
+            ContentSource.Discover(install, UnturnedInstall.Platform.Linux));
+
+        Assert.Equal(0.95f, database.ArmorFor(180));
+        Assert.Equal(0.1f, database.ArmorFor(30000));
+        Assert.True(database.IsVest(30000));
+    }
+
+    // The game's own content still wins an id collision, which needs Discover's core-first ordering to
+    // survive the switch from Root/Items to Root.
+    [Fact]
+    public void ScanContentSources_KeepsTheGamesOwnIdWhenAModReusesIt()
+    {
+        using var dir = new TempDir();
+        string install = Path.Combine(dir.Path, "steamapps", "common", "Unturned");
+        dir.Write(Path.Combine("steamapps", "common", "Unturned", "Bundles", "Items", "Vests", "Alice",
+            "Alice.dat"), Dat("Vest", 253, "Armor 0.9\n"));
+        string item = Path.Combine("steamapps", "workshop", "content", "304930", "9002");
+        dir.Write(Path.Combine(item, "MasterBundle.dat"), "Asset_Bundle_Name mod\n");
+        dir.Write(Path.Combine(item, "Gear", "Fake", "Fake.dat"), Dat("Vest", 253, "Armor 0.01\n"));
+
+        ClothingArmorDatabase database = ClothingArmorDatabase.ScanContentSources(
+            ContentSource.Discover(install, UnturnedInstall.Platform.Linux));
+
+        Assert.Equal(0.9f, database.ArmorFor(253));
+    }
+
     // The real items. The point of the change is that these numbers are on disk.
     [RealDataFact]
     public void RealClothing_CarriesItsArmor()
