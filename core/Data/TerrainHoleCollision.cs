@@ -38,7 +38,7 @@ public static class TerrainHoleCollision
 {
     // Marks every heightfield sample that corners a hole cell as no-collision, in place.
     //
-    // `mapData` is in HeightMapShape3D's layout — data[depth * width + width], with the depth axis
+    // `mapData` is in HeightMapShape3D's layout — data[depth * width + widthIndex], with the depth axis
     // reversed against the heightmap's x (TerrainHeightfield.MapData) — so the sample for heightmap index
     // (hx, hy) lives at ((res - 1 - hx) * res) + hy. Returns whether anything was marked, which is what
     // lets a tile whose file exists but cuts nothing skip the patch entirely.
