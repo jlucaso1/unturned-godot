@@ -20,10 +20,13 @@ namespace UnturnedGodot.RuntimeTests;
 // What that makes testable without a real map is the GROUPING: many placements of one asset become one
 // batch, two assets cannot share one, and a server can build the same world with nothing drawn.
 //
-// Deliberately not asserted here: what happens to an asset with no mesh, and to a placement whose asset
-// is unknown. Both matter, and both depend on how the region/cell partitioning lays nodes out — which
+// Deliberately not asserted here: where an asset with no mesh, or a placement whose asset is unknown,
+// ends up in the DRAWN output. That depends on how the region/cell partitioning lays nodes out, which
 // this fixture does not reproduce faithfully enough for an assertion to mean anything. Guessing at it
 // would produce a test that passes for the wrong reason, which is worse than the gap.
+//
+// Whether such an asset is SOLID depends on none of that, and is asserted: it was a real divergence
+// between the two build paths. See TheSameAssetIsSolidOnBothBuildPaths.
 public class ObjectsBuilderTests : TestClass
 {
     public ObjectsBuilderTests(Node testScene) : base(testScene) { }
@@ -99,6 +102,74 @@ public class ObjectsBuilderTests : TestClass
 
         Assert.Equal(0, TotalInstances(root));          // nothing drawn
         Assert.True(HasCollision(root), "the server built no collision"); // but the world is solid
+
+        root.QueueFree();
+    }
+
+    // The same asset, the same cache, the two build paths — and it has to be solid in both.
+    //
+    // An asset whose .collider is cached but whose mesh does not realise is the case that used to split
+    // them. ModelLibrary.Build returns no importer when every submesh has fewer than three indices, or
+    // when the cache entry holds no vertices at all, and neither path invalidates the entry — so the
+    // collider survives in the cache with no ArrayMesh beside it. The builder's placement map then
+    // admitted the GUID only if it had a mesh, or if rendering was off, so the dedicated server built the
+    // body and the client and listen server did not: the same building was solid for everyone on a
+    // dedicated server and walk-through on the host's own screen.
+    [Test]
+    public async Task TheSameAssetIsSolidOnBothBuildPaths()
+    {
+        Guid asset = Guid.NewGuid();
+        var db = new ObjectAssetDatabase();
+        db.Add(Asset(asset, "Warehouse"));
+        // The cache as it is left by a mesh that could not be realised: colliders, no ArrayMesh.
+        var noMeshes = new Dictionary<Guid, ArrayMesh>();
+        var colliders = new Dictionary<Guid, List<CachedCollider>>
+        {
+            [asset] = new() { CachedCollider.Box(Transform3D.Identity, Vector3.Zero, Vector3.One * 4f) },
+        };
+        var placements = new List<PlacedObject> { Place(asset, Vector3.Zero) };
+
+        Node3D server = ObjectsBuilder.Build(placements, db, noMeshes, colliders, out _,
+            label: "DedicatedObjects", renderGeometry: false);
+        Node3D client = ObjectsBuilder.Build(placements, db, noMeshes, colliders, out int withMesh);
+        TestScene.AddChild(server);
+        TestScene.AddChild(client);
+        await NextPhysicsFrame();
+
+        Assert.True(HasCollision(server), "the dedicated server built no collision");
+        Assert.True(HasCollision(client), "the render build left the same asset walk-through");
+        // Still a cache miss to the renderer, so the placement keeps its placeholder box: solid and
+        // invisible would be the worse of the two failures.
+        Assert.Equal(0, withMesh);
+        Assert.Equal(1, TotalInstances(client));
+
+        server.QueueFree();
+        client.QueueFree();
+    }
+
+    // The climbing volume goes the same way. It hangs off a child rather than the object's root, so it is
+    // built outside the LARGE/MEDIUM gate — and it was lost on the render build for exactly the same
+    // reason the static body was.
+    [Test]
+    public async Task ALadderWithNoRealisableMeshIsStillClimbable()
+    {
+        Guid asset = Guid.NewGuid();
+        var db = new ObjectAssetDatabase();
+        db.Add(Asset(asset, "Ladder"));
+        var colliders = new Dictionary<Guid, List<CachedCollider>>
+        {
+            [asset] = new()
+            {
+                CachedCollider.Box(Transform3D.Identity, Vector3.Zero, Vector3.One, isLadder: true),
+            },
+        };
+
+        Node3D root = ObjectsBuilder.Build(new List<PlacedObject> { Place(asset, Vector3.Zero) }, db,
+            new Dictionary<Guid, ArrayMesh>(), colliders, out _);
+        TestScene.AddChild(root);
+        await NextPhysicsFrame();
+
+        Assert.Equal(1, LadderCount(root));
 
         root.QueueFree();
     }
@@ -299,6 +370,20 @@ public class ObjectsBuilderTests : TestClass
             batches += BatchCount(child);
         }
         return batches;
+    }
+
+    // The climbable volumes this build produced. LadderVolumes frees itself when it holds none, so an
+    // absent node and a node with no volumes are the same answer.
+    private static int LadderCount(Node parent)
+    {
+        int count = 0;
+        foreach (Node child in parent.GetChildren())
+        {
+            if (child is LadderVolumes ladders)
+                count += ladders.Count;
+            count += LadderCount(child);
+        }
+        return count;
     }
 
     private static bool HasCollision(Node parent)
