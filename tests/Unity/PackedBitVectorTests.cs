@@ -135,6 +135,24 @@ public class PackedBitVectorTests
         Assert.Equal(4f, floats[1], 4);
     }
 
+    [Theory]
+    [InlineData(33)]
+    [InlineData(64)]
+    public void BitSizeWiderThanAUInt_UnpacksToNothingRatherThanFoldingBits(int bitSize)
+    {
+        // The accumulator is a uint, and C# masks a shift count on a 32-bit operand to & 31 — so bit 32
+        // would have folded onto bit 0 and every item come out as a plausible wrong number. UnpackFloats
+        // then denormalized that against uint.MaxValue, so a m_CompressedMesh claiming this width decoded
+        // to geometry that looked like data and was not.
+        var data = new byte[bitSize]; // comfortably more than the header's items need
+        Array.Fill(data, (byte)0xFF);
+        PackedBitVector vector = PackedBitVector.Read(Node(4, bitSize, data, range: 1f));
+
+        Assert.True(vector.IsEmpty);
+        Assert.Empty(vector.UnpackUInts());
+        Assert.Empty(vector.UnpackFloats());
+    }
+
     [Fact]
     public void Read_DataOfTheWrongType_IsEmpty()
     {
