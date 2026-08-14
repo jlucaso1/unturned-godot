@@ -180,7 +180,7 @@ public static class WorldPreview
         // the terrain build below, exactly as the game does.
         onStatus("Reading placements…");
         System.Threading.Tasks.Task<Placements>? placements = options.NeedsPlacements
-            ? System.Threading.Tasks.Task.Run(() => ReadPlacements(unturnedPath, level))
+            ? System.Threading.Tasks.Task.Run(() => ReadPlacements(unturnedPath, level, options.Foliage))
             : null;
 
         onStatus("Terrain…");
@@ -250,18 +250,31 @@ public static class WorldPreview
     // preview drew Russia's forty characters as placeholder boxes and re-chased their GUIDs through the
     // extraction plan on every preview; the needed set came from the raw placement GUIDs, so the
     // stale-GUID-to-legacy-id fallback never ran; and the foliage GUIDs went in unresolved.
-    private static Placements ReadPlacements(string unturnedPath, LevelInfo level)
+    private static Placements ReadPlacements(string unturnedPath, LevelInfo level, bool drawFoliage)
     {
         IReadOnlyList<ContentSource> sources = ContentSource.Discover(unturnedPath);
         ObjectAssetDatabase db = ContentExtraction.ScanAssets(sources);
-        // The same chunked loader the game uses. LevelFoliage.Load, which this read before, hands back a
-        // flat instance list the runtime FoliageBuilder overload no longer takes — and a preview that
-        // draws its grass differently from the session is not previewing the session.
-        LevelFoliageChunks? foliage = LevelFoliageChunks.Load(Path.Combine(level.Path, "Foliage.blob"),
-            FoliageBuilder.RuntimeChunkTiles);
+
+        // The chunked loader, which is what the game builds its own MultiMeshes from — LevelFoliage.Load,
+        // which this read before, hands back a flat instance list, and a preview that draws its grass
+        // differently from the session is not previewing the session. Deliberately NOT the residency
+        // index the game prefers: that one builds a FoliageStreamingRenderer which pages chunks in around
+        // a player camera each frame, and the preview is flown with the editor's camera, which nothing
+        // here drives.
+        //
+        // The instances are read only when they are going to be drawn. The GUIDs still are either way —
+        // they belong in the needed set so the dock's cache report and the mesh library agree with a real
+        // load — but those live in the blob's header, so a preview with foliage off no longer pulls tens
+        // of megabytes of scatter data through to throw it away.
+        string blobPath = Path.Combine(level.Path, "Foliage.blob");
+        LevelFoliageChunks? foliage = drawFoliage
+            ? LevelFoliageChunks.Load(blobPath, FoliageBuilder.RuntimeChunkTiles)
+            : null;
+        IReadOnlyList<Guid>? foliageGuids = foliage?.AssetGuids
+            ?? LevelFoliageChunks.ReadAssetGuids(blobPath);
+
         // The vehicle roll inside is seeded, so the preview shows the same vehicles a session would.
-        return new Placements(
-            LevelContentPlan.Resolve(sources, level, db, foliage?.AssetGuids), foliage);
+        return new Placements(LevelContentPlan.Resolve(sources, level, db, foliageGuids), foliage);
     }
 
     private static async System.Threading.Tasks.Task BuildObjectsAsync(Node3D root, Placements placements,
