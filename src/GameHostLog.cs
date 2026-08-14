@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 
 namespace UnturnedGodot;
@@ -17,7 +18,13 @@ namespace UnturnedGodot;
 // from being a thing that can happen.
 internal sealed class GameHostLog : IHostLog
 {
+    // CA2255 says module initializers belong in application code rather than in a library. This IS the
+    // application — the game — and the analyzer cannot tell, because Godot builds it as a .dll that the
+    // engine loads. The rule's actual hazard is a library imposing startup work on whoever references it;
+    // nothing references this assembly, and the work is one field assignment.
     [ModuleInitializer]
+    [SuppressMessage("Usage", "CA2255:The ModuleInitializer attribute should not be used in libraries",
+        Justification = "This assembly is the game, not a library; Godot loads it as the entry point.")]
     internal static void Install() => HostLog.Sink = new GameHostLog();
 
     public void Print(string message) => AppShutdown.PrintUnlessQuitting(message);

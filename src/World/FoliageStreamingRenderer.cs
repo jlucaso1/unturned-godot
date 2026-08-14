@@ -148,13 +148,13 @@ public partial class FoliageStreamingRenderer : Node3D
 
     public FoliageStreamingRenderer()
     {
-        _prefetchMargin = EnvFloat("UG_FOLIAGE_PREFETCH_MARGIN", 256f, 32f, 2048f);
-        _unloadHysteresis = EnvFloat("UG_FOLIAGE_UNLOAD_HYSTERESIS", 128f, 16f, 2048f);
-        _teleportDistance = EnvFloat("UG_FOLIAGE_TELEPORT_DISTANCE", 512f, 64f, 8192f);
-        _maximumPending = EnvInt("UG_FOLIAGE_MAX_PENDING", 256, 8, 8192);
-        _maximumWorkers = EnvInt("UG_FOLIAGE_DECODE_WORKERS", 1, 1, 4);
-        _uploadsPerFrame = EnvInt("UG_FOLIAGE_UPLOADS_PER_FRAME", 16, 1, 256);
-        _decodedByteLimit = (long)EnvInt("UG_FOLIAGE_DECODED_MIB", 32, 4, 512) * 1024 * 1024;
+        _prefetchMargin = EnvOption.Number(System.Environment.GetEnvironmentVariable("UG_FOLIAGE_PREFETCH_MARGIN"), 256f, 32f, 2048f);
+        _unloadHysteresis = EnvOption.Number(System.Environment.GetEnvironmentVariable("UG_FOLIAGE_UNLOAD_HYSTERESIS"), 128f, 16f, 2048f);
+        _teleportDistance = EnvOption.Number(System.Environment.GetEnvironmentVariable("UG_FOLIAGE_TELEPORT_DISTANCE"), 512f, 64f, 8192f);
+        _maximumPending = EnvOption.Whole(System.Environment.GetEnvironmentVariable("UG_FOLIAGE_MAX_PENDING"), 256, 8, 8192);
+        _maximumWorkers = EnvOption.Whole(System.Environment.GetEnvironmentVariable("UG_FOLIAGE_DECODE_WORKERS"), 1, 1, 4);
+        _uploadsPerFrame = EnvOption.Whole(System.Environment.GetEnvironmentVariable("UG_FOLIAGE_UPLOADS_PER_FRAME"), 16, 1, 256);
+        _decodedByteLimit = (long)EnvOption.Whole(System.Environment.GetEnvironmentVariable("UG_FOLIAGE_DECODED_MIB"), 32, 4, 512) * 1024 * 1024;
         _prewarmEnabled = EnvFlag.IsOn(System.Environment.GetEnvironmentVariable("UG_FOLIAGE_PREWARM"),
             whenUnset: true);
     }
@@ -678,16 +678,6 @@ public partial class FoliageStreamingRenderer : Node3D
             + $"{_emergencyVisibleLoads} emergency visible loads, {_visibleSetMisses} visible-set misses, "
             + $"{_staleResults} stale results, {_decodeFailures} failures");
     }
-
-    private static int EnvInt(string name, int fallback, int min, int max) =>
-        int.TryParse(System.Environment.GetEnvironmentVariable(name), out int value)
-            ? Math.Clamp(value, min, max) : fallback;
-
-    private static float EnvFloat(string name, float fallback, float min, float max) =>
-        float.TryParse(System.Environment.GetEnvironmentVariable(name),
-            System.Globalization.NumberStyles.Float,
-            System.Globalization.CultureInfo.InvariantCulture, out float value)
-            ? Math.Clamp(value, min, max) : fallback;
 
     private static void UpdateMaximum(ref long target, long value)
     {

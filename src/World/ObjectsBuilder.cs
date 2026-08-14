@@ -36,7 +36,7 @@ public static class ObjectsBuilder
     // groups and the coarsening handles the rest.
     private static readonly float ObjectChunkMetres = EnvFloat("UG_OBJECT_CHUNK_METRES", 1024f, 0f, 8192f);
     private static readonly long ObjectChunkMinTriangles = EnvLong("UG_OBJECT_CHUNK_MIN_TRIS", 0, 0, long.MaxValue);
-    private static readonly bool ObjectChunkRequireSpread = EnvBool("UG_OBJECT_CHUNK_REQUIRE_SPREAD", true);
+    private static readonly bool ObjectChunkRequireSpread = EnvOption.IsOn(System.Environment.GetEnvironmentVariable("UG_OBJECT_CHUNK_REQUIRE_SPREAD"), whenUnset: true);
     // Geometry an average cell must carry for its own draw call to be worth taking. See CellSizeFor.
     // The default sits where the measured cost of the next step up stops being worth it: coarsening this
     // far buys most of the aerial saving that a larger cell size would, for a fraction of its cost at eye
@@ -54,7 +54,7 @@ public static class ObjectsBuilder
     // gracefully. Zero merges only batches that do not widen the batch at all; large values merge every
     // co-located pair and are the A/B control for the constraint.
     private static readonly float BatchMergeGrowth = EnvFloat("UG_BATCH_MERGE_GROWTH", 0.02f, 0f, 1000f);
-    private static readonly bool ChunkSparseObjects = EnvBool("UG_CHUNK_SPARSE_OBJECTS", true);
+    private static readonly bool ChunkSparseObjects = EnvOption.IsOn(System.Environment.GetEnvironmentVariable("UG_CHUNK_SPARSE_OBJECTS"), whenUnset: true);
     private static readonly long SparseChunkMinTriangles =
         EnvLong("UG_SPARSE_OBJECT_MIN_TRIS", 0, 0, long.MaxValue);
     private const int MinChunkedInstances = 8;
@@ -325,14 +325,6 @@ public static class ObjectsBuilder
         long.TryParse(System.Environment.GetEnvironmentVariable(name), out long value)
             ? Math.Clamp(value, min, max)
             : fallback;
-
-    private static bool EnvBool(string name, bool fallback) =>
-        System.Environment.GetEnvironmentVariable(name) switch
-        {
-            "1" or "true" or "yes" => true,
-            "0" or "false" or "no" => false,
-            _ => fallback,
-        };
 
     private static long TriangleCount(ArrayMesh mesh)
     {
@@ -949,7 +941,7 @@ public static class ObjectsBuilder
     // A/B control must not pay for meshes and materials that ObjectsBuilder would then ignore.
     public static bool ObjectLodEnabled => LodEnabled;
 
-    private static readonly bool LodEnabled = EnvBool("UG_OBJECT_LOD", true);
+    private static readonly bool LodEnabled = EnvOption.IsOn(System.Environment.GetEnvironmentVariable("UG_OBJECT_LOD"), whenUnset: true);
 
     // Unity switches level by projected screen height, so the threshold scales with the object: a tree
     // holds its detail much further out than a crate. Approximate that with a multiple of the mesh's
@@ -964,7 +956,7 @@ public static class ObjectsBuilder
     // Unity's LODGroup switches level outright unless cross-fade is explicitly authored, so a hard swap
     // is both the parity behaviour and the cheaper one: inside a fade margin Godot dithers the two levels
     // together, which draws BOTH. UG_OBJECT_LOD_FADE=1 opts back into the dithered swap.
-    private static readonly bool LodFade = EnvBool("UG_OBJECT_LOD_FADE", false);
+    private static readonly bool LodFade = EnvOption.IsOn(System.Environment.GetEnvironmentVariable("UG_OBJECT_LOD_FADE"), whenUnset: false);
 
     // Cell size for groups that have a lower level, capped by ObjectChunkMetres above. A batch switches
     // level as a whole, so cells that are large next to their own switch distance make the choice
