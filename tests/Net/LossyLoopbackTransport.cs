@@ -211,22 +211,23 @@ public sealed class LossyLoopbackServerTransport : IServerTransport
     private readonly List<LossyLoopbackConnection> _connections = new();
     private int _nextConnectionId = 1;
 
-    // Every connection's traffic, rolled up, exactly as LoopbackServerTransport does it: the children
-    // report THROUGH this rather than the server scanning them.
-    public NetTraffic Traffic { get; } = new();
-
-    // Nothing to answer connectionlessly: a loopback peer only exists once CreateClient has made it a
-    // connection, so there is no such thing here as a datagram from a stranger. Held so a server can set
-    // it uniformly across whatever transports it is composed of.
-    public Func<byte[], byte[]?>? AnswerConnectionless { get; set; }
-
     public LossyLoopbackServerTransport(LossPolicy policy) => _policy = policy;
 
     public LossPolicy Policy => _policy;
 
+    public NetTraffic Traffic { get; } = new();
+
+    // Accepted and never called. A connectionless answer is the one path that exists precisely to avoid
+    // allocating a connection, and this harness has no unconnected peers to answer — every endpoint here
+    // is a LossyLoopbackClientTransport the test constructed through CreateClient. Refusing to carry the
+    // property would make the transport unusable rather than honest about what it does not exercise, so
+    // the soak simply does not cover that path and UdpEndToEndTests remains where it is covered.
+    public Func<byte[], byte[]?>? AnswerConnectionless { get; set; }
+
     public LossyLoopbackClientTransport CreateClient()
     {
-        var connection = new LossyLoopbackConnection(_nextConnectionId++, this, _policy);
+        var connection = new LossyLoopbackConnection(_nextConnectionId++, this, _policy,
+            new NetTraffic(Traffic));
         var client = new LossyLoopbackClientTransport(connection, _policy);
         connection.Client = client;
         _connections.Add(connection);
@@ -267,7 +268,12 @@ public sealed class LossyLoopbackServerTransport : IServerTransport
     public void Update(double now)
     {
         foreach (LossyLoopbackConnection connection in _connections)
+        {
             connection.AdvanceToServer();
+            connection.Traffic.Update(now);
+        }
+        // After the children, so this window closes over the bytes they have just counted.
+        Traffic.Update(now);
     }
 
     public void Close()
@@ -301,41 +307,38 @@ public sealed class LossyLoopbackConnection : ITransportConnection
 
     public int Id { get; }
 
-    // This link's share, reporting up into the server's. Nothing frames a payload here, so wire bytes
-    // are its length — the same reading LoopbackConnection gives, and for the same reason.
     public NetTraffic Traffic { get; }
 
-    internal LossyLoopbackConnection(int id, LossyLoopbackServerTransport server, LossPolicy policy)
+    internal LossyLoopbackConnection(int id, LossyLoopbackServerTransport server, LossPolicy policy,
+        NetTraffic traffic)
     {
         Id = id;
         _server = server;
-        Traffic = new NetTraffic(server.Traffic);
+        Traffic = traffic;
         _toClient = new LossyPipe<byte[]>(policy);
         _toServer = new LossyPipe<byte[]>(policy);
     }
 
-    // Recorded on the way in, before the pipe decides whether to drop it: what a transport SENT is what
-    // it handed to the wire. A double whose counters stayed at zero would make any future assertion
-    // about traffic vacuously true.
+    // Counted where the payload is handed to the wire, not where the wire delivers it: a datagram the
+    // policy then drops was still sent, and a byte counter that hid the dropped ones would report a
+    // healthy link precisely when the link is worst.
     public void Send(byte[] payload, ESendType sendType)
     {
         Traffic.RecordSent(payload, payload.Length);
         _toClient.Send(payload, sendType);
     }
 
-    internal void SendToServer(byte[] payload, ESendType sendType) => _toServer.Send(payload, sendType);
+    internal void SendToServer(byte[] payload, ESendType sendType)
+    {
+        Traffic.RecordReceived(payload, payload.Length);
+        _toServer.Send(payload, sendType);
+    }
 
     internal void AdvanceToServer() => _toServer.Advance();
 
     internal void AdvanceToClient() => _toClient.Advance();
 
-    internal bool TryTakeFromClient(out byte[] payload)
-    {
-        if (!_toServer.TryTake(out payload))
-            return false;
-        Traffic.RecordReceived(payload, payload.Length);
-        return true;
-    }
+    internal bool TryTakeFromClient(out byte[] payload) => _toServer.TryTake(out payload);
 
     internal bool TryTakeFromServer(out byte[] payload) => _toClient.TryTake(out payload);
 
@@ -365,11 +368,9 @@ public sealed class LossyLoopbackClientTransport : IClientTransport
     internal LossyLoopbackClientTransport(LossyLoopbackConnection connection, LossPolicy policy) =>
         _connection = connection;
 
-    public bool IsConnected { get; private set; } = true;
-
-    // The CLIENT's own view of the same link, kept separate from the connection's rather than shared:
-    // "sent" means the opposite thing at each end.
     public NetTraffic Traffic { get; } = new();
+
+    public bool IsConnected { get; private set; } = true;
 
     internal void CloseFromServer() => IsConnected = false;
 
@@ -389,7 +390,11 @@ public sealed class LossyLoopbackClientTransport : IClientTransport
         return true;
     }
 
-    public void Update(double now) => _connection.AdvanceToClient();
+    public void Update(double now)
+    {
+        _connection.AdvanceToClient();
+        Traffic.Update(now);
+    }
 
     public void Close()
     {
