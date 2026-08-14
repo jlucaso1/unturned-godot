@@ -90,6 +90,38 @@ public class ZombieClipNamesTests : TestClass
         view.QueueFree();
     }
 
+    // Re-entering a region is a fresh meeting with the zombie, so the clocks reset with the pose.
+    //
+    // Leaving them was visible twice. A stale State of Attack makes Push early-return on the server's
+    // very next state for this zombie, so the forced idle stands until NextSwing comes round instead of
+    // the swing resuming; and a HoldUntil left over from a stagger that finished while the avatar was
+    // out of the region suppresses clip selection outright until that instant passes.
+    [Test]
+    public void ReEnteringTheRegionClearsTheClocksTheAvatarLeftWith()
+    {
+        ZombiesView view = View();
+        view.ListForTest(Listing(id: 9), bound: 0);
+
+        // What the avatar was doing when the player walked out: mid-attack, and staggered.
+        view.PushStateForTest(9, EZombieState.Attack, now: 100.0);
+        view.StunForTest(9, clip: 0, now: 100.0);
+        Assert.Equal(EZombieState.Attack, view.StateForTest(9));
+        Assert.True(view.HoldRemainingForTest(9, now: 100.0) > 0.0);
+
+        // And what the region list says on the way back in.
+        view.ListForTest(Listing(id: 9), bound: 0);
+
+        Assert.Equal(EZombieState.Idle, view.StateForTest(9));
+        Assert.Equal(0.0, view.HoldRemainingForTest(9, now: 100.0));
+
+        // The proof that State really was cleared rather than merely read as Idle: the server's next
+        // Attack is acted on instead of early-returning against a stale copy of itself.
+        view.PushStateForTest(9, EZombieState.Attack, now: 101.0);
+        Assert.Equal(EZombieState.Attack, view.StateForTest(9));
+
+        view.QueueFree();
+    }
+
     private static ZombieListing Listing(ushort id, byte move = 0, byte idle = 0,
         EZombieSpeciality speciality = EZombieSpeciality.Normal) => new()
         {

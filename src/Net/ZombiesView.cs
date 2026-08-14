@@ -419,6 +419,18 @@ public partial class ZombiesView : Node3D
         avatar.TargetPosition = listing.Position;
         avatar.TargetYaw = avatar.AppliedYaw;
 
+        // The clocks are reset with the pose, because a re-listed avatar is a zombie this client is
+        // meeting again from scratch — it may have been out of the region for minutes. Leaving them
+        // meant two visible defects. A stale `State` of Attack makes Push early-return on the server's
+        // very next state for it, so the forced idle below stands until NextSwing (up to a second)
+        // instead of the swing resuming; and a HoldUntil left over from a stagger that finished while
+        // the avatar was gone suppresses clip selection outright until that instant passes. Both are
+        // the difference between re-entry looking like a spawn and looking like a freeze.
+        avatar.State = EZombieState.Idle;
+        avatar.HoldUntil = 0;
+        avatar.NextSwing = 0;
+        avatar.NextGroan = 0;
+        avatar.Streaming = false;
         avatar.Rig?.Play(avatar.IdleClipName);
     }
 
