@@ -119,4 +119,53 @@ public class UnityMaterialTests
         Assert.Equal((0, 0L), UnityMaterial.GetTexture(Material(null, null), "_MainTex"));
         Assert.Equal((0, 0L), UnityMaterial.GetTexture(new Dictionary<string, object>(), "_MainTex"));
     }
+
+    // A TexEnv entry as Unity writes it: the texture pointer plus the tiling and offset beside it.
+    private static Dictionary<string, object> TexEntry(string name, int fileId, long pathId,
+        (float X, float Y) scale, (float X, float Y) offset)
+    {
+        Dictionary<string, object> entry = TexEntry(name, fileId, pathId);
+        var value = (Dictionary<string, object>)entry["second"];
+        value["m_Scale"] = new Dictionary<string, object> { ["x"] = scale.X, ["y"] = scale.Y };
+        value["m_Offset"] = new Dictionary<string, object> { ["x"] = offset.X, ["y"] = offset.Y };
+        return entry;
+    }
+
+    [Fact]
+    public void GetTextureScaleOffset_ReadsTheTilingBesideTheTexture()
+    {
+        // Unity multiplies the mesh's UVs by the scale and adds the offset before sampling, so a material
+        // that repeats its texture across a wall says so here and nothing in the mesh does.
+        var mat = Material(null, new List<object>
+        {
+            TexEntry("_MainTex", 0, 555, scale: (4f, 2f), offset: (0.25f, 0.5f)),
+        });
+
+        (Vector2 scale, Vector2 offset) = UnityMaterial.GetTextureScaleOffset(mat, "_MainTex")!.Value;
+
+        Assert.Equal(new Vector2(4f, 2f), scale);
+        Assert.Equal(new Vector2(0.25f, 0.5f), offset);
+    }
+
+    [Fact]
+    public void GetTextureScaleOffset_WithoutTheFields_IsTheIdentityTransform()
+    {
+        // A TexEnv carrying only the pointer tiles once and does not shift, which is Unity's own default —
+        // not "no answer", since the property IS bound.
+        var mat = Material(null, new List<object> { TexEntry("_MainTex", 0, 555) });
+
+        (Vector2 scale, Vector2 offset) = UnityMaterial.GetTextureScaleOffset(mat, "_MainTex")!.Value;
+
+        Assert.Equal(Vector2.One, scale);
+        Assert.Equal(Vector2.Zero, offset);
+    }
+
+    [Fact]
+    public void GetTextureScaleOffset_MissingProperty_And_MissingSection()
+    {
+        var mat = Material(null, new List<object> { TexEntry("_BumpMap", 0, 1) });
+        Assert.Null(UnityMaterial.GetTextureScaleOffset(mat, "_MainTex"));
+        Assert.Null(UnityMaterial.GetTextureScaleOffset(Material(null, null), "_MainTex"));
+        Assert.Null(UnityMaterial.GetTextureScaleOffset(new Dictionary<string, object>(), "_MainTex"));
+    }
 }
