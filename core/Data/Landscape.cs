@@ -11,6 +11,10 @@ public static class Landscape
     public const int HEIGHTMAP_RESOLUTION_MINUS_ONE = 256;
     public const int SPLATMAP_RESOLUTION = 256;
 
+    // Landscape.cs:35 — "Heightmap resolution minus one". One hole flag per heightmap CELL rather than
+    // per sample, which is what makes a hole a 4 m quad of terrain that is simply not there.
+    public const int HOLES_RESOLUTION = 256;
+
     // Mirrors Landscape.getWorldPosition: heightmap indices are transposed vs world
     // axes (hx->Z, hy->X), so keep the swap to match Unturned's placement exactly.
     public static Vector3 GetWorldPosition(int tileX, int tileY, int hx, int hy, float heightNormalized)

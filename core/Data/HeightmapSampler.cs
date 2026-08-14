@@ -8,6 +8,19 @@ namespace UnturnedGodot.Data;
 // conformed feature lands exactly on the rendered surface — not a bilinear approximation that drifts off the
 // triangles on slopes and leaves a lip or z-fights. This is what lets roads hug the ground with only a hair's
 // z-offset, the way Unturned's roads sit on Unity's (bilinear) terrain.
+//
+// "The same triangulation" is a claim about the whole grid, and it stopped being true once: the mesh was
+// built at every second heightmap index while this stayed at every index, so a ridge or a gully on an odd
+// index was kept here and interpolated away there, and a road lofted onto it buried itself in the drawn
+// ground or floated over it. The mesh is built at the heightmap's own resolution again, which is what
+// makes the sentence above a fact rather than an intention — TerrainHeightfieldTests holds it to that by
+// sampling a tile MeshInstance's own vertices.
+//
+// Terrain HOLES are deliberately not consulted. A hole removes a cell from what is drawn and from what is
+// collided with, but the heightmap underneath it still has values, and Landscape.getWorldHeight — which is
+// what Unturned conforms roads and placements with — reads those values without asking about holes. A
+// caller that needs to know whether there is ground here at all is asking a different question, and
+// Landscape.IsPointInsideHole is what answers it.
 public sealed class HeightmapSampler
 {
     private static readonly bool CompactHeightmaps = EnvFlag.IsOn(System.Environment.GetEnvironmentVariable("UG_COMPACT_HEIGHTMAP"), whenUnset: true);
