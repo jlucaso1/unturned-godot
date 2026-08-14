@@ -11,6 +11,10 @@ namespace UnturnedGodot.Assets;
 // source: the prefab keys inside a bundle are relative to that bundle's own asset folders.
 public sealed class ContentSource
 {
+    // The file MasterBundleConfig.Load reads. Named here only so HasAssetDefinition can tell the bundle
+    // declaration apart from the asset definitions it is looking for.
+    private const string BundleConfigFileName = "MasterBundle.dat";
+
     // "core.masterbundle", "california2.masterbundle": the name assets reference the bundle by.
     public string Name { get; }
 
@@ -137,13 +141,17 @@ public sealed class ContentSource
         // from Discover's result. Rejecting an item that contains only one of them silently drops
         // otherwise valid content: an item shipping nothing but spawn tables is what a map's own
         // vehicle table resolves through, and dropping it leaves every spawnpoint using it empty.
+        //
+        // These named folders are only a CHEAP PRE-TEST, not the rule. Each is a directory this class
+        // hands out as a property, so a hit here settles the question without touching the tree; the
+        // general answer is HasAssetDefinition below.
         bool hasSupportedAssets = Directory.Exists(Path.Combine(assets, "Landscapes"))
             || Directory.Exists(Path.Combine(assets, "Foliage"))
             || Directory.Exists(Path.Combine(assets, "PhysicsMaterials"))
             || Directory.Exists(spawns)
             || Directory.Exists(npcs);
         if (!Directory.Exists(objects) && !Directory.Exists(trees) && !Directory.Exists(vehicles)
-            && !hasSupportedAssets)
+            && !hasSupportedAssets && !HasAssetDefinition(itemDirectory))
         {
             return null;
         }
@@ -163,6 +171,42 @@ public sealed class ContentSource
             spawns,
             npcs,
             isCore: false);
+    }
+
+    // Does this item ship any asset definition at all, anywhere below its root?
+    //
+    // A FIXED LIST OF FOLDER NAMES CANNOT ANSWER THIS for the item family. Maps follow the game's own
+    // layout because the editor writes it, but item mods name their folders freely, and the game does
+    // not care: it hands a subscribed OBJECT/ITEM/VEHICLE item's own directory to the asset worker as a
+    // search location (Assets.cs:2030-2033) and the worker walks every subdirectory below it
+    // (AssetsWorker.cs:139-177). Of the three items installed here that declare a bundle, one keeps its
+    // thirty clothing assets in "Clothes/" and another keeps its items under "Bundles/Items/" — neither
+    // name means anything to the game, and neither is a name a whitelist would have guessed. Both were
+    // dropped outright before this, which left the clothing armor scan and the difficulty scan with
+    // nothing of theirs to read: a zombie wearing that mod's vest took damage as if bare.
+    //
+    // The criterion is the worker's own: an asset definition is a ".asset" or a ".dat"
+    // (AssetsWorker.cs:305-371). MasterBundle.dat is excluded by name because it is the bundle
+    // DECLARATION every candidate here has by construction — counting it would make the test vacuous
+    // and turn a bundle with no content behind it into a source.
+    //
+    // Walked through SafeFileTree, NOT Directory.EnumerateFiles(..., AllDirectories). The difference is
+    // not stylistic: that overload aborts the whole lazy enumeration on the first directory it cannot
+    // list, so a single denied subtree anywhere under the item would have thrown before the readable
+    // assets beside it were ever reached — and the catch below would then have read "this item ships
+    // nothing" and dropped a perfectly good source. Measured: a root holding an unreadable child and a
+    // readable sibling throws UnauthorizedAccessException out of the first enumeration. SafeFileTree
+    // isolates the denied subtree and keeps its siblings, which is the behaviour every other optional
+    // content walk in this repository already has.
+    private static bool HasAssetDefinition(string itemDirectory)
+    {
+        foreach (string file in Data.SafeFileTree.EnumerateFiles(itemDirectory, "*.dat"))
+        {
+            if (!Path.GetFileName(file).Equals(BundleConfigFileName, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return Data.SafeFileTree.EnumerateFiles(itemDirectory, "*.asset").Count > 0;
     }
 
     // Materialized inside the try rather than handed back as a lazy sequence. .NET's enumerator opens the

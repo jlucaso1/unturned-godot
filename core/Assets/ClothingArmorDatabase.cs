@@ -25,8 +25,8 @@ public enum EClothingType
 // One clothing item, reduced to what the damage path reads.
 public readonly record struct ClothingArmor(ushort Id, EClothingType Type, float Armor, float ExplosionArmor);
 
-// A DELIBERATELY MINIMAL reader: it walks Bundles/Items and keeps, for each clothing item, its legacy
-// id, its type and its armor multipliers. Nothing else.
+// A DELIBERATELY MINIMAL reader: it walks a content source's tree and keeps, for each clothing item,
+// its legacy id, its type and its armor multipliers. Nothing else.
 //
 // The full item-asset family — meshes, blueprints, calibers, the whole ItemAsset tree — is a separate
 // piece of work. This exists because the zombie damage path needs exactly one number that nothing in
@@ -57,14 +57,24 @@ public sealed class ClothingArmorDatabase
     // The clothing of every content source. A workshop map ships its own items, and a zombie table on
     // that map names them by the same legacy ids.
     //
-    // Bundles/Items, NOT Bundles/Items/Clothing: the game keeps clothing in per-kind folders (Shirts,
-    // Pants, Hats, Vests, Masks, Glasses, Backpacks) plus per-update folders that mix kinds, so the
-    // whole Items tree is walked and the Type key decides what is clothing.
+    // THE WHOLE SOURCE ROOT, not Root/Items. The game's own Bundles folder does keep clothing under
+    // Items/ — in per-kind folders (Shirts, Pants, Hats, Vests, Masks, Glasses, Backpacks) plus
+    // per-update folders that mix kinds, which is why a Type key rather than a folder name decides what
+    // is clothing — but that layout is a convention of the game's own content, not a rule the loader
+    // enforces. A subscribed item is handed to the asset worker as its own directory
+    // (Assets.cs:2030-2033) and the worker recurses from there (AssetsWorker.cs:139-177), so a mod is
+    // free to put clothing anywhere. Both installed mods here do: one keeps thirty clothing assets in
+    // "Clothes/", and even the one that does use Items/ has two more under NPCs/.
+    //
+    // Measured on the same two sources, so the widening is the only variable: Root/Items found 1474
+    // clothing in 141 ms, the whole root found 1476 in 270 ms. The scan runs once when a session comes
+    // up, and 130 ms there does not buy a special case that silently loses whatever sits outside the
+    // convention.
     public static ClothingArmorDatabase ScanContentSources(IEnumerable<ContentSource> sources)
     {
         var roots = new List<string>();
         foreach (ContentSource source in sources)
-            roots.Add(Path.Combine(source.Root, "Items"));
+            roots.Add(source.Root);
         return ScanDirectories(roots);
     }
 
