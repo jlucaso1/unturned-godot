@@ -99,15 +99,32 @@ public static class HolidayUtil
         return ENPCHoliday.None;
     }
 
-    // The spellings Unturned's own -Holiday switch accepts, including its two abbreviations. A closed
-    // set on purpose, like EnvFlag's: an unrecognised value leaves the schedule alone rather than being
-    // guessed at, because a screenshot run silently falling back to "no holiday" is a wasted run.
-    public static ENPCHoliday ParseOverride(string? value)
+    // The spellings Unturned's own -Holiday switch accepts, including its two abbreviations, plus one
+    // this port adds. A closed set otherwise, like EnvFlag's: an unrecognised value leaves the schedule
+    // alone rather than being guessed at, because a screenshot run silently falling back to "no holiday"
+    // is a wasted run.
+    //
+    // Null is "nobody asked", ENPCHoliday.None is "asked for no holiday at all", and the two have to be
+    // different values because they lead to different behaviour — the first consults the calendar and
+    // the second overrides it. Unturned's own switch cannot say the second: `-Holiday` only ever names a
+    // holiday to turn ON, and holidayOverride staying NONE is indistinguishable from the flag being
+    // absent (HolidayUtil.cs's static constructor). This is a deliberate departure, and a small one, but
+    // it is a departure and it is worth saying which way it runs.
+    //
+    // It earns its keep twice over. Reproducing a screenshot WITHOUT the tinsel on December 20th is
+    // exactly as useful as forcing Christmas in July, and only one of those was expressible before. And
+    // the structural-metrics gate — the one thing watching the render graph, which no unit test sees —
+    // counts placed objects, so without a pin its recorded baseline silently becomes wrong for six weeks
+    // of the year: Halloween adds 31 placements, Christmas 336, and June turns on a PRIDE_MONTH asset.
+    // A deterministic gate that fails by the calendar is one people learn to ignore.
+    public static ENPCHoliday? ParseOverride(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
-            return ENPCHoliday.None;
+            return null;
 
         string trimmed = value.Trim();
+        if (Is(trimmed, "None") || Is(trimmed, "Off"))
+            return ENPCHoliday.None;
         if (Is(trimmed, "Halloween") || Is(trimmed, "HW"))
             return ENPCHoliday.Halloween;
         if (Is(trimmed, "Christmas") || Is(trimmed, "XMAS"))
@@ -122,7 +139,7 @@ public static class HolidayUtil
             return ENPCHoliday.LunarNewYear;
         if (Is(trimmed, "UnturnedAnniversary"))
             return ENPCHoliday.UnturnedAnniversary;
-        return ENPCHoliday.None;
+        return null;
     }
 
     // getActiveHoliday(): the override if one is set, otherwise the schedule. Read once per process like
@@ -131,12 +148,11 @@ public static class HolidayUtil
     public static ENPCHoliday ActiveHoliday { get; } = Resolve(
         Environment.GetEnvironmentVariable(OverrideEnvironmentVariable), DateTime.Now);
 
-    // Split out so the pair can be tested without the process's clock or environment.
-    public static ENPCHoliday Resolve(string? overrideValue, DateTime localNow)
-    {
-        ENPCHoliday over = ParseOverride(overrideValue);
-        return over != ENPCHoliday.None ? over : GetScheduledHoliday(localNow);
-    }
+    // Split out so the pair can be tested without the process's clock or environment. An override that
+    // parsed — INCLUDING one that parsed as None — wins outright; only the absence of one falls through
+    // to the calendar. That distinction is the whole point of ParseOverride returning a nullable.
+    public static ENPCHoliday Resolve(string? overrideValue, DateTime localNow) =>
+        ParseOverride(overrideValue) ?? GetScheduledHoliday(localNow);
 
     private static bool Is(string value, string name) =>
         string.Equals(value, name, StringComparison.OrdinalIgnoreCase);
