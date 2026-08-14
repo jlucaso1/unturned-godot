@@ -146,8 +146,17 @@ export async function runSuite(manifest) {
 }
 
 // A map folder with the given tiles, plus the files every map has.
+//
+// Including a Config.json that declares Landscape terrain, because a map that ships Landscape tiles is
+// one. Support starts at the map's own Use_Legacy_Ground (see readMap) and that field defaults to true,
+// so a fixture without a config is a legacy map whatever it puts under Landscape/Heightmaps — which
+// would make every tile-naming and placeholder assertion below pass for the same uninteresting reason.
 function mapTree(prefix, tiles) {
-    const tree = { [`${prefix}/Level.dat`]: "", [`${prefix}/English.dat`]: "Name A Map" };
+    const tree = {
+        [`${prefix}/Level.dat`]: "",
+        [`${prefix}/English.dat`]: "Name A Map",
+        [`${prefix}/Config.json`]: '{"Use_Legacy_Ground":false}',
+    };
     for (const tile of tiles) tree[`${prefix}/Landscape/Heightmaps/${tile}`] = "";
     return tree;
 }
