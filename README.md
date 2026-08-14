@@ -223,6 +223,9 @@ being drawn to switch off.
 **Useful environment flags** (mostly for automation and screenshots): `UNTURNED_PATH`, `MAP=Washington`
 (skip the browser and load that map), `SOLO=1` (boot straight into a local session), `FREECAM=1`,
 `JOIN=host:port`, `OPEN_LAN=1`, `PLAYER=1`, `SCREENSHOT_PATH`, `TIME_OF_DAY=0..1`, `DAY_SPEED=N`,
+`UG_HOLIDAY=Christmas|Halloween|None|...` (the game's own `-Holiday` switch: dress the world for a
+holiday out of season, or — which `-Holiday` cannot say — pin it to *no* holiday so a December
+screenshot has no tinsel in it. The holiday gates whether a map's seasonal props exist at all),
 `NAV_DEBUG=1`, `NAV_PREVIEW=1` (`NAV_XRAY`, `NAV_LIFT`, `NAV_RIM`, `NAV_BEACONS`, `NAV_BOUNDS`),
 `AUDIO_DEBUG=1`, `UG_CONSOLE="<console line>"`, `SHOW_CONSOLE=1`, `REPRO_*` ([docs/REPRO.md](docs/REPRO.md)).
 

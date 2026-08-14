@@ -144,9 +144,15 @@ public class HolidayUtilTests
     [Fact]
     public void ActiveHoliday_AgreesWithTheScheduleUnlessOverridden()
     {
-        // Read once per process, so this is whatever the suite is running on; it must at least be the
-        // answer the pure function gives for the same moment when nothing overrides it.
-        if (Environment.GetEnvironmentVariable(HolidayUtil.OverrideEnvironmentVariable) == null)
+        // Read once per process, so this is whatever the suite is running on. Both directions are worth
+        // asserting, and the second is the one CI exercises: the structural job sets UG_HOLIDAY=None, so
+        // a regression that let the calendar win over an explicit override would show up here rather
+        // than as a baseline that drifts every December.
+        string? over = Environment.GetEnvironmentVariable(HolidayUtil.OverrideEnvironmentVariable);
+
+        if (HolidayUtil.ParseOverride(over) is { } pinned)
+            Assert.Equal(pinned, HolidayUtil.ActiveHoliday);
+        else
             Assert.Equal(HolidayUtil.GetScheduledHoliday(DateTime.Now), HolidayUtil.ActiveHoliday);
     }
 }
