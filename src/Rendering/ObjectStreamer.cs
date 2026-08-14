@@ -358,7 +358,7 @@ public partial class ObjectStreamer : Node
         try
         {
             foreach (ImpactDecalExtractor.Request request in
-                ImpactDecalRequests.For(_sources, ImpactDecalRequests.CacheDirectory))
+                ImpactDecalRequests.For(_sources, DecalCache.Directory))
             {
                 if (request.BundlePath.Length > 0 && !ImpactDecalExtractor.IsSatisfied(request))
                     wants[request.BundlePath] = request;

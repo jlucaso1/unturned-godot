@@ -19,7 +19,10 @@ public class RagdollExtractorRealTests : TestClass
     private static string? Install => UnturnedInstall.Find();
 
     private static RagdollDefinition? Zombie() =>
-        Install == null ? null : RagdollExtractor.Read(Install, RagdollExtractor.ZombiePrefab);
+        Install == null
+            ? null
+            : RagdollExtractor.Read(Install, RagdollExtractor.ZombiePrefab,
+                ModelExtractor.ReadClassTypeTrees);
 
     // Eleven bodies: the pelvis, the spine, the skull, and two of each limb segment.
     [Test]
@@ -139,7 +142,8 @@ public class RagdollExtractorRealTests : TestClass
     {
         if (Install == null)
             return;
-        RagdollDefinition? player = RagdollExtractor.Read(Install, RagdollExtractor.PlayerPrefab);
+        RagdollDefinition? player = RagdollExtractor.Read(Install, RagdollExtractor.PlayerPrefab,
+            ModelExtractor.ReadClassTypeTrees);
 
         Assert.NotNull(player);
         Assert.True(player!.IsUsable);

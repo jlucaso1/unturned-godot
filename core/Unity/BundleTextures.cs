@@ -1,9 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using UnturnedGodot.Unity;
 
-namespace UnturnedGodot;
+namespace UnturnedGodot.Unity;
 
 // Pulls textures out of a master bundle by their AssetBundle container path (the lowercase Unity path,
 // e.g. "assets/coremasterbundle/terrain/materials/pei/grass_00.png").
@@ -112,7 +111,7 @@ public static class BundleTextures
             // buffers — has always answered this way, on the stated grounds that a caller mid-level-build
             // would rather lose one texture than the level. The two readers disagreed until now, which is
             // a difference nobody chose.
-            Log.PrintErr($"[textures] {Path.GetFileName(bundlePath)} could not be read ({e.Message}); "
+            HostLog.Error($"[textures] {Path.GetFileName(bundlePath)} could not be read ({e.Message}); "
                 + "the assets it carries load untextured");
             return result;
         }
@@ -137,7 +136,10 @@ public static class BundleTextures
 
     // The Texture2D behind each wanted container path, read from the AssetBundle object that names every
     // asset in the file. Pixels are not touched here: where they live decides what the caller pays.
-    internal static IEnumerable<(string Path, UnityTexture Texture)> Locate(SerializedFile file,
+    //
+    // Public rather than internal since this moved to core/: the streaming extractor in src/ drives its
+    // own forward pass and asks this where a texture sits, which is now a call across the assembly line.
+    public static IEnumerable<(string Path, UnityTexture Texture)> Locate(SerializedFile file,
         IReadOnlyCollection<string> containerPaths)
     {
         var wanted = new HashSet<string>(containerPaths);

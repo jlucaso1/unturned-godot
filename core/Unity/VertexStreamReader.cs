@@ -2,9 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading;
-using UnturnedGodot.Unity;
 
-namespace UnturnedGodot;
+namespace UnturnedGodot.Unity;
 
 // Reads the vertex buffers Unity moved out of a bundle's SerializedFile and into one of its .resS nodes.
 //

@@ -641,7 +641,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void PostLoadReclaimHasMeasuredOneAndTwoPassControls()
     {
-        if (FindRepositoryFile(Path.Combine("src", "LoadMemory.cs")) is not { } path)
+        if (FindRepositoryFile(Path.Combine("core", "LoadMemory.cs")) is not { } path)
             return;
         string source = File.ReadAllText(path);
         Assert.Contains("UG_RECLAIM_PASSES", source);
@@ -669,7 +669,7 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void ColliderAliasesShareParsedDataAndShapePoolKeys()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ColliderLibrary.cs")) is not { } libraryPath
+        if (FindRepositoryFile(Path.Combine("core", "Unity", "ColliderLibrary.cs")) is not { } libraryPath
             || FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs")) is not { } builderPath)
             return;
         string library = File.ReadAllText(libraryPath);

@@ -2,6 +2,7 @@ using Godot;
 using UnturnedGodot.Assets;
 using UnturnedGodot.Data;
 using UnturnedGodot.Net;
+using UnturnedGodot.Player;
 
 namespace UnturnedGodot;
 
@@ -973,7 +974,8 @@ public partial class Main : Node3D
         {
             // The game's own Ragdoll_Zombie: per-bone bodies, colliders and joint limits. Null when the
             // install cannot be read, and then a corpse tumbles as one piece instead.
-            Definition = RagdollExtractor.Read(unturnedPath, RagdollExtractor.ZombiePrefab),
+            Definition = RagdollExtractor.Read(unturnedPath, RagdollExtractor.ZombiePrefab,
+                ModelExtractor.ReadClassTypeTrees),
         };
         AddChild(ragdolls);
         zombiesView.AttachRagdolls(ragdolls);
@@ -1013,7 +1015,7 @@ public partial class Main : Node3D
         PhysicsMaterialBank bank)
     {
         (_, ImpactEffectBank effects) = ImpactDecalRequests.Banks(sources);
-        string cacheDirectory = ImpactDecalRequests.CacheDirectory;
+        string cacheDirectory = DecalCache.Directory;
 
         var bundleByDirectory = new System.Collections.Generic.Dictionary<string, ContentSource>(
             System.StringComparer.Ordinal);
