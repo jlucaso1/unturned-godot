@@ -219,6 +219,22 @@ jobs:
             exit 1
           fi
 
+      # catalog.js mirrors four more types — UnturnedInstall, ContentSource, MapCatalog and LevelInfo —
+      # and had no differential at all. The suite above is the only thing that covered it, against the
+      # one real install the dedicated server ships: every map there is well-formed and there are no
+      # workshop items in it, so agreement there says nothing about the shapes that actually separate
+      # the two. This generates those (no Level.dat, a name that is only whitespace, tile filenames
+      # spelled four wrong ways, a stale bundled copy standing in for a subscription), materializes each
+      # on disk, and runs core/ and the browser over the same bytes. Self-skips without the .NET SDK.
+      - name: Check the browser's catalogue against the desktop's
+        run: |
+          set -o pipefail
+          node web/test/catalog-differential.mjs | tee "$RUNNER_TEMP/catalog-differential.log"
+          if grep -q 'skipped' "$RUNNER_TEMP/catalog-differential.log"; then
+            echo "The catalogue differential skipped; it was supposed to run."
+            exit 1
+          fi
+
       # The casing tables are exceptions to JavaScript's built-ins, so they rot when either runtime's
       # Unicode version moves. This compares them against the BCL over every code point. It runs under
       # Node rather than in the browser on purpose: Chromium's ICU is behind, and does not know some of

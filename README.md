@@ -343,6 +343,9 @@ node web/test/run.mjs
 # The browser's .dat port against core/Dat/DatParser.cs, over generated documents.
 node web/test/differential.mjs
 
+# The browser's install/map catalogue against core/'s, over generated install trees written to disk.
+node web/test/catalog-differential.mjs
+
 # The browser's casing tables against the BCL, over every code point.
 node web/test/casing.mjs
 ```
