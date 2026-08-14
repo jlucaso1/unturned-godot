@@ -23,6 +23,26 @@ public static class GameData
         return Directory.Exists(path) ? path : null;
     }
 
+    // The content sources the GAME itself ships, with this machine's workshop subscriptions left out.
+    //
+    // For tests that pin an exact count. ContentSource.Discover returns the workshop items too, which is
+    // right for production — that is what loading a mod means — but it makes any counted assertion a fact
+    // about whoever ran it: "9 object assets redirect for a holiday" on a clean runner became 26 on a
+    // machine with six subscriptions, from the same commit and the same game version. A number nobody can
+    // reproduce is not a regression test, so the scan is narrowed to what the number is a claim about.
+    //
+    // A test that is ABOUT mod content wants Discover instead; this is not a general-purpose replacement.
+    public static IReadOnlyList<ContentSource> CoreSources()
+    {
+        var core = new List<ContentSource>();
+        foreach (ContentSource source in ContentSource.Discover(Install!))
+        {
+            if (source.IsCore)
+                core.Add(source);
+        }
+        return core;
+    }
+
     // The platform's core masterbundle inside the install, or null.
     public static string? MasterBundle =>
         Install == null ? null : UnturnedInstall.FindMasterBundle(Install);

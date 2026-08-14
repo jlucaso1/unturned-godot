@@ -16,8 +16,16 @@ namespace UnturnedGodot.Tests;
 public class PlacementFidelityRealDataTests
 {
     // The whole asset database is a scan of thousands of .dat files; one per run, shared.
+    //
+    // THE GAME'S OWN CONTENT ONLY. Every count below is a claim about what Unturned ships — "109 object
+    // assets carry a holiday restriction" is checkable precisely because it is a fact about the depot.
+    // ContentSource.Discover also returns the workshop items this machine happens to be subscribed to,
+    // and scanning those makes each number a fact about the developer's Steam account instead: a clean
+    // CI runner counted 9 redirecting assets and a machine with six subscriptions counted 26, from the
+    // same commit. Production scans everything, which is the point of mods; a test that pins a number
+    // has to scan the thing the number is about.
     private static readonly Lazy<ObjectAssetDatabase> Assets = new(() =>
-        ContentExtraction.ScanAssets(ContentSource.Discover(GameData.Install!)));
+        ContentExtraction.ScanAssets(GameData.CoreSources()));
 
     private static List<PlacedObject> PeiObjects() =>
         LevelObjects.Load(Path.Combine(GameData.Map("PEI")!, "Level", "Objects.dat"));
