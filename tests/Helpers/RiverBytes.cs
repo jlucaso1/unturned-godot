@@ -21,6 +21,7 @@ public sealed class RiverBytes
     public RiverBytes Int32(int v) { _bytes.AddRange(BitConverter.GetBytes(v)); return this; }
     public RiverBytes UInt64(ulong v) { _bytes.AddRange(BitConverter.GetBytes(v)); return this; }
     public RiverBytes Single(float v) { _bytes.AddRange(BitConverter.GetBytes(v)); return this; }
+    public RiverBytes Double(double v) { _bytes.AddRange(BitConverter.GetBytes(v)); return this; }
 
     public RiverBytes Str(string s)
     {
