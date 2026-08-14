@@ -5,6 +5,7 @@ using Godot;
 using UnturnedGodot.Data;
 using UnturnedGodot.Net;
 using UnturnedGodot.Player;
+using UnturnedGodot.Tests.Helpers;
 using UnturnedGodot.Zombies;
 using Xunit;
 
@@ -372,7 +373,7 @@ public class LossyNetworkSoakTests
     // of the clients churning to force id recycling and zombies dying throughout. At the end the world
     // every client believes in must be the world the server has.
     [Fact]
-    [Trait("Category", "Soak")]
+    [Trait(TestCategories.Name, TestCategories.Soak)]
     public void EightClientsOverALossyReorderingWire_ConvergeOnTheServersWorld()
     {
         const ulong seed = 0x5EEDD00Du;

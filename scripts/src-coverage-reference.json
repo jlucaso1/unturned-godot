@@ -1,0 +1,14 @@
+{
+  "_comment": [
+    "Reference point for scripts/check-src-coverage.sh --ratchet, which is what keeps",
+    "src/ from regressing silently. Regenerate with --record and COMMIT the result:",
+    "raising it is how covering more of src/ raises the bar, and lowering it is a",
+    "deliberate, reviewable statement that a large uncovered file was just opted in.",
+    "Measured hermetically (the runtime suite alone, no game content), so a pull",
+    "request can reproduce it."
+  ],
+  "lineRate": 52.21,
+  "branchRate": 39.83,
+  "optedOutLines": 0,
+  "optedOutFiles": 0
+}

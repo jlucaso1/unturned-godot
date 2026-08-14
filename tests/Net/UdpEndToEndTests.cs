@@ -3,12 +3,17 @@ using System.Collections.Generic;
 using Godot;
 using UnturnedGodot.Net;
 using UnturnedGodot.Player;
+using UnturnedGodot.Tests.Helpers;
 using Xunit;
 
 namespace UnturnedGodot.Tests.Net;
 
 // The full stack over REAL localhost UDP sockets: server + two clients, joins, movement, visibility.
 // Same scenario the loopback E2E proves, now through the wire (framing, acks, endpoint tracking).
+//
+// Traited because this is one of the two files here that can flake: it binds real ports (through a
+// FreePort probe with a TOCTOU window) and sleeps on localhost datagram scheduling. See TestCategories.
+[Trait(TestCategories.Name, TestCategories.RealSockets)]
 public class UdpEndToEndTests
 {
     private const string Level = "PEI";
