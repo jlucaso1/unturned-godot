@@ -13,8 +13,15 @@
 #   ./scripts/install-godot.sh --print-path # echo where the binary is (or will be)
 set -euo pipefail
 
-readonly GODOT_VERSION=4.7-stable
-readonly GODOT_SHA256=69e855001e34b108eb8124ff1eae8445026b2a30a83b6e6314f705ae963d0fe1
+# The engine has to match what the PROJECT targets, not merely be close to it. unturned-godot.csproj
+# targets Godot.NET.Sdk/4.7.1 and core/ pins GodotSharp 4.7.1; when an older editor opens the project to
+# export it, it rewrites the csproj's SDK version DOWN to its own — a real edit, left in the working tree
+# — and the restore then fails with NU1605 (GodotSharp downgrade 4.7.1 -> 4.7.0). The exporter does not
+# treat that as fatal: it writes a .pck with no managed assemblies and EXITS ZERO, and the binary dies on
+# launch with "ERROR: .NET: Assemblies not found". So this pin is part of the release build's
+# correctness, not just of which editor a developer happens to get.
+readonly GODOT_VERSION=4.7.1-stable
+readonly GODOT_SHA256=6ca7ff0459f1b806900be683c1b0837c607a9c16834c530dc68c81b9fc3ae1f6
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 install_dir="$repo_dir/build/tools/godot-$GODOT_VERSION-mono"
