@@ -55,8 +55,9 @@ public static class WorldBuilder
             "Terrain", "Trees.dat"));
 
         ObjectAssetDatabase db = ContentExtraction.ScanAssets(sources);
-        int legacy = LegacyPlacements.ResolveGuids(objects, db)
-            + LegacyPlacements.AppendTrees(trees, objects, db);
+        var holidays = HolidayPolicy.ForMap(level.Path);
+        int legacy = LegacyPlacements.ResolveGuids(objects, db, holidays)
+            + LegacyPlacements.AppendTrees(trees, objects, db, holidays);
         if (legacy > 0)
             Log.Print($"[server] Legacy placements resolved by id: {legacy}");
         HashSet<Guid> needed = db.ResolvePlacementGuids(objects);
@@ -303,8 +304,11 @@ public static class WorldBuilder
         // A pre-GUID map names its objects and trees by legacy id; the needed set below is keyed on GUIDs,
         // so those placements borrow theirs from the asset database first — and the trees join the list
         // here, resolved through the resource namespace rather than the object one.
-        int legacy = LegacyPlacements.ResolveGuids(objects, db)
-            + LegacyPlacements.AppendTrees(trees, objects, db);
+        // The map's own Config.json decides whether a holiday may substitute its objects and trees;
+        // the calendar decides whether one is running (see HolidayPolicy).
+        var holidays = HolidayPolicy.ForMap(level.Path);
+        int legacy = LegacyPlacements.ResolveGuids(objects, db, holidays)
+            + LegacyPlacements.AppendTrees(trees, objects, db, holidays);
         if (legacy > 0)
             Log.Print($"[unturned-godot] Legacy placements resolved by id: {legacy}");
 

@@ -236,6 +236,37 @@ public class UiScreensTests : TestClass
         overlay.QueueFree();
     }
 
+    // Switched off, it does nothing at all. A CanvasLayer keeps receiving _Process while invisible, so
+    // the HUD was opening /proc/self/status, pulling seven monitors across the interop boundary and
+    // reshaping a Label five times a second with nobody looking. Worse than wasted: that work lands
+    // inside TimeProcess, which is the number `perf` subtracts from the frame — so the overlay was
+    // perturbing the measurement it exists to take.
+    [Test]
+    public async Task AHiddenOverlayStopsUpdating()
+    {
+        var overlay = new DebugOverlay { UpdateInterval = 0.0 }; // every frame, so nothing here waits
+        TestScene.AddChild(overlay);
+        await NextFrame();
+
+        Label label = Labels(overlay)[0];
+        overlay._Input(new InputEventKey { Keycode = Key.F3, Pressed = true });
+        Assert.False(overlay.Visible);
+
+        label.Text = "untouched";
+        for (int i = 0; i < 3; i++)
+            await NextFrame();
+
+        Assert.Equal("untouched", label.Text);
+
+        // And the toggle refreshes on the way back on, rather than leaving whatever frame it was
+        // switched off during on screen until the next interval comes round.
+        overlay._Input(new InputEventKey { Keycode = Key.F3, Pressed = true });
+        Assert.True(overlay.Visible);
+        Assert.Contains("FPS", label.Text);
+
+        overlay.QueueFree();
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
 
     private static Button? FindButton(Node parent)

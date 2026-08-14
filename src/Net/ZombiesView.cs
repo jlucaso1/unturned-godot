@@ -48,6 +48,11 @@ public partial class ZombiesView : Node3D
         public Vector3 KnownPosition;  // Root.Position as last written
         public float AppliedYaw;       // Root.RotationDegrees.Y as last written
         public bool AnimationActive = true; // rig.ProcessMode as last written (Inherit on spawn)
+
+        // The two state clips this zombie's Speciality/Move/Idle resolve to, resolved once when those
+        // three are set (SpawnOrReset is the only place they move) rather than per frame. See ClipFor.
+        public string MoveClipName = MoveClips[0];
+        public string IdleClipName = IdleClips[0];
     }
 
     private string _unturnedPath = "";
@@ -119,12 +124,14 @@ public partial class ZombiesView : Node3D
     {
         var root = new Node3D { Position = position };
         AddChild(root);
-        _avatars[(ushort)(_avatars.Count + 1)] = new ZombieAvatar
+        var avatar = new ZombieAvatar
         {
             Root = root,
             Speciality = speciality,
             KnownPosition = position,
         };
+        ResolveStateClips(avatar);
+        _avatars[(ushort)(_avatars.Count + 1)] = avatar;
     }
 
     // Which clip owns an avatar's rig, and for how much longer. The three one-shot sources (a stagger, a
@@ -143,6 +150,17 @@ public partial class ZombiesView : Node3D
         if (_avatars.TryGetValue(id, out ZombieAvatar? avatar))
             PlayOneShot(avatar, $"Stun_{clip}", now, interrupt: true, ZombieStun.DurationSeconds);
     }
+
+    // A region list arriving for one zombie, which is the whole of what re-entering a region does to an
+    // avatar: the same call the ZombieList branch makes per listing. Here so the re-entry reset can be
+    // asserted without standing up a server, a transport and a bound transition to produce one packet.
+    internal void ListForTest(in ZombieListing listing, byte bound) => SpawnOrReset(listing, bound);
+
+    internal string MoveClipForTest(ushort id) =>
+        _avatars.TryGetValue(id, out ZombieAvatar? avatar) ? avatar.MoveClipName : "";
+
+    internal string IdleClipForTest(ushort id) =>
+        _avatars.TryGetValue(id, out ZombieAvatar? avatar) ? avatar.IdleClipName : "";
 
     internal void PushStateForTest(ushort id, EZombieState state, double now)
     {
@@ -393,13 +411,27 @@ public partial class ZombiesView : Node3D
         avatar.Speciality = listing.Speciality;
         avatar.Move = listing.Move;
         avatar.Idle = listing.Idle;
+        ResolveStateClips(avatar);
         avatar.Root.Position = listing.Position;
         avatar.Root.RotationDegrees = new Vector3(0, NetAngles.DequantizeYaw(listing.Yaw), 0);
         avatar.KnownPosition = listing.Position;
         avatar.AppliedYaw = NetAngles.DequantizeYaw(listing.Yaw);
         avatar.TargetPosition = listing.Position;
         avatar.TargetYaw = avatar.AppliedYaw;
-        avatar.Rig?.Play(IdleClip(avatar));
+
+        // The clocks are reset with the pose, because a re-listed avatar is a zombie this client is
+        // meeting again from scratch — it may have been out of the region for minutes. Leaving them
+        // meant two visible defects. A stale `State` of Attack makes Push early-return on the server's
+        // very next state for it, so the forced idle below stands until NextSwing (up to a second)
+        // instead of the swing resuming; and a HoldUntil left over from a stagger that finished while
+        // the avatar was gone suppresses clip selection outright until that instant passes. Both are
+        // the difference between re-entry looking like a spawn and looking like a freeze.
+        avatar.State = EZombieState.Idle;
+        avatar.HoldUntil = 0;
+        avatar.NextSwing = 0;
+        avatar.NextGroan = 0;
+        avatar.Streaming = false;
+        avatar.Rig?.Play(avatar.IdleClipName);
     }
 
     private ZombieAvatar Spawn(in ZombieListing listing)
@@ -573,44 +605,77 @@ public partial class ZombiesView : Node3D
         Benchmark.RuntimeCounters.Record(Benchmark.RuntimeCounters.Counter.ZombiesView, benchmarkStarted);
     }
 
+    // Every clip name Zombie.cs can ask for, spelled out rather than interpolated.
+    //
+    // `$"Move_{avatar.Move}"` allocated a string per zombie per frame: ClipFor runs for every streaming
+    // avatar every frame, and CharacterSkeleton.Play's `clip == _current` early-out drops the result
+    // without the allocation ever reaching the rig. Move is 0..3 and Idle is 0..2, so the whole value
+    // space is seven names — 100 awake zombies at 144 fps was ~14k allocations a second building them.
+    // Literals are interned, so the tables cost nothing and hand out the same reference every time,
+    // which is also what turns Play's comparison into a reference hit instead of an ordinal walk.
+    private static readonly string[] MoveClips = { "Move_0", "Move_1", "Move_2", "Move_3" };
+    private static readonly string[] IdleClips = { "Idle_0", "Idle_1", "Idle_2" };
+    private static readonly string[] AttackClips =
+    {
+        "Attack_0", "Attack_1", "Attack_2", "Attack_3", "Attack_4",
+        "Attack_5", "Attack_6", "Attack_7", "Attack_8",
+    };
+    private static readonly string[] StartleClips =
+    {
+        "Startle_0", "Startle_1", "Startle_2", "Startle_3",
+        "Startle_4", "Startle_5", "Startle_6",
+    };
+
     // Zombie.cs's animation selection: the move/idle split follows what the RENDERED body is
     // doing (the original client checks whether it is still approaching its interpolation target),
     // so a physically blocked zombie stands instead of treadmilling its walk cycle.
     private string ClipFor(ZombieAvatar avatar, bool visiblyMoving) => avatar.State switch
     {
         EZombieState.Attack => AttackClip(avatar),
-        _ => visiblyMoving ? MoveClip(avatar) : IdleClip(avatar),
+        _ => visiblyMoving ? avatar.MoveClipName : avatar.IdleClipName,
     };
 
-    // sendZombieAttack's swing ids: crawlers swipe from the ground with Attack_5, sprinters lunge
-    // with Attack_6..8, everyone else swings the standing Attack_0..4.
-    private string AttackClip(ZombieAvatar avatar) => avatar.Speciality switch
+    // The two clips the listing's Speciality/Move/Idle resolve to. Called where those are assigned, so
+    // the per-frame loop reads a field instead of running this.
+    private static void ResolveStateClips(ZombieAvatar avatar)
     {
-        EZombieSpeciality.Crawler => "Attack_5",
-        EZombieSpeciality.Sprinter => $"Attack_{_rng.RandiRange(6, 8)}",
-        _ => $"Attack_{_rng.RandiRange(0, 4)}",
-    };
+        avatar.MoveClipName = MoveClipFor(avatar.Speciality, avatar.Move);
+        avatar.IdleClipName = IdleClipFor(avatar.Speciality, avatar.Idle);
+    }
 
-    private static string MoveClip(ZombieAvatar avatar) => avatar.Speciality switch
+    // Move/Idle arrive off the wire, so the roll a server sends is clamped into the table rather than
+    // trusted: an out-of-range byte used to build a clip name no rig carries, which Play then dropped —
+    // the same outcome the last variant gives, and this one cannot index past the end to reach it.
+    internal static string MoveClipFor(EZombieSpeciality speciality, byte move) => speciality switch
     {
         EZombieSpeciality.Crawler => "Move_4",
         EZombieSpeciality.Sprinter => "Move_5",
-        _ => $"Move_{avatar.Move}",
+        _ => MoveClips[Math.Min(move, MoveClips.Length - 1)],
     };
 
-    private static string IdleClip(ZombieAvatar avatar) => avatar.Speciality switch
+    internal static string IdleClipFor(EZombieSpeciality speciality, byte idle) => speciality switch
     {
         EZombieSpeciality.Crawler => "Idle_3",
         EZombieSpeciality.Sprinter => "Idle_4",
-        _ => $"Idle_{avatar.Idle}",
+        _ => IdleClips[Math.Min(idle, IdleClips.Length - 1)],
+    };
+
+    // sendZombieAttack's swing ids: crawlers swipe from the ground with Attack_5, sprinters lunge
+    // with Attack_6..8, everyone else swings the standing Attack_0..4. The roll stays where it was —
+    // only the name it picks is now a table entry rather than a fresh string.
+    private string AttackClip(ZombieAvatar avatar) => avatar.Speciality switch
+    {
+        EZombieSpeciality.Crawler => AttackClips[5],
+        EZombieSpeciality.Sprinter => AttackClips[_rng.RandiRange(6, 8)],
+        _ => AttackClips[_rng.RandiRange(0, 4)],
     };
 
     // Zombie.alert's startle roll: crawlers roar with 3/6, sprinters with 4/5, everyone else 0..2.
     private string StartleClip(ZombieAvatar avatar) => avatar.Speciality switch
     {
-        EZombieSpeciality.Crawler => _rng.Randf() < 0.5f ? "Startle_3" : "Startle_6",
-        EZombieSpeciality.Sprinter => _rng.Randf() < 0.5f ? "Startle_4" : "Startle_5",
-        _ => $"Startle_{_rng.RandiRange(0, 2)}",
+        EZombieSpeciality.Crawler => _rng.Randf() < 0.5f ? StartleClips[3] : StartleClips[6],
+        EZombieSpeciality.Sprinter => _rng.Randf() < 0.5f ? StartleClips[4] : StartleClips[5],
+        _ => StartleClips[_rng.RandiRange(0, 2)],
     };
 
     // ZombieRegion.destroy on region change: free every avatar that is not of the CURRENT region —

@@ -460,8 +460,9 @@ public partial class ObjectStreamer : Node
 
         // Needs both of the first two: a pre-GUID map names its objects and trees by legacy id, and only
         // the asset database can turn those into the GUIDs the rest of the load is keyed on.
-        int legacy = LegacyPlacements.ResolveGuids(_objects, _db)
-            + LegacyPlacements.AppendTrees(trees, _objects, _db);
+        var holidays = HolidayPolicy.ForMap(_level.Path);
+        int legacy = LegacyPlacements.ResolveGuids(_objects, _db, holidays)
+            + LegacyPlacements.AppendTrees(trees, _objects, _db, holidays);
         if (legacy > 0)
             Log.Print($"[stream] legacy placements resolved by id: {legacy}");
 

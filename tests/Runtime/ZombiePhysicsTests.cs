@@ -178,6 +178,41 @@ public class ZombiePhysicsTests : TestClass
         Assert.True(resolved.X < 12f, $"a probe starting inside the block was allowed to finish at {resolved}");
     }
 
+    // Every shape the resolver can be handed resolves to a finite position rather than an exception.
+    //
+    // This runs per zombie per tick inside _PhysicsProcess, where a throw is not a bad frame but the end
+    // of the process — and three reads of CastMotion's result had no guard against the empty array Godot
+    // answers with when a query cannot run at all, while the fourth, on the same array, did. What that
+    // asymmetry costs is not visible until the day the query fails; these are the degenerate inputs the
+    // resolver can actually be reached with, and none of them may take the tick down.
+    [Test]
+    public async Task DegenerateMovesResolveInsteadOfThrowing()
+    {
+        using var sandbox = new PhysicsSandbox(TestScene);
+        sandbox.AddBox(new Vector3(0f, -0.5f, 0f), new Vector3(60f, 1f, 60f), CollisionLayers.World);
+        sandbox.AddBox(new Vector3(4f, 2f, 0f), new Vector3(1f, 4f, 20f), CollisionLayers.World);
+        await sandbox.Settle();
+
+        ZombieSystem zombies = Attached(sandbox);
+
+        (Vector3 From, Vector3 To, float Radius)[] moves =
+        {
+            (Vector3.Zero, Vector3.Zero, 0.3f),                          // no motion at all
+            (Vector3.Zero, new Vector3(0.001f, 0f, 0f), 0.3f),           // below the slide threshold
+            (Vector3.Zero, new Vector3(0.4f, 0f, 0f), 0f),               // a capsule with no radius
+            (Vector3.Zero, new Vector3(0.4f, 0f, 0f), 8f),               // one far wider than the map
+            (Vector3.Zero, new Vector3(0f, -40f, 0f), 0.3f),             // straight down through the floor
+            (Vector3.Zero, new Vector3(400f, 0f, 0f), 0.3f),             // a route leg the length of a map
+            (new Vector3(4f, 0f, 0f), new Vector3(20f, 0f, 0f), 0.3f),   // beginning inside the wall
+        };
+
+        foreach ((Vector3 from, Vector3 to, float radius) in moves)
+        {
+            Vector3 resolved = zombies.MoveResolver!(from, to, radius);
+            Assert.True(resolved.IsFinite(), $"{from} -> {to} at r={radius} resolved to {resolved}");
+        }
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
 
     // Eye height, at either end of the map's x axis.
