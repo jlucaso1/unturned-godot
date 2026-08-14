@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 
 namespace UnturnedGodot.Unity;
 
@@ -78,6 +79,20 @@ public sealed class UnityBundle
             uint u = info.ReadUInt32();
             uint c = info.ReadUInt32();
             ushort f = info.ReadUInt16();
+            // Both sizes are uint on the wire and int everywhere below, so anything at or above 2 GiB
+            // wraps negative: ReadBytes would throw on a negative count, and the LZMA path would size its
+            // output buffer negative. Neither is far-fetched — the game's own masterbundle is a single
+            // ~1.4 GB block, 65% of the way to the limit, so a workshop bundle with a bigger one reaches
+            // it. Checked here, while the header is being parsed, rather than at the block loop below:
+            // the blob is allocated in between, and `new byte[4 GiB]` fails as an OutOfMemoryException
+            // that says nothing about the size field that asked for it.
+            if (u > int.MaxValue || c > int.MaxValue)
+            {
+                throw new InvalidDataException(
+                    $"Bundle block {i} is too large to read ({u} bytes uncompressed, {c} compressed); "
+                    + $"the reader is limited to {int.MaxValue}");
+            }
+
             blocks[i] = new BlockInfo(u, c, f);
             totalUncompressed += u;
         }
@@ -102,6 +117,8 @@ public sealed class UnityBundle
             if (blobPos >= blobSize)
                 break; // reached the requested cap
 
+            // Sizes were bounds-checked against int when the block table was parsed, so these casts and
+            // the blob allocation above are both safe.
             byte[] compressed = r.ReadBytes((int)block.CompressedSize);
             int want = (int)Math.Min(block.UncompressedSize, blobSize - blobPos);
             int blockCompression = block.Flags & 0x3F;
