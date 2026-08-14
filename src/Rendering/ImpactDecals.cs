@@ -51,6 +51,16 @@ public sealed partial class ImpactDecals : Node3D
     private readonly List<Decal> _pool = new();
     private readonly List<double> _expiry = new();
 
+    // Whether each slot is currently showing a mark, mirrored on the C# side.
+    //
+    // The sweep used to ask the engine — `_pool[i].Visible` is a marshalled property read, and reading
+    // all 24 of them plus a Time.GetTicksMsec every frame was ~3,500 interop crossings a second at
+    // 144 fps to establish that nothing had expired. ZombiesView states the rule this follows: a value
+    // this class writes is a value it already knows. The count is what lets the sweep stop entirely, so
+    // a session that has never thrown a punch — which is most of any session — costs nothing at all.
+    private readonly List<bool> _live = new();
+    private int _liveCount;
+
     // Where the round-robin stands once the pool is full.
     private int _next;
 
@@ -201,21 +211,47 @@ public sealed partial class ImpactDecals : Node3D
             AddChild(created);
             _pool.Add(created);
             _expiry.Add(until);
+            _live.Add(true);   // Mark makes it visible the moment it has the texture
+            _liveCount++;
             return created;
         }
 
         _next = (_next + 1) % _pool.Count;
         _expiry[_next] = until;
+        if (!_live[_next])
+        {
+            _live[_next] = true;
+            _liveCount++;
+        }
         return _pool[_next];
     }
 
+    // How many slots are currently showing a mark. Internal so the sweep can be tested against what this
+    // class knows rather than against Decal.Visible, which is the engine-side value it stopped asking for.
+    internal int LiveDecals => _liveCount;
+
+    // Ages every standing mark, so retirement can be tested without waiting out the 48 seconds one lives.
+    internal void AgeForTest(double seconds)
+    {
+        for (int i = 0; i < _expiry.Count; i++)
+            _expiry[i] -= seconds;
+    }
+
     // Retires marks whose time is up. Runs on the frame loop rather than on a timer per decal, because a
-    // pool of two dozen is cheaper to sweep than it is to schedule.
+    // pool of two dozen is cheaper to sweep than it is to schedule — and cheaper still when it knows
+    // there is nothing in it, which is the state a session spends nearly all of its time in.
     public override void _Process(double delta)
     {
+        if (_liveCount == 0)
+            return;
         double now = Time.GetTicksMsec() / 1000.0;
         for (int i = 0; i < _pool.Count; i++)
-            if (_pool[i].Visible && _expiry[i] <= now)
-                _pool[i].Visible = false;
+        {
+            if (!_live[i] || _expiry[i] > now)
+                continue;
+            _live[i] = false;
+            _liveCount--;
+            _pool[i].Visible = false;
+        }
     }
 }
