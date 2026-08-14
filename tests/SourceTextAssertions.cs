@@ -244,15 +244,46 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void LegacyObjectIdsAreNormalizedBeforeEveryGuidKeyedWorldBuild()
     {
-        if (FindRepositoryFile(Path.Combine("src", "World", "WorldBuilder.cs")) is not { } worldPath
+        // This used to count the ResolvePlacementGuids calls in each builder, because each builder had
+        // its own copy of the sequence. There is one now, so what needs guarding is that every path into
+        // a GUID-keyed world goes through it — the editor preview did not, and its needed set came
+        // straight off the raw placement GUIDs, so the stale-GUID-to-legacy-id fallback never ran and
+        // Russia's NPCs were chased through the extraction plan on every preview.
+        if (FindRepositoryFile(Path.Combine("core", "Assets", "LevelContentPlan.cs")) is not { } planPath
+            || FindRepositoryFile(Path.Combine("src", "World", "WorldBuilder.cs")) is not { } worldPath
             || FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs"))
-                is not { } streamerPath)
+                is not { } streamerPath
+            || FindRepositoryFile(Path.Combine("addons", "unturned", "WorldPreview.cs"))
+                is not { } previewPath)
             return;
 
-        string world = File.ReadAllText(worldPath);
-        string streamer = File.ReadAllText(streamerPath);
-        Assert.Equal(2, CountOccurrences(world, "ResolvePlacementGuids(objects)"));
-        Assert.Contains("_db.ResolvePlacementGuids(_objects)", streamer);
+        string plan = File.ReadAllText(planPath);
+        string preview = File.ReadAllText(previewPath);
+
+        // The normalisation, and the order that makes it correct: the trees are folded in and the NPCs
+        // are taken out BEFORE the needed set is derived from the placements.
+        Assert.Contains("LegacyPlacements.ResolveGuids(objects, db, holiday)", plan);
+        Assert.Contains("LegacyPlacements.AppendTrees(trees, objects, db, holiday)", plan);
+        Assert.True(plan.IndexOf("NpcPlacements.Partition(objects, db)", StringComparison.Ordinal)
+            < plan.IndexOf("db.ResolvePlacementGuids(objects)", StringComparison.Ordinal),
+            "the NPCs have to leave the list before the needed set is built, or the extraction plan "
+                + "chases GUIDs that resolve to the player rig and ObjectsBuilder draws them as boxes");
+        // And the holiday policy is resolved once, from the map. Two builds of the same map that
+        // disagreed about the date would not merely draw different things: the placement list is what
+        // DamageableWorld indexes into, so the indices would shift between them.
+        Assert.Contains("HolidayPolicy.ForMap(level.Path)", plan);
+
+        // And nothing else derives any of it. A second ResolvePlacementGuids call site — or a second
+        // HolidayPolicy — is a fifth copy of the sequence starting up again.
+        foreach (string source in new[] { File.ReadAllText(worldPath), File.ReadAllText(streamerPath),
+            preview })
+        {
+            Assert.Contains("LevelContentPlan.Resolve(", source);
+            Assert.Equal(0, CountOccurrences(source, "ResolvePlacementGuids("));
+            Assert.Equal(0, CountOccurrences(source, "NpcPlacements.Partition("));
+            Assert.Equal(0, CountOccurrences(source, "LegacyPlacements."));
+            Assert.Equal(0, CountOccurrences(source, "HolidayPolicy."));
+        }
     }
 
     [Fact]
@@ -380,11 +411,14 @@ public class PhysicsBodyOrderTests
         // instance origin, so identity would switch every object on its distance from the map origin.
         Assert.Contains("renderer.Add(multimesh, new Transform3D(Basis.Identity, centre)", objects);
         Assert.Contains("BuildMultiMesh(mesh, transforms, bounds.Centre)", objects);
-        Assert.Contains("SwitchDistanceFor(mesh, transforms) + bounds.Radius", objects);
         // The switch distance comes from the batch AddLevels was handed, so it accounts for the largest
-        // scale actually placed there; deriving it from the mesh alone would swap scaled copies too early.
-        Assert.Contains("SwitchDistanceFor(mesh, transforms)", objects);
-        Assert.Contains("radius * maxScale * LodSwitchRadii", objects);
+        // scale actually placed there; deriving it from the mesh alone would swap scaled copies too
+        // early. What it multiplies is asserted directly in ObjectBatchPartitionTests now that the
+        // arithmetic lives in core/, so all this pins is that the batch's own placements are what reach
+        // it, and that the batch radius is added on top — without that, a cell whose centre is just past
+        // the threshold draws the coarse level for the placement nearest the player.
+        Assert.Contains("ObjectBatchPartition.SwitchDistance(BoundingRadius(mesh), transforms,", objects);
+        Assert.Contains("LodSwitchRadii) + bounds.Radius", objects);
         if (FindRepositoryFile(Path.Combine("src", "Benchmark", "SceneMetrics.cs")) is { } metricsPath)
             Assert.Contains("case MultiMeshRidRenderer", File.ReadAllText(metricsPath));
     }
@@ -692,7 +726,7 @@ public class PhysicsBodyOrderTests
         if (FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs")) is not { } path)
             return;
         string source = File.ReadAllText(path);
-        Assert.Contains("ObjectCollisionPolicy.PhysicsLayer(asset!)", source);
+        Assert.Contains("ObjectCollisionPolicy.PhysicsLayer(asset)", source);
     }
 
     [Fact]
@@ -933,21 +967,38 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void ObjectCellsAreAnchoredPerGroupAndCoarsenedByTheGeometryTheyCarry()
     {
-        if (FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs")) is not { } path)
+        // The policy itself moved to core/Data/ObjectBatchPartition.cs, where each of these properties is
+        // now asserted by running it (ObjectBatchPartitionTests) rather than by matching its source. What
+        // is left for a source scan is the seam: that the builder still routes through it, and that the
+        // knobs it reads are the ones the env vars configure. A copy of the arithmetic quietly reappearing
+        // in the builder is exactly the drift this file exists to catch.
+        if (FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs")) is not { } path
+            || FindRepositoryFile(Path.Combine("core", "Data", "ObjectBatchPartition.cs"))
+                is not { } partitionPath)
             return;
         string source = File.ReadAllText(path);
+        string partition = File.ReadAllText(partitionPath);
+
+        Assert.Contains("ObjectBatchPartition.CellSizeFor(transforms, trianglesPerInstance,", source);
+        Assert.Contains("ObjectBatchPartition.Cells(transforms, chunkMetres)", source);
+        Assert.Contains("ObjectBatchPartition.ExceedsCellSpan(transforms, chunkMetres)", source);
+        Assert.Contains("ObjectBatchPartition.BoundsOf(transforms)", source);
+        // All four knobs reach the partition through one settings value, so a new one cannot be read in
+        // the builder and silently ignored by the policy.
+        Assert.Contains("UG_OBJECT_CELL_MIN_TRIS", source);
+        Assert.Contains("new(baseMetres, MinCellTriangles, MaxCellMetres, ObjectChunkRequireSpread)", source);
+
         // Anchoring the grid at the world origin cuts every group straddling it along both axes whatever
         // the cell size is, so such a group can never fall below four batches — and official maps are
         // centred there. The anchor has to come from the group.
-        Assert.Contains("AnchorOf(transforms)", source);
-        Assert.Contains("(origin.X - anchor.X) / cellSize", source);
-        Assert.Contains("(origin.Z - anchor.Z) / cellSize", source);
+        Assert.Contains("AnchorOf(transforms)", partition);
+        Assert.Contains("(origin.X - anchor.X) / cellSize", partition);
+        Assert.Contains("(origin.Z - anchor.Z) / cellSize", partition);
         // Splitting buys frustum rejection and costs a draw call per cell, so it pays in proportion to
         // the geometry each cell carries. Coarsening by doubling keeps the grids nested, which is what
         // makes the cell count fall monotonically and the walk terminate.
-        Assert.Contains("UG_OBJECT_CELL_MIN_TRIS", source);
-        Assert.Contains("trianglesPerInstance * transforms.Count / cells >= MinCellTriangles", source);
-        Assert.Contains("metres *= 2f", source);
+        Assert.Contains("trianglesPerInstance * transforms.Count / cells", partition);
+        Assert.Contains("metres *= 2f", partition);
     }
 
     [Fact]

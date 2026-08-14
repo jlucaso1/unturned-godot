@@ -109,6 +109,25 @@ public partial class DebugOverlay : CanvasLayer
             $"Process RSS {memMb:0.0} MB\n" +
             $"Draw calls {drawCalls:0}   Primitives {primitives:0}\n" +
             $"Render objects {renderObjects:0}   Nodes {nodes:0}\n" +
+            NetLine() + "\n" +
             "F3 toggle HUD   F4 copy camera (SHOT_CAM)";
+    }
+
+    // The netcode's line, in the same place as everything else the project measures.
+    //
+    // Client-side numbers, because this HUD is drawn in a client's frame — the round trip and what this
+    // machine is sending and receiving. A host wanting its SERVER's totals types `net.stats`, which
+    // prints both halves; a line narrow enough to sit beside the frame time cannot carry four.
+    //
+    // Resolved through the group every time rather than held: the session is rebuilt on every map load,
+    // and it does not exist at all in the menu or in a free-camera walkthrough.
+    private string NetLine()
+    {
+        if (!IsInsideTree() || GetTree().GetFirstNodeInGroup(SceneGroups.Network) is not NetworkManager net
+            || net.Client is not { } client)
+        {
+            return "Net  offline";
+        }
+        return UnturnedGodot.Net.NetReport.HudLine(client.Traffic, client.RoundTripSeconds);
     }
 }

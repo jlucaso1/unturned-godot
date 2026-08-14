@@ -104,8 +104,8 @@ public class TerrainBuilderTests : TestClass
 
         var holes = new System.Collections.Generic.HashSet<(int, int)>(cut);
         var space = tile.GetWorld3D().DirectSpaceState;
-        // Every cell within two of a cut one: the cut cells themselves, the ring the wide cut damages,
-        // and a ring beyond it that must never have been touched at all.
+        // Every cell within three of a cut one: the cut cells themselves, the ring the wide cut damages
+        // and the repair puts back, and two rings beyond that must never have been touched at all.
         foreach ((int cx, int cy) in Neighbourhood(cut, radius: 3))
         {
             // Cell (cx, cy) spans heightmap indices cx..cx+1 (world Z) and cy..cy+1 (world X).

@@ -56,12 +56,11 @@ public class PunchHitmarkTests : TestClass
 
     // A tree that opts in to fists, and one that does not — the resource path's own gate.
     //
-    // The opt-in is SPELLED OUT, and it has to be. Unturned reads this field with ParseBool and a false
-    // default (ResourceAsset.cs:477), and ParseBool falls back on that default for the null a valueless
-    // key holds — so a BARE `Vulnerable_To_Fists` is not an opt-in, it is off. The booleans the game
-    // really does write by presence are the ones it reads with ContainsKey instead. This fixture used
-    // the bare spelling, and stopped meaning what its name says the moment .dat scalars began being
-    // read by the game's own rules; ObjectAssetDamageTests.ABareFlagIsNotAnOptIn pins that on purpose.
+    // The opt-in is SPELLED OUT, and it has to be. ResourceAsset.cs:477 reads this key with ParseBool
+    // and a false default, and DatValueEx.TryParseBool fails on the null a valueless key holds — so a
+    // bare "Vulnerable_To_Fists" is not an opt-in, it is the default. This fixture wrote it bare and
+    // passed only because GetBool used to answer true for a value it could not parse; that was fixed to
+    // match the game, and the fixture was the one caller left describing the old behaviour.
     private static ObjectAsset VulnerableTree() => Parse("""
         GUID d19b3ec55a2046668611c9d2775efd99
         Type Resource
