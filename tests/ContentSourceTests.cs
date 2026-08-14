@@ -184,6 +184,47 @@ public class ContentSourceTests
         Assert.True(core.Owns(Path.Combine(core.VehiclesDir, "Offroader")));
     }
 
+    // Item mods do not follow the game's folder layout, and nothing makes them: the loader hands the
+    // item's own directory to the asset worker and recurses. "Clothes" is what the admin-tools item
+    // installed on this machine calls its clothing folder and "Bundles/Items" is where a stacking mod
+    // puts its items; neither is a name a whitelist would have guessed, and both were dropped outright
+    // before this, leaving the clothing armor scan with none of their assets to read.
+    [Theory]
+    [InlineData("Clothes")]
+    [InlineData("Bundles/Items/Drinks")]
+    [InlineData("Assets/Zombie_Difficulty")]
+    public void Discover_AcceptsAnItemWhoseAssetsSitOutsideEveryKnownFolder(string folder)
+    {
+        using var dir = new TempDir();
+        string install = BuildLibrary(dir);
+        string item = Path.Combine("steamapps", "workshop", "content", "304930", "5005");
+        dir.Write(Path.Combine(item, "MasterBundle.dat"), ModConfig);
+        dir.Write(Path.Combine(item, "california2_linux.masterbundle"), new byte[] { 1 });
+        dir.Write(Path.Combine(item, Path.Combine(folder.Split('/')), "Thing", "Thing.dat"),
+            "GUID 8a1c0f5d6b2e4738a9f0c1d2e3b4a596\nType Vest\nID 30000\n");
+
+        ContentSource mod = Assert.Single(ContentSource.Discover(install,
+            UnturnedInstall.Platform.Linux), source => !source.IsCore);
+
+        Assert.EndsWith(Path.Combine("304930", "5005"), mod.Root, StringComparison.Ordinal);
+    }
+
+    // ".asset" counts as well as ".dat" — a difficulty asset, a landscape or a vehicle redirector is
+    // written in that form, and the worker looks for both (AssetsWorker.cs:305-371).
+    [Fact]
+    public void Discover_AcceptsAnItemWhoseOnlyContentIsALooseAssetFile()
+    {
+        using var dir = new TempDir();
+        string install = BuildLibrary(dir);
+        string item = Path.Combine("steamapps", "workshop", "content", "304930", "5006");
+        dir.Write(Path.Combine(item, "MasterBundle.dat"), ModConfig);
+        dir.Write(Path.Combine(item, "Custom", "Hard.asset"),
+            "Metadata { GUID 2b7d4e1a9c3f45608172a3b4c5d6e7f8 }\n");
+
+        Assert.Single(ContentSource.Discover(install, UnturnedInstall.Platform.Linux),
+            source => !source.IsCore);
+    }
+
     // Still not a source: a bundle declaration with no content of any kind behind it.
     [Fact]
     public void Discover_RejectsAnItemWithNoContentAtAll()
@@ -198,6 +239,83 @@ public class ContentSourceTests
 
         Assert.True(ContentSource.Discover(install, UnturnedInstall.Platform.Linux)[0].IsCore);
         Assert.Single(ContentSource.Discover(install, UnturnedInstall.Platform.Linux));
+    }
+
+    // An item whose tree cannot be walked contributes nothing, rather than aborting the library scan and
+    // costing the player every other mod plus the game itself.
+    [Fact]
+    public void Discover_ItemWithAnUnreadableTree_IsSkippedWithoutThrowing()
+    {
+        if (OperatingSystem.IsWindows())
+            return; // POSIX permissions only
+
+        using var dir = new TempDir();
+        string install = BuildLibrary(dir);
+        string item = Path.Combine("steamapps", "workshop", "content", "304930", "5007");
+        dir.Write(Path.Combine(item, "MasterBundle.dat"), ModConfig);
+        dir.Write(Path.Combine(item, "Clothes", "Vest", "Vest.dat"), "GUID x\nType Vest\nID 30000\n");
+        string locked = Path.Combine(dir.Path, item, "Clothes");
+        File.SetUnixFileMode(locked, UnixFileMode.None);
+
+        try
+        {
+            Directory.EnumerateFiles(locked).GetEnumerator().MoveNext();
+            return; // running as root: modes do not apply
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // expected
+        }
+
+        try
+        {
+            ContentSource core = Assert.Single(ContentSource.Discover(install,
+                UnturnedInstall.Platform.Linux));
+            Assert.True(core.IsCore);
+        }
+        finally
+        {
+            File.SetUnixFileMode(locked,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    // ...but ONE denied subtree must not hide the readable assets beside it.
+    //
+    // This is the case the test above cannot catch, because there everything the item ships is behind
+    // the lock and dropping it is right. Here the item has content the scan can read AND an unrelated
+    // directory it cannot list — a permission a mod author set, a partial download, a directory owned by
+    // another user. Directory.EnumerateFiles(..., AllDirectories) aborts its whole enumeration on the
+    // first such child, so the readable sibling is never reached and the item reads as shipping nothing:
+    // a source silently lost to a folder that had nothing to do with it. SafeFileTree isolates the denied
+    // subtree instead, which is what every other optional content walk in this repository does.
+    [Fact]
+    public void Discover_OneDeniedSubtreeDoesNotHideTheAssetsBesideIt()
+    {
+        if (!PosixPermissions.AreEnforced)
+            return;
+
+        using var dir = new TempDir();
+        string install = BuildLibrary(dir);
+        string item = Path.Combine("steamapps", "workshop", "content", "304930", "5008");
+        dir.Write(Path.Combine(item, "MasterBundle.dat"), ModConfig);
+        // Readable, and enough on its own to make this item a source.
+        dir.Write(Path.Combine(item, "Custom", "Hard.asset"),
+            "Metadata { GUID 3c8e5f2b0d4a56719283b4c5d6e7f8a9 }\n");
+        dir.Write(Path.Combine(item, "Private", "Secret", "notes.dat"), "nothing to see\n");
+        string locked = Path.Combine(dir.Path, item, "Private");
+        File.SetUnixFileMode(locked, UnixFileMode.None);
+
+        try
+        {
+            Assert.Single(ContentSource.Discover(install, UnturnedInstall.Platform.Linux),
+                source => !source.IsCore);
+        }
+        finally
+        {
+            File.SetUnixFileMode(locked,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
     }
 
     [Fact]
@@ -320,6 +438,11 @@ public class ContentSourceTests
     }
 
     // The real install: the game is always a source, and any subscribed mod with a bundle joins it.
+    //
+    // The per-source assertion is deliberately NOT "has an Objects or Resources tree". Item mods have
+    // neither — the one installed here keeps its clothing in Clothes/ — and requiring those folders is
+    // exactly the assumption that used to drop them. What every source does have is the bundle
+    // declaration that made it one, and a root that still exists.
     [RealDataFact]
     public void Discover_RealInstall_AlwaysHasTheGame()
     {
@@ -331,6 +454,10 @@ public class ContentSourceTests
         Assert.True(sources[0].IsCore);
         Assert.True(File.Exists(sources[0].BundlePath));
         foreach (ContentSource source in sources)
-            Assert.True(Directory.Exists(source.ObjectsDir) || Directory.Exists(source.TreesDir));
+        {
+            Assert.True(Directory.Exists(source.Root), source.Root);
+            Assert.True(source.IsCore || File.Exists(Path.Combine(source.Root, "MasterBundle.dat")),
+                source.Root);
+        }
     }
 }

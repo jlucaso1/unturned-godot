@@ -61,8 +61,11 @@ skip() {
 godot_version="$(sed -n 's/^readonly GODOT_VERSION=//p' "$repo_dir/scripts/install-godot.sh")"
 [[ -n "$godot_version" ]] || { echo "Could not read GODOT_VERSION from install-godot.sh" >&2; exit 1; }
 
-# sha256 of templates/linux_release.x86_64 inside Godot_v4.7-stable_mono_export_templates.tpz.
-readonly TEMPLATE_SHA256=26b1b5d076b78c02f1476dab78e183218a6aa30c8e614653eac11a0dd198456a
+# sha256 of templates/linux_release.x86_64 inside Godot_v<GODOT_VERSION>_mono_export_templates.tpz.
+# Bump this together with GODOT_VERSION above: the version is read from install-godot.sh so the two
+# cannot drift, but the checksum is a second fact about the same release and this is the one that has to
+# be re-measured by hand.
+readonly TEMPLATE_SHA256=f724c4ecb43ab5cfda3d3b92a99e183a92082b3228cf5ae52daccc9b22ac5481
 
 templates_root="${XDG_DATA_HOME:-$HOME/.local/share}/godot/export_templates"
 
