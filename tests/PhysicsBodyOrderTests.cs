@@ -289,12 +289,13 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void HuntProbeAdvancesInsidePhysicsNotifications()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Net", "NetworkManager.cs")) is not { } path)
+        if (FindRepositoryFile(Path.Combine("src", "Diagnostics", "NavProbes.cs")) is not { } path)
             return;
 
         string source = File.ReadAllText(path);
         int probe = source.IndexOf("if (OS.GetEnvironment(\"HUNT_PROBE\")", StringComparison.Ordinal);
-        int frame = source.IndexOf("await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame)", probe,
+        int frame = source.IndexOf(
+            "await owner.ToSignal(owner.GetTree(), SceneTree.SignalName.PhysicsFrame)", probe,
             StringComparison.Ordinal);
         int tick = source.IndexOf("probe.Tick(views", probe, StringComparison.Ordinal);
         Assert.True(probe >= 0 && frame > probe && tick > frame,
@@ -319,12 +320,13 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void PathProbeQueriesInsideAPhysicsNotification()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Net", "NetworkManager.cs")) is not { } path)
+        if (FindRepositoryFile(Path.Combine("src", "Diagnostics", "NavProbes.cs")) is not { } path)
             return;
 
         string source = File.ReadAllText(path);
         int probe = source.IndexOf("if (OS.GetEnvironment(\"PATH_PROBE\")", StringComparison.Ordinal);
-        int frame = source.IndexOf("await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame)", probe,
+        int frame = source.IndexOf(
+            "await owner.ToSignal(owner.GetTree(), SceneTree.SignalName.PhysicsFrame)", probe,
             StringComparison.Ordinal);
         int query = source.IndexOf("zombies.PathQuery!(from, to", probe, StringComparison.Ordinal);
         Assert.True(probe >= 0 && frame > probe && query > frame,
@@ -732,11 +734,13 @@ public class PhysicsBodyOrderTests
     {
         if (FindRepositoryFile(Path.Combine("src", "World", "InstancedStaticBodies.cs")) is not { } ownerPath
             || FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs")) is not { } builderPath
-            || FindRepositoryFile(Path.Combine("src", "Net", "NetworkManager.cs")) is not { } netPath)
+            // The diagnostics that read a collider's name back moved out of the session owner and into
+            // src/Diagnostics/NavProbes.cs; the naming they consume is still this test's subject.
+            || FindRepositoryFile(Path.Combine("src", "Diagnostics", "NavProbes.cs")) is not { } probesPath)
             return;
         string owner = File.ReadAllText(ownerPath);
         string builder = File.ReadAllText(builderPath);
-        string net = File.ReadAllText(netPath);
+        string probes = File.ReadAllText(probesPath);
         int addShape = owner.IndexOf("PhysicsServer3D.BodyAddShape", System.StringComparison.Ordinal);
         int setSpace = owner.IndexOf("PhysicsServer3D.BodySetSpace", System.StringComparison.Ordinal);
         Assert.True(addShape >= 0 && setSpace > addShape);
@@ -744,7 +748,7 @@ public class PhysicsBodyOrderTests
         Assert.Contains("_names[body] = definition.Name", owner);
         Assert.Contains("PhysicsServer3D.FreeRid(body)", owner);
         Assert.Contains("UG_NODE_PHYSICS", builder);
-        Assert.Contains("InstancedStaticBodies.ColliderName", net);
+        Assert.Contains("InstancedStaticBodies.ColliderName", probes);
     }
 
     [Fact]

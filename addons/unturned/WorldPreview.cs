@@ -218,7 +218,7 @@ public static class WorldPreview
         await Yield(yieldOn);
 
         if (heights is { } sampled)
-            Try(report, "roads", () => root.AddChild(RoadsBuilder.Build(environmentDir, sampled)));
+            Try(report, "roads", () => root.AddChild(RoadsBuilder.Build(environmentDir, sampled, unturnedPath)));
 
         StandardMaterial3D? water = null;
         Try(report, "water", () =>

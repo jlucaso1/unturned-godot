@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using Godot;
+using UnturnedGodot.Assets;
 using UnturnedGodot.Data;
 using UnturnedGodot.Unity;
 
@@ -46,7 +47,11 @@ public static class RoadsBuilder
         """,
     };
 
-    public static Node3D Build(string environmentDir, HeightmapSampler heights)
+    // `unturnedPath`, when given, is what lets a road that names a RoadAsset be drawn as that asset
+    // rather than as whatever the legacy table's entry `Material` happens to be. Optional so the runtime
+    // tests, which build a Paths.dat in a temp folder with no install behind it, still exercise the
+    // legacy path unchanged.
+    public static Node3D Build(string environmentDir, HeightmapSampler heights, string? unturnedPath = null)
     {
         var watch = System.Diagnostics.Stopwatch.StartNew();
         var root = new Node3D { Name = "Roads" };
@@ -57,6 +62,7 @@ public static class RoadsBuilder
 
         List<RoadMaterialConfig> configs = LevelRoads.LoadMaterials(Path.Combine(environmentDir, "Roads.dat"));
         List<ImageTexture?> textures = LoadRoadTextures(environmentDir);
+        RoadAssetDatabase? roadAssets = LoadRoadAssets(unturnedPath, roads);
 
         var pavedFallback = new ShaderMaterial { Shader = RoadShader };
         pavedFallback.SetShaderParameter("paved", true);
@@ -70,18 +76,32 @@ public static class RoadsBuilder
         var merged = new Dictionary<int, (SurfaceTool tool, Material material, int verts)>();
         var arrayMeshes = new Dictionary<int, (List<RoadMeshData> meshes, Material material)>();
 
-        int built = 0, textured = 0;
+        int built = 0, textured = 0, byAsset = 0;
         for (int i = 0; i < roads.Count; i++)
         {
+            // A road that names a RoadAsset takes its shape from that asset; one that does not keeps
+            // indexing Roads.dat. The batching key follows: assets and table entries share the `mat`
+            // number space otherwise, and two roads of different widths would be merged into one mesh.
+            RoadAsset? asset = roadAssets?.ResolveByGuid(roads[i].RoadAssetGuid);
             int mat = roads[i].Material;
-            RoadMaterialConfig config = mat < configs.Count
-                ? configs[mat]
-                : new RoadMaterialConfig(8f, 4f, 0.2f, 0f, true);
+            int key = asset != null ? ~roads[i].RoadAssetGuid.GetHashCode() : mat;
+            RoadMaterialConfig config = asset?.ToMaterialConfig()
+                ?? (mat < configs.Count ? configs[mat] : new RoadMaterialConfig(8f, 4f, 0.2f, 0f, true));
 
-            if (!byMaterial.TryGetValue(mat, out (Material material, float inverseRepeat) shared))
+            if (!byMaterial.TryGetValue(key, out (Material material, float inverseRepeat) shared))
             {
                 shared = SharedMaterial(mat, config, textures, pavedFallback, dirtFallback);
-                byMaterial[mat] = shared;
+                if (asset != null)
+                {
+                    byAsset++;
+                    // Road.cs:802: the asset tiles by its own Width and the texture's aspect, not by the
+                    // legacy table's height divisor. Applied to whatever texture is actually bound, so
+                    // the UVs match the image on the surface.
+                    shared.inverseRepeat = TexturedSize(shared.material) is var (w, h) && w > 0
+                        ? asset.InverseTextureRepeatDistance(w, h)
+                        : 1f / FallbackRepeat;
+                }
+                byMaterial[key] = shared;
                 if (shared.material is StandardMaterial3D)
                     textured++;
             }
@@ -92,20 +112,20 @@ public static class RoadsBuilder
 
             if (useArrays)
             {
-                if (!arrayMeshes.TryGetValue(mat, out (List<RoadMeshData> meshes, Material material) group))
-                    arrayMeshes[mat] = group = (new List<RoadMeshData>(), shared.material);
+                if (!arrayMeshes.TryGetValue(key, out (List<RoadMeshData> meshes, Material material) group))
+                    arrayMeshes[key] = group = (new List<RoadMeshData>(), shared.material);
                 group.meshes.Add(roadMesh);
             }
             else
             {
-                if (!merged.TryGetValue(mat, out (SurfaceTool tool, Material material, int verts) acc))
+                if (!merged.TryGetValue(key, out (SurfaceTool tool, Material material, int verts) acc))
                 {
                     var st = new SurfaceTool();
                     st.Begin(Mesh.PrimitiveType.Triangles);
                     acc = (st, shared.material, 0);
                 }
                 AppendRoad(acc.tool, acc.verts, roadMesh);
-                merged[mat] = (acc.tool, acc.material, acc.verts + roadMesh.Vertices.Length);
+                merged[key] = (acc.tool, acc.material, acc.verts + roadMesh.Vertices.Length);
             }
             built++;
         }
@@ -127,10 +147,41 @@ public static class RoadsBuilder
                     meshCount++;
                 }
         Log.Print($"[unturned-godot] Roads: {built}/{roads.Count} built into {meshCount} meshes, " +
-            $"{textured} textured materials in {watch.ElapsedMilliseconds} ms "
+            $"{textured} textured materials, {byAsset} from RoadAssets in {watch.ElapsedMilliseconds} ms "
             + $"({(useArrays ? "direct arrays" : "SurfaceTool")})");
         return root;
     }
+
+    // Scanned only when some road actually names an asset, so the ordinary map pays nothing for this.
+    private static RoadAssetDatabase? LoadRoadAssets(string? unturnedPath, List<PlacedRoad> roads)
+    {
+        if (string.IsNullOrEmpty(unturnedPath))
+            return null;
+        bool any = false;
+        foreach (PlacedRoad road in roads)
+            any |= road.RoadAssetGuid != Guid.Empty;
+        if (!any)
+            return null;
+
+        try
+        {
+            return RoadAssetDatabase.ScanSources(ContentSource.Discover(unturnedPath));
+        }
+        catch (Exception e)
+        {
+            // Same rule as the textures below: a road whose asset cannot be read still builds, off the
+            // legacy table, rather than costing the map its roads.
+            Log.Print($"[unturned-godot] Road assets unavailable ({e.GetType().Name}: {e.Message}); "
+                + "falling back to the legacy Roads.dat table.");
+            return null;
+        }
+    }
+
+    // The bound albedo's pixel size, or (0, 0) when the road drew with the procedural fallback shader.
+    private static (int Width, int Height) TexturedSize(Material material) =>
+        material is StandardMaterial3D { AlbedoTexture: { } texture }
+            ? (texture.GetWidth(), texture.GetHeight())
+            : (0, 0);
 
     // One material per road-material index: the real Roads.unity3d texture (tiled by the config height),
     // or the procedural asphalt/dirt shader when no texture is available. The float is the source's

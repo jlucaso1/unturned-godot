@@ -14,17 +14,27 @@ public sealed class HeightmapTile
     public readonly ushort[]? RawSamples;
     public bool HasMaterializedHeights => _heights != null;
 
-    private HeightmapTile(int coordX, int coordY, float[,]? heights, ushort[]? rawSamples = null)
+    // Which of the tile's cells the map cuts away, or null when it cuts none. It rides on the tile rather
+    // than being fetched separately because a hole is a property of this tile's surface: every consumer
+    // of the heights — the drawn mesh, the collision heightfield — has to agree about which cells exist,
+    // and one of them reading holes while another did not is exactly the drift that leaves a player
+    // standing on ground that is not drawn.
+    public readonly LandscapeHoles? Holes;
+
+    private HeightmapTile(int coordX, int coordY, float[,]? heights, ushort[]? rawSamples = null,
+        LandscapeHoles? holes = null)
     {
         CoordX = coordX;
         CoordY = coordY;
         _heights = heights;
         RawSamples = rawSamples;
+        Holes = holes;
     }
 
     // For tests and callers that already have a height grid (e.g. building a HeightmapSampler).
-    public static HeightmapTile FromHeights(int coordX, int coordY, float[,] heights)
-        => new(coordX, coordY, heights);
+    public static HeightmapTile FromHeights(int coordX, int coordY, float[,] heights,
+        LandscapeHoles? holes = null)
+        => new(coordX, coordY, heights, null, holes);
 
     public static HeightmapTile Read(string filePath, int coordX, int coordY)
     {
@@ -50,7 +60,8 @@ public sealed class HeightmapTile
             }
         }
 
-        return new HeightmapTile(coordX, coordY, null, raw);
+        return new HeightmapTile(coordX, coordY, null, raw,
+            LandscapeHoles.TryReadBeside(filePath, coordX, coordY));
     }
 
     public float HeightAt(int x, int y) => RawSamples != null

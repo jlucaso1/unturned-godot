@@ -100,6 +100,7 @@ public static class RuntimeBenchmark
             AddFrameBucket(report.Metrics, "withPhysics", withPhysicsFrameMs);
             AddFrameBucket(report.Metrics, "withoutPhysics", withoutPhysicsFrameMs);
             AddCounterMetrics(report.Metrics);
+            AddNavigationMetrics(tree, report.Metrics);
             AddFoliageMetrics(tree, report.Metrics, foliageSettled);
             BenchmarkRunner.Finish(report, $"{mapName}-runtime", DiffOptions(),
                 "timings are advisory; counts are deterministic for the same spawn view, "
@@ -185,6 +186,16 @@ public static class RuntimeBenchmark
             metrics[$"{prefix}.meanMs"] = sample.MeanMs;
             metrics[$"{prefix}.maxMs"] = sample.MaxMs;
         }
+    }
+
+    // What the pathfinder is holding after the sample. The workspaces are three arrays of triangleCount
+    // each, taken from a per-flag pool that nothing ever drains, so the count is the concurrency the
+    // session actually reached — a count, not a timing, and deterministic for the same load, which is
+    // why it is left on the strict default threshold. Absent on a session that hosts no zombies.
+    private static void AddNavigationMetrics(SceneTree tree, SortedDictionary<string, double> metrics)
+    {
+        if (tree.GetFirstNodeInGroup(SceneGroups.Network) is NetworkManager network && network.IsHosting)
+            metrics["runtime.nav.searchWorkspaces"] = network.SearchWorkspaceCount;
     }
 
     private static void AddFoliageMetrics(SceneTree tree, SortedDictionary<string, double> metrics,

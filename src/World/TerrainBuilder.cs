@@ -137,8 +137,9 @@ public static partial class TerrainBuilder
 
     // Everything a tile carries between the worker-thread build (BuildTileMesh) and the main-thread finish
     // (FinishTile): its LOD-baked geometry (an ImporterMesh, a data-only Resource), the full-resolution
-    // heightmap for collision, and which splat layers the tile paints — a scan of its 512 KB weight array,
-    // done here so the main thread's FinishTile only assembles the material it decides.
+    // heightmap for collision, the cells the map cuts away, and which splat layers the tile paints — a
+    // scan of its 512 KB weight array, done here so the main thread's FinishTile only assembles the
+    // material it decides.
     public readonly struct TileMesh
     {
         public readonly ImporterMesh Importer;
@@ -148,8 +149,9 @@ public static partial class TerrainBuilder
         public readonly int Y;
         public readonly SplatmapTile? Splat;
         public readonly int[]? Painted;
+        public readonly LandscapeHoles? Holes;
         public TileMesh(ImporterMesh importer, ushort[]? heights16, float[]? heights32,
-            int x, int y, SplatmapTile? splat, int[]? painted = null)
+            int x, int y, SplatmapTile? splat, int[]? painted = null, LandscapeHoles? holes = null)
         {
             Importer = importer;
             Heights16 = heights16;
@@ -158,26 +160,36 @@ public static partial class TerrainBuilder
             Y = y;
             Splat = splat;
             Painted = painted;
+            Holes = holes;
         }
         public float HeightAt(int index) => Heights16 != null
             ? Heights16[index] / (float)ushort.MaxValue : Heights32![index];
     }
 
-    // Phase 1 — safe to run on a worker thread: read + tessellate the tile at a subsampled resolution and
-    // generate its meshoptimizer LOD chain. This is pure CPU/meshopt work on an ImporterMesh (a data-only
-    // Resource); no RenderingServer object is created until FinishTile calls GetMesh() on the main thread.
+    // Phase 1 — safe to run on a worker thread: read + tessellate the tile and generate its meshoptimizer
+    // LOD chain. This is pure CPU/meshopt work on an ImporterMesh (a data-only Resource); no
+    // RenderingServer object is created until FinishTile calls GetMesh() on the main thread.
     // `textured` selects the render path (true: splat shader via UV2, skip per-vertex colors; false:
     // averaged vertex colors for the flat fallback material).
     public static TileMesh BuildTileMesh(HeightmapTile tile, SplatmapTile? splat, bool textured)
     {
-        // Build the visual tile at a subsampled resolution (step must divide 256 so tile edges land on 0
-        // and 256 and adjacent tiles stay gap-free), then let Godot's meshoptimizer LODs coarsen it further
-        // with distance. In Godot 4.7 generate_lods() locks the mesh's topological border, so each tile's
-        // shared edge is preserved at full resolution across every LOD and adjacent tiles never crack. The
-        // collision keeps the full-resolution heightmap (attached below) so player movement is unaffected.
-        const int LodStep = 2;
-        int res = ((Landscape.HEIGHTMAP_RESOLUTION - 1) / LodStep) + 1;
-        int vertexCount = res * res;
+        // One quad per heightmap cell, at the heightmap's own resolution — the same 257x257 grid the
+        // collision heightfield is built from and HeightmapSampler interpolates on. This used to subsample
+        // every second index, and the three then disagreed: the drawn surface interpolated straight over
+        // whatever sat on an odd index while the collider and the sampler kept it, so a ridge there put
+        // the player above the ground being drawn and a gully sank them into it, and a road lofted onto
+        // the sampler buried itself wherever the decimation had moved the drawn surface. Unturned has one
+        // TerrainData per tile and Unity draws and collides against that one heightmap, so agreeing at
+        // full resolution is also what the original does.
+        //
+        // Distance is meshoptimizer's job rather than the source grid's: GenerateLods below coarsens the
+        // tile with distance from a full-resolution base, and in Godot 4.7 generate_lods() locks the
+        // mesh's topological border, so each tile's shared edge survives every LOD and adjacent tiles
+        // never crack. Measured on PEI, going full-resolution left every pose's DRAW CALLS unchanged and
+        // the aerial poses within 4-15% of the subsampled primitive counts; what it costs is the near
+        // view, where LOD 0 is what is in frame (see the pull request for the numbers).
+        const int res = Landscape.HEIGHTMAP_RESOLUTION;
+        const int vertexCount = res * res;
 
         // Build the mesh arrays in C# and hand them to the engine in a single AddSurfaceFromArrays call,
         // instead of SurfaceTool's per-element AddVertex/SetColor/AddIndex + GenerateNormals. The profiler
@@ -189,33 +201,42 @@ public static partial class TerrainBuilder
         var positions = new Vector3[vertexCount];
         Color[]? colors = textured ? null : new Color[vertexCount];
         var uv2 = new Vector2[vertexCount];
-        float invRes = 1f / (res - 1);
-        for (int x = 0; x < res; x++)
+        const float invRes = 1f / (res - 1);
+        for (int hx = 0; hx < res; hx++)
         {
-            for (int y = 0; y < res; y++)
+            for (int hy = 0; hy < res; hy++)
             {
-                int idx = x * res + y;
-                int hx = x * LodStep, hy = y * LodStep; // full-res heightmap sample
+                int idx = (hx * res) + hy;
                 float h01 = tile.HeightAt(hx, hy);
                 Vector3 unity = Landscape.GetWorldPosition(tile.CoordX, tile.CoordY, hx, hy, h01);
                 positions[idx] = Landscape.UnityToGodot(unity);
                 if (colors != null)
                     colors[idx] = TerrainColor.ForVertex(splat, hx, hy, unity.Y);
-                uv2[idx] = new Vector2(x * invRes, y * invRes); // tile-normalized, for the splat control lookup
+                uv2[idx] = new Vector2(hx * invRes, hy * invRes); // tile-normalized, for the splat control lookup
             }
         }
 
         // Front faces point up (verified on screen): back-face culling (#3) then drops the underside.
-        var indices = new int[(res - 1) * (res - 1) * 6];
+        //
+        // A cell the map cuts away emits nothing at all. That is the whole of drawing a hole, and it only
+        // works because a cell IS a quad here: at the old subsampled resolution a 4 m hole was half of an
+        // 8 m quad, and half a quad cannot be left out. The vertices around it stay in the array — two of
+        // them go unreferenced in the middle of a solid block of holes — because dropping them would mean
+        // renumbering every index behind them to save a few dozen bytes a map.
+        LandscapeHoles? holes = tile.Holes is { HasAnyHoles: true } h ? h : null;
+        int cells = res - 1;
+        var indices = new int[cells * cells * 6];
         int t = 0;
-        for (int x = 0; x < res - 1; x++)
+        for (int hx = 0; hx < cells; hx++)
         {
-            for (int y = 0; y < res - 1; y++)
+            for (int hy = 0; hy < cells; hy++)
             {
-                int v00 = x * res + y;
-                int v01 = x * res + (y + 1);
-                int v10 = (x + 1) * res + y;
-                int v11 = (x + 1) * res + (y + 1);
+                if (holes != null && holes.IsHole(hx, hy))
+                    continue;
+                int v00 = (hx * res) + hy;
+                int v01 = (hx * res) + hy + 1;
+                int v10 = ((hx + 1) * res) + hy;
+                int v11 = ((hx + 1) * res) + hy + 1;
                 indices[t++] = v00;
                 indices[t++] = v10;
                 indices[t++] = v11;
@@ -224,6 +245,8 @@ public static partial class TerrainBuilder
                 indices[t++] = v01;
             }
         }
+        if (t != indices.Length)
+            System.Array.Resize(ref indices, t);
 
         // Smooth normals: accumulate each triangle's (area-weighted) face normal into its three vertices,
         // then normalize. Done with raw float accumulators rather than Godot.Vector3 operators — the
@@ -283,22 +306,59 @@ public static partial class TerrainBuilder
         var importer = new ImporterMesh();
         importer.AddSurface(Mesh.PrimitiveType.Triangles, arrays);
         importer.GenerateLods(25f, 60f, new Godot.Collections.Array());
+        if (holes != null)
+            importer = KeepLodsThatKeepHolesOpen(importer, holes, tile.CoordX, tile.CoordY);
 
-        // Carry the full-resolution heightmap (row-major, normalized) so the on-demand player collision
-        // stays full-res and correct — the visual mesh is decimated/LOD'd and meshoptimizer reorders its
-        // vertices, so collision can't be reconstructed from it.
+        // Carry the heightmap (row-major, normalized) so collision is built from the source grid rather
+        // than read back off the mesh — the drawn surface is LOD'd and meshoptimizer reorders its
+        // vertices, so LOD 0's geometry is not recoverable from what ends up on the GPU. The two now
+        // describe the same 257x257 grid; this is how the collider gets at it.
         float[]? flat = null;
         if (tile.RawSamples == null)
         {
-            int fullRes = Landscape.HEIGHTMAP_RESOLUTION;
-            flat = new float[fullRes * fullRes];
-            for (int hx = 0; hx < fullRes; hx++)
-                for (int hy = 0; hy < fullRes; hy++)
-                    flat[(hx * fullRes) + hy] = tile.HeightAt(hx, hy);
+            flat = new float[vertexCount];
+            for (int hx = 0; hx < res; hx++)
+                for (int hy = 0; hy < res; hy++)
+                    flat[(hx * res) + hy] = tile.HeightAt(hx, hy);
         }
         // Only the textured path builds a splat material, and only it needs to know what the tile paints.
         int[]? painted = textured && splat != null ? PaintedLayers(splat) : null;
-        return new TileMesh(importer, tile.RawSamples, flat, tile.CoordX, tile.CoordY, splat, painted);
+        return new TileMesh(importer, tile.RawSamples, flat, tile.CoordX, tile.CoordY, splat, painted,
+            holes);
+    }
+
+    // Rebuilds a tile's surface keeping only the generated levels that still leave its holes open.
+    //
+    // meshoptimizer welds an interior boundary shut once it is decimating hard enough — a hole is exactly
+    // that kind of boundary, and the level where it goes depends on the tile, so it is found rather than
+    // assumed. Everything up to that level is kept; from it on the tile draws the last honest level at
+    // every distance instead of a coarser one that has paved over an entrance. Only tiles with holes pay
+    // for this, and only in geometry at long range.
+    private static ImporterMesh KeepLodsThatKeepHolesOpen(ImporterMesh generated,
+        LandscapeHoles holes, int tileX, int tileY)
+    {
+        Vector2[] centres = TerrainHoleCollision.HoleCentres(holes, tileX, tileY);
+        // The levels index the SURFACE's vertex array, so that is what they are read against rather than
+        // the array this method's caller happens to still be holding.
+        using var arrays = generated.GetSurfaceArrays(0);
+        Vector3[] positions = arrays[(int)Mesh.ArrayType.Vertex].As<Vector3[]>();
+
+        int lodCount = generated.GetSurfaceLodCount(0);
+        var kept = new Godot.Collections.Dictionary();
+        for (int lod = 0; lod < lodCount; lod++)
+        {
+            int[] indices = generated.GetSurfaceLodIndices(0, lod);
+            if (!TerrainHoleCollision.KeepsHolesOpen(positions, indices, centres))
+                break;
+            kept[generated.GetSurfaceLodSize(0, lod)] = indices;
+        }
+        if (kept.Count == lodCount)
+            return generated; // every level survived: nothing to rebuild
+
+        var trimmed = new ImporterMesh();
+        trimmed.AddSurface(Mesh.PrimitiveType.Triangles, arrays,
+            new Godot.Collections.Array<Godot.Collections.Array>(), kept);
+        return trimmed;
     }
 
     // Phase 2 — main thread only: realise the LOD mesh (GetMesh creates the ArrayMesh RenderingServer
@@ -342,6 +402,7 @@ public static partial class TerrainBuilder
             Name = $"Tile_{tm.X}_{tm.Y}",
             CollisionHeights16 = tm.Heights16,
             CollisionHeights32 = tm.Heights32,
+            Holes = tm.Holes,
             TileX = tm.X,
             TileY = tm.Y,
         };
@@ -352,14 +413,20 @@ public static partial class TerrainBuilder
     {
         public ushort[]? CollisionHeights16;
         public float[]? CollisionHeights32;
+        public LandscapeHoles? Holes;
         public int TileX;
         public int TileY;
     }
 
-    // Gives a rendered terrain tile a cheap full-resolution heightfield StaticBody (a 257x257
-    // HeightMapShape3D) instead of a ~131k-triangle concave trimesh, from the full-res heightmap the tile
-    // carried in metadata (FinishTile) — independent of the tile's visual LOD. Verified to reproduce the
-    // render surface exactly by TerrainHeightfieldTests.
+    // Gives a rendered terrain tile a cheap heightfield StaticBody (a 257x257 HeightMapShape3D) instead of
+    // a ~131k-triangle concave trimesh, from the heightmap the tile carried in metadata (FinishTile) —
+    // the same grid the mesh is drawn from, so the surface walked is the surface drawn. Verified sample by
+    // sample against a built tile's own vertices by TerrainHeightfieldTests.
+    //
+    // A tile with holes gets a second shape beside the heightfield. See TerrainHoleCollision for why the
+    // cut has to be made too wide and then repaired: Godot's heightfield can only refuse collision at a
+    // SAMPLE, and a hole is a CELL.
+    //
     // `navigationField`, when given, receives the same heightfield the physics server does, so navmesh
     // reconciliation can probe the ground without a physics tick. See CollisionField.
     public static void AddHeightfieldCollision(MeshInstance3D tile,
@@ -370,13 +437,23 @@ public static partial class TerrainBuilder
             return;
 
         const int res = Landscape.HEIGHTMAP_RESOLUTION;
-        float[] mapData = terrainTile.CollisionHeights16 != null
-            ? TerrainHeightfield.MapData(terrainTile.CollisionHeights16)
-            : MapDataFromFlat(terrainTile.CollisionHeights32!);
+        ushort[]? raw = terrainTile.CollisionHeights16;
+        float[]? flat = terrainTile.CollisionHeights32;
+        float[] mapData = raw != null
+            ? TerrainHeightfield.MapData(raw)
+            : MapDataFromFlat(flat!);
         Transform3D placement =
             TerrainHeightfield.CollisionTransform(terrainTile.TileX, terrainTile.TileY);
 
         var body = new StaticBody3D { Name = "TerrainCollision" };
+        LandscapeHoles? holes = terrainTile.Holes;
+        Vector3[]? repair = holes != null && TerrainHoleCollision.MarkNoCollisionSamples(mapData, holes)
+            ? TerrainHoleCollision.RepairFaces(holes, terrainTile.TileX, terrainTile.TileY,
+                (hx, hy) => raw != null
+                    ? raw[(hx * res) + hy] / (float)ushort.MaxValue
+                    : flat![(hx * res) + hy])
+            : null;
+
         body.AddChild(new CollisionShape3D
         {
             Shape = new HeightMapShape3D
@@ -387,13 +464,27 @@ public static partial class TerrainBuilder
             },
             Transform = placement,
         });
+        if (repair is { Length: > 0 })
+        {
+            // The repair faces are already in world space, like the tile mesh's own vertices, so this
+            // shape takes no transform — unlike the heightfield above, which is a unit-cell grid that has
+            // to be scaled and centred onto the tile.
+            var patch = new ConcavePolygonShape3D();
+            patch.SetFaces(repair);
+            body.AddChild(new CollisionShape3D { Shape = patch, Name = "HoleRepair" });
+        }
         tile.AddChild(body);
+        // The navigation field is given the marked heightfield, not the raw one: a probe over a hole has
+        // to find no ground, exactly as the physics server now does. It is NOT given the repair patch,
+        // because CollisionField answers "I cannot tell" for any cell touching a no-collision sample and
+        // sends it to the server — which has both shapes — rather than guessing at the seam between them.
         navigationField?.AddHeightfield(placement, res, res, mapData);
 
         // The heightfield now lives in the physics server's HeightMapShape3D; drop the ~264 KB/tile source
         // copy the tile carried in metadata (collision is built once and never rebuilt).
         terrainTile.CollisionHeights16 = null;
         terrainTile.CollisionHeights32 = null;
+        terrainTile.Holes = null;
     }
 
     private static float[] MapDataFromFlat(float[] heights)

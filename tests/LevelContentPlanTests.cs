@@ -62,6 +62,22 @@ public class LevelContentPlanTests
         public Install Resource(string name, Guid guid, ushort id) =>
             Asset("Trees", name, guid, id, "Resource");
 
+        // A resource with extra keys — a vertical offset, a holiday redirect, or both.
+        public Install Resource(string name, Guid guid, ushort id, string extraKeys)
+        {
+            _dir.Write(System.IO.Path.Combine("Bundles", "Trees", name, "Asset.dat"),
+                $"GUID {guid:N}\nType Resource\nID {id}\n{extraKeys}");
+            return this;
+        }
+
+        // A map whose Config.json lets a holiday substitute its objects and trees.
+        public Install AllowsHolidayRedirects()
+        {
+            _dir.Write(System.IO.Path.Combine("Maps", "Test", "Config.json"),
+                "{\n  \"Allow_Holiday_Redirects\": true\n}\n");
+            return this;
+        }
+
         public Install Npc(string name, Guid guid, ushort id) =>
             Asset(System.IO.Path.Combine("NPCs", "Characters"), name, guid, id, "NPC");
 
@@ -367,6 +383,116 @@ public class LevelContentPlanTests
 
         Assert.Equal(forMap.NeededGuids, defaulted.NeededGuids);
         Assert.Equal(forMap.Objects.Count, defaulted.Objects.Count);
+    }
+
+    // --- Rules this unification must not quietly drop --------------------------------------------------
+    // Each of these lives inside LegacyPlacements, which LevelContentPlan calls. They are asserted THROUGH
+    // the plan rather than against LegacyPlacements directly (which has its own tests) because the failure
+    // mode being guarded is the plan forgetting to pass something along — a plan that dropped the holiday
+    // argument still compiles, still returns a list, and no gate here would notice until trees floated.
+
+    [Fact]
+    public void ATreeIsPlantedAtItsAssetsVerticalOffset()
+    {
+        // ResourceSpawnpoint: `point + Vector3.up * scale.y * asset.verticalOffset`. The point in
+        // Trees.dat is where the trunk MEETS THE GROUND, so without this the whole forest floats.
+        var pine = Guid.NewGuid();
+        using var install = new Install();
+        install.Resource("Pine", pine, 5, "Vertical_Offset -1.5\n").Trees((At(1), pine));
+
+        LevelContent content = Resolve(install);
+
+        // Scale is 1 in this fixture, so the offset applies as authored.
+        Assert.Equal(-1.5f, Assert.Single(content.Objects).Position.Y, 4);
+    }
+
+    [Fact]
+    public void ATreeWithNoAssetIsLeftWhereTheFileputIt()
+    {
+        // There is no offset to apply without an asset, and inventing the -0.75 default would bury a
+        // placement nothing can identify.
+        using var install = new Install();
+        install.Trees((At(1), Guid.NewGuid()));
+
+        Assert.Equal(0f, Assert.Single(Resolve(install).Objects).Position.Y);
+    }
+
+    [Fact]
+    public void AHolidayRedirectSubstitutesTheTreeItNames()
+    {
+        var pine = Guid.NewGuid();
+        var snowyPine = Guid.NewGuid();
+        using var install = new Install();
+        install.AllowsHolidayRedirects()
+            .Resource("Pine", pine, 5, $"Christmas_Redirect {snowyPine:N}\n")
+            .Resource("SnowyPine", snowyPine, 6, "Vertical_Offset -1\n")
+            .Trees((At(1), pine));
+
+        LevelContent content = Resolve(install,
+            holidays: new HolidayPolicy(ENPCHoliday.Christmas, allowRedirects: true));
+
+        // The substitute's GUID is what gets placed — and its own vertical offset is what applies.
+        Assert.Equal(snowyPine, Assert.Single(content.Objects).Guid);
+        Assert.Equal(-1f, content.Objects[0].Position.Y, 4);
+        Assert.Equal(new HashSet<Guid> { snowyPine }, content.NeededGuids);
+    }
+
+    [Fact]
+    public void ARedirectWhoseTargetDoesNotResolveDropsThePlacement()
+    {
+        // Unturned logs "Missing holiday redirect" and leaves the asset null, which the loader reads as
+        // "skip this placement" — a forest genuinely thins out in December on a map whose pines redirect
+        // to snowy ones the install is missing.
+        var pine = Guid.NewGuid();
+        using var install = new Install();
+        install.AllowsHolidayRedirects()
+            .Resource("Pine", pine, 5, $"Christmas_Redirect {Guid.NewGuid():N}\n")
+            .Trees((At(1), pine));
+
+        LevelContent content = Resolve(install,
+            holidays: new HolidayPolicy(ENPCHoliday.Christmas, allowRedirects: true));
+
+        Assert.Empty(content.Objects);
+        Assert.Empty(content.NeededGuids);
+    }
+
+    [Fact]
+    public void ARedirectOntoTheWrongAssetFamilyDropsThePlacement()
+    {
+        // The game resolves a tree's redirect through AssetReference<ResourceAsset>, which is typed: one
+        // naming an ObjectAsset comes back unresolved and the tree is dropped. Unchecked, an unrelated
+        // asset would be handed a tree's transform, vertical offset and mesh.
+        var pine = Guid.NewGuid();
+        var house = Guid.NewGuid();
+        using var install = new Install();
+        install.AllowsHolidayRedirects()
+            .Resource("Pine", pine, 5, $"Christmas_Redirect {house:N}\n")
+            .Object("House", house, 12)
+            .Trees((At(1), pine));
+
+        LevelContent content = Resolve(install,
+            holidays: new HolidayPolicy(ENPCHoliday.Christmas, allowRedirects: true));
+
+        Assert.Empty(content.Objects);
+        Assert.DoesNotContain(house, content.NeededGuids);
+    }
+
+    [Fact]
+    public void SubstitutionIsOffWhenTheMapDoesNotAllowIt()
+    {
+        // Allow_Holiday_Redirects is the map's own switch, so the same asset is substituted on one map
+        // and left alone on another. Absent Config.json means off.
+        var pine = Guid.NewGuid();
+        var snowyPine = Guid.NewGuid();
+        using var install = new Install();
+        install.Resource("Pine", pine, 5, $"Christmas_Redirect {snowyPine:N}\n")
+            .Resource("SnowyPine", snowyPine, 6)
+            .Trees((At(1), pine));
+
+        LevelContent content = Resolve(install,
+            holidays: HolidayPolicy.ForMap(install.MapPath, ENPCHoliday.Christmas));
+
+        Assert.Equal(pine, Assert.Single(content.Objects).Guid);
     }
 
     [Fact]

@@ -76,6 +76,187 @@ public class TerrainBuilderTests : TestClass
         tile.QueueFree();
     }
 
+    // The hole in the ground is a hole in the FLOOR: exactly the cells the map cuts away let a probe
+    // through, and every cell beside them still carries the player.
+    //
+    // This is the test that has to be end-to-end rather than arithmetic, because the cut is made with a
+    // tool that does not fit the job. Godot's heightfield can only refuse collision at a SAMPLE, and one
+    // no-collision sample takes out every triangle around it, so TerrainHoleCollision deliberately cuts
+    // wider than the map asked for and patches the difference back. Whether the union of those two shapes
+    // is the surface the map describes is a question for the physics server, not for the arithmetic that
+    // fed it — and the answer is what tells a repair that misses a cell apart from one that is correct.
+    [Test]
+    public async Task ExactlyTheCellsTheMapCutsAwayAreOpenToTheSky()
+    {
+        // Two clusters, one of them an L, so the repair cannot get away with covering a rectangle.
+        (int X, int Y)[] cut =
+        {
+            (62, 62), (62, 63), (63, 62), (63, 63), (64, 62), (64, 63),
+            (190, 68), (190, 69), (191, 68), (191, 69), (192, 68), (192, 69), (192, 70),
+        };
+        using var sandbox = new PhysicsSandbox(TestScene);
+        TerrainBuilder.TileMesh built =
+            TerrainBuilder.BuildTileMesh(Rough(0, 0, Holes(cut)), null, textured: false);
+        MeshInstance3D tile = TerrainBuilder.FinishTile(built, null);
+        sandbox.Root.AddChild(tile);
+        TerrainBuilder.AddHeightfieldCollision(tile);
+        await sandbox.Settle();
+
+        var holes = new System.Collections.Generic.HashSet<(int, int)>(cut);
+        var space = tile.GetWorld3D().DirectSpaceState;
+        // Every cell within two of a cut one: the cut cells themselves, the ring the wide cut damages,
+        // and a ring beyond it that must never have been touched at all.
+        foreach ((int cx, int cy) in Neighbourhood(cut, radius: 3))
+        {
+            // Cell (cx, cy) spans heightmap indices cx..cx+1 (world Z) and cy..cy+1 (world X).
+            float x = (cy + 0.5f) * TerrainHeightfield.CellSize;
+            float z = -((cx + 0.5f) * TerrainHeightfield.CellSize);
+            var down = PhysicsRayQueryParameters3D.Create(
+                new Vector3(x, 400f, z), new Vector3(x, -400f, z));
+            bool solid = space.IntersectRay(down).Count > 0;
+
+            Assert.True(solid != holes.Contains((cx, cy)),
+                holes.Contains((cx, cy))
+                    ? $"cell ({cx}, {cy}) is a hole but still collides"
+                    : $"cell ({cx}, {cy}) is ground but nothing collides there");
+        }
+
+        tile.QueueFree();
+    }
+
+    private static System.Collections.Generic.IEnumerable<(int X, int Y)> Neighbourhood(
+        (int X, int Y)[] cells, int radius)
+    {
+        var seen = new System.Collections.Generic.HashSet<(int, int)>();
+        foreach ((int cx, int cy) in cells)
+            for (int dx = -radius; dx <= radius; dx++)
+                for (int dy = -radius; dy <= radius; dy++)
+                    if (seen.Add((cx + dx, cy + dy)))
+                        yield return (cx + dx, cy + dy);
+    }
+
+    // The test the old TerrainHeightfieldTests.Placement_ReproducesRenderMeshVertices claimed to be.
+    //
+    // Everything else about terrain fidelity rests on one sentence: the surface the player is put on and
+    // the surface a road is lofted onto (HeightmapSampler) is the surface being drawn. Both halves are
+    // asked here, of a REAL tile: every vertex BuildTileMesh emitted is handed back to the sampler and
+    // has to come back at its own height. Nothing shy of this catches the failure it exists for — the
+    // mesh was for a long time built at every second heightmap index while the sampler read every index,
+    // and the pair of surfaces that produced could be metres apart on a ridge without a single test
+    // noticing, because none of them ever built a tile and asked.
+    //
+    // The heights alternate per index deliberately: on a smooth field a subsampled mesh interpolates to
+    // very nearly the right answer and a loose tolerance would pass it.
+    [Test]
+    public void TheDrawnSurfaceIsTheSurfaceTheSamplerReports()
+    {
+        HeightmapTile source = Rough(1, -2);
+        TerrainBuilder.TileMesh built = TerrainBuilder.BuildTileMesh(source, null, textured: false);
+        var sampler = new HeightmapSampler(new[] { source });
+
+        const int res = Landscape.HEIGHTMAP_RESOLUTION;
+        Godot.Collections.Array arrays = built.Importer.GetSurfaceArrays(0);
+        Vector3[] vertices = arrays[(int)Mesh.ArrayType.Vertex].As<Vector3[]>();
+
+        // The whole heightmap grid, not a decimation of it.
+        Assert.Equal(res * res, vertices.Length);
+
+        float worst = 0f;
+        // Index 256 on either axis is the row this tile SHARES with its neighbour: it sits exactly on the
+        // seam, and the sampler resolves a point there to the next tile along — which is not loaded here,
+        // and would be answering about its own index 0 if it were. Every cell this tile owns is covered by
+        // the 0..255 corners.
+        for (int hx = 0; hx < res - 1; hx++)
+        {
+            for (int hy = 0; hy < res - 1; hy++)
+            {
+                Vector3 vertex = vertices[(hx * res) + hy];
+                // Mesh vertices are in Godot space (Z mirrored); the sampler works in Unity's +Z.
+                Assert.True(sampler.TrySampleHeight(vertex.X, -vertex.Z, out float sampled));
+                worst = Mathf.Max(worst, Mathf.Abs(sampled - vertex.Y));
+            }
+        }
+        // Millimetres, and that only for float rounding through the world transform — a decimated mesh
+        // measures tens of centimetres here on this terrain.
+        Assert.True(worst < 0.01f, $"drawn surface is up to {worst:F3} m from what the sampler reports");
+    }
+
+    // A cell the map cuts away is not drawn — and stays not drawn at every level meshoptimizer generates.
+    // A hole is a topological border, which 4.7's border-locked LOD generation is supposed to preserve;
+    // if it ever stopped, the entrance would seal itself back up as the player walked away from it.
+    [Test]
+    public void AHoleIsCutFromTheMeshAndStaysCutAtEveryLod()
+    {
+        // A 3x2 block of holes, the shape PEI's own two hole tiles carry.
+        LandscapeHoles holes = Holes((62, 62), (62, 63), (63, 62), (63, 63), (64, 62), (64, 63));
+        TerrainBuilder.TileMesh built = TerrainBuilder.BuildTileMesh(Rough(0, 0, holes), null, false);
+
+        Godot.Collections.Array arrays = built.Importer.GetSurfaceArrays(0);
+        Vector3[] vertices = arrays[(int)Mesh.ArrayType.Vertex].As<Vector3[]>();
+        int[] baseIndices = arrays[(int)Mesh.ArrayType.Index].As<int[]>();
+
+        // Six cells of two triangles each, gone from the base mesh.
+        int cells = Landscape.HEIGHTMAP_RESOLUTION - 1;
+        Assert.Equal(((cells * cells) - 6) * 6, baseIndices.Length);
+
+        // Cell (62, 62) covers heightmap indices 62..63, which is world Z 248..252 and world X 248..252
+        // (hx -> Z, hy -> X), mirrored to -Z in Godot. Nothing may cover its centre, at any level.
+        var centre = new Vector2(250f, -250f);
+        for (int lod = 0; lod < built.Importer.GetSurfaceLodCount(0); lod++)
+            AssertNothingCovers(vertices, built.Importer.GetSurfaceLodIndices(0, lod), centre, $"LOD {lod}");
+        AssertNothingCovers(vertices, baseIndices, centre, "the base mesh");
+    }
+
+    // A tile whose holes file exists but cuts nothing is drawn whole, and takes no hole path at all.
+    [Test]
+    public void ATileThatCutsNothingIsDrawnWhole()
+    {
+        TerrainBuilder.TileMesh built = TerrainBuilder.BuildTileMesh(Rough(0, 0, Holes()), null, false);
+
+        int cells = Landscape.HEIGHTMAP_RESOLUTION - 1;
+        int[] indices = built.Importer.GetSurfaceArrays(0)[(int)Mesh.ArrayType.Index].As<int[]>();
+        Assert.Equal(cells * cells * 6, indices.Length);
+        Assert.Null(built.Holes);
+    }
+
+    // No triangle of `indices` covers `point` in the XZ plane.
+    private static void AssertNothingCovers(Vector3[] vertices, int[] indices, Vector2 point, string what)
+    {
+        for (int i = 0; i < indices.Length; i += 3)
+        {
+            Vector2 a = Flatten(vertices[indices[i]]);
+            Vector2 b = Flatten(vertices[indices[i + 1]]);
+            Vector2 c = Flatten(vertices[indices[i + 2]]);
+            Assert.False(Covers(a, b, c, point), $"{what} still draws over the hole at {point}");
+        }
+    }
+
+    private static Vector2 Flatten(Vector3 v) => new(v.X, v.Z);
+
+    private static bool Covers(Vector2 a, Vector2 b, Vector2 c, Vector2 p)
+    {
+        float d1 = Side(p, a, b), d2 = Side(p, b, c), d3 = Side(p, c, a);
+        bool negative = d1 < 0 || d2 < 0 || d3 < 0;
+        bool positive = d1 > 0 || d2 > 0 || d3 > 0;
+        return !(negative && positive);
+    }
+
+    private static float Side(Vector2 p, Vector2 a, Vector2 b) =>
+        ((p.X - b.X) * (a.Y - b.Y)) - ((a.X - b.X) * (p.Y - b.Y));
+
+    // A holes file cutting exactly the given cells, built the way the game writes one: all ones is intact
+    // ground, and a CLEARED bit is the hole.
+    private static LandscapeHoles Holes(params (int X, int Y)[] cells)
+    {
+        var bytes = new byte[LandscapeHoles.FILE_BYTES];
+        bytes[0] = 1; // version
+        for (int i = 1; i < bytes.Length; i++)
+            bytes[i] = 0xFF;
+        foreach ((int x, int y) in cells)
+            bytes[1 + (x * (Landscape.HOLES_RESOLUTION / 8)) + (y >> 3)] &= (byte)~(1 << (y & 7));
+        return LandscapeHoles.Parse(bytes, 0, 0);
+    }
+
     // A tile that is not one of ours, or one carrying no heightmap, is left alone rather than throwing —
     // the caller walks whatever the world builder produced.
     [Test]
@@ -326,6 +507,20 @@ public class TerrainBuilderTests : TestClass
             for (int j = 0; j < res; j++)
                 heights[i, j] = height;
         return HeightmapTile.FromHeights(x, y, heights);
+    }
+
+    // Terrain with a feature on every index, including the odd ones a subsampled mesh would step over.
+    private static HeightmapTile Rough(int x, int y, LandscapeHoles? holes = null)
+    {
+        const int res = Landscape.HEIGHTMAP_RESOLUTION;
+        var heights = new float[res, res];
+        for (int i = 0; i < res; i++)
+            for (int j = 0; j < res; j++)
+                // The alternating term is the point: a ridge that lives only on odd indices, which the
+                // mesh has to carry if it is built on the heightmap's own grid and cannot if it is not.
+                heights[i, j] = 0.4f + (0.0004f * (((i * 7) + (j * 13)) % 23))
+                    + (((i + j) % 2 == 0) ? 0f : 0.01f);
+        return HeightmapTile.FromHeights(x, y, heights, holes);
     }
 
     private SignalAwaiter NextPhysicsFrame() =>
