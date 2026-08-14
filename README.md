@@ -253,7 +253,7 @@ player's disk through the browser's directory picker, so a web build would ship 
 | Project | What it holds | Engine dependency |
 |---|---|---|
 | `core/` (`UnturnedGodot.Core`) | Pure logic: binary/text parsers, terrain math, netcode, zombie AI, asset/extraction planning. Only uses managed Godot structs. | none, runs under xUnit |
-| `src/` (`unturned-godot`) | Godot glue: `Main`, world builders, UI, player/zombie nodes. `[ExcludeFromCodeCoverage]`. | Godot.NET.Sdk |
+| `src/` (`unturned-godot`) | Godot glue: `Main`, world builders, UI, player/zombie nodes. Measured by `scripts/check-src-coverage.sh` (in-engine, via `tests/Runtime/`), but against no floor. | Godot.NET.Sdk |
 | `tests/` (`UnturnedGodot.Tests`) | xUnit suite; CI requires more than 95% line and branch coverage of `core/`. | none |
 | `addons/unturned/` | Editor add-on: the "Unturned" dock (map preview, cache warming, navigation overlay, camera readout). Debug/editor builds only. | GodotSharpEditor |
 | `tools/PerfHarness` | Standalone micro-benchmarks over the Core parsers. | none |
@@ -262,6 +262,12 @@ player's disk through the browser's directory picker, so a web build would ship 
 
 Keeping the parsers engine-free is what makes full unit-test coverage possible. `core/`, `tests/` and
 `tools/` carry a `.gdignore` so the Godot editor leaves them alone (they build via the .NET SDK).
+
+Both halves are measured, but only one is gated, and that is the reason to keep pure logic out of `src/`.
+A `core/` test is hermetic, cross-platform, runs in parallel under `dotnet test`, and has to clear the
+95%/80% floors before CI goes green. A `src/` test needs a 130 MB Godot binary, a Linux runner and real
+game content, and passes against no floor at all. So logic that lands in `src/` is untestable *by gate*
+rather than by construction — which is why anything with no engine dependency belongs in `core/`.
 
 Non-Godot binaries (core + tests, Debug and Release) go to `build/<project>/<config>/` instead of scattered
 `bin`/`obj`; the game keeps its Godot-managed output under `.godot/`. All of `build/` is git-ignored.
