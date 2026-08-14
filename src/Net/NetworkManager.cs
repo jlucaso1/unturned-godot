@@ -377,7 +377,7 @@ public partial class NetworkManager : Node
         UnturnedGodot.Zombies.ZombieSystem? zombies, UnturnedGodot.Zombies.ZombieHost? host)
     {
         var punches = new UnturnedGodot.Damage.PunchDamageHost(_server!, zombies, host);
-        PunchPhysics.Attach(punches, () => GetViewport()?.World3D);
+        PunchPhysics.Attach(punches, () => GetViewport()?.World3D, _server);
         return punches;
     }
 

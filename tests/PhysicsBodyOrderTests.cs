@@ -718,8 +718,8 @@ public class PhysicsBodyOrderTests
             return;
         string source = File.ReadAllText(path);
         Assert.Contains("UG_DIRECT_COLLISION_BUCKETS", source);
-        Assert.Contains("buckets.Add(origin.X, origin.Z, (shape, transform))", source);
-        Assert.Contains("foreach (((int x, int z), List<(int Shape, Transform3D Transform)> inCell)", source);
+        Assert.Contains("buckets.Add(origin.X, origin.Z, placement)", source);
+        Assert.Contains("foreach (((int x, int z), List<CollisionPlacement> inCell)", source);
         Assert.Contains("directFlat ?? buckets!.Flatten()", source);
     }
 

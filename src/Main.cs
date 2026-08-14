@@ -234,6 +234,7 @@ public partial class Main : Node3D
         {
             // Complete synchronous build — headless validation, or a screenshot that must be finished.
             WorldBuildResult world = WorldBuilder.Build(unturnedPath, _mapName);
+            _objectAssets = world.Assets;
             AddChild(world.Terrain);
             AddChild(world.Objects);
             AddChild(world.Vehicles);
@@ -837,12 +838,17 @@ public partial class Main : Node3D
     private NetworkManager? _network;
 
     // One-shot movement-audio extraction, deferred behind the world streamer (see BuildFootsteps).
-    private System.Action? _pendingAudioExtraction;
+    private System.Func<System.Threading.Tasks.Task>? _pendingAudioExtraction;
     private PlayerController? _player;
+
+    // The run of it, once started. A screenshot waits on this: the crosshair icons come out of the same
+    // pass, and a capture that raced it produced a picture with no crosshair — nondeterministically, on
+    // slower machines only, which is the worst way for a reference image to be wrong.
+    private System.Threading.Tasks.Task? _extraction;
 
     private void RunPendingAudioExtraction()
     {
-        _pendingAudioExtraction?.Invoke();
+        _extraction = _pendingAudioExtraction?.Invoke();
         _pendingAudioExtraction = null;
     }
 
@@ -888,6 +894,21 @@ public partial class Main : Node3D
         (player.Footsteps, _movementAudioFactory) = BuildMovementAudio(unturnedPath);
         player.Sounds = _oneShotAudio; // BuildMovementAudio created the pool; gestures share it
         AddChild(player);
+
+        // The crosshair, and the local raycast behind its hit marks. Both come from BuildMovementAudio's
+        // pass — it is what discovers the content sources and plans the icon extraction — so they are
+        // attached after it rather than in the initializer above.
+        if (_hudIcons != null)
+        {
+            var hud = new PlayerHud(_hudIcons);
+            AddChild(hud);
+            player.Hud = hud;
+            // Both lookups are per swing: the asset scan finishes seconds after the player exists on
+            // the streaming path, and the zombie view is attached when a session starts.
+            player.Hitmark = new PunchHitmark(
+                () => _objectAssets ?? GetNodeOrNull<ObjectStreamer>("ObjectStreamer")?.Assets,
+                () => GetNodeOrNull<ZombiesView>("Zombies"), () => GetViewport()?.World3D);
+        }
         _dayNight?.AttachCamera(player.Camera);
 
         string playerName = OS.GetEnvironment("PLAYER_NAME") is { Length: > 0 } pn ? pn : "Player";
@@ -945,13 +966,94 @@ public partial class Main : Node3D
             EnvironmentDir(unturnedPath, _mapName));
         var zombiesView = ZombiesView.Create(network.Client, unturnedPath, _oneShotAudio,
             navBounds, () => player.GlobalPosition);
+        // Where killed bodies are thrown. Its own node rather than a child of the zombie view, because
+        // a corpse outlives the avatar it came from — and because animals and players will want the
+        // same pool when they can die.
+        var ragdolls = new Ragdolls
+        {
+            // The game's own Ragdoll_Zombie: per-bone bodies, colliders and joint limits. Null when the
+            // install cannot be read, and then a corpse tumbles as one piece instead.
+            Definition = RagdollExtractor.Read(unturnedPath, RagdollExtractor.ZombiePrefab),
+        };
+        AddChild(ragdolls);
+        zombiesView.AttachRagdolls(ragdolls);
         AddChild(zombiesView);
         zombiesView.WarmupTemplates(); // still behind LoadingScreen; never import on a city-entry packet
+        if (_impactAudio != null)
+            AddChild(ImpactView.Create(network.Client, _impactAudio, _impactDecals));
     }
 
     // One MovementAudio per character; remote avatars get theirs from this factory (RemotePlayersView).
     private System.Func<MovementAudio>? _movementAudioFactory;
     private OneShotAudio? _oneShotAudio; // the shared positional voice pool (zombie roars use it too)
+
+    // What a fist landing on a surface sounds like. Shares the bank and the voice pool with the footsteps
+    // — the same PhysicsMaterialAssets answer both questions.
+    private ImpactAudio? _impactAudio;
+
+    // The mark a fist leaves. Held so a session that starts later can hand it to the impact view.
+    private ImpactDecals? _impactDecals;
+
+    // The crosshair's textures, once extracted. Null on a session that found no core bundle, which draws
+    // no crosshair rather than a stand-in.
+    private HudIconSet? _hudIcons;
+
+    // The object/tree assets this world was built from, kept so the crosshair's hit test can ask whether
+    // a fist can hurt what it is pointed at without scanning several thousand .dat files a second time.
+    private ObjectAssetDatabase? _objectAssets;
+
+    // What the deferred extraction still owes the decal cache. Runs beside the audio's, for the same
+    // reason: both open the same bundle, and doing it once is the whole point of planning it up front.
+    private System.Collections.Generic.List<ImpactDecalExtractor.Request> _decalRequests = new();
+
+    // The decal side of the impact: which effect each surface names, and where that effect's textures
+    // live. Scanned from the Bundles/Effects .dat tree — a few hundred small files — rather than from the
+    // master bundle, because the .dat is what carries the GUID a PhysicsMaterialAsset points at.
+    private void BuildImpactDecals(System.Collections.Generic.IReadOnlyList<ContentSource> sources,
+        PhysicsMaterialBank bank)
+    {
+        (_, ImpactEffectBank effects) = ImpactDecalRequests.Banks(sources);
+        string cacheDirectory = ImpactDecalRequests.CacheDirectory;
+
+        var bundleByDirectory = new System.Collections.Generic.Dictionary<string, ContentSource>(
+            System.StringComparer.Ordinal);
+        foreach (ContentSource source in sources)
+            bundleByDirectory[source.Root] = source;
+
+        // An effect's textures are packaged in the bundle of whichever source SHIPPED it, and the effect
+        // remembers which that was. Keying by asset prefix instead was the first version and was wrong:
+        // two sources may declare the same prefix — each bundle has its own container namespace — and
+        // then one of them silently owned the other's effects.
+        //
+        // Through ImpactDecalRequests.TagFor, which is what the extraction files them under: a key
+        // written under one tag and read under another is a texture that exists and is never found.
+        string TagOf(ImpactEffectAsset effect) => ImpactDecalRequests.TagFor(sources,
+            bundleByDirectory.TryGetValue(effect.SourceDirectory, out ContentSource? owner)
+                ? owner.BundlePath
+                : string.Empty);
+
+        _impactDecals = new ImpactDecals(bank, effects, TagOf, cacheDirectory);
+        AddChild(_impactDecals);
+
+        foreach (ContentSource source in sources)
+        {
+            if (!source.IsCore || source.BundlePath.Length == 0)
+                continue;
+            string prefix = MasterBundleConfig.Load(source.Root)?.AssetPrefix ?? string.Empty;
+            if (prefix.Length > 0)
+            {
+                _hudIcons = new HudIconSet(cacheDirectory,
+                    ImpactDecalRequests.TagFor(sources, source.BundlePath), prefix);
+            }
+
+            break;
+        }
+
+        // What the object streamer's own pass did not cover. On a cold load it planned these into that
+        // pass and the requests below are already satisfied; this is the path for a load that ran no
+        // pass at all (a warm mesh cache) or one that was cancelled.
+        _decalRequests = ImpactDecalRequests.For(sources, bank, effects, cacheDirectory);
+    }
 
     // Movement audio infrastructure: the physics-material bank + terrain splat sampler resolve WHICH
     // definition a step plays; the shared AudioDefLibrary + positional OneShotAudio pool play it. The
@@ -1025,6 +1127,31 @@ public partial class Main : Node3D
                 }
             }
 
+            // The impact decals ride along, on the same thread and after the same wait. They read the same
+            // bundles the definitions above came from, and a second deferred pass would open those bundles
+            // a second time for a couple of dozen small textures.
+            foreach (ImpactDecalExtractor.Request request in _decalRequests)
+            {
+                if (AppShutdown.IsShuttingDown)
+                    break;
+                if (ImpactDecalExtractor.IsSatisfied(request))
+                    continue;
+                decoded = true;
+                try
+                {
+                    int written = ImpactDecalExtractor.Extract(request);
+                    if (written > 0)
+                        Log.Print($"[impact] cached {written} decal texture(s) from {request.BundleTag}");
+                }
+                catch (System.Exception e) when (e is System.IO.IOException
+                    or System.UnauthorizedAccessException or System.IO.InvalidDataException)
+                {
+                    // Per bundle, like the audio above: one truncated workshop bundle must not stop the
+                    // game's own impacts from being extracted.
+                    Log.PrintErr($"[impact] {request.BundlePath} could not be extracted: {e.Message}");
+                }
+            }
+
             // A whole-bundle decode here lands AFTER the streamer has already compacted the load's heap,
             // so nothing else ever gives its transient back: the collector keeps the segments it grew for
             // it, and RSS stays hundreds of megabytes above a warm session's for the rest of the game.
@@ -1042,6 +1169,11 @@ public partial class Main : Node3D
         string BundleTagOfDirectory(string directory) =>
             SourceForAssetDirectory(sources, directory)?.CacheTag
             ?? UnturnedGodot.Unity.TextureKey.TagFor(System.IO.Path.GetFileNameWithoutExtension(bundlePath));
+
+        // Built here rather than in AttachSession because this is where the bank and the bundle-tag
+        // lookup exist; a session that starts later takes the finished thing.
+        _impactAudio = new ImpactAudio(bank, oneShot, BundleTagOfDirectory);
+        BuildImpactDecals(sources, bank);
 
         MovementAudio Factory(bool startGrounded) =>
             new(bank, landscape, splat, oneShot, startGrounded, BundleTagOfDirectory);
@@ -1096,6 +1228,15 @@ public partial class Main : Node3D
     // character settles onto the terrain). SHOT_CAM only applies to the free camera.
     private async System.Threading.Tasks.Task CaptureAndQuit(string path, int settleFrames)
     {
+        // The crosshair icons are extracted on the deferred pass, and reading the core bundle takes
+        // seconds — far longer than the settle frames below. Without this the capture commonly beat it and
+        // produced a screenshot with no crosshair, and whether it did depended on the machine.
+        if (_extraction is { } extraction)
+        {
+            while (!extraction.IsCompleted && !AppShutdown.IsShuttingDown)
+                await NextFrame();
+        }
+
         if (GetNodeOrNull<FreeCamera>("FreeCamera") is { } cam)
         {
             // A high three-quarter view of the whole map. The offsets are PEI's framing expressed as

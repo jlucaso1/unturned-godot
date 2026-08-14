@@ -51,6 +51,13 @@ public sealed class PunchDamageHost
     // its outcome.
     public event Action<PunchResult>? Resolved;
 
+    // Raised when a swing lands on a surface that says what it is made of — DamageTool.ServerSpawnLegacyImpact,
+    // as an event rather than a call, because what a host DOES with it differs: an interactive session
+    // plays it locally and replicates it, and a dedicated server only replicates.
+    //
+    // Fires for a wall as readily as for a crate: this is not a damage notification.
+    public event Action<PunchImpact>? Impacted;
+
     public PunchDamageHost(NetServer server, ZombieSystem? zombies, ZombieHost? zombieHost = null,
         DamageableWorld? world = null)
     {
@@ -118,6 +125,12 @@ public sealed class PunchDamageHost
         if (hit.Exists && !PunchTargeting.IsWithinServerRange(origin, hit.Point))
             hit = PunchHit.None;
 
+        // The impact goes out BEFORE the damage, and independently of it. PlayerEquipment.punch spawns it
+        // off the material name alone, above the whole `info.type` ladder, so a wall that takes no damage
+        // still cracks — and a target that takes damage cracks whether or not the damage killed it.
+        if (hit.HasSurface)
+            Impacted?.Invoke(new PunchImpact(playerId, hit.Point, hit.Normal, hit.Surface));
+
         PunchResult result = hit.Kind switch
         {
             EPunchTargetKind.Zombie => DamageZombie(playerId, hit, forward),
@@ -136,7 +149,13 @@ public sealed class PunchDamageHost
         ushort amount = PunchDamageResolver.Zombie(hit.Limb, direction, ZombieHitbox.ForwardOf(zombie));
         bool killed = _zombies!.Damage(zombie, amount, playerId, _views);
         if (killed)
-            _zombieHost?.ReportKilled(zombie);
+        {
+            // DamageTool.damageZombie builds this from the swing and the damage before it calls
+            // askDamage, and askDamage carries it through to sendZombieDead: the shove a corpse takes
+            // with it, which is why a hard hit throws a body and a weak one drops it.
+            _zombieHost?.ReportKilled(zombie, RagdollForce.Impulse(direction, amount));
+        }
+
         return new PunchResult(playerId, hit, amount, killed);
     }
 
@@ -154,3 +173,8 @@ public sealed class PunchDamageHost
 // something a fist cannot hurt — a pine, whose asset does not say Vulnerable_To_Fists — and the two are
 // told apart by whether the hit exists.
 public readonly record struct PunchResult(byte PlayerId, PunchHit Hit, ushort Amount, bool Destroyed);
+
+// Where a fist met the world and what that was made of: the arguments of ReceiveSpawnLegacyImpact, plus
+// who threw it. `Surface` is a physics-material name, which is what both the sound and the mark are
+// resolved through, and it is never empty here — a swing with no surface raises no impact at all.
+public readonly record struct PunchImpact(byte PlayerId, Vector3 Point, Vector3 Normal, string Surface);

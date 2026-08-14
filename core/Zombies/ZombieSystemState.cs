@@ -67,6 +67,7 @@ public sealed class ZombieSystemState
         destination.SinceSwing = source.SinceSwing;
         destination.PendingHit = source.PendingHit;
         destination.LeaveDelay = source.LeaveDelay;
+        destination.StunRemaining = source.StunRemaining;
         destination.LeaveTo = source.LeaveTo;
         destination.RepathGranted = source.RepathGranted;
         destination.CurrentWaypointIndex = source.CurrentWaypointIndex;

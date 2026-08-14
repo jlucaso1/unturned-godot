@@ -90,7 +90,7 @@ public partial class DedicatedServer : Node
         // has zombies: the rubble and resources are there either way. Hooked after the zombie host so a
         // swing sees the population that tick already moved.
         var punches = new UnturnedGodot.Damage.PunchDamageHost(node._server, zombies, zombieHost, damageable);
-        PunchPhysics.Attach(punches, () => node.GetViewport()?.World3D);
+        PunchPhysics.Attach(punches, () => node.GetViewport()?.World3D, node._server);
         node.PunchDamage = punches;
 
         Log.Print($"[server] dedicated server for {levelName} listening on UDP {port} ({tiles.Count} height tiles)");

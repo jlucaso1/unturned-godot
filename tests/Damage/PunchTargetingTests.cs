@@ -38,14 +38,18 @@ public class PunchTargetingTests
         """);
 
     // A stand-in for the physics world: the ray stops dead at `distance` along it, on a body belonging
-    // to `asset` — Guid.Empty standing for terrain or anything else the host cannot name.
-    private static PunchTargeting.WorldRaycast WallAt(float distance, Guid asset = default) =>
-        (Vector3 origin, Vector3 direction, float maxDistance, out Vector3 point, out float hit,
-            out Guid struck) =>
+    // to `asset` — Guid.Empty standing for terrain or anything else the host cannot name — made of
+    // `surface`, which is empty for a collider carrying no PhysicMaterial.
+    private static PunchTargeting.WorldRaycast WallAt(float distance, Guid asset = default,
+        string surface = "") =>
+        (Vector3 origin, Vector3 direction, float maxDistance, out Vector3 point, out Vector3 normal,
+            out float hit, out Guid struck, out string material) =>
         {
             point = origin + (direction.Normalized() * distance);
+            normal = -direction.Normalized(); // a wall square on to the swing
             hit = distance;
             struck = asset;
+            material = surface;
             return distance <= maxDistance;
         };
 

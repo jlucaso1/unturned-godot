@@ -39,6 +39,8 @@ public enum ENetMessage : byte
     // and times out instead of reporting the mismatch it exists to report.
     PlayerGesture, // server -> all but the owner, reliable: a one-shot hand animation (a punch today)
     ZombieKilled,  // server -> a region's clients, reliable: zombies that died this tick
+    Impact,        // server -> all, unreliable: a hit's point, normal and surface (its sound and mark)
+    ZombieStunned, // server -> a region's clients, reliable: zombies staggered this tick, and which reel
 }
 
 // Why a Hello was refused. Sent before the connection is closed so the player is told what happened
@@ -231,7 +233,11 @@ public static class NetMessages
     // the corpse of every punched zombie standing on its screen forever.
     // Version 11 widens the Input swing block by the three bytes of the swing's own aim, so a version 10
     // client's swing frames would be read three bytes short and every field after them would be garbage.
-    public const byte ProtocolVersion = 11;
+    // Version 12 adds Impact, which a version 11 client would drop as an unknown type — every punch on
+    // the world would be silent and unmarked on its screen, including its own.
+    // Version 13 adds ZombieStunned the same way: a version 12 client would keep animating a zombie the
+    // server has frozen, so the body would slide through its stagger instead of playing it.
+    public const byte ProtocolVersion = 13;
 
     // Two level names denote the same world. The name on the wire is the map's FOLDER name — the one
     // identity that survives the trip between two machines (paths and workshop ids do not) — and it

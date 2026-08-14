@@ -183,7 +183,11 @@ public static class ModelExtractor
         ObjectAssetDatabase db, Action onMeshesReady, Action<string> onTextureWritten,
         IReadOnlyList<FoliageAsset>? foliageAssets = null,
         IReadOnlyDictionary<string, Guid[]>? layerWantsByPath = null,
-        Action<Guid, CachedTexture>? onLayerTexture = null,
+        // Called with the CONTAINER PATH rather than with whatever the caller wanted the texture for:
+        // this pass fetches paths, and the caller is what knows whether a given one is a terrain layer,
+        // an impact decal or a crosshair icon. It used to hand back terrain material GUIDs, which meant
+        // nothing else could ride the pass without inventing one.
+        Action<string, CachedTexture>? onContainerTexture = null,
         AudioExtractor.Request? audio = null,
         CancellationToken cancellationToken = default)
     {
@@ -217,8 +221,7 @@ public static class ModelExtractor
                 foreach ((string containerPath, CachedTexture texture) in
                     BundleTextures.ExtractAll(bundlePath, new List<string>(layerWants.Keys)))
                 {
-                    foreach (Guid material in layerWants[containerPath])
-                        onLayerTexture?.Invoke(material, texture);
+                    onContainerTexture?.Invoke(containerPath, texture);
                 }
             return;
         }
@@ -277,7 +280,7 @@ public static class ModelExtractor
                 readSerialized++;
 
                 audioPlan = ReadSerializedNode(stream, (int)node.Size, source, fileTag, neededGuids,
-                    cacheDir, db, neededTextures, layerTextures, foliageAssets, layerWants, onLayerTexture,
+                    cacheDir, db, neededTextures, layerTextures, foliageAssets, layerWants, onContainerTexture,
                     produced, staleLevels, audio, audioPlan, cancellationToken);
 
                 // Settle what needs no stream at all, once per texture: pixels stored inline are in hand
@@ -352,8 +355,7 @@ public static class ModelExtractor
                 else
                 {
                     CachedTexture cached = CachedTexture.From(owed.Texture, bytes);
-                    foreach (Guid material in layerWants[owed.LayerPath])
-                        onLayerTexture?.Invoke(material, cached);
+                    onContainerTexture?.Invoke(owed.LayerPath, cached);
                 }
             }, cancellationToken: cancellationToken);
 
@@ -527,7 +529,7 @@ public static class ModelExtractor
         HashSet<Guid> neededGuids, string cacheDir, ObjectAssetDatabase db,
         Dictionary<(string Tag, long Id), UnityTexture> neededTextures, Dictionary<string, UnityTexture> layerTextures,
         IReadOnlyList<FoliageAsset>? foliageAssets,
-        IReadOnlyDictionary<string, Guid[]> layerWants, Action<Guid, CachedTexture>? onLayerTexture,
+        IReadOnlyDictionary<string, Guid[]> layerWants, Action<string, CachedTexture>? onContainerTexture,
         HashSet<Guid> produced, HashSet<Guid> staleLevels, AudioExtractor.Request? audio,
         AudioExtractor.StreamPlan? audioPlan, CancellationToken cancellationToken)
     {
@@ -560,9 +562,7 @@ public static class ModelExtractor
         {
             if (texture.StreamPath.Length == 0)
             {
-                CachedTexture cached = CachedTexture.From(texture, texture.InlineData);
-                foreach (Guid material in layerWants[containerPath])
-                    onLayerTexture?.Invoke(material, cached);
+                onContainerTexture?.Invoke(containerPath, CachedTexture.From(texture, texture.InlineData));
             }
             else
                 layerTextures[containerPath] = texture;
@@ -1051,14 +1051,16 @@ public static class ModelExtractor
             switch (p.Kind)
             {
                 case EColliderKind.Box:
-                    result.Add(CachedCollider.Box(p.LocalToRoot, p.Center, p.Size, isLadder));
+                    result.Add(CachedCollider.Box(p.LocalToRoot, p.Center, p.Size, isLadder,
+                        p.MaterialName));
                     break;
                 case EColliderKind.Sphere:
-                    result.Add(CachedCollider.Sphere(p.LocalToRoot, p.Center, p.Radius, isLadder));
+                    result.Add(CachedCollider.Sphere(p.LocalToRoot, p.Center, p.Radius, isLadder,
+                        p.MaterialName));
                     break;
                 case EColliderKind.Capsule:
                     result.Add(CachedCollider.Capsule(p.LocalToRoot, p.Center, p.Radius, p.Height,
-                        p.Direction, isLadder));
+                        p.Direction, isLadder, p.MaterialName));
                     break;
                 default:
                     if (!graph.ObjectsByPathId.TryGetValue(p.MeshId, out SerializedObject? meshObj))
@@ -1069,7 +1071,8 @@ public static class ModelExtractor
                     var indices = new List<int>();
                     foreach (int[] sub in mesh.Submeshes)
                         indices.AddRange(sub);
-                    result.Add(CachedCollider.Mesh(p.LocalToRoot, mesh.Vertices, indices.ToArray(), isLadder));
+                    result.Add(CachedCollider.Mesh(p.LocalToRoot, mesh.Vertices, indices.ToArray(), isLadder,
+                        p.MaterialName));
                     break;
             }
         }

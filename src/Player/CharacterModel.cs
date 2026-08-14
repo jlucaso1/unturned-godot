@@ -95,7 +95,12 @@ public static class CharacterModel
             "Attack_0", "Attack_1", "Attack_2", "Attack_3", "Attack_4",
             "Attack_5", "Attack_6", "Attack_7", "Attack_8",
             "Startle_0", "Startle_1", "Startle_2", "Startle_3", "Startle_4", "Startle_5", "Startle_6",
+            // Stun_0..4 are the standing stagger reels; 5/7/8 are the crawler's and 6/9/10 the
+            // sprinter's (Zombie.stun rolls between them by speciality). Importing only the standing set
+            // left a staggered crawler on its walk cycle for the whole second: Replay ignores a clip the
+            // rig does not carry, and nothing says so.
             "Stun_0", "Stun_1", "Stun_2", "Stun_3", "Stun_4",
+            "Stun_5", "Stun_6", "Stun_7", "Stun_8", "Stun_9", "Stun_10",
         },
         PrimaryIdle = "Idle_0",
         Skin = isMega ? new Color(89f / 255f, 99f / 255f, 89f / 255f) : new Color(99f / 255f, 124f / 255f, 99f / 255f),

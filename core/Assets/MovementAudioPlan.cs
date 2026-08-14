@@ -16,6 +16,32 @@ public static class MovementAudioPlan
     // without one falls back through the chain the bank walks.
     public static readonly string[] EventKeys = { "FootstepWalk", "FootstepRun", "BipedLand" };
 
+    // What a fist landing on that same surface resolves through, IN THE ORDER THEY ARE TRIED. A punch
+    // reaches DamageTool.ReceiveSpawnLegacyImpact, whose PlayLegacyImpactAudio asks for LegacyImpact
+    // first and falls back to MeleeImpact — the opposite order to PlayMeleeImpactAudio, which a swung
+    // weapon reaches. The shipped materials mostly define both to the same asset, so the two orders
+    // usually agree; where they do not, this is the one a fist takes.
+    //
+    // Planned in the same pass as the footsteps because it is the same question asked of the same
+    // assets: a bundle opened once should give up everything its surfaces owe, and a definition
+    // discovered later costs a second whole-bundle decode.
+    //
+    // ImpactAudio plays from this array rather than declaring its own. A key planned but never played,
+    // or played but never extracted, is a silent surface with no error anywhere — so there is one list.
+    public static readonly string[] ImpactEventKeys = { "LegacyImpact", "MeleeImpact" };
+
+    // Every surface event the extraction plans for, in one sequence.
+    public static IEnumerable<string> AllEventKeys
+    {
+        get
+        {
+            foreach (string key in EventKeys)
+                yield return key;
+            foreach (string key in ImpactEventKeys)
+                yield return key;
+        }
+    }
+
     // Every name the bank knows, not the game's ten base surfaces: a workshop landscape can name its own
     // material, and one the extraction never visited was resolvable at runtime but absent from the audio
     // cache, so that ground was silent. Definitions are shared between materials, so the set of paths this
@@ -29,7 +55,7 @@ public static class MovementAudioPlan
         IReadOnlyList<ContentSource> sources, PhysicsMaterialBank bank, string fallbackBundlePath)
     {
         var byBundle = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
-        foreach (string key in EventKeys)
+        foreach (string key in AllEventKeys)
             foreach (string name in bank.Names)
             {
                 if (bank.FindAudioDef(name, key) is not { } def)

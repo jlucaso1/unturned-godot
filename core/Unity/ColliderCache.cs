@@ -27,9 +27,15 @@ public readonly struct CachedCollider
     // so it must become a body a climb probe can find and nothing else can walk into.
     public readonly bool IsLadder;
 
+    // The PhysicMaterial name this collider carries, or empty. It decides which impact sound and which
+    // impact effect a melee hit on this surface resolves to (PhysicsTool.GetColliderSharedPhysicsMaterialName),
+    // and empty is a real answer rather than missing data: the original skips the impact entirely for a
+    // collider with no material, and most colliders in the shipped content have none.
+    public readonly string MaterialName;
+
     public CachedCollider(EColliderKind kind, Transform3D localToRoot, Vector3 center, Vector3 size,
         float radius, float height, int direction, Vector3[] vertices, int[] indices,
-        bool isLadder = false)
+        bool isLadder = false, string materialName = "")
     {
         Kind = kind;
         LocalToRoot = localToRoot;
@@ -41,22 +47,27 @@ public readonly struct CachedCollider
         Vertices = vertices;
         Indices = indices;
         IsLadder = isLadder;
+        MaterialName = materialName;
     }
 
     private static readonly Vector3[] NoVerts = Array.Empty<Vector3>();
     private static readonly int[] NoIndices = Array.Empty<int>();
 
-    public static CachedCollider Box(Transform3D t, Vector3 center, Vector3 size, bool isLadder = false)
-        => new(EColliderKind.Box, t, center, size, 0f, 0f, 0, NoVerts, NoIndices, isLadder);
-    public static CachedCollider Sphere(Transform3D t, Vector3 center, float radius, bool isLadder = false)
-        => new(EColliderKind.Sphere, t, center, Vector3.Zero, radius, 0f, 0, NoVerts, NoIndices, isLadder);
+    public static CachedCollider Box(Transform3D t, Vector3 center, Vector3 size, bool isLadder = false,
+        string materialName = "")
+        => new(EColliderKind.Box, t, center, size, 0f, 0f, 0, NoVerts, NoIndices, isLadder, materialName);
+    public static CachedCollider Sphere(Transform3D t, Vector3 center, float radius, bool isLadder = false,
+        string materialName = "")
+        => new(EColliderKind.Sphere, t, center, Vector3.Zero, radius, 0f, 0, NoVerts, NoIndices, isLadder,
+            materialName);
     public static CachedCollider Capsule(Transform3D t, Vector3 center, float radius, float height,
-        int direction, bool isLadder = false)
+        int direction, bool isLadder = false, string materialName = "")
         => new(EColliderKind.Capsule, t, center, Vector3.Zero, radius, height, direction, NoVerts,
-            NoIndices, isLadder);
+            NoIndices, isLadder, materialName);
     public static CachedCollider Mesh(Transform3D t, Vector3[] vertices, int[] indices,
-        bool isLadder = false)
-        => new(EColliderKind.Mesh, t, Vector3.Zero, Vector3.Zero, 0f, 0f, 0, vertices, indices, isLadder);
+        bool isLadder = false, string materialName = "")
+        => new(EColliderKind.Mesh, t, Vector3.Zero, Vector3.Zero, 0f, 0f, 0, vertices, indices, isLadder,
+            materialName);
 }
 
 // Per-GUID cache of an object's colliders, written once during extraction and read at load — small, so plain
@@ -72,21 +83,33 @@ public readonly struct CachedCollider
 // object would silently load with no collision.
 public static class ColliderCache
 {
-    // "UGC2". The magic doubles as the format version: the previous "UGCL" files carry no flags byte, so
-    // reading one with this reader would misparse every collider after the first. Files written under any
-    // older magic — and the header-less format before that — are treated as stale and re-extracted, which
-    // is also how a bad or truncated file recovers.
-    private const uint Magic = 0x32434755;
+    // "UGC3". The magic doubles as the format version: "UGC2" files carry no physics-material table, and
+    // "UGCL" before them no flags byte, so reading either with this reader would misparse every collider
+    // after the first. Files written under any older magic — and the header-less format before those — are
+    // treated as stale and re-extracted, which is also how a bad or truncated file recovers.
+    private const uint Magic = 0x33434755;
 
     // magic + payload length.
     private const int HeaderBytes = 8;
 
-    // Kind byte + flags byte + a 12-float transform. Every collider costs at least this, so the declared
-    // count can be bounded against the bytes actually present instead of being trusted into an allocation.
-    private const int MinBytesPerCollider = 1 + 1 + (12 * 4);
+    // Kind byte + flags byte + material index byte + a 12-float transform. Every collider costs at least
+    // this, so the declared count can be bounded against the bytes actually present instead of being
+    // trusted into an allocation.
+    private const int MinBytesPerCollider = 1 + 1 + 1 + (12 * 4);
 
     // Bit 0 of the per-collider flags byte: this is a ladder's climbing volume, not solid geometry.
     private const byte LadderFlag = 1;
+
+    // Physics-material names are written once per file as a table and referenced by a one-byte index, with
+    // index 0 reserved for "no material". A prefab's colliders draw from a handful of names — the whole
+    // shipped game defines 21 — and the same one repeats across every collider on a building, so the table
+    // costs a few dozen bytes where inline strings would cost that much per collider.
+    private const int NoMaterial = 0;
+
+    // How many distinct names one file's table may hold, index 0 being the empty name. A prefab that
+    // somehow exceeded this could not be addressed by a byte, and silently dropping the overflow to "no
+    // material" would make an object quietly lose its impact sounds — so it is refused at write time.
+    private const int MaxMaterialNames = 256;
 
     // True when the file carries the current magic AND its length matches the one recorded in its header —
     // i.e. the write completed. False for the header-less legacy format, a truncated file, a short file, or
@@ -128,10 +151,34 @@ public static class ColliderCache
     {
         using var w = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true);
         w.Write(colliders.Count);
+
+        // The table comes before the colliders that index into it, so a reader has every name in hand
+        // before it needs one. Index 0 is the empty name and is never written out.
+        Dictionary<string, int> materialIndices = BuildMaterialTable(colliders, out List<string> names);
+        w.Write(names.Count);
+        foreach (string name in names)
+        {
+            // A one-byte length and raw UTF-8, rather than BinaryWriter.Write(string): that writes a
+            // 7-bit-encoded length a corrupt file can inflate to 2 GB, and ReadString would allocate it
+            // before any bound here could look. A physics-material name is a Unity object name — the
+            // longest the game ships is 30-odd characters — so a byte is generous and, more to the
+            // point, unable to describe an allocation worth guarding against.
+            byte[] utf8 = System.Text.Encoding.UTF8.GetBytes(name);
+            if (utf8.Length > byte.MaxValue)
+            {
+                throw new InvalidDataException(
+                    $"A physics-material name is longer than {byte.MaxValue} bytes: {name}");
+            }
+
+            w.Write((byte)utf8.Length);
+            w.Write(utf8);
+        }
+
         foreach (CachedCollider c in colliders)
         {
             w.Write((byte)c.Kind);
             w.Write((byte)(c.IsLadder ? LadderFlag : 0));
+            w.Write((byte)(materialIndices.TryGetValue(c.MaterialName, out int index) ? index : NoMaterial));
             WriteTransform(w, c.LocalToRoot);
             switch (c.Kind)
             {
@@ -161,6 +208,28 @@ public static class ColliderCache
         }
     }
 
+    // The distinct non-empty material names these colliders name, in first-seen order, and the index each
+    // one is written under. Index 0 is "no material" and has no entry.
+    private static Dictionary<string, int> BuildMaterialTable(IReadOnlyList<CachedCollider> colliders,
+        out List<string> names)
+    {
+        var indices = new Dictionary<string, int>(StringComparer.Ordinal);
+        names = new List<string>();
+        foreach (CachedCollider c in colliders)
+        {
+            if (c.MaterialName.Length == 0 || indices.ContainsKey(c.MaterialName))
+                continue;
+            if (names.Count + 1 >= MaxMaterialNames)
+            {
+                throw new InvalidDataException(
+                    $"A prefab names more than {MaxMaterialNames - 1} distinct physics materials.");
+            }
+            names.Add(c.MaterialName);
+            indices[c.MaterialName] = names.Count; // 0 is reserved, so the first name is 1
+        }
+        return indices;
+    }
+
     public static List<CachedCollider> Read(Stream stream)
     {
         using var r = new BinaryReader(stream, System.Text.Encoding.UTF8, leaveOpen: true);
@@ -178,9 +247,12 @@ public static class ColliderCache
         if (count < 0)
             throw new InvalidDataException($"Collider cache declares a negative count ({count}).");
 
+        string[] materialNames = ReadMaterialTable(r, stream);
+
         // A corrupt-but-plausible count must not become an allocation. Every collider costs at least a kind
         // byte and a transform, so the bytes actually present bound how many there can be — otherwise a
         // count of int.MaxValue would OutOfMemory here, which is not a decode failure any caller catches.
+        // Measured after the name table, since that is where the colliders actually start.
         long available = stream.CanSeek ? stream.Length - stream.Position : declaredPayload - sizeof(int);
         if ((long)count * MinBytesPerCollider > available)
         {
@@ -193,18 +265,19 @@ public static class ColliderCache
         {
             var kind = (EColliderKind)r.ReadByte();
             bool isLadder = (r.ReadByte() & LadderFlag) != 0;
+            string material = MaterialAt(materialNames, r.ReadByte());
             Transform3D t = ReadTransform(r);
             switch (kind)
             {
                 case EColliderKind.Box:
-                    result.Add(CachedCollider.Box(t, ReadVec3(r), ReadVec3(r), isLadder));
+                    result.Add(CachedCollider.Box(t, ReadVec3(r), ReadVec3(r), isLadder, material));
                     break;
                 case EColliderKind.Sphere:
-                    result.Add(CachedCollider.Sphere(t, ReadVec3(r), r.ReadSingle(), isLadder));
+                    result.Add(CachedCollider.Sphere(t, ReadVec3(r), r.ReadSingle(), isLadder, material));
                     break;
                 case EColliderKind.Capsule:
                     result.Add(CachedCollider.Capsule(t, ReadVec3(r), r.ReadSingle(), r.ReadSingle(),
-                        r.ReadInt32(), isLadder));
+                        r.ReadInt32(), isLadder, material));
                     break;
                 default:
                     var verts = new Vector3[ReadBoundedCount(r, stream, sizeof(float) * 3, "vertices")];
@@ -213,7 +286,7 @@ public static class ColliderCache
                     var indices = new int[ReadBoundedCount(r, stream, sizeof(int), "indices")];
                     for (int i = 0; i < indices.Length; i++)
                         indices[i] = r.ReadInt32();
-                    result.Add(CachedCollider.Mesh(t, verts, indices, isLadder));
+                    result.Add(CachedCollider.Mesh(t, verts, indices, isLadder, material));
                     break;
             }
         }
@@ -232,6 +305,47 @@ public static class ColliderCache
 
         return result;
     }
+
+    // The file's physics-material names. Bounded twice: the COUNT against the bytes remaining (a name
+    // costs at least its own length prefix), and each name's own length against them again — a single
+    // enormous name is the shape a bounded count alone would let through.
+    private static string[] ReadMaterialTable(BinaryReader r, Stream stream)
+    {
+        int count = r.ReadInt32();
+        if (count < 0 || count >= MaxMaterialNames)
+            throw new InvalidDataException($"Collider cache declares {count} physics-material names.");
+        if (stream.CanSeek && count > stream.Length - stream.Position)
+        {
+            throw new InvalidDataException(
+                $"Collider cache declares {count} physics-material names but carries only "
+                + $"{stream.Length - stream.Position} bytes.");
+        }
+
+        var names = new string[count];
+        for (int i = 0; i < count; i++)
+        {
+            int length = r.ReadByte();
+            if (stream.CanSeek && length > stream.Length - stream.Position)
+            {
+                throw new InvalidDataException(
+                    $"Collider cache declares a {length}-byte material name with "
+                    + $"{stream.Length - stream.Position} bytes left.");
+            }
+
+            byte[] utf8 = r.ReadBytes(length);
+            if (utf8.Length != length)
+                throw new EndOfStreamException("Collider cache ended inside a material name.");
+            names[i] = System.Text.Encoding.UTF8.GetString(utf8);
+        }
+
+        return names;
+    }
+
+    // Index 0 is "no material"; anything else names the table entry one before it. An index past the table
+    // is corruption, but a benign kind — the collider still has its shape — so it reads as no material
+    // rather than failing the whole file, which would leave the object with no collision at all.
+    private static string MaterialAt(string[] names, byte index) =>
+        index == NoMaterial || index > names.Length ? string.Empty : names[index - 1];
 
     // Reads a length prefix that is about to size an array, and refuses one the file cannot possibly back.
     // Bounding the collider count alone is not enough: a single mesh collider whose nested vertex or index
