@@ -843,7 +843,9 @@ public partial class Main : Node3D
 
     // Spawns the character on one of the map's own player spawnpoints (Spawns/Players.dat) and gives each
     // terrain tile a cheap heightfield collision so it can stand on the ground (vs a 2.1M-triangle concave
-    // trimesh). Objects stay non-colliding for now (the player clips buildings), which is fine for movement.
+    // trimesh). Objects bring their own: ObjectsBuilder puts every LARGE/MEDIUM object's and every
+    // resource's cached colliders onto batched per-GUID bodies, so buildings are solid by the time this
+    // runs — the terrain is simply the one surface with no asset to carry a collider of its own.
     private PlayerController SpawnPlayer(Node3D terrain, bool thirdPerson, string unturnedPath,
         HeightmapSampler? heights, Data.CollisionFieldBuilder? navigationField)
     {

@@ -67,7 +67,8 @@ public partial class ObjectStreamer : Node
     // the crosshair's hit test takes a callback rather than a value: it is built with the player, several
     // seconds before this exists, and asking it again per swing costs a field read.
     public ObjectAssetDatabase? Assets => _db;
-    private Dictionary<Guid, FoliageAsset.Owned> _foliageAssets = new();
+    private IReadOnlyDictionary<Guid, FoliageAsset.Owned> _foliageAssets =
+        new Dictionary<Guid, FoliageAsset.Owned>();
     private LevelFoliageChunks? _foliage;
     private FoliageResidencyIndex? _foliageIndex;
     // Held only between building the scene and warming the spawn ring; the tree owns the node itself.
@@ -442,21 +443,14 @@ public partial class ObjectStreamer : Node
 
     private void LoadPlacements()
     {
-        // Three independent reads, and the bundle decode cannot start until all of them are in: the
-        // placements (a hundred thousand of them on a workshop map), the asset database (thousands of
-        // .dat files) and the foliage. Running them together is what lets the decode start sooner.
-        // Trees stay in their own list until the asset database is in: a pre-GUID one is placed by an id
-        // from the RESOURCE namespace, and only the database can turn that into a GUID without confusing
-        // it with the identically-numbered object (see LegacyPlacements).
-        var trees = new List<PlacedTree>();
-        Task placements = Task.Run(() =>
-        {
-            _objects = LevelObjects.Load(_level.ObjectsDat);
-            trees = LevelTrees.Load(Path.Combine(_level.Path, "Terrain", "Trees.dat"));
-        });
-
+        // The two reads LevelContentPlan needs before it can resolve anything, and the bundle decode
+        // cannot start until both are in: the asset database (thousands of .dat files) and the foliage
+        // blob. Running them together is what lets the decode start sooner. The placements themselves are
+        // read inside Resolve, because the order they are then folded together in is the part that used to
+        // drift between the four copies of this — see LevelContentPlan.
         Task assets = Task.Run(() => _db = ContentExtraction.ScanAssets(_sources));
 
+        IReadOnlyList<Guid>? foliageGuids = null;
         Task foliage = Task.Run(() =>
         {
             string blobPath = Path.Combine(_level.Path, "Foliage.blob");
@@ -484,39 +478,21 @@ public partial class ObjectStreamer : Node
             {
                 _foliage = LevelFoliageChunks.Load(blobPath, FoliageBuilder.RuntimeChunkTiles);
             }
-            // Across every source, not just the core Assets folder: a workshop map's own grass and pebble
-            // assets live next to its bundle, and scanning core alone leaves them unresolved — no needed
-            // GUID, no extraction, no foliage on the map.
-            IReadOnlyList<Guid>? foliageGuids = _foliageIndex?.AssetGuids ?? _foliage?.AssetGuids;
-            if (foliageGuids != null)
-                _foliageAssets = FoliageAsset.ScanSources(_sources, new HashSet<Guid>(foliageGuids));
+            foliageGuids = _foliageIndex?.AssetGuids ?? _foliage?.AssetGuids;
         });
 
-        Task.WaitAll(placements, assets, foliage);
+        Task.WaitAll(assets, foliage);
 
-        // Needs both of the first two: a pre-GUID map names its objects and trees by legacy id, and only
-        // the asset database can turn those into the GUIDs the rest of the load is keyed on.
-        var holidays = HolidayPolicy.ForMap(_level.Path);
-        int legacy = LegacyPlacements.ResolveGuids(_objects, _db, holidays)
-            + LegacyPlacements.AppendTrees(trees, _objects, _db, holidays);
-        if (legacy > 0)
-            Log.Print($"[stream] legacy placements resolved by id: {legacy}");
+        LevelContent content = LevelContentPlan.Resolve(_sources, _level, _db, foliageGuids);
+        _objects = content.Objects;
+        _vehicles = content.Vehicles;
+        _npcs = content.Npcs;
+        _foliageAssets = content.FoliageAssets;
+        _neededGuids = content.NeededGuids;
 
-        // After the asset scan, which it resolves its vehicles through, and before the needed set below.
-        _vehicles = VehicleSpawnPlan.Load(_level, _sources, _db);
+        if (content.LegacyResolved > 0)
+            Log.Print($"[stream] legacy placements resolved by id: {content.LegacyResolved}");
         Log.Print($"[stream] vehicles: {_vehicles.Count} spawned");
-
-        // NPCs leave the object list before the needed set is built: they resolve to the player rig, not
-        // to an extracted mesh, so counting them would keep every load looking cold (see NpcPlacements).
-        _npcs = NpcPlacements.Partition(_objects, _db);
-
-        _neededGuids = _db.ResolvePlacementGuids(_objects);
-        foreach (PlacedObject v in _vehicles)
-            _neededGuids.Add(v.Guid);
-        // Only the foliage types that actually resolved to an asset: an unresolved GUID has nothing to
-        // extract, so counting it as needed would report the cache cold on every boot.
-        foreach (Guid g in _foliageAssets.Keys)
-            _neededGuids.Add(g);
     }
 
     // Warm path: meshes and textures are already cached. Staged across frames so the loading screen
@@ -632,7 +608,9 @@ public partial class ObjectStreamer : Node
         _objects = null!;
         _vehicles = null!;
         _db = null!;
-        _foliageAssets = new(); // consumed by the streaming worker / mesh extraction; drop it too
+        // Consumed by the streaming worker / mesh extraction; drop it too. Replaced rather than cleared:
+        // the table belongs to the LevelContent this load resolved, not to this field.
+        _foliageAssets = new Dictionary<Guid, FoliageAsset.Owned>();
     }
 
     // Hands the streaming foliage the spawn ring while the loading screen still owns the frame. The
@@ -797,7 +775,7 @@ public partial class ObjectStreamer : Node
         _decalWants = new Dictionary<string, ImpactDecalExtractor.Request>(StringComparer.Ordinal);
         _layersProduced.Clear();
         while (_readyKeys.TryDequeue(out _)) { }
-        _foliageAssets.Clear();
+        // Replaced rather than cleared: the table belongs to the LevelContent this load resolved.
         _foliageAssets = new Dictionary<Guid, FoliageAsset.Owned>();
         _foliage = null;
         _foliageIndex = null;
