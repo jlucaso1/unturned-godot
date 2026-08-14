@@ -62,6 +62,8 @@ public static class Program
             NavigationProbeSuite(map);
         if (all || wanted.Contains("navsnap"))
             NavigationSnapSuite(map);
+        if (all || wanted.Contains("zombietick"))
+            ZombieTickSuite(map);
         if (all || wanted.Contains("repro"))
             ReproSuite();
         if (all || wanted.Contains("bundle"))
@@ -437,6 +439,161 @@ public static class Program
             + $"budget ({Endpoints} endpoints) costs {perSnapMs * Endpoints:0.000} ms per server tick, "
             + $"{perSnapMs * Endpoints / ServerSimulation.TickRate:0.0} ms/s");
         Console.WriteLine();
+    }
+
+    // What one authoritative server tick of the zombie brain costs, over the map's own population,
+    // spawnpoints, nav bounds and pre-baked navmesh — and split the way Tier 3 splits it, through the
+    // same `ZombieSystem.Costs` sink `RuntimeCounters` installs.
+    //
+    // Tier 3 can only report what its own session happens to do, and its session spawns a stationary
+    // player at the map's spawn and leaves them there: nothing aggros, no repath is granted, and
+    // `ZombiePathQuery` reads zero. That is an honest reading of an idle map and no reading at all of
+    // the case the tick is budgeted for. This drives the population deliberately — every zombie in the
+    // busiest region hunting at once — and does it without an engine, so it is repeatable in seconds.
+    //
+    // The second pass is the one that answers "does this scale". `ZombieManager.generateZombies` caps a
+    // region at min(the flag's MaxZombies, a quarter of its eligible spawnpoints), and on PEI it is the
+    // SPAWNPOINTS that bind, not the cap — raising MaxZombies alone changes nothing at all. So the pass
+    // replicates each spawnpoint instead, which is what a denser map is, and reports how far it got.
+    private static void ZombieTickSuite(string? map)
+    {
+        if (Skip("zombietick", map != null && Directory.Exists(map) ? map : null, out string levelDir))
+            return;
+
+        foreach (int copies in new[] { 1, 24 })
+        {
+            (ZombieSystem? system, int hunters, int inRegion, Vector3 at) =
+                HuntingPopulation(levelDir, copies);
+            if (system == null)
+            {
+                Console.WriteLine("== zombietick: SKIP (this map ships no zombie world) ==\n");
+                return;
+            }
+
+            const int Ticks = 200; // 16 s of simulation at the 12.5 Hz authoritative rate
+            var players = new[] { new ZombiePlayerView(1, at, Player.EPlayerStance.Stand, true) };
+            string label = copies == 1
+                ? "the map's own spawnpoints"
+                : $"each spawnpoint replicated {copies}x";
+            Console.WriteLine($"== zombietick: {system.Zombies.Count:N0} zombies, {hunters:N0} of "
+                + $"{inRegion:N0} hunting in the busiest region ({label}) ==");
+            Bench($"ZombieSystem.Tick x{Ticks}", () =>
+            {
+                for (int i = 0; i < Ticks; i++)
+                    system.Tick(players, ServerSimulation.TickRate);
+            }, warmup: 1, iters: 3);
+
+            // The split, from the same sink Tier 3 reads, so the two numbers mean the same thing.
+            // Installed only now, after the benchmark above has warmed and jitted everything: a sink
+            // that was live through the warmup would fold the first pass's cold code into the average.
+            long brainTicks = 0, queryTicks = 0;
+            int queries = 0;
+            system.Costs = (cost, ticks) =>
+            {
+                if (cost == EZombieCost.PathQuery)
+                {
+                    queryTicks += ticks;
+                    queries++;
+                }
+                else
+                {
+                    brainTicks += ticks;
+                }
+            };
+            for (int i = 0; i < Ticks; i++)
+                system.Tick(players, ServerSimulation.TickRate);
+            system.Costs = null;
+
+            double brainMs = brainTicks * 1000.0 / Stopwatch.Frequency;
+            double queryMs = queryTicks * 1000.0 / Stopwatch.Frequency;
+            Console.WriteLine($"  ZombieBrain {brainMs / Ticks:0.000} ms/tick, of which ZombiePathQuery "
+                + $"{queryMs / Ticks:0.000} ms/tick over {queries / (double)Ticks:0.0} queries/tick");
+            // What was actually simulated, because "hunting" is a starting condition and not a promise:
+            // aggro is re-earned every detect pass and given up past 64 m.
+            int chasing = 0, attacking = 0;
+            foreach (ZombieInstance zombie in system.Zombies)
+            {
+                if (zombie.State == EZombieState.Chase) chasing++;
+                else if (zombie.State == EZombieState.Attack) attacking++;
+            }
+            Console.WriteLine($"  ended with {chasing:N0} chasing and {attacking:N0} attacking");
+            Console.WriteLine();
+        }
+    }
+
+    // The map's real zombie world with every body in the busiest region hunting a player standing in it.
+    // `copies` replicates each spawnpoint that many times, on a small deterministic offset so the copies
+    // are distinct eligible points rather than the same one refused twice — the only way to reach a
+    // region's real 255-zombie ceiling on a map whose spawnpoints run out first.
+    private static (ZombieSystem? System, int Hunters, int InRegion, Vector3 Player) HuntingPopulation(
+        string levelDir, int copies)
+    {
+        List<NavBound> bounds = LevelNavigationData.Load(Path.Combine(levelDir, "Environment"));
+        // Both caps have to move together. Replicating spawnpoints alone stops at the flag's own
+        // MaxZombies (64 on PEI) and raising MaxZombies alone stops at a quarter of the spawnpoints,
+        // so either one on its own leaves the population exactly where it was.
+        if (copies > 1)
+            foreach (NavBound bound in bounds)
+                bound.MaxZombies = byte.MaxValue;
+        List<ZombieTable> tables =
+            LevelZombiesData.LoadTables(Path.Combine(levelDir, "Spawns", "Zombies.dat"));
+        List<ZombieSpawnpointData> spawnpoints =
+            LevelZombiesData.LoadSpawnpoints(Path.Combine(levelDir, "Spawns", "Animals.dat"));
+        List<NavFlag> navmesh = LevelNavmesh.Load(Path.Combine(levelDir, "Environment"));
+        if (tables.Count == 0 || spawnpoints.Count == 0 || bounds.Count == 0)
+            return (null, 0, 0, Vector3.Zero);
+
+        if (copies > 1)
+        {
+            var dense = new List<ZombieSpawnpointData>(spawnpoints.Count * copies);
+            foreach (ZombieSpawnpointData point in spawnpoints)
+                for (int i = 0; i < copies; i++)
+                    dense.Add(new ZombieSpawnpointData(point.Type, point.Point
+                        + new Vector3((i % 5) * 0.75f, 0f, (i / 5) * 0.75f)));
+            spawnpoints = dense;
+        }
+
+        // Flat ground: this measures the brain's own CPU, and the real heightfield would only add a
+        // sampler's cost equally to both passes.
+        static bool Ground(float x, float z, out float y)
+        {
+            y = 0f;
+            return true;
+        }
+
+        var system = new ZombieSystem(tables, bounds, Ground, navmesh.Count > 0 ? navmesh : null);
+        system.Spawn(spawnpoints, new Random(7));
+        if (navmesh.Count > 0)
+        {
+            var graph = BakedNavGraph.Build(navmesh);
+            system.PathQuery = (Vector3 from, Vector3 to, List<Vector3> path, float radius) =>
+                graph.TryPath(from, to, path, radius);
+            system.PathReady = () => true;
+        }
+
+        // The busiest region, and everything in it hunting: Chase is what runs the whole tick — the
+        // repath cadence, the route follower, the move resolver and the zombie-zombie separation.
+        byte busiest = 0;
+        int most = 0;
+        for (byte bound = 0; bound < system.BoundCount; bound++)
+            if (system.ZombiesInBound(bound).Count > most)
+            {
+                most = system.ZombiesInBound(bound).Count;
+                busiest = bound;
+            }
+        int hunters = 0;
+        var centre = Vector3.Zero;
+        foreach (ZombieInstance zombie in system.ZombiesInBound(busiest))
+        {
+            zombie.State = EZombieState.Chase;
+            zombie.TargetPlayer = 1;
+            centre += zombie.Position;
+            hunters++;
+        }
+        // The player stands among them. Aggro is re-earned every detect pass and given up past 64 m, so
+        // a target somewhere else on the map would have the horde drop back to Return within a couple of
+        // ticks and the benchmark would price an idle region under a hunting name.
+        return (system, hunters, most, hunters == 0 ? Vector3.Zero : centre / hunters);
     }
 
     // Classes a bundle-wide loop decodes EVERY object of, on any load of this bundle, whatever the map:
