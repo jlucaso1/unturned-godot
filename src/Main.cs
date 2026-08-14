@@ -777,6 +777,13 @@ public partial class Main : Node3D
             _player = SpawnPlayer(terrain, thirdPerson: false, unturnedPath, heights, navigationField);
         }
 
+        // Whoever was going to claim the preloaded navmesh has claimed it by now: SpawnPlayer brings the
+        // session up and hosts the zombies inline, and the two branches above it never get that far.
+        // Anything still sitting there belongs to a session that will never ask for it — a JOIN client,
+        // a FREECAM fly-through, a STEP_PROBE — and it is the map's whole NavFlag list, tens of
+        // megabytes on a large map, held in a static for the rest of the process.
+        ZombieNavigation.DiscardPreloaded();
+
         loading.SetStatus("World objects…");
         await NextFrame();
         var overlay = new LoadingOverlay { Name = "LoadingOverlay" };

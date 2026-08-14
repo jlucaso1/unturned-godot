@@ -8,8 +8,8 @@ namespace UnturnedGodot;
 // remembered to wire. `SceneTree.GetFirstNodeInGroup` is the engine's own answer to that: the builder
 // says what a node is once, at construction, and the lookup is a dictionary hit whenever it is needed.
 //
-// Today the dev console is the only consumer. The names are prefixed so they cannot collide with the
-// groups gameplay code already uses for its own purposes.
+// The dev console and Tier 3's report are the consumers. The names are prefixed so they cannot collide
+// with the groups gameplay code already uses for its own purposes.
 public static class SceneGroups
 {
     public const string Terrain = "ug_terrain";
@@ -30,4 +30,8 @@ public static class SceneGroups
     public const string RemotePlayers = "ug_remote_players";
     public const string Lighting = "ug_lighting";
     public const string PauseMenu = "ug_pause_menu";
+    // The session owner. Tier 3 reads the pathfinder's retained state through it, and it cannot be
+    // handed the node instead: the report is started by the object streamer, from a coroutine on Main,
+    // long after the session came up.
+    public const string Network = "ug_network";
 }
