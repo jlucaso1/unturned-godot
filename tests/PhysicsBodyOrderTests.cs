@@ -1327,6 +1327,15 @@ public class PhysicsBodyOrderTests
         Assert.Contains("File.WriteAllText(StampPathFor(material, cacheDirectory), stamp)", cache);
         Assert.Contains("TerrainLayerCache.Missing(needed, bundlePaths)", File.ReadAllText(streamerPath));
         Assert.Contains("TerrainLayerCache.Read(guid, bundlePath)", File.ReadAllText(layersPath));
+
+        // Written through a temporary and renamed into place, like every other cache file in this repo.
+        // Truncating the .tex where it lies was safe against a CRASH — the stamp is written afterwards,
+        // so an interrupted write leaves no stamp and the entry reads as missing — but not against a
+        // REWRITE by a second process sharing user://, which is what a dedicated server plus a BOT_JOIN
+        // client are: A finishing its .tex and .stamp while B has just truncated the same .tex leaves a
+        // reader passing A's stamp and then reading B's half-written payload.
+        Assert.DoesNotContain("File.Create(PathFor(material, cacheDirectory))", cache);
+        Assert.Contains("File.Move(temporary, path, overwrite: true)", cache);
     }
 
     // Two phases, and the split is the whole point: TerrainLayers.Load is pure parsing and file IO, so
