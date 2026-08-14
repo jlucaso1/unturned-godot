@@ -133,6 +133,36 @@ public class ImpactDecalsTests : TestClass
         decals.QueueFree();
     }
 
+    // The ORDER the ring recycles in, pinned rather than described.
+    //
+    // The round-robin was a deliberate choice — recycling "whichever expires soonest" was the first
+    // attempt and was wrong, because each mark's lifetime carries a random spread and the expiry order
+    // is therefore not the creation order. Anything that quietly moved which slot comes round first
+    // would be a behaviour change wearing an optimization's clothes, so the sequence is asserted.
+    //
+    // Note what it says: `_next` advances BEFORE it is used, so a freshly filled pool comes back round
+    // to slot 1 first and slot 0 waits a full lap. That predates the live-count bookkeeping and is not
+    // changed by it — it is written down here so that any future change to it has to be deliberate.
+    [Test]
+    public void TheRingRecyclesInACompleteLapStartingAtTheSecondSlot()
+    {
+        ImpactDecals decals = Build();
+        TestScene.AddChild(decals);
+
+        var claimed = new List<Decal>();
+        for (int i = 0; i < ImpactDecals.MaxDecals; i++)
+            claimed.Add(decals.Claim());
+
+        for (int i = 0; i < ImpactDecals.MaxDecals; i++)
+        {
+            // 1, 2, ... 23, then back to 0: one full lap, every slot exactly once, in ring order.
+            Decal expected = claimed[(i + 1) % ImpactDecals.MaxDecals];
+            Assert.Same(expected, decals.Claim());
+        }
+
+        decals.QueueFree();
+    }
+
     // The sweep retires on the pool's own bookkeeping rather than on what the engine says each slot is
     // doing. It used to read Decal.Visible — a marshalled property — across all 24 slots plus a
     // Time.GetTicksMsec every frame, which is ~3,500 interop crossings a second at 144 fps to establish
