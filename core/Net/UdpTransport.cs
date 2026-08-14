@@ -44,8 +44,14 @@ public sealed class UdpServerTransport : IServerTransport
     public const int MaxReadsPerPump = 1024;
 
     // Counting events is not a memory bound: an unreliable datagram can carry ~65 KiB, so a full queue of
-    // them is hundreds of megabytes retained before anyone has said Hello. The largest message the
-    // protocol writes is a full ZombieList at roughly 6 KiB, so anything past this is not ours.
+    // them is hundreds of megabytes retained before anyone has said Hello. Nothing this protocol writes
+    // comes close to 16 KiB — every message that walks a collection is now split at NetChunks'
+    // 1200-byte path budget — so anything past this is not ours.
+    //
+    // This is a ceiling on what the transport will ACCEPT, and deliberately not a budget anything spends.
+    // It once read "the largest message the protocol writes is a full ZombieList at roughly 6 KiB", which
+    // was wrong twice over: a ZombieList chunk is 1153 bytes, and the largest message was Welcome, whose
+    // full roster was about 12.5 KB until it was chunked too.
     public const int MaxPayloadBytes = 16 * 1024;
 
     // And the queue is bounded by what it holds, not only by how many things it holds.
