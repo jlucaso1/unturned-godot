@@ -873,6 +873,9 @@ public partial class Main : Node3D
 
         (Vector3 spawnPosition, float spawnYaw) = ResolveSpawn(unturnedPath, _mapName, heights);
 
+        // NetworkManager puts itself in SceneGroups.Network from _Ready, which is how the benchmark
+        // report, the console's `net` namespace and the F3 HUD all find the session without holding it:
+        // it is built with each map and freed with it.
         var network = new NetworkManager { Name = "Network", LevelName = LevelIdentity(unturnedPath, _mapName) };
         _network = network;
         network.OnRejected += ShowJoinRefused;

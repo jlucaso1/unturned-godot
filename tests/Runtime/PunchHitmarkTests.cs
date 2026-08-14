@@ -55,12 +55,18 @@ public class PunchHitmarkTests : TestClass
         """);
 
     // A tree that opts in to fists, and one that does not — the resource path's own gate.
+    //
+    // The opt-in is SPELLED OUT, and it has to be. ResourceAsset.cs:477 reads this key with ParseBool
+    // and a false default, and DatValueEx.TryParseBool fails on the null a valueless key holds — so a
+    // bare "Vulnerable_To_Fists" is not an opt-in, it is the default. This fixture wrote it bare and
+    // passed only because GetBool used to answer true for a value it could not parse; that was fixed to
+    // match the game, and the fixture was the one caller left describing the old behaviour.
     private static ObjectAsset VulnerableTree() => Parse("""
         GUID d19b3ec55a2046668611c9d2775efd99
         Type Resource
         ID 63
         Health 800
-        Vulnerable_To_Fists
+        Vulnerable_To_Fists true
         """);
 
     private static ObjectAsset ToughTree() => Parse("""

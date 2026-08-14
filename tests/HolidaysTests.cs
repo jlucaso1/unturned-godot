@@ -80,22 +80,55 @@ public class HolidayUtilTests
     [InlineData("PrideMonth", (int)ENPCHoliday.PrideMonth)]
     [InlineData("LunarNewYear", (int)ENPCHoliday.LunarNewYear)]
     [InlineData("UnturnedAnniversary", (int)ENPCHoliday.UnturnedAnniversary)]
-    // A closed set, like EnvFlag's: anything else is a typo and leaves the schedule alone.
-    [InlineData("Easter", (int)ENPCHoliday.None)]
-    [InlineData("", (int)ENPCHoliday.None)]
-    [InlineData(null, (int)ENPCHoliday.None)]
-    public void ParseOverride_AcceptsTheSpellingsTheGamesSwitchDoes(string? value, int expected) =>
+    // The one spelling Unturned's own switch has no way to say, and the reason for the nullable.
+    [InlineData("None", (int)ENPCHoliday.None)]
+    [InlineData("off", (int)ENPCHoliday.None)]
+    public void ParseOverride_AcceptsTheSpellingsTheGamesSwitchDoes(string value, int expected) =>
         Assert.Equal((ENPCHoliday)expected, HolidayUtil.ParseOverride(value));
+
+    [Theory]
+    // A closed set, like EnvFlag's: anything else is a typo, and "nobody asked" is null rather than
+    // None, so a typo still consults the calendar instead of silently pinning the world to no holiday.
+    [InlineData("Easter")]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public void ParseOverride_ReturnsNullWhenNobodyAsked(string? value) =>
+        Assert.Null(HolidayUtil.ParseOverride(value));
+
+    [Fact]
+    public void ParseOverride_SeparatesNoOverrideFromAnOverrideOfNone()
+    {
+        // The distinction the whole change exists for. Both used to be ENPCHoliday.None, so "pin this
+        // run to no holiday" was inexpressible and every caller fell through to the clock.
+        Assert.Null(HolidayUtil.ParseOverride(null));
+        Assert.Equal(ENPCHoliday.None, HolidayUtil.ParseOverride("None"));
+    }
 
     [Fact]
     public void Resolve_PrefersTheOverrideOverTheCalendar()
     {
         var august = new DateTime(2026, 8, 14, 12, 0, 0);
+        var christmasDay = new DateTime(2024, 12, 25, 12, 0, 0);
 
         Assert.Equal(ENPCHoliday.Christmas, HolidayUtil.Resolve("XMAS", august));
         Assert.Equal(ENPCHoliday.None, HolidayUtil.Resolve(null, august));
         Assert.Equal(ENPCHoliday.None, HolidayUtil.Resolve("nonsense", august));
-        Assert.Equal(ENPCHoliday.Christmas, HolidayUtil.Resolve(null, new DateTime(2024, 12, 25)));
+        Assert.Equal(ENPCHoliday.Christmas, HolidayUtil.Resolve(null, christmasDay));
+    }
+
+    [Fact]
+    public void Resolve_PinsToNoHolidayEvenOnChristmasDay()
+    {
+        // What the structural-metrics gate runs with. Without it the recorded placement counts are only
+        // true for the ~46 weeks a year nothing is running, and the job goes red every December having
+        // found nothing wrong.
+        var christmasDay = new DateTime(2024, 12, 25, 12, 0, 0);
+
+        Assert.Equal(ENPCHoliday.None, HolidayUtil.Resolve("None", christmasDay));
+        Assert.Equal(ENPCHoliday.None, HolidayUtil.Resolve("Off", christmasDay));
+        // And the calendar still wins when nothing is pinned, which is what makes the pin meaningful.
+        Assert.Equal(ENPCHoliday.Christmas, HolidayUtil.Resolve(null, christmasDay));
     }
 
     [Fact]

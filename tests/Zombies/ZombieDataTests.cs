@@ -258,6 +258,32 @@ public class ZombieDataTests : IDisposable
         Assert.Equal(LevelNavigationData.NoBound, LevelNavigationData.TryGetBound(bounds, new Vector3(0, 0, 200)));
     }
 
+    // NoBound is 255, which is also a legal INDEX. A level with 256 bounds would make the 256th one
+    // indistinguishable from "you are standing nowhere" — putting a player inside it in the same bucket
+    // as one off the map, and indexing ZombieHost's per-bound array (sized by the bound count) out of
+    // range. Bounds.dat counts its entries in a byte so a file cannot express that today, but that is a
+    // property of the file format rather than of this code, and it is the kind that a workshop map or a
+    // new format version stops guaranteeing without anything here noticing.
+    [Fact]
+    public void TryGetBound_NeverReturnsAnIndexThatMeansNowhere()
+    {
+        var bounds = new List<NavBound>();
+        for (int i = 0; i < 300; i++)
+        {
+            // Two metres wide at its own x, so a point picks exactly one of them.
+            bounds.Add(new NavBound { Center = new Vector3(i * 10, 0, 0), Size = new Vector3(2, 300, 2) });
+        }
+
+        // Standing inside the 256th bound — the one whose index would collide — reads as nowhere
+        // rather than as a region that is not the one it is in.
+        Assert.Equal(LevelNavigationData.NoBound,
+            LevelNavigationData.TryGetBound(bounds, new Vector3(255 * 10, 0, 0)));
+        // And the last addressable bound still answers with its own index.
+        Assert.Equal(LevelNavigationData.MaxBounds - 1,
+            LevelNavigationData.TryGetBound(bounds,
+                new Vector3((LevelNavigationData.MaxBounds - 1) * 10, 0, 0)));
+    }
+
     private static bool Flat(float x, float z, out float y)
     {
         y = 7f;

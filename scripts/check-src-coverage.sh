@@ -18,9 +18,32 @@
 # Usage:
 #   ./scripts/check-src-coverage.sh                # measure and report
 #   ./scripts/check-src-coverage.sh --min 40       # also fail below 40% of the opted-in lines
+#   ./scripts/check-src-coverage.sh --ratchet      # fail if it dropped below the recorded reference
+#   ./scripts/check-src-coverage.sh --record       # write the current numbers as the new reference
 #   ./scripts/check-src-coverage.sh --files        # per-file breakdown, worst first
 #   ./scripts/check-src-coverage.sh --with-game-run  # also measure real game sessions and merge them
 #   ./scripts/check-src-coverage.sh --with-gpu-run   # ...including the ones that need a display
+#
+# --ratchet is the gate, and it is deliberately NOT --min.
+#
+# The reasoning against a fixed floor is sound and is written above: src/ is being brought under
+# measurement file by file, and opting a large uncovered file in drops the rate before the tests for it
+# land — so a percentage bar would punish exactly the move it exists to encourage. But the consequence
+# was that src/ could regress by any amount with no signal at all, which is the other failure.
+#
+# A ratchet rewards the migration instead of punishing it. It compares against a reference committed to
+# the repo (src-coverage-reference.json) and fails only when the number falls more than a tolerance
+# below it, so:
+#
+#   * covering more of src/ raises the reference on the next --record and the bar rises with it;
+#   * opting a big uncovered file IN lowers the rate, which is expected — and is a deliberate,
+#     reviewable edit to the reference file rather than a gate to argue with;
+#   * deleting tests, or letting a covered path rot, drops the rate against a reference nobody
+#     changed, and that fails.
+#
+# The opted-out line count is ratcheted too, in the other direction: it may fall but never rise. That
+# is what stops the headline percentage from being gamed by adding [ExcludeFromCodeCoverage] to
+# whatever is dragging it down — the move that makes both numbers look better while measuring less.
 #
 # --with-game-run exists because some of src/ cannot be reached from a test at all. Main.cs is the entry
 # point: it loads a map, builds a world and then ENDS THE PROCESS, so a test that called it would end the
@@ -45,15 +68,30 @@ min=""
 show_files=0
 with_game_run=0
 with_gpu_run=0
+ratchet=0
+record=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --min) min="$2"; shift 2 ;;
         --files) show_files=1; shift ;;
+        --ratchet) ratchet=1; shift ;;
+        --record) record=1; shift ;;
         --with-game-run) with_game_run=1; shift ;;
         --with-gpu-run) with_game_run=1; with_gpu_run=1; shift ;;
         *) echo "Unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+
+# The reference is the HERMETIC measurement — the suite alone, no game content, no extra sessions —
+# because that is the one a pull request can reproduce. --with-game-run merges real sessions on top and
+# necessarily reports a different (higher) number, so ratcheting the two against one reference would
+# compare two different measurements and fail whichever ran second.
+if (( (ratchet || record) && with_game_run )); then
+    echo "--ratchet/--record measure the hermetic suite; they cannot be combined with --with-game-run." >&2
+    exit 2
+fi
+
+reference_file="$repo_dir/scripts/src-coverage-reference.json"
 
 godot="${GODOT:-$("$repo_dir/scripts/install-godot.sh" --print-path)}"
 if [[ ! -x "$godot" ]]; then
@@ -248,8 +286,12 @@ fi
 
 [[ -s "$report" ]] || { echo "coverlet produced no report:" >&2; tail -20 "$result_dir/run.log" >&2; exit 1; }
 
-SRC_COVERAGE_MIN="$min" SRC_COVERAGE_FILES="$show_files" python3 - "$report" "$repo_dir" <<'PY'
+SRC_COVERAGE_MIN="$min" SRC_COVERAGE_FILES="$show_files" \
+SRC_COVERAGE_RATCHET="$ratchet" SRC_COVERAGE_RECORD="$record" \
+SRC_COVERAGE_REFERENCE="$reference_file" \
+python3 - "$report" "$repo_dir" <<'PY'
 import collections
+import json
 import os
 import sys
 import xml.etree.ElementTree as ET
@@ -257,6 +299,17 @@ import xml.etree.ElementTree as ET
 report, repo_dir = sys.argv[1], sys.argv[2]
 minimum = os.environ.get("SRC_COVERAGE_MIN") or ""
 show_files = os.environ.get("SRC_COVERAGE_FILES") == "1"
+ratchet = os.environ.get("SRC_COVERAGE_RATCHET") == "1"
+record = os.environ.get("SRC_COVERAGE_RECORD") == "1"
+reference_file = os.environ.get("SRC_COVERAGE_REFERENCE", "")
+
+# How far the rate may fall below the reference before this fails.
+#
+# Not zero. The figure moves a little on its own — a run that races differently, a line the JIT
+# reaches on one machine and not another — and a gate that fires on noise is a gate people learn to
+# re-run rather than read. A point and a half is comfortably above that and far below any real
+# regression: deleting one covered file's tests moves this by much more.
+TOLERANCE_POINTS = 1.5
 
 # The Godot source generators emit a partial class per script (property/method dispatch tables). That code
 # is not hand-written and no one can meaningfully test it, so it is not part of the target — the same
@@ -336,4 +389,69 @@ if minimum:
               file=sys.stderr)
         raise SystemExit(1)
     print(f"Gate passed: {line_rate:.2f}% >= {floor:.2f}%.")
+
+if record:
+    with open(reference_file, "w") as handle:
+        json.dump(
+            {
+                "_comment": [
+                    "Reference point for scripts/check-src-coverage.sh --ratchet, which is what keeps",
+                    "src/ from regressing silently. Regenerate with --record and COMMIT the result:",
+                    "raising it is how covering more of src/ raises the bar, and lowering it is a",
+                    "deliberate, reviewable statement that a large uncovered file was just opted in.",
+                    "Measured hermetically (the runtime suite alone, no game content), so a pull",
+                    "request can reproduce it.",
+                ],
+                "lineRate": round(line_rate, 2),
+                "branchRate": round(branch_rate, 2),
+                "optedOutLines": out_loc,
+                "optedOutFiles": len(opted_out),
+            },
+            handle,
+            indent=2,
+        )
+        handle.write("\n")
+    print(f"Recorded {line_rate:.2f}% lines / {branch_rate:.2f}% branches and {out_loc:,} opted-out "
+          f"lines to {os.path.relpath(reference_file, repo_dir)}.")
+
+if ratchet:
+    try:
+        with open(reference_file) as handle:
+            reference = json.load(handle)
+    except FileNotFoundError:
+        print(f"Coverage ratchet failed: no reference at {reference_file}. Create it with "
+              f"./scripts/check-src-coverage.sh --record and commit it.", file=sys.stderr)
+        raise SystemExit(1)
+
+    was_lines = float(reference["lineRate"])
+    was_opted_out = int(reference["optedOutLines"])
+    floor = was_lines - TOLERANCE_POINTS
+    failed = False
+
+    if line_rate < floor:
+        print(f"Coverage ratchet failed: src/ line coverage is {line_rate:.2f}%, more than "
+              f"{TOLERANCE_POINTS} points below the recorded {was_lines:.2f}%.", file=sys.stderr)
+        print("  If this is a large uncovered file being opted IN, that is the move this ratchet exists",
+              file=sys.stderr)
+        print("  to allow: re-record with ./scripts/check-src-coverage.sh --record and commit the",
+              file=sys.stderr)
+        print("  change, so the drop is stated rather than silent.", file=sys.stderr)
+        failed = True
+
+    # The other direction, and the reason the headline number cannot be gamed: hiding a badly covered
+    # file behind [ExcludeFromCodeCoverage] RAISES the percentage while measuring less of src/.
+    if out_loc > was_opted_out:
+        print(f"Coverage ratchet failed: src/ now excludes {out_loc:,} lines from measurement, up from "
+              f"{was_opted_out:,}. Opting code OUT is the one direction this may not move.",
+              file=sys.stderr)
+        failed = True
+
+    if failed:
+        raise SystemExit(1)
+
+    print(f"Ratchet passed: {line_rate:.2f}% lines against a recorded {was_lines:.2f}% "
+          f"(floor {floor:.2f}%), {out_loc:,} opted-out lines against {was_opted_out:,}.")
+    if line_rate > was_lines + TOLERANCE_POINTS or out_loc < was_opted_out:
+        print("  This is comfortably ahead of the reference — re-record it "
+              "(./scripts/check-src-coverage.sh --record) so the bar keeps up.")
 PY

@@ -24,7 +24,10 @@ public sealed class UdpServerTransport : IServerTransport
         public double SendNow; // the transport's current clock, so Send can frame reliably
 
         public int Id { get; init; }
+        public required NetTraffic Traffic { get; init; }
 
+        // Counted inside the channel rather than here: a retransmission is real bandwidth the caller
+        // never asked for, and the channel is the only place that sees one.
         public void Send(byte[] payload, ESendType sendType) => Channel.Send(payload, sendType, SendNow);
 
         public void Close() => Owner.Drop(this);
@@ -41,8 +44,14 @@ public sealed class UdpServerTransport : IServerTransport
     public const int MaxReadsPerPump = 1024;
 
     // Counting events is not a memory bound: an unreliable datagram can carry ~65 KiB, so a full queue of
-    // them is hundreds of megabytes retained before anyone has said Hello. The largest message the
-    // protocol writes is a full ZombieList at roughly 6 KiB, so anything past this is not ours.
+    // them is hundreds of megabytes retained before anyone has said Hello. Nothing this protocol writes
+    // comes close to 16 KiB — every message that walks a collection is now split at NetChunks'
+    // 1200-byte path budget — so anything past this is not ours.
+    //
+    // This is a ceiling on what the transport will ACCEPT, and deliberately not a budget anything spends.
+    // It once read "the largest message the protocol writes is a full ZombieList at roughly 6 KiB", which
+    // was wrong twice over: a ZombieList chunk is 1153 bytes, and the largest message was Welcome, whose
+    // full roster was about 12.5 KB until it was chunked too.
     public const int MaxPayloadBytes = 16 * 1024;
 
     // And the queue is bounded by what it holds, not only by how many things it holds.
@@ -50,12 +59,19 @@ public sealed class UdpServerTransport : IServerTransport
 
     private int _queuedBytes;
 
+    // Every connection's traffic, rolled up: what this listener has sent and received, split by message
+    // type, plus the drop counters below.
+    public NetTraffic Traffic { get; } = new();
+
+    // See IServerTransport: answers a stranger's question without allocating a connection for them.
+    public Func<byte[], byte[]?>? AnswerConnectionless { get; set; }
+
     // Datagrams dropped for exceeding MaxPayloadBytes, and only those. Reaching the queued-byte or
     // queued-event budget stops the pump instead: those datagrams are never read, so they stay in the
     // socket's receive buffer for the OS to discard and there is nothing here to count. Worth being
     // precise about — read as "all backpressure", this counter would sit at zero through exactly the
     // overload it looks like it measures.
-    public long OversizedDropped { get; private set; }
+    public long OversizedDropped => Traffic.OversizedDropped;
 
     // Read into this rather than letting the socket hand back a fresh array each time. UdpClient.Receive
     // allocates for whatever arrived — up to ~65 KiB — BEFORE the payload cap can reject it, and an
@@ -86,7 +102,7 @@ public sealed class UdpServerTransport : IServerTransport
     public const int MaxConnectionsPerAddress = 8;
 
     // Datagrams dropped because they would have created a connection past one of the caps.
-    public long RefusedConnections { get; private set; }
+    public long RefusedConnections => Traffic.RefusedConnections;
 
     private readonly Queue<ServerTransportEvent> _events = new();
     private int _nextId = 1;
@@ -142,7 +158,7 @@ public sealed class UdpServerTransport : IServerTransport
             {
                 // Windows reports an over-long datagram rather than truncating it. Either way it is
                 // consumed and gone; Linux's truncation is caught by the length check below.
-                OversizedDropped++;
+                Traffic.CountOversizedDropped();
                 continue;
             }
             catch (SocketException)
@@ -152,7 +168,7 @@ public sealed class UdpServerTransport : IServerTransport
 
             if (received > MaxPayloadBytes)
             {
-                OversizedDropped++;
+                Traffic.CountOversizedDropped();
                 continue; // nothing this protocol writes is this big
             }
 
@@ -164,26 +180,52 @@ public sealed class UdpServerTransport : IServerTransport
             string key = remote.ToString();
             if (!_connections.TryGetValue(key, out Connection? connection))
             {
+                // Answered before anything is allocated, if the server recognises it as a question that
+                // needs no connection. This is what stops the pre-handshake table being exhaustible:
+                // the bulk of legitimate traffic from strangers is "which map are you running?", and
+                // serving that out of a Connection meant every asker held one of 256 slots for 15 s.
+                //
+                // Only an UNRELIABLE frame qualifies. A reliable one wants an ack, and acking is
+                // per-connection state by definition — which is the thing being avoided. ServerQuery
+                // sends this unreliably and retries on its own schedule, which is what a query does.
+                if (AnswerConnectionless is { } answer
+                    && datagram.Length >= 2 && datagram[0] == ReliableChannel.ChannelUnreliable
+                    && answer(datagram[1..]) is { } reply)
+                {
+                    // One datagram out for one datagram in, to the address that asked, and nothing
+                    // retained. Framed by hand because there is no channel here to do it — that is the
+                    // point. The read budget (MaxReadsPerPump) is what bounds how often this can happen.
+                    var framed = new byte[reply.Length + 1];
+                    framed[0] = ReliableChannel.ChannelUnreliable;
+                    reply.CopyTo(framed, 1);
+                    Traffic.RecordReceived(NetTraffic.TypeOf(datagram[1..]), received);
+                    Traffic.RecordSent(NetTraffic.TypeOf(reply), framed.Length);
+                    TrySendTo(framed, new IPEndPoint(remote.Address, remote.Port));
+                    continue;
+                }
+
                 _perAddress.TryGetValue(remote.Address, out int fromAddress);
                 if (_connections.Count >= MaxConnections || fromAddress >= MaxConnectionsPerAddress)
                 {
-                    RefusedConnections++;
+                    Traffic.CountRefusedConnection();
                     continue; // drop it; an unauthenticated sender does not get to allocate
                 }
 
                 var endpoint = new IPEndPoint(remote.Address, remote.Port);
+                var traffic = new NetTraffic(Traffic);
                 connection = new Connection
                 {
                     Endpoint = endpoint,
                     Owner = this,
                     Id = _nextId++,
+                    Traffic = traffic,
                     Channel = null!,
                     // Born mid-drain: stamp the current clock, or the first reliable reply (Welcome) would
                     // carry time 0 and hit ReliableChannel's give-up deadline on the next Update.
                     SendNow = _now,
                     LastHeard = _now,
                 };
-                connection.Channel = new ReliableChannel(d => TrySendTo(d, endpoint));
+                connection.Channel = new ReliableChannel(d => TrySendTo(d, endpoint), traffic);
                 _connections[key] = connection;
                 _perAddress[remote.Address] = fromAddress + 1;
                 _events.Enqueue(new ServerTransportEvent(ETransportEvent.Connected, connection, Array.Empty<byte>()));
@@ -208,12 +250,14 @@ public sealed class UdpServerTransport : IServerTransport
         {
             connection.SendNow = now;
             connection.Channel.Update(now);
+            connection.Traffic.Update(now);
             if (now - connection.LastHeard > SilenceTimeout || connection.Channel.HasGivenUp)
                 (dead ??= new List<Connection>()).Add(connection);
         }
         if (dead != null)
             foreach (Connection connection in dead)
                 Drop(connection);
+        Traffic.Update(now); // after the children, so this window closes over bytes they have just counted
     }
 
     private void Drop(Connection connection)
@@ -262,11 +306,14 @@ public sealed class UdpClientTransport : IClientTransport
 
     public bool IsConnected { get; private set; } = true;
 
+    // This client's own view of its one link, on the same terms the server keeps per connection.
+    public NetTraffic Traffic { get; } = new();
+
     public UdpClientTransport(string host, ushort port)
     {
         _socket = new UdpClient();
         _socket.Connect(host, port);
-        _channel = new ReliableChannel(TrySend);
+        _channel = new ReliableChannel(TrySend, Traffic);
     }
 
     public void Send(byte[] payload, ESendType sendType) => _channel.Send(payload, sendType, _now);
@@ -303,6 +350,7 @@ public sealed class UdpClientTransport : IClientTransport
             }
             catch (SocketException e) when (e.SocketErrorCode == SocketError.MessageSize)
             {
+                Traffic.CountOversizedDropped();
                 continue; // over-long, and already consumed
             }
             catch (SocketException)
@@ -310,7 +358,10 @@ public sealed class UdpClientTransport : IClientTransport
                 return;
             }
             if (received > UdpServerTransport.MaxPayloadBytes)
+            {
+                Traffic.CountOversizedDropped();
                 continue;
+            }
             if (_channel.HandleDatagram(_readBuffer[..received], out byte[] payload))
             {
                 _incoming.Enqueue(payload);
@@ -324,6 +375,7 @@ public sealed class UdpClientTransport : IClientTransport
         _now = now;
         PumpSocket();
         _channel.Update(now);
+        Traffic.Update(now);
         if (_channel.HasGivenUp)
             IsConnected = false;
     }

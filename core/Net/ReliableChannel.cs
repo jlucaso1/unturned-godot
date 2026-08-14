@@ -39,9 +39,17 @@ public sealed class ReliableChannel
     // on a queue depth a legitimate roster can reach.
     public const int MaxPending = 1024;
 
-    // Reliable sends refused because MaxPending was already reached.
-    public long RefusedSends { get; private set; }
+    // How many bytes this channel puts on the wire around a payload, by send type. The traffic counters
+    // are meant to report what crossed the link rather than what the protocol wrote, and this is the
+    // difference between the two — one byte of channel prefix unreliable, plus two of sequence reliable.
+    public static int FrameBytes(ESendType sendType) => sendType == ESendType.Reliable ? 3 : 1;
 
+    // Reliable sends refused because MaxPending was already reached. Stored on the traffic object rather
+    // than here, so a caller reading "what has gone wrong on this link" reads one place; this stays as
+    // the name everything already uses.
+    public long RefusedSends => _traffic.RefusedSends;
+
+    private readonly NetTraffic _traffic;
     private readonly Action<byte[]> _rawSend;
     private readonly Dictionary<ushort, (byte[] Datagram, double FirstSent, double LastSent)> _pending = new();
     private readonly HashSet<ushort> _seen = new();
@@ -51,7 +59,13 @@ public sealed class ReliableChannel
     // True once a reliable send exhausted GiveUpAfter without an ack — the peer is unreachable.
     public bool HasGivenUp { get; private set; }
 
-    public ReliableChannel(Action<byte[]> rawSend) => _rawSend = rawSend;
+    // The traffic object is optional so the channel's own tests can build one without an owner; a
+    // channel that reports nowhere still counts, it just counts into an instance nobody reads.
+    public ReliableChannel(Action<byte[]> rawSend, NetTraffic? traffic = null)
+    {
+        _rawSend = rawSend;
+        _traffic = traffic ?? new NetTraffic();
+    }
 
     public void Send(byte[] payload, ESendType sendType, double now)
     {
@@ -60,6 +74,7 @@ public sealed class ReliableChannel
             var datagram = new byte[payload.Length + 1];
             datagram[0] = ChannelUnreliable;
             payload.CopyTo(datagram, 1);
+            _traffic.RecordSent(NetTraffic.TypeOf(payload), datagram.Length);
             _rawSend(datagram);
             return;
         }
@@ -76,7 +91,7 @@ public sealed class ReliableChannel
             // The frame is still not sent — it cannot be, the set is full — but the connection dies with
             // it, so "reliable" keeps meaning delivered-or-disconnected rather than silently-maybe.
             HasGivenUp = true;
-            RefusedSends++;
+            _traffic.CountRefusedSend();
             return;
         }
 
@@ -87,6 +102,7 @@ public sealed class ReliableChannel
         reliable[2] = (byte)(seq >> 8);
         payload.CopyTo(reliable, 3);
         _pending[seq] = (reliable, now, now);
+        _traffic.RecordSent(NetTraffic.TypeOf(payload), reliable.Length);
         _rawSend(reliable);
     }
 
@@ -96,6 +112,17 @@ public sealed class ReliableChannel
         payload = Array.Empty<byte>();
         if (datagram.Length == 0)
             return false;
+
+        // Counted before anything decides whether it is worth delivering. An ack, a duplicate and a
+        // frame in an unknown channel all cost the same bandwidth as one that carries a message, and a
+        // reading that only counted the useful ones would go quiet during exactly the retransmission
+        // storm it exists to make visible. Only a reliable frame long enough to hold a payload can be
+        // attributed to a message type; everything else is Other, which is what it is.
+        _traffic.RecordReceived(
+            datagram[0] == ChannelUnreliable && datagram.Length >= 2 ? Classify(datagram[1])
+            : datagram[0] == ChannelReliable && datagram.Length >= 4 ? Classify(datagram[3])
+            : NetTraffic.OtherType,
+            datagram.Length);
 
         switch (datagram[0])
         {
@@ -113,7 +140,12 @@ public sealed class ReliableChannel
                     if (datagram.Length < 3)
                         return false;
                     ushort seq = (ushort)(datagram[1] | (datagram[2] << 8));
-                    _rawSend(new[] { ChannelAck, datagram[1], datagram[2] }); // always ack, even duplicates
+                    // Always ack, even duplicates — and count the ack, because a peer being flooded with
+                    // reliable frames answers every one of them and that return traffic is a real share
+                    // of a saturated uplink.
+                    var ack = new[] { ChannelAck, datagram[1], datagram[2] };
+                    _traffic.RecordSent(NetTraffic.OtherType, ack.Length);
+                    _rawSend(ack);
                     // Acked above so the sender stops retrying, but an empty payload carries no message
                     // type and must not reach a reader. Same rule as the unreliable channel. Checked
                     // before the dedup set is touched: a bare frame must not burn a sequence number and
@@ -141,6 +173,11 @@ public sealed class ReliableChannel
         }
     }
 
+    // A message-type byte lifted straight out of a framed datagram, bucketed the same way a payload's
+    // first byte is. Kept next to the framing that produces the offsets, so the two cannot drift.
+    private static int Classify(byte typeByte) =>
+        typeByte < NetTraffic.TypeCount ? typeByte : NetTraffic.OtherType;
+
     // Retransmits unacked reliable datagrams; marks the channel dead after GiveUpAfter.
     public void Update(double now)
     {
@@ -155,6 +192,11 @@ public sealed class ReliableChannel
             else if (now - lastSent >= ResendInterval)
             {
                 _pending[seq] = (datagram, firstSent, now);
+                // A resend is bandwidth the caller never asked for, and it is the whole cost of a big
+                // reliable message on a lossy link — a full Welcome goes out again every quarter second
+                // until it is acked. Counting it is what makes that visible instead of theoretical.
+                _traffic.RecordSent(datagram.Length >= 4 ? Classify(datagram[3]) : NetTraffic.OtherType,
+                    datagram.Length);
                 _rawSend(datagram);
             }
         }

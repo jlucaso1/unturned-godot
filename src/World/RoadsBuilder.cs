@@ -90,13 +90,28 @@ public static class RoadsBuilder
 
             if (!byMaterial.TryGetValue(key, out (Material material, float inverseRepeat) shared))
             {
+                // NOT YET CONSUMED: the asset's own TexturePath. An asset road takes its geometry and
+                // its tiling from the asset, and its IMAGE from the legacy Roads.unity3d entry that the
+                // `mat` index names — so a migrated map comes out the right shape with, potentially, the
+                // wrong surface on it. Said plainly here because the rest of this function now does read
+                // the asset, and a reader could reasonably assume that includes the texture.
+                //
+                // The gap is a different subsystem rather than a missing line. RoadAsset names its
+                // texture as a path inside the core masterbundle ("Roads/PEI_Trail.png"), not as a file
+                // beside the .asset, so closing it means resolving that path through
+                // PrefabGraph.ContainerByPath, decoding the Texture2D and taking it through the user://
+                // texture cache the way object albedos already go — extractor work, not builder work.
+                // Whoever picks it up: bind the decoded texture here in place of `textures[mat]`; the
+                // repeat below then reads the real aspect and needs no change. Nothing shipped is
+                // affected — all 23 of PEI's roads carry an empty asset GUID and take the legacy branch.
                 shared = SharedMaterial(mat, config, textures, pavedFallback, dirtFallback);
                 if (asset != null)
                 {
                     byAsset++;
                     // Road.cs:802: the asset tiles by its own Width and the texture's aspect, not by the
                     // legacy table's height divisor. Applied to whatever texture is actually bound, so
-                    // the UVs match the image on the surface.
+                    // the UVs match the image on the surface — which is what keeps this right while the
+                    // image is still the legacy one.
                     shared.inverseRepeat = TexturedSize(shared.material) is var (w, h) && w > 0
                         ? asset.InverseTextureRepeatDistance(w, h)
                         : 1f / FallbackRepeat;
