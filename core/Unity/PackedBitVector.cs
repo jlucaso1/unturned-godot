@@ -27,7 +27,14 @@ public readonly struct PackedBitVector
         BitSize = bitSize;
     }
 
-    public bool IsEmpty => NumItems <= 0 || BitSize <= 0 || Data.Length == 0;
+    // A vector wider than 32 bits is rejected rather than decoded, because UnpackUInts accumulates into a
+    // uint: C# masks a shift count on a 32-bit operand to & 31, so bit 32 would fold back onto bit 0 and
+    // every item would come out as a plausible-looking wrong number instead of an error. UnpackFloats then
+    // compounds it, denormalizing that value against uint.MaxValue. Unity has no reason to emit one — the
+    // widest thing m_CompressedMesh quantizes into is 32 bits — so the honest answer to a header claiming
+    // more is "this vector is not something we can read", which is exactly what IsEmpty already means and
+    // what every caller in CompressedMesh already handles.
+    public bool IsEmpty => NumItems <= 0 || BitSize <= 0 || BitSize > 32 || Data.Length == 0;
 
     // Reads the vector out of a TypeTree-decoded node. Integer vectors carry no range/start, so those
     // fields are simply absent there; every field is optional and defaults to "nothing to unpack".
@@ -83,7 +90,8 @@ public readonly struct PackedBitVector
         if (raw.Length == 0)
             return Array.Empty<float>();
 
-        // UnpackUInts only returns values for a positive BitSize, so the denominator is never zero.
+        // UnpackUInts only returns values for a BitSize of 1..32 (IsEmpty rejects the rest), so the
+        // denominator is never zero and the shift below never reaches its own masking width.
         float maxValue = BitSize >= 32 ? uint.MaxValue : (1u << BitSize) - 1u;
         float scale = Range / maxValue;
 

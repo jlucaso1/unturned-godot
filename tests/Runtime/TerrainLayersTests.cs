@@ -52,6 +52,7 @@ public class TerrainLayersTests : TestClass
             return;
 
         TerrainLayers layers = TerrainLayers.Load(install, level);
+        layers.Realise();
 
         Assert.True(layers.TileCount > 0, "PEI resolved no terrain tiles at all");
         Assert.True(layers.TextureCount > 0, "PEI resolved tiles but not one layer texture");
@@ -74,7 +75,70 @@ public class TerrainLayersTests : TestClass
         Assert.True(painted > 0, $"PEI reported {layers.TileCount} tiles but none were found by coordinate");
     }
 
+    // The load is split in two, and this is the split.
+    //
+    // Load is pure parsing and file IO — bundle decode, cache reads — and the interactive terrain build
+    // runs it on the thread pool while the main thread keeps drawing the loading screen. Realise is what
+    // turns the pixels it found into ImageTextures, and Image.CreateFromData + ImageTexture.CreateFromImage
+    // are RenderingServer operations: main thread only, the same rule ModelLibrary.Realise,
+    // TerrainBuilder.FinishTile and TextureRegistry.Apply all keep.
+    //
+    // Load used to build them itself, so a normal interactive load created eight to thirty ImageTextures
+    // on a worker, concurrently with the loading screen's own tween and with the FinishTile calls of
+    // later tiles. That reads as an intermittent cold-load crash or a terrain layer that comes out wrong,
+    // and it is invisible in the synchronous build because there the same call runs on the main thread.
+    //
+    // Resolving on a worker and realising here is exactly the shape the interactive build now has.
+    [Test]
+    public async System.Threading.Tasks.Task TexturesAreBuiltByRealiseOnTheMainThreadAndNotByLoad()
+    {
+        if (!RealMap(out string install, out LevelInfo level))
+            return;
+
+        TerrainLayers layers = await System.Threading.Tasks.Task.Run(
+            () => TerrainLayers.Load(install, level));
+
+        // The worker found the pixels...
+        Assert.True(layers.TextureCount > 0, "PEI resolved no layer textures at all");
+        // ...and created no GPU resource while doing it: not one tile can answer with textures yet.
+        Assert.Equal(0, layers.TileCount);
+        for (int x = -8; x <= 8; x++)
+            for (int y = -8; y <= 8; y++)
+                Assert.Null(layers.For(x, y));
+
+        // Back on Godot's synchronisation context, which is the main thread.
+        int textured = layers.Realise();
+
+        Assert.True(textured > 0, "PEI realised no textured tiles");
+        Assert.Equal(textured, layers.TileCount);
+    }
+
+    // Realise is idempotent: the terrain build calls it once, but a second call must not upload every
+    // layer a second time, and it must keep answering with the textures the tiles were already given.
+    [Test]
+    public void RealisingTwiceKeepsTheSameTextures()
+    {
+        if (!RealMap(out string install, out LevelInfo level))
+            return;
+
+        TerrainLayers layers = TerrainLayers.Load(install, level);
+        int first = layers.Realise();
+        ImageTexture[]? before = FirstPaintedTile(layers);
+
+        Assert.Equal(first, layers.Realise());
+        Assert.Same(before, FirstPaintedTile(layers));
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
+
+    private static ImageTexture[]? FirstPaintedTile(TerrainLayers layers)
+    {
+        for (int x = -8; x <= 8; x++)
+            for (int y = -8; y <= 8; y++)
+                if (layers.For(x, y) is { } tile)
+                    return tile;
+        return null;
+    }
 
     private static bool RealMap(out string install, out LevelInfo level)
     {

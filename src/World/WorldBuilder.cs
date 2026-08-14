@@ -55,8 +55,9 @@ public static class WorldBuilder
             "Terrain", "Trees.dat"));
 
         ObjectAssetDatabase db = ContentExtraction.ScanAssets(sources);
-        int legacy = LegacyPlacements.ResolveGuids(objects, db)
-            + LegacyPlacements.AppendTrees(trees, objects, db);
+        var holidays = HolidayPolicy.ForMap(level.Path);
+        int legacy = LegacyPlacements.ResolveGuids(objects, db, holidays)
+            + LegacyPlacements.AppendTrees(trees, objects, db, holidays);
         if (legacy > 0)
             Log.Print($"[server] Legacy placements resolved by id: {legacy}");
         HashSet<Guid> needed = db.ResolvePlacementGuids(objects);
@@ -143,26 +144,57 @@ public static class WorldBuilder
             assets);
     }
 
-    // Interactive-load variant of BuildTerrain: the pure-CPU tile/LOD generation runs on the thread pool
-    // (the main thread keeps rendering the loading screen), and the RenderingServer-touching FinishTile
-    // calls yield to the render loop every few tiles so no single frame swallows all 16.
-    public static async System.Threading.Tasks.Task<(Node3D root, int tileCount, HeightmapSampler heights)>
+    // Interactive-load variant of BuildTerrain: the pure-CPU layer resolve and tile/LOD generation run on
+    // the thread pool (the main thread keeps rendering the loading screen), and the RenderingServer-
+    // touching FinishTile calls yield to the render loop every few tiles so no single frame swallows all 16.
+    public static System.Threading.Tasks.Task<(Node3D root, int tileCount, HeightmapSampler heights)>
         BuildTerrainAsync(string unturnedPath, LevelInfo level, Node yieldOn,
             System.Threading.Tasks.Task<IReadOnlyDictionary<Guid, UnturnedGodot.Unity.CachedTexture>>? sharedLayers = null)
+        => BuildTerrain(unturnedPath, level, sharedLayers,
+            async () => await yieldOn.ToSignal(yieldOn.GetTree(), SceneTree.SignalName.ProcessFrame));
+
+    public static (Node3D root, int tileCount, HeightmapSampler heights) BuildTerrain(
+        string unturnedPath, LevelInfo level)
+    {
+        // With no yield callback nothing below ever awaits, so the task is already complete when it comes
+        // back and this only unwraps it — GetResult rather than .Result so an exception is not re-wrapped.
+        return BuildTerrain(unturnedPath, level, sharedLayers: null, yieldEvery: null)
+            .GetAwaiter().GetResult();
+    }
+
+    // The one terrain build. The interactive and synchronous entry points above used to be near-identical
+    // twins whose only difference was a Task.Run wrapper and an 8 ms yield budget, held equal by a comment
+    // claiming they matched — a promise that had already rotted: the async twin's layer resolve had drifted
+    // onto a worker thread while creating GPU textures. `yieldEvery` is what tells them apart, and a null
+    // one means "never yield", which is the synchronous build.
+    private static async System.Threading.Tasks.Task<(Node3D root, int tileCount, HeightmapSampler heights)>
+        BuildTerrain(string unturnedPath, LevelInfo level,
+            System.Threading.Tasks.Task<IReadOnlyDictionary<Guid, UnturnedGodot.Unity.CachedTexture>>? sharedLayers,
+            Func<System.Threading.Tasks.Task>? yieldEvery)
     {
         var tiles = level.EnumerateTiles();
         Log.Print($"[unturned-godot] Terrain tiles: {tiles.Count}");
-        var heightTiles = new HeightmapTile[tiles.Count];
+        var heightTiles = new HeightmapTile[tiles.Count]; // kept for the height sampler (roads conform to it)
 
-        // Layer resolve + tile/LOD generation all happen off the main thread; only FinishTile below
-        // touches the RenderingServer. Semantics match the sync variant exactly.
-        TerrainLayers layers = await System.Threading.Tasks.Task.Run(() =>
-            LoadLayers(unturnedPath, level, sharedLayers));
+        // The map's own per-tile splat layer textures; tiles without a full set fall back to averaged
+        // layer colors. Phase 1 is pure parsing/IO, so the interactive load hands it to the thread pool;
+        // awaiting it lands back on Godot's synchronisation context, i.e. the main thread.
+        TerrainLayers layers = yieldEvery == null
+            ? LoadLayers(unturnedPath, level, sharedLayers)
+            : await System.Threading.Tasks.Task.Run(() => LoadLayers(unturnedPath, level, sharedLayers));
 
+        // Phase 2, main thread: the layer pixels become ImageTextures here and nowhere else.
+        int textured = layers.Realise();
+        Log.Print($"[unturned-godot] Terrain layers: {layers.TextureCount} textures, "
+            + (textured > 0 ? $"{textured} tiles textured" : "flat-color fallback"));
+
+        // Build the tiles' geometry + meshoptimizer LODs on worker threads (the LOD generation dominates
+        // terrain build time and is pure CPU/meshopt on data-only ImporterMeshes), then realise the meshes
+        // and attach materials on this (main) thread — the only steps that touch the RenderingServer.
         var meshes = new TerrainBuilder.TileMesh[tiles.Count];
         TerrainOccluder.Prepared[]? occluders = OccludersEnabled
             ? new TerrainOccluder.Prepared[tiles.Count] : null;
-        await System.Threading.Tasks.Task.Run(() => System.Threading.Tasks.Parallel.For(0, tiles.Count, i =>
+        void GenerateTiles() => System.Threading.Tasks.Parallel.For(0, tiles.Count, i =>
         {
             (int x, int y) = tiles[i];
             HeightmapTile tile = HeightmapTile.Read(level.HeightmapPath(x, y), x, y);
@@ -171,7 +203,11 @@ public static class WorldBuilder
             meshes[i] = TerrainBuilder.BuildTileMesh(tile, splat, layers.For(x, y) != null && splat != null);
             if (occluders != null)
                 occluders[i] = TerrainOccluder.Prepare(meshes[i]);
-        }));
+        });
+        if (yieldEvery == null)
+            GenerateTiles();
+        else
+            await System.Threading.Tasks.Task.Run(GenerateTiles);
 
         // Yield on a time budget, not every N tiles: waiting for a frame costs more than finishing the
         // tile that would have shared it, and a 52-tile map was spending most of this phase waiting.
@@ -186,66 +222,22 @@ public static class WorldBuilder
             terrainRoot.AddChild(TerrainBuilder.FinishTile(tm, layers.For(tm.X, tm.Y), controlTextures));
             if (occluders != null)
                 terrainRoot.AddChild(TerrainOccluder.Finish(occluders[i]));
-            if (Stopwatch.GetTimestamp() >= until)
+            if (yieldEvery != null && Stopwatch.GetTimestamp() >= until)
             {
-                await yieldOn.ToSignal(yieldOn.GetTree(), SceneTree.SignalName.ProcessFrame);
+                await yieldEvery();
                 until = Stopwatch.GetTimestamp() + budget;
             }
         }
         return (terrainRoot, tiles.Count, new HeightmapSampler(heightTiles));
     }
 
-    public static (Node3D root, int tileCount, HeightmapSampler heights) BuildTerrain(
-        string unturnedPath, LevelInfo level)
-    {
-        var tiles = level.EnumerateTiles();
-        Log.Print($"[unturned-godot] Terrain tiles: {tiles.Count}");
-        var heightTiles = new HeightmapTile[tiles.Count]; // kept for the height sampler (roads conform to it)
-
-        // The map's own per-tile splat layer textures; tiles without a full set fall back to averaged
-        // layer colors.
-        TerrainLayers layers = LoadLayers(unturnedPath, level);
-
-        // Build the tiles' geometry + meshoptimizer LODs on worker threads (the LOD generation dominates
-        // terrain build time and is pure CPU/meshopt on data-only ImporterMeshes), then realise the meshes
-        // and attach materials on this (main) thread — the only steps that touch the RenderingServer.
-        var meshes = new TerrainBuilder.TileMesh[tiles.Count];
-        TerrainOccluder.Prepared[]? occluders = OccludersEnabled
-            ? new TerrainOccluder.Prepared[tiles.Count] : null;
-        System.Threading.Tasks.Parallel.For(0, tiles.Count, i =>
-        {
-            (int x, int y) = tiles[i];
-            HeightmapTile tile = HeightmapTile.Read(level.HeightmapPath(x, y), x, y);
-            heightTiles[i] = tile;
-            SplatmapTile? splat = SplatmapTile.TryRead(level.SplatmapPath(x, y), x, y);
-            meshes[i] = TerrainBuilder.BuildTileMesh(tile, splat, layers.For(x, y) != null && splat != null);
-            if (occluders != null)
-                occluders[i] = TerrainOccluder.Prepare(meshes[i]);
-        });
-
-        var terrainRoot = new Node3D { Name = "Terrain" };
-        terrainRoot.AddToGroup(SceneGroups.Terrain);
-        var controlTextures = new TerrainBuilder.ControlTextureCache();
-        for (int i = 0; i < meshes.Length; i++)
-        {
-            TerrainBuilder.TileMesh tm = meshes[i];
-            terrainRoot.AddChild(TerrainBuilder.FinishTile(tm, layers.For(tm.X, tm.Y), controlTextures));
-            if (occluders != null)
-                terrainRoot.AddChild(TerrainOccluder.Finish(occluders[i]));
-        }
-        return (terrainRoot, tiles.Count, new HeightmapSampler(heightTiles));
-    }
-
-    // Resolves the map's per-tile splat layers and reports what came back, so a map that renders flat is
-    // traceable to either "no materials in the hierarchy" or "textures could not be extracted".
+    // Phase 1 of the layer resolve: which texture each tile paints with, as pixels. Worker-safe by design
+    // — TerrainLayers.Realise is the half that creates the GPU resources. What it found is reported by the
+    // caller (after Realise, which is what decides how many tiles ended up textured), so a map that renders
+    // flat is traceable to either "no materials in the hierarchy" or "textures could not be extracted".
     private static TerrainLayers LoadLayers(string unturnedPath, LevelInfo level,
         System.Threading.Tasks.Task<IReadOnlyDictionary<Guid, UnturnedGodot.Unity.CachedTexture>>? sharedLayers = null)
-    {
-        TerrainLayers layers = TerrainLayers.Load(unturnedPath, level, sharedLayers);
-        Log.Print($"[unturned-godot] Terrain layers: {layers.TextureCount} textures, "
-            + (layers.TileCount > 0 ? $"{layers.TileCount} tiles textured" : "flat-color fallback"));
-        return layers;
-    }
+        => TerrainLayers.Load(unturnedPath, level, sharedLayers);
 
     private static (Node3D root, Node3D foliage, Node3D vehicles, int placed, int withMesh, int unique, ObjectAssetDatabase assets)
         BuildObjects(LevelInfo level, string unturnedPath)
@@ -303,8 +295,11 @@ public static class WorldBuilder
         // A pre-GUID map names its objects and trees by legacy id; the needed set below is keyed on GUIDs,
         // so those placements borrow theirs from the asset database first — and the trees join the list
         // here, resolved through the resource namespace rather than the object one.
-        int legacy = LegacyPlacements.ResolveGuids(objects, db)
-            + LegacyPlacements.AppendTrees(trees, objects, db);
+        // The map's own Config.json decides whether a holiday may substitute its objects and trees;
+        // the calendar decides whether one is running (see HolidayPolicy).
+        var holidays = HolidayPolicy.ForMap(level.Path);
+        int legacy = LegacyPlacements.ResolveGuids(objects, db, holidays)
+            + LegacyPlacements.AppendTrees(trees, objects, db, holidays);
         if (legacy > 0)
             Log.Print($"[unturned-godot] Legacy placements resolved by id: {legacy}");
 

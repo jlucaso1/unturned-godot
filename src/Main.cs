@@ -239,7 +239,7 @@ public partial class Main : Node3D
             AddChild(world.Objects);
             AddChild(world.Vehicles);
             AddChild(world.Foliage);
-            AddSubsystem("roads", () => RoadsBuilder.Build(environmentDir, world.Heights));
+            AddSubsystem("roads", () => RoadsBuilder.Build(environmentDir, world.Heights, unturnedPath));
             StandardMaterial3D water = AddWater(lighting);
             AddSubsystem("nodes", () => NodesBuilder.Build(environmentDir));
             RunSubsystem("environment", () => SetupEnvironment(lighting, water, unturnedPath));
@@ -751,7 +751,7 @@ public partial class Main : Node3D
 
         loading.SetStatus("Roads and water…");
         await NextFrame();
-        AddSubsystem("roads", () => RoadsBuilder.Build(environmentDir, heights));
+        AddSubsystem("roads", () => RoadsBuilder.Build(environmentDir, heights, unturnedPath));
         StandardMaterial3D waterMat = AddWater(lighting);
         AddSubsystem("nodes", () => NodesBuilder.Build(environmentDir));
         RunSubsystem("environment", () => SetupEnvironment(lighting, waterMat, unturnedPath));
@@ -776,6 +776,13 @@ public partial class Main : Node3D
             navigationField = new Data.CollisionFieldBuilder();
             _player = SpawnPlayer(terrain, thirdPerson: false, unturnedPath, heights, navigationField);
         }
+
+        // Whoever was going to claim the preloaded navmesh has claimed it by now: SpawnPlayer brings the
+        // session up and hosts the zombies inline, and the two branches above it never get that far.
+        // Anything still sitting there belongs to a session that will never ask for it — a JOIN client,
+        // a FREECAM fly-through, a STEP_PROBE — and it is the map's whole NavFlag list, tens of
+        // megabytes on a large map, held in a static for the rest of the process.
+        ZombieNavigation.DiscardPreloaded();
 
         loading.SetStatus("World objects…");
         await NextFrame();
@@ -864,11 +871,10 @@ public partial class Main : Node3D
 
         (Vector3 spawnPosition, float spawnYaw) = ResolveSpawn(unturnedPath, _mapName, heights);
 
+        // NetworkManager puts itself in SceneGroups.Network from _Ready, which is how the benchmark
+        // report, the console's `net` namespace and the F3 HUD all find the session without holding it:
+        // it is built with each map and freed with it.
         var network = new NetworkManager { Name = "Network", LevelName = LevelIdentity(unturnedPath, _mapName) };
-        // Advertised the way every other subject the console can read is: the `net` namespace and the F3
-        // HUD find the session through the group rather than holding it, because it is rebuilt with the
-        // world and a captured reference would be pointing at a freed node by the second map.
-        network.AddToGroup(SceneGroups.Network);
         _network = network;
         network.OnRejected += ShowJoinRefused;
         if (heights != null)

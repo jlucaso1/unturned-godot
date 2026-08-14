@@ -92,6 +92,12 @@ public sealed class UnityMesh
         // A streamed mesh writes an empty m_DataSize; the buffer is the range out of the .resS instead.
         byte[] buffer = streamed ? streamVertexData! : (byte[])vertexData["m_DataSize"];
 
+        // Every stride below is computed from the channels' declared formats, so a format the header names
+        // but Unity does not define would index FormatSize out of bounds and fault the whole bundle. An
+        // undecodable mesh is what Usable already says, so say it here instead.
+        if (!KnownFormats(channels))
+            return result;
+
         int[] strides = ComputeStreamStrides(channels, out int[] streamOffsets, vertexCount);
         // The channel readers index the buffer straight from the strides, so a buffer shorter than the
         // header describes would fault rather than decode. That was unreachable while the bytes always
@@ -106,23 +112,29 @@ public sealed class UnityMesh
         result.BoneWeights = ReadFloat4Channel(channels, 12, buffer, vertexCount, strides, streamOffsets);
         result.BoneIndices = ReadInt4Channel(channels, 13, buffer, vertexCount, strides, streamOffsets);
         result.BindPoses = ReadBindPoses(mesh);
-        result.Submeshes = ReadSubmeshes(mesh);
-        // Flatten the submesh index arrays into one buffer in a single pass. The old running Concat
-        // reallocated and recopied the whole growing array once per submesh — O(submeshes * total
-        // indices), quadratic in submesh count.
-        int totalIndices = 0;
-        foreach (int[] sm in result.Submeshes)
-            totalIndices += sm.Length;
-        var flat = new int[totalIndices];
-        int flatOffset = 0;
-        foreach (int[] sm in result.Submeshes)
-        {
-            Array.Copy(sm, 0, flat, flatOffset, sm.Length);
-            flatOffset += sm.Length;
-        }
-        result.Indices = flat;
-        result.Usable = result.Vertices.Length > 0 && totalIndices > 0;
+        result.Submeshes = ReadSubmeshes(mesh, result.Vertices.Length);
+        result.Indices = Flatten(result.Submeshes);
+        result.Usable = result.Vertices.Length > 0 && result.Indices.Length > 0;
         return result;
+    }
+
+    // The submesh index arrays as one buffer, in a single pass. The old running Concat reallocated and
+    // recopied the whole growing array once per submesh — O(submeshes * total indices), quadratic in
+    // submesh count.
+    private static int[] Flatten(List<int[]> submeshes)
+    {
+        int total = 0;
+        foreach (int[] sm in submeshes)
+            total += sm.Length;
+
+        var flat = new int[total];
+        int offset = 0;
+        foreach (int[] sm in submeshes)
+        {
+            Array.Copy(sm, 0, flat, offset, sm.Length);
+            offset += sm.Length;
+        }
+        return flat;
     }
 
     // A compressed mesh carries its triangles as one packed run; the submesh table still says which slice
@@ -137,16 +149,22 @@ public sealed class UnityMesh
         result.Vertices = compressed.Vertices;
         result.Normals = compressed.Normals;
         result.Uvs = compressed.Uvs;
-        result.Indices = compressed.Triangles;
+        result.BoneWeights = compressed.BoneWeights;
+        result.BoneIndices = compressed.BoneIndices;
         result.BindPoses = ReadBindPoses(mesh);
-        result.Submeshes = SliceSubmeshes(mesh, compressed.Triangles);
-        result.Usable = true;
+        result.Submeshes = SliceSubmeshes(mesh, compressed.Triangles, result.Vertices.Length);
+        // Taken from the submeshes rather than from compressed.Triangles, so this path and the
+        // uncompressed one agree about what Indices holds: the indices that survived validation. Handing
+        // back the raw run would have put the very values SliceSubmeshes just rejected back in reach.
+        result.Indices = Flatten(result.Submeshes);
+        result.Usable = result.Indices.Length > 0;
         return result;
     }
 
     // firstByte/indexCount address the index buffer the mesh would have had, so the element size the
     // header declares converts them into offsets in the unpacked triangle list.
-    private static List<int[]> SliceSubmeshes(Dictionary<string, object> mesh, int[] triangles)
+    private static List<int[]> SliceSubmeshes(Dictionary<string, object> mesh, int[] triangles,
+        int vertexCount)
     {
         int indexSize = ToInt(mesh["m_IndexFormat"]) == 1 ? 4 : 2;
         var result = new List<int[]>();
@@ -164,12 +182,16 @@ public sealed class UnityMesh
 
             var slice = new int[count];
             Array.Copy(triangles, first, slice, 0, count);
-            result.Add(slice);
+            // Same rule as the uncompressed path: an index that names a vertex the mesh does not have is
+            // not renderable, and passing it on hands the fault to whoever draws it rather than to the
+            // reader that can still say no.
+            result.Add(ApplyBaseVertex(slice, BaseVertex(sm), vertexCount) ? slice : Array.Empty<int>());
         }
 
-        // A mesh with no usable submesh table still renders as one surface.
+        // A mesh with no usable submesh table still renders as one surface — validated like any other,
+        // since nothing about an absent table makes the packed triangles trustworthy.
         if (result.Count == 0)
-            result.Add(triangles);
+            result.Add(ApplyBaseVertex(triangles, 0, vertexCount) ? triangles : Array.Empty<int>());
 
         return result;
     }
@@ -232,11 +254,11 @@ public sealed class UnityMesh
 
         var ch = (Dictionary<string, object>)channels[index];
         int dim = Dimension(ch);
-        if (dim < 3)
+        int format = ToInt(ch["format"]);
+        if (dim < 3 || !IsFloatFormat(format))
             return Array.Empty<Vector3>();
 
         int stream = ToInt(ch["stream"]);
-        int format = ToInt(ch["format"]);
         int stride = strides[stream];
         int baseOffset = streamOffsets[stream] + ToInt(ch["offset"]);
         int componentSize = FormatSize[format];
@@ -261,11 +283,11 @@ public sealed class UnityMesh
 
         var ch = (Dictionary<string, object>)channels[index];
         int dim = Dimension(ch);
-        if (dim < 2)
+        int format = ToInt(ch["format"]);
+        if (dim < 2 || !IsFloatFormat(format))
             return Array.Empty<Vector2>();
 
         int stream = ToInt(ch["stream"]);
-        int format = ToInt(ch["format"]);
         int stride = strides[stream];
         int baseOffset = streamOffsets[stream] + ToInt(ch["offset"]);
         int componentSize = FormatSize[format];
@@ -279,62 +301,86 @@ public sealed class UnityMesh
         return values;
     }
 
-    // 4 float bone weights per vertex (BlendWeight channel), flattened; empty when absent.
+    // Bone weights (BlendWeight channel), flattened to four per vertex; empty when absent.
+    //
+    // The channel's own dimension is how many influences each vertex carries, and it is NOT always four.
+    // Unity writes as many as the mesh's import settings asked for, and the rest of the slot is simply not
+    // in the buffer — a two-influence mesh has a 16-byte skin stream where a four-influence one has 32.
+    // Requiring four dropped every such mesh's skin on the floor, and the game ships two of them in
+    // resources.assets: the first-person Viewmodel arms (464 vertices, 16 bind poses) and one more rig
+    // beside them, both authored at two influences. That is the whole of the README's "skin weights the
+    // port does not decode yet" — the data is inline and uncompressed, it is just two wide.
+    //
+    // The unread slots stay zero, which is what they mean: Unity normalizes a vertex's weights across the
+    // influences it declares, so two that sum to 1 are complete on their own.
     private static float[] ReadFloat4Channel(List<object> channels, int index, byte[] buffer,
         int vertexCount, int[] strides, int[] streamOffsets)
     {
         if (index >= channels.Count)
             return Array.Empty<float>();
         var ch = (Dictionary<string, object>)channels[index];
-        if (Dimension(ch) < 4)
+        int format = ToInt(ch["format"]);
+        int dim = Dimension(ch);
+        if (dim < 1 || !IsFloatFormat(format))
             return Array.Empty<float>();
 
         int stream = ToInt(ch["stream"]);
-        int format = ToInt(ch["format"]);
         int stride = strides[stream];
         int baseOffset = streamOffsets[stream] + ToInt(ch["offset"]);
         int size = FormatSize[format];
+        int influences = Math.Min(dim, BonesPerVertex);
 
-        var values = new float[vertexCount * 4];
+        var values = new float[vertexCount * BonesPerVertex];
         for (int v = 0; v < vertexCount; v++)
         {
             int p = baseOffset + v * stride;
-            for (int c = 0; c < 4; c++)
-                values[v * 4 + c] = ReadComponent(buffer, p + c * size, format);
+            for (int c = 0; c < influences; c++)
+                values[(v * BonesPerVertex) + c] = ReadComponent(buffer, p + (c * size), format);
         }
         return values;
     }
 
-    // 4 bone indices per vertex (BlendIndices channel; UInt8/16/32), flattened; empty when absent.
+    // Bone indices (BlendIndices channel; UInt8/16/32), flattened to four per vertex; empty when absent.
+    // Same dimension rule as the weights above — the two channels always agree about how many influences
+    // a vertex has, so an index whose weight was not written stays 0 and contributes nothing.
     private static int[] ReadInt4Channel(List<object> channels, int index, byte[] buffer,
         int vertexCount, int[] strides, int[] streamOffsets)
     {
         if (index >= channels.Count)
             return Array.Empty<int>();
         var ch = (Dictionary<string, object>)channels[index];
-        if (Dimension(ch) < 4)
+        int format = ToInt(ch["format"]);
+        int dim = Dimension(ch);
+        // The mirror of the float channels' guard: bone ids are integers, and a float format here would
+        // be read at the wrong width by ReadIntComponent.
+        if (dim < 1 || IsFloatFormat(format))
             return Array.Empty<int>();
 
         int stream = ToInt(ch["stream"]);
-        int format = ToInt(ch["format"]);
         int stride = strides[stream];
         int baseOffset = streamOffsets[stream] + ToInt(ch["offset"]);
         int size = FormatSize[format];
+        int influences = Math.Min(dim, BonesPerVertex);
 
-        var values = new int[vertexCount * 4];
+        var values = new int[vertexCount * BonesPerVertex];
         for (int v = 0; v < vertexCount; v++)
         {
             int p = baseOffset + v * stride;
-            for (int c = 0; c < 4; c++)
-                values[v * 4 + c] = ReadIntComponent(buffer, p + c * size, format);
+            for (int c = 0; c < influences; c++)
+                values[(v * BonesPerVertex) + c] = ReadIntComponent(buffer, p + (c * size), format);
         }
         return values;
     }
 
+    // The bone-index channel's integer formats. The signed narrow widths are listed for the same reason
+    // ReadComponent lists them: FormatSize already sizes them, so a 4-byte read at a 1- or 2-byte stride
+    // silently mixes in the neighbouring component instead of failing.
     private static int ReadIntComponent(byte[] buffer, int offset, int format) => format switch
     {
         6 => buffer[offset],                            // UInt8
+        7 => (sbyte)buffer[offset],                     // SInt8
         8 => BitConverter.ToUInt16(buffer, offset),     // UInt16
+        9 => BitConverter.ToInt16(buffer, offset),      // SInt16
         _ => BitConverter.ToInt32(buffer, offset),      // UInt32/SInt32 (format 10/11)
     };
 
@@ -357,16 +403,59 @@ public sealed class UnityMesh
         return result;
     }
 
+    // Unity's six floating-point VertexFormats, decoded at the width FormatSize already declares.
+    //
+    // Only 0/1/2 used to be decoded and 3/4/5 fell through to a 4-byte BitConverter.ToSingle. That was
+    // worse than not reading the mesh at all: FormatSize gets their widths right, so the strides and the
+    // buffer-fits test both pass, the mesh reports Usable, and what comes out is a scrambled model rather
+    // than a rejected one. The normalized readings are Unity's own — a signed value divides by its
+    // positive maximum, which leaves the most negative value a hair below -1, so it clamps.
     private static float ReadComponent(byte[] buffer, int offset, int format) => format switch
     {
-        0 => BitConverter.ToSingle(buffer, offset),                       // Float32
-        1 => (float)BitConverter.ToHalf(buffer, offset),                  // Float16
-        2 => buffer[offset] / 255f,                                       // UNorm8
-        _ => BitConverter.ToSingle(buffer, offset),
+        0 => BitConverter.ToSingle(buffer, offset),                        // Float32
+        1 => (float)BitConverter.ToHalf(buffer, offset),                   // Float16
+        2 => buffer[offset] / 255f,                                        // UNorm8
+        3 => Math.Max((sbyte)buffer[offset] / 127f, -1f),                  // SNorm8
+        4 => BitConverter.ToUInt16(buffer, offset) / 65535f,               // UNorm16
+        _ => Math.Max(BitConverter.ToInt16(buffer, offset) / 32767f, -1f), // SNorm16 (format 5)
     };
 
+    // Whether a format carries a floating-point quantity, which is what positions, normals, UVs and blend
+    // weights are. The integer formats (6..11) hold ids and counts; Unity reads them through a separate
+    // path and so does this reader (ReadIntComponent, for the bone-index channel). A float channel that
+    // names one is not something to guess at — reinterpreting its bytes as a float is exactly the silent
+    // scrambling above — so the channel reads as absent, and for positions that makes the mesh unusable,
+    // which is the answer Usable exists to give.
+    private static bool IsFloatFormat(int format) => format is >= 0 and <= 5;
+
+    // A component's byte size, or -1 for a format outside Unity's VertexFormat enum. Indexing FormatSize
+    // directly threw on such a header, which fails the whole bundle rather than the one mesh that named it.
+    private static int FormatSizeOf(int format) =>
+        (uint)format < (uint)FormatSize.Length ? FormatSize[format] : -1;
+
+    // Whether every channel that carries data names a format this reader can size and decode.
+    private static bool KnownFormats(List<object> channels)
+    {
+        foreach (object c in channels)
+        {
+            var ch = (Dictionary<string, object>)c;
+            if (Dimension(ch) > 0 && FormatSizeOf(ToInt(ch["format"])) < 0)
+                return false;
+        }
+        return true;
+    }
+
     // One index array per submesh (triangle lists only), parallel to the palette's materials.
-    private static List<int[]> ReadSubmeshes(Dictionary<string, object> mesh)
+    //
+    // Two separate bounds hold here, and neither is optional. `firstByte`/`indexCount` come straight off
+    // the TypeTree, so a range that overruns m_IndexBuffer threw out of BitConverter and turned every
+    // object in that bundle into a box. The worse one is silent: a range that fits the index buffer can
+    // still hold values naming vertices this mesh does not have, and nothing downstream re-checks them —
+    // they go into the cache through MeshCache.Write and are handed to ImporterMesh.AddSurface on the main
+    // thread on every warm load for the life of that cache entry. A submesh that fails either test is
+    // dropped to an empty array, the same answer SliceSubmeshes gives, which keeps the list aligned with
+    // the material palette.
+    private static List<int[]> ReadSubmeshes(Dictionary<string, object> mesh, int vertexCount)
     {
         byte[] indexBuffer = (byte[])mesh["m_IndexBuffer"];
         bool is32 = ToInt(mesh["m_IndexFormat"]) == 1;
@@ -384,16 +473,51 @@ public sealed class UnityMesh
 
             int firstByte = ToInt(sm["firstByte"]);
             int indexCount = ToInt(sm["indexCount"]);
+            // Widened to long deliberately: indexCount * size overflows int for a large enough claimed
+            // count, and an overflowed product compares as "fits" against a buffer it does not fit.
+            if (firstByte < 0 || indexCount <= 0
+                || (long)indexCount * size > (long)indexBuffer.Length - firstByte)
+            {
+                result.Add(Array.Empty<int>());
+                continue;
+            }
+
+            int baseVertex = BaseVertex(sm);
             var indices = new int[indexCount];
             for (int i = 0; i < indexCount; i++)
             {
                 int p = firstByte + i * size;
-                // Index buffer values are absolute vertex indices.
-                indices[i] = is32 ? BitConverter.ToInt32(indexBuffer, p) : BitConverter.ToUInt16(indexBuffer, p);
+                // Index buffer values are relative to the submesh's baseVertex, which is zero for nearly
+                // every mesh in the game's own bundle but not for one Unity split: a mesh with more than
+                // 65 535 vertices keeps 16-bit indices and moves the window with baseVertex instead.
+                indices[i] = is32
+                    ? unchecked((int)BitConverter.ToUInt32(indexBuffer, p))
+                    : BitConverter.ToUInt16(indexBuffer, p);
             }
-            result.Add(indices);
+            result.Add(ApplyBaseVertex(indices, baseVertex, vertexCount) ? indices : Array.Empty<int>());
         }
         return result;
+    }
+
+    // m_SubMeshes.baseVertex, absent on the older mesh versions that never wrote it.
+    private static int BaseVertex(Dictionary<string, object> submesh) =>
+        submesh.TryGetValue("baseVertex", out object? value) ? ToInt(value) : 0;
+
+    // Adds baseVertex to every index in place, and answers whether they all landed on a vertex the mesh
+    // actually has. The sum is taken in long because a 32-bit index buffer holds values up to uint.MaxValue
+    // — read back as int those are negative, and adding baseVertex to one could wrap right back into the
+    // valid range and pass the very test meant to catch it. (Not to be confused with MeshIndices.Rebase,
+    // which moves an already-valid part's indices into a combined mesh's pool.)
+    private static bool ApplyBaseVertex(int[] indices, int baseVertex, int vertexCount)
+    {
+        for (int i = 0; i < indices.Length; i++)
+        {
+            long index = (uint)indices[i] + (long)baseVertex;
+            if (index < 0 || index >= vertexCount)
+                return false;
+            indices[i] = (int)index;
+        }
+        return true;
     }
 
     private static int ToInt(object value) => Convert.ToInt32(value);

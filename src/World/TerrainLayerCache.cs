@@ -96,18 +96,35 @@ public static class TerrainLayerCache
     public static void Write(Guid material, CachedTexture texture, string bundlePath,
         string cacheDirectory)
     {
+        string path = PathFor(material, cacheDirectory);
+        // Unique per writer, because two processes may be writing the same GUID at the same time — a
+        // dedicated server and a BOT_JOIN client share one user://, which is the shape this repo's own
+        // end-to-end runs take.
+        string temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
             string stamp = SourceStamp(bundlePath);
             if (stamp.Length == 0)
                 return;
             System.IO.Directory.CreateDirectory(cacheDirectory);
-            using FileStream stream = File.Create(PathFor(material, cacheDirectory));
-            TextureCache.Write(stream, texture);
+            // Written through a temporary and renamed into place, like every other cache file here
+            // (ModelExtractor.WriteAtomically, TextureCache.RecordSource, FoliageResidencyIndex.Write).
+            // Truncating the .tex in place was safe against a crash — the stamp is written afterwards, so
+            // an interrupted write leaves no stamp and the entry reads as missing — but not against a
+            // REWRITE by a second process: A finishing its .tex and .stamp while B has just truncated the
+            // same .tex leaves a reader passing A's stamp and then reading B's half-written payload.
+            using (FileStream stream = File.Create(temporary))
+                TextureCache.Write(stream, texture);
+            File.Move(temporary, path, overwrite: true);
             File.WriteAllText(StampPathFor(material, cacheDirectory), stamp);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
+        }
+        finally
+        {
+            try { File.Delete(temporary); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
         }
     }
 }

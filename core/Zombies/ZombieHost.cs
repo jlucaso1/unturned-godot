@@ -20,7 +20,6 @@ public sealed class ZombieHost
     private readonly List<byte> _gone = new();
     private readonly List<ZombiePlayerView> _views = new();
     private readonly List<(byte Player, ITransportConnection Connection)> _connections = new();
-    private readonly Dictionary<ushort, EZombieState> _lastSent = new();
     // Deaths waiting to go out, by the region the zombie belonged to. Filled by whatever damaged it —
     // which runs on the same OnTick this does, and may run after it — and drained at the START of the
     // next tick, so a kill is announced exactly once and never races the snapshot pass below.
@@ -73,16 +72,15 @@ public sealed class ZombieHost
         _playerBounds[id] = newBound;
     }
 
-    // Announces a zombie's death to its region on the next tick, and forgets the state tracking that
-    // would otherwise keep an id alive in _lastSent for the rest of the session. The zombie is already
-    // out of the population by the time this is called — ZombieSystem.Damage removes it — so this is
-    // purely the replication half of the same event.
+    // Announces a zombie's death to its region on the next tick. The zombie is already out of the
+    // population by the time this is called — ZombieSystem.Damage removes it — so this is purely the
+    // replication half of the same event, and the state tracking needs no cleanup: it is a field on the
+    // body being buried rather than an entry under its id, so it goes when the body does.
     // `ragdoll` is the shove the killing blow gave the body — DamageTool.damageZombie's own vector,
     // which askDamage hands to sendZombieDead. Zero for a death with no direction behind it.
     public void ReportKilled(ZombieInstance zombie, Godot.Vector3 ragdoll = default)
     {
         System.ArgumentNullException.ThrowIfNull(zombie);
-        _lastSent.Remove(zombie.Id);
         if (!_pendingKills.TryGetValue(zombie.Bound, out List<(ushort, Godot.Vector3)>? kills))
             _pendingKills[zombie.Bound] = kills = new List<(ushort, Godot.Vector3)>();
         kills.Add((zombie.Id, ragdoll));
@@ -138,10 +136,9 @@ public sealed class ZombieHost
             states.Clear();
         foreach (ZombieInstance zombie in _system.Zombies)
         {
-            _lastSent.TryGetValue(zombie.Id, out EZombieState last);
-            if (zombie.State == EZombieState.Idle && last == EZombieState.Idle)
+            if (zombie.State == EZombieState.Idle && zombie.LastSentState == EZombieState.Idle)
                 continue;
-            _lastSent[zombie.Id] = zombie.State;
+            zombie.LastSentState = zombie.State;
             _awakeByBound[zombie.Bound].Add(Snapshot(zombie));
         }
 
@@ -220,7 +217,11 @@ public sealed class ZombieHost
     public void ResendRegions()
     {
         _playerBounds.Clear();
-        _lastSent.Clear();
+        // Idle is what an unseen zombie used to read as when the dictionary had no entry for it, so
+        // clearing the tracking is now writing that back onto the population that is still standing.
+        // The replacement population arrives with the field already at its default.
+        foreach (ZombieInstance zombie in _system.Zombies)
+            zombie.LastSentState = EZombieState.Idle;
         // The ids in here belong to the population being replaced. Announcing their deaths after the
         // swap would name zombies the client is about to be told about afresh, under the same ids.
         _pendingKills.Clear();

@@ -11,13 +11,17 @@ public class LevelRoadsTests
     private readonly record struct Joint(Vector3 Vertex, Vector3 T0, Vector3 T1);
 
     private static byte[] BuildPaths(byte version, params (byte material, bool loop, Joint[] joints)[] roads)
+        => BuildPaths(version, null, roads);
+
+    private static byte[] BuildPaths(byte version, System.Guid? roadAsset,
+        params (byte material, bool loop, Joint[] joints)[] roads)
     {
         var w = new RiverBytes().Byte(version).UInt16((ushort)roads.Length);
         foreach (var (material, loop, joints) in roads)
         {
             w.UInt16((ushort)joints.Length).Byte(material);
             if (version > 2) w.Bool(loop);
-            if (version >= 6) w.Guid(System.Guid.NewGuid());
+            if (version >= 6) w.Guid(roadAsset ?? System.Guid.NewGuid());
             foreach (Joint j in joints)
             {
                 w.Vector3(j.Vertex);
@@ -134,5 +138,33 @@ public class LevelRoadsTests
         // Symmetric handles keep the midpoint on the straight line between the vertices.
         Assert.Equal(5f, LevelRoads.BezierPoint(a, b, 0.5f).X, 0.001f);
         Assert.Equal(0f, LevelRoads.BezierPoint(a, b, 0.5f).Y, 0.001f);
+    }
+
+    [Fact]
+    public void LoadPaths_KeepsThePerRoadRoadAssetGuid()
+    {
+        // From Paths.dat version 6 a road may name a RoadAsset instead of an index into the legacy
+        // Roads.dat table, and the two disagree about width, depth, offset and texture. Reading the GUID
+        // and throwing it away gave a migrated map the legacy entry's shape instead of its own.
+        using var dir = new TempDir();
+        var asset = System.Guid.NewGuid();
+        var joints = new[] { new Joint(Vector3.Zero, Vector3.Zero, Vector3.Zero) };
+        string path = dir.Write("Paths.dat", BuildPaths(6, asset, ((byte)0, false, joints)));
+
+        Assert.Equal(asset, Assert.Single(LevelRoads.LoadPaths(path)).RoadAssetGuid);
+    }
+
+    [Fact]
+    public void LoadPaths_LeavesTheGuidEmptyBeforeVersion6AndWhenUnset()
+    {
+        // Empty means the road really does use the legacy table -- which is all 23 of PEI's.
+        using var dir = new TempDir();
+        var joints = new[] { new Joint(Vector3.Zero, Vector3.Zero, Vector3.Zero) };
+
+        string old = dir.Write("Paths5.dat", BuildPaths(5, ((byte)0, false, joints)));
+        Assert.Equal(System.Guid.Empty, Assert.Single(LevelRoads.LoadPaths(old)).RoadAssetGuid);
+
+        string unset = dir.Write("Paths6.dat", BuildPaths(6, System.Guid.Empty, ((byte)0, false, joints)));
+        Assert.Equal(System.Guid.Empty, Assert.Single(LevelRoads.LoadPaths(unset)).RoadAssetGuid);
     }
 }

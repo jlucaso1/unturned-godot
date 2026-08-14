@@ -258,12 +258,13 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void HuntProbeAdvancesInsidePhysicsNotifications()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Net", "NetworkManager.cs")) is not { } path)
+        if (FindRepositoryFile(Path.Combine("src", "Diagnostics", "NavProbes.cs")) is not { } path)
             return;
 
         string source = File.ReadAllText(path);
         int probe = source.IndexOf("if (OS.GetEnvironment(\"HUNT_PROBE\")", StringComparison.Ordinal);
-        int frame = source.IndexOf("await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame)", probe,
+        int frame = source.IndexOf(
+            "await owner.ToSignal(owner.GetTree(), SceneTree.SignalName.PhysicsFrame)", probe,
             StringComparison.Ordinal);
         int tick = source.IndexOf("probe.Tick(views", probe, StringComparison.Ordinal);
         Assert.True(probe >= 0 && frame > probe && tick > frame,
@@ -288,12 +289,13 @@ public class PhysicsBodyOrderTests
     [Fact]
     public void PathProbeQueriesInsideAPhysicsNotification()
     {
-        if (FindRepositoryFile(Path.Combine("src", "Net", "NetworkManager.cs")) is not { } path)
+        if (FindRepositoryFile(Path.Combine("src", "Diagnostics", "NavProbes.cs")) is not { } path)
             return;
 
         string source = File.ReadAllText(path);
         int probe = source.IndexOf("if (OS.GetEnvironment(\"PATH_PROBE\")", StringComparison.Ordinal);
-        int frame = source.IndexOf("await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame)", probe,
+        int frame = source.IndexOf(
+            "await owner.ToSignal(owner.GetTree(), SceneTree.SignalName.PhysicsFrame)", probe,
             StringComparison.Ordinal);
         int query = source.IndexOf("zombies.PathQuery!(from, to", probe, StringComparison.Ordinal);
         Assert.True(probe >= 0 && frame > probe && query > frame,
@@ -506,7 +508,9 @@ public class PhysicsBodyOrderTests
             // frames as the texture apply it was staged behind.
             Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(streamer,
                 @"await PrewarmFoliageAsync\(\);").Count);
-            Assert.Contains("await foliage.PrewarmAsync(_loadCancellation.Token);", streamer);
+            // _loadToken, not _loadCancellation.Token: the source is disposed when the streamer leaves
+            // the tree, and reading .Token off a disposed source throws.
+            Assert.Contains("await foliage.PrewarmAsync(_loadToken);", streamer);
             // _sceneBuilt is what releases _Process to apply textures. Setting it before the warm pass
             // would let the two spend their separate per-frame budgets in the same frames, which is the
             // staging the pass yields to preserve.
@@ -696,11 +700,13 @@ public class PhysicsBodyOrderTests
     {
         if (FindRepositoryFile(Path.Combine("src", "World", "InstancedStaticBodies.cs")) is not { } ownerPath
             || FindRepositoryFile(Path.Combine("src", "World", "ObjectsBuilder.cs")) is not { } builderPath
-            || FindRepositoryFile(Path.Combine("src", "Net", "NetworkManager.cs")) is not { } netPath)
+            // The diagnostics that read a collider's name back moved out of the session owner and into
+            // src/Diagnostics/NavProbes.cs; the naming they consume is still this test's subject.
+            || FindRepositoryFile(Path.Combine("src", "Diagnostics", "NavProbes.cs")) is not { } probesPath)
             return;
         string owner = File.ReadAllText(ownerPath);
         string builder = File.ReadAllText(builderPath);
-        string net = File.ReadAllText(netPath);
+        string probes = File.ReadAllText(probesPath);
         int addShape = owner.IndexOf("PhysicsServer3D.BodyAddShape", System.StringComparison.Ordinal);
         int setSpace = owner.IndexOf("PhysicsServer3D.BodySetSpace", System.StringComparison.Ordinal);
         Assert.True(addShape >= 0 && setSpace > addShape);
@@ -708,7 +714,7 @@ public class PhysicsBodyOrderTests
         Assert.Contains("_names[body] = definition.Name", owner);
         Assert.Contains("PhysicsServer3D.FreeRid(body)", owner);
         Assert.Contains("UG_NODE_PHYSICS", builder);
-        Assert.Contains("InstancedStaticBodies.ColliderName", net);
+        Assert.Contains("InstancedStaticBodies.ColliderName", probes);
     }
 
     [Fact]
@@ -789,6 +795,36 @@ public class PhysicsBodyOrderTests
         Assert.Contains("MaterialAliasPlan.Canonical(keys, registry.MaterialIdentities)", table);
         Assert.Contains("surface.Mesh.SurfaceSetMaterial(surface.Index, target)", table);
         Assert.Contains("registry.RegisterAlias(surface.TextureKey, target)", table);
+    }
+
+    // A linked CancellationTokenSource registers a callback on the source it links to, and only Dispose
+    // removes it. The streamer links to AppShutdown's static source, which lives for the whole process,
+    // so a streamer that never disposes leaves one dead registration per map load — the leak
+    // FoliageStreamingRenderer already avoids for its own lifetime and per-decode sources.
+    [Fact]
+    public void TheStreamerDisposesTheSourceItLinkedToAppShutdown()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path).Replace("\r\n", "\n");
+        Assert.Contains("CreateLinkedTokenSource(AppShutdown.Token)", source);
+        Assert.Contains("_loadCancellation.Dispose()", source);
+        // Both exits release it: the node leaving the tree, and a load cancelled before it ever joined
+        // one. Once each — Cancel() and .Token both throw on a disposed source.
+        Assert.Contains("public override void _ExitTree() => ReleaseLoadCancellation();", source);
+        Assert.Contains("if (!_loadCancellationReleased)\n            _loadCancellation.Cancel();", source);
+        // Which is why the token is taken once, up front, rather than off the source at each use.
+        Assert.Contains("public ObjectStreamer() => _loadToken = _loadCancellation.Token;", source);
+
+        // Inside CancelAsync: _Process is stopped BEFORE the awaits yield frames — it is what drains the
+        // ready queue and starts the re-dedup pass — and the source is released only after every task
+        // that could still take the token has been observed.
+        string cancel = source[source.IndexOf("public async Task CancelAsync()", StringComparison.Ordinal)..];
+        int stop = cancel.IndexOf("SetProcess(false);", StringComparison.Ordinal);
+        int lastAwait = cancel.IndexOf("await ObserveStopped(_rededupTask);", StringComparison.Ordinal);
+        int released = cancel.IndexOf("ReleaseLoadCancellation();", StringComparison.Ordinal);
+        Assert.True(stop >= 0 && lastAwait > stop && released > lastAwait);
     }
 
     [Fact]
@@ -1327,6 +1363,76 @@ public class PhysicsBodyOrderTests
         Assert.Contains("File.WriteAllText(StampPathFor(material, cacheDirectory), stamp)", cache);
         Assert.Contains("TerrainLayerCache.Missing(needed, bundlePaths)", File.ReadAllText(streamerPath));
         Assert.Contains("TerrainLayerCache.Read(guid, bundlePath)", File.ReadAllText(layersPath));
+
+        // Written through a temporary and renamed into place, like every other cache file in this repo.
+        // Truncating the .tex where it lies was safe against a CRASH — the stamp is written afterwards,
+        // so an interrupted write leaves no stamp and the entry reads as missing — but not against a
+        // REWRITE by a second process sharing user://, which is what a dedicated server plus a BOT_JOIN
+        // client are: A finishing its .tex and .stamp while B has just truncated the same .tex leaves a
+        // reader passing A's stamp and then reading B's half-written payload.
+        Assert.DoesNotContain("File.Create(PathFor(material, cacheDirectory))", cache);
+        Assert.Contains("File.Move(temporary, path, overwrite: true)", cache);
+    }
+
+    // Two phases, and the split is the whole point: TerrainLayers.Load is pure parsing and file IO, so
+    // the interactive terrain build runs it on the thread pool, and Realise is the half that turns the
+    // pixels into ImageTextures — a RenderingServer operation, main thread only, exactly as
+    // ModelLibrary.Realise, TerrainBuilder.FinishTile and TextureRegistry.Apply all are.
+    //
+    // Load used to build them itself, so a normal interactive load created eight to thirty ImageTextures
+    // on a worker while the main thread was tweening the loading screen and finishing later tiles.
+    [Fact]
+    public void TerrainLayerTexturesAreBuiltOnTheMainThreadAndNotInsideTheWorkerResolve()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "World", "TerrainLayers.cs")) is not { } layersPath
+            || FindRepositoryFile(Path.Combine("src", "World", "WorldBuilder.cs")) is not { } builderPath)
+            return;
+
+        string layers = File.ReadAllText(layersPath).Replace("\r\n", "\n");
+        string builder = File.ReadAllText(builderPath).Replace("\r\n", "\n");
+
+        // Every GPU resource this file creates is inside Realise, which is declared before Load.
+        int realise = layers.IndexOf("public int Realise()", StringComparison.Ordinal);
+        int load = layers.IndexOf("public static TerrainLayers Load(", StringComparison.Ordinal);
+        Assert.True(realise >= 0 && load > realise);
+        foreach (string creation in new[] { "ModelLibrary.BuildTexture(", "ImageTexture.CreateFromImage(" })
+            foreach (int at in Occurrences(layers, creation))
+                Assert.True(at < load,
+                    $"{creation} appears at {at}, past the start of the worker-side Load at {load}");
+
+        // And the build realises it back on the main thread, after the Task.Run that resolved it.
+        int offloaded = builder.IndexOf("await System.Threading.Tasks.Task.Run(() => LoadLayers(",
+            StringComparison.Ordinal);
+        int realised = builder.IndexOf("layers.Realise()", StringComparison.Ordinal);
+        Assert.True(offloaded >= 0 && realised > offloaded);
+    }
+
+    // One implementation, not two twins held equal by a comment. The pair used to differ only in a
+    // Task.Run wrapper and an 8 ms yield budget while claiming "semantics match the sync variant
+    // exactly" — and the claim had already rotted, which is how the layer resolve above ended up
+    // creating GPU resources on a worker in one of them and on the main thread in the other.
+    [Fact]
+    public void TheTwoTerrainBuildEntryPointsShareOneImplementation()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "World", "WorldBuilder.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path).Replace("\r\n", "\n");
+        Assert.Contains("Func<System.Threading.Tasks.Task>? yieldEvery", source);
+        // One Parallel.For over the tiles, one FinishTile loop, one HeightmapTile.Read.
+        Assert.Single(Occurrences(source, "TerrainBuilder.BuildTileMesh("));
+        Assert.Single(Occurrences(source, "TerrainBuilder.FinishTile("));
+        Assert.Single(Occurrences(source, "HeightmapTile.Read("));
+        Assert.DoesNotContain("Semantics match the sync variant exactly", source);
+    }
+
+    private static IEnumerable<int> Occurrences(string haystack, string needle)
+    {
+        for (int at = haystack.IndexOf(needle, StringComparison.Ordinal); at >= 0;
+             at = haystack.IndexOf(needle, at + needle.Length, StringComparison.Ordinal))
+        {
+            yield return at;
+        }
     }
 
     [Fact]

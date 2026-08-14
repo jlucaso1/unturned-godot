@@ -21,6 +21,23 @@ public class MaterialPaletteTests
     }
 
     [Fact]
+    public void KeepsTheBundleEachMaterialNames()
+    {
+        // A material reference is a bundle plus a path inside it. Only the path was kept, which agrees
+        // with the name for every palette the game ships — they all say core.masterbundle and the graph
+        // resolving them is core — and parts company for a workshop palette naming another bundle. The
+        // list stays index-parallel with the paths, so the entry that gives no Name still holds its slot.
+        string text =
+            "Metadata\n{\nGUID 3fcc42609bfb4154abb9dd39e7542ed8\n}\n" +
+            "Asset\n{\nID 0\nMaterials\n[\n{\nName core.masterbundle\nPath Objects/Palettes/A.mat\n}\n" +
+            "{\nPath Objects/Palettes/B.mat\n}\n]\n}\n";
+
+        MaterialPalette? palette = MaterialPalette.Read(DatParser.Parse(text));
+
+        Assert.Equal(new[] { "core.masterbundle", "" }, palette!.MaterialBundles);
+    }
+
+    [Fact]
     public void MissingGuid_ReturnsNull()
     {
         Assert.Null(MaterialPalette.Read(DatParser.Parse("Asset\n{\nMaterials\n[\n]\n}\n")));
