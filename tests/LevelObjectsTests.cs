@@ -102,4 +102,31 @@ public class LevelObjectsTests
         var real = new Obj(Vector3.One, Vector3.Zero, Vector3.One, 5, Guid.Empty);
         Assert.Single(Load(12, ghost, real));
     }
+
+    [Fact]
+    public void Load_RoundsATransformThatIsNearlySquare()
+    {
+        // LevelObjects.cs:652 and :656 round as they read, so two walls an editor left a hair out of
+        // square end up exactly coplanar instead of z-fighting. None of PEI's 4,329 placements is off by
+        // enough to move -- the modern editor already writes them rounded -- so this is for the workshop
+        // maps and the older editors that do drift.
+        List<PlacedObject> placed = Load(12, new Obj(new Vector3(1, 2, 3),
+            new Vector3(0.001f, 89.99f, -0.02f), new Vector3(1.0000001f, -0.9999f, 0.5f), 7, Guid.NewGuid()));
+
+        Assert.Equal(new Vector3(0, 90, 0), Assert.Single(placed).EulerDegrees);
+        Assert.Equal(new Vector3(1, -1, 0.5f), placed[0].Scale);
+        Assert.Equal(new Vector3(1, 2, 3), placed[0].Position); // position is never rounded
+    }
+
+    [Fact]
+    public void Load_LeavesADeliberateTransformExactlyAsAuthored()
+    {
+        var euler = new Vector3(0, 37.5f, 0);
+        var scale = new Vector3(0.5f, 2f, 0.998f);
+
+        List<PlacedObject> placed = Load(12, new Obj(Vector3.Zero, euler, scale, 7, Guid.NewGuid()));
+
+        Assert.Equal(euler, Assert.Single(placed).EulerDegrees);
+        Assert.Equal(scale, placed[0].Scale);
+    }
 }
