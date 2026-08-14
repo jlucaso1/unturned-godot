@@ -30,4 +30,9 @@ public static class SceneGroups
     public const string RemotePlayers = "ug_remote_players";
     public const string Lighting = "ug_lighting";
     public const string PauseMenu = "ug_pause_menu";
+
+    // The session owner (NetworkManager), so the console's read-only `net` namespace and the F3 HUD can
+    // read what the netcode is costing. Found through a group like everything else here: the session is
+    // created during the world build and torn down with it, so nothing may hold a reference across maps.
+    public const string Network = "ug_network";
 }

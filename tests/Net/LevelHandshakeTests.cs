@@ -27,6 +27,7 @@ public class LevelHandshakeTests
         public readonly List<(byte[] Payload, ESendType SendType)> Sent = new();
         public bool Closed;
         public int Id => 7;
+        public NetTraffic Traffic { get; } = new();
         public void Send(byte[] payload, ESendType sendType) => Sent.Add((payload, sendType));
         public void Close() => Closed = true;
 
@@ -44,6 +45,7 @@ public class LevelHandshakeTests
         public void Message(FakeConnection c, byte[] payload) =>
             Events.Enqueue(new ServerTransportEvent(ETransportEvent.Message, c, payload));
 
+        public NetTraffic Traffic { get; } = new();
         public bool TryReceive(out ServerTransportEvent evt) => Events.TryDequeue(out evt);
         public void Update(double now) { }
         public void Close() { }
@@ -263,6 +265,7 @@ public class LevelHandshakeTests
         private readonly Queue<byte[]> _inbox = new();
         public readonly List<byte[]> Sent = new();
         public bool IsConnected { get; private set; } = true;
+        public NetTraffic Traffic { get; } = new();
         public void Deliver(byte[] payload) => _inbox.Enqueue(payload);
         public void Send(byte[] payload, ESendType sendType) => Sent.Add(payload);
         public bool TryReceive(out byte[] payload) => _inbox.TryDequeue(out payload!);

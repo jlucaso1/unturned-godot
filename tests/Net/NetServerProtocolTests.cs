@@ -15,6 +15,7 @@ public class NetServerProtocolTests
     {
         public readonly List<(byte[] Payload, ESendType SendType)> Sent = new();
         public int Id => 99;
+        public NetTraffic Traffic { get; } = new();
         public void Send(byte[] payload, ESendType sendType) => Sent.Add((payload, sendType));
         public void Close() { }
     }
@@ -34,6 +35,7 @@ public class NetServerProtocolTests
         public void Disconnect(FakeConnection c) =>
             Events.Enqueue(new ServerTransportEvent(ETransportEvent.Disconnected, c, Array.Empty<byte>()));
 
+        public NetTraffic Traffic { get; } = new();
         public bool TryReceive(out ServerTransportEvent evt) => Events.TryDequeue(out evt);
         public void Update(double now) => UpdateCalls++;
         public void Close() => Closed = true;

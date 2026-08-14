@@ -865,6 +865,10 @@ public partial class Main : Node3D
         (Vector3 spawnPosition, float spawnYaw) = ResolveSpawn(unturnedPath, _mapName, heights);
 
         var network = new NetworkManager { Name = "Network", LevelName = LevelIdentity(unturnedPath, _mapName) };
+        // Advertised the way every other subject the console can read is: the `net` namespace and the F3
+        // HUD find the session through the group rather than holding it, because it is rebuilt with the
+        // world and a captured reference would be pointing at a freed node by the second map.
+        network.AddToGroup(SceneGroups.Network);
         _network = network;
         network.OnRejected += ShowJoinRefused;
         if (heights != null)

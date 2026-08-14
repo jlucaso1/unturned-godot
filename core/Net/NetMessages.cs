@@ -41,6 +41,23 @@ public enum ENetMessage : byte
     ZombieKilled,  // server -> a region's clients, reliable: zombies that died this tick
     Impact,        // server -> all, unreliable: a hit's point, normal and surface (its sound and mark)
     ZombieStunned, // server -> a region's clients, reliable: zombies staggered this tick, and which reel
+
+    // server -> one client, unreliable: the newest input frame number that client's own datagrams have
+    // reached the server with. The round trip is the only thing about a link this stack never measured,
+    // and everything downstream of it — a ping readout, an interpolation delay that adapts to the link
+    // instead of sitting at a fixed 0.1 s — needs a number first.
+    //
+    // Its own message rather than a field on StateUpdate, which is where the obvious 4 bytes would go.
+    // StateUpdate is deliberately ONE payload serialized for many clients (per region, since the interest
+    // filter below), and an echo is per client by construction: putting it in the header would force a
+    // fresh 4 KB snapshot payload per connection per tick, spending kilobytes to carry four bytes. Nine
+    // bytes of its own, on the other hand, is what it actually costs.
+    InputEcho,
+
+    // server -> the owning client, unreliable: where the server says that player really is, sent when a
+    // trusted-position claim was refused. See ServerSimulation.ApplyTrustedPosition — without this the
+    // two sides simply disagree in silence, and it is the server's position that decides damage.
+    PositionCorrection,
 }
 
 // Why a Hello was refused. Sent before the connection is closed so the player is told what happened
@@ -237,7 +254,10 @@ public static class NetMessages
     // the world would be silent and unmarked on its screen, including its own.
     // Version 13 adds ZombieStunned the same way: a version 12 client would keep animating a zombie the
     // server has frozen, so the body would slide through its stagger instead of playing it.
-    public const byte ProtocolVersion = 13;
+    // Version 14 adds InputEcho and PositionCorrection. A version 13 client would drop both as unknown
+    // types: it would report no ping at all (harmless) and would never be corrected when the server
+    // refuses its position (not harmless — that is the divergence the message exists to close).
+    public const byte ProtocolVersion = 14;
 
     // Two level names denote the same world. The name on the wire is the map's FOLDER name — the one
     // identity that survives the trip between two machines (paths and workshop ids do not) — and it
@@ -583,6 +603,51 @@ public static class NetMessages
             states.Add(new PlayerSnapshotState(id, pos, pitch, yaw, stance, moving, grounded));
         }
         return (tick, states);
+    }
+
+    // The RTT probe, and the cheapest one that exists: the client already stamps every input frame with a
+    // number of its own, so the server has only to say which one it last heard. The client knows when it
+    // sent that frame, and the difference is the round trip — no clock synchronisation, no extra
+    // timestamp on the wire, nothing to trust the peer about (a client that lies here only misleads
+    // itself). The server tick rides along so the reading can be dated on the receiving end.
+    //
+    // Unreliable, because a lost probe is answered by the next tick's and a retransmitted one would
+    // report a round trip that includes the retransmission wait.
+    public static byte[] WriteInputEcho(uint frame, uint tick)
+    {
+        var payload = new byte[9];
+        payload[0] = (byte)ENetMessage.InputEcho;
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(1), frame);
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(5), tick);
+        return payload;
+    }
+
+    public static (uint Frame, uint Tick) ReadInputEcho(byte[] payload)
+    {
+        using BinaryReader r = Reader(payload);
+        return (r.ReadUInt32(), r.ReadUInt32());
+    }
+
+    // Where the server says this player really is, after refusing what they claimed.
+    //
+    // The tick is what makes it safe to apply out of order: these are unreliable, so a correction can
+    // arrive behind a newer one, and snapping to the older would put the player back somewhere the
+    // server has already moved them past. Newest wins, wrap-safe like every other sequence here.
+    public static byte[] WritePositionCorrection(uint tick, Vector3 position)
+    {
+        var payload = new byte[17];
+        payload[0] = (byte)ENetMessage.PositionCorrection;
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(1), tick);
+        BinaryPrimitives.WriteSingleLittleEndian(payload.AsSpan(5), position.X);
+        BinaryPrimitives.WriteSingleLittleEndian(payload.AsSpan(9), position.Y);
+        BinaryPrimitives.WriteSingleLittleEndian(payload.AsSpan(13), position.Z);
+        return payload;
+    }
+
+    public static (uint Tick, Vector3 Position) ReadPositionCorrection(byte[] payload)
+    {
+        using BinaryReader r = Reader(payload);
+        return (r.ReadUInt32(), new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()));
     }
 
     private static void WriteListing(BinaryWriter w, PlayerListing p)

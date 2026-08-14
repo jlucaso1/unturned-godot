@@ -16,6 +16,13 @@ public sealed class NetServer
         public byte PlayerId;
         public string Name = string.Empty;
         public bool Joined;
+
+        // The newest input frame number heard from this client, echoed back once per tick so the client
+        // can measure its own round trip. Held here rather than read out of the simulation because the
+        // simulation discards a stale or refused frame, and what the probe has to report is what
+        // ARRIVED — an echo that went quiet whenever a frame was dropped would read as a lost link.
+        public bool HasInputFrame;
+        public uint LastInputFrame;
     }
 
     private readonly IServerTransport _transport;
@@ -46,6 +53,16 @@ public sealed class NetServer
     // Datagrams that reached a decoder and did not survive it. Non-zero means someone is sending the
     // server bytes it cannot read — a mismatched build, a corrupt link, or a probe.
     public long MalformedPacketsDropped { get; private set; }
+
+    // Everything this server's links have cost, split by message type, plus the transport's own drop
+    // counters. Surfaced here because the console is deliberately renderer-side and reads the session
+    // through NetworkManager: it should not have to know which transport a listen server is composed of
+    // to answer "what is this server sending".
+    public NetTraffic Traffic => _transport.Traffic;
+
+    // Trusted positions the simulation refused for not being finite. Reads through to the simulation so
+    // the six counters that describe a sick session are all reachable from one place.
+    public long RejectedPositions => _simulation.RejectedPositions;
 
     // Transport events handled per Update. Comfortably above what a full server generates at its own
     // cadence, so it bounds a flood without shaping normal traffic.
@@ -163,6 +180,7 @@ public sealed class NetServer
             foreach (PlayerGestureEvent gesture in _simulation.Gestures)
                 BroadcastExcept(gesture.PlayerId,
                     NetMessages.WritePlayerGesture(gesture.PlayerId, _simulation.Tick, gesture.Gesture), ESendType.Reliable);
+            SendInputEchoes();
             OnTick?.Invoke(_simulation.Tick);
             caughtUp++;
         }
@@ -272,9 +290,21 @@ public sealed class NetServer
                 // Dated by when it ARRIVED, not by the last tick: the swing rate limit is measured in
                 // real seconds, and a stall is exactly when the two stop being the same thing.
                 if (MalformedPacket.TryDecode(payload, ReadInput, out InputCommand input))
+                {
+                    // Newest-wins, wrap-safe: UDP reorders, and echoing back an older frame number than
+                    // one already echoed would show up on the client as a round trip that went backwards.
+                    if (!session.HasInputFrame
+                        || unchecked((int)(input.Frame - session.LastInputFrame)) > 0)
+                    {
+                        session.HasInputFrame = true;
+                        session.LastInputFrame = input.Frame;
+                    }
                     _simulation.QueueInput(session.PlayerId, input, now);
+                }
                 else
+                {
                     MalformedPacketsDropped++;
+                }
                 break;
         }
     }
@@ -343,6 +373,19 @@ public sealed class NetServer
         _playerIds.Return(session.PlayerId, now);
         _rosterVersion++;
         Broadcast(NetMessages.WritePlayerLeft(_rosterVersion, session.PlayerId), ESendType.Reliable);
+    }
+
+    // One nine-byte probe per joined client per tick, addressed rather than broadcast because the number
+    // in it is that client's own frame counter and means nothing to anyone else. Skipped for a client
+    // that has not sent an input yet (a spectator, a bot with no frames, the tick between admission and
+    // the first datagram): there is nothing to echo, and echoing a zero would report a round trip
+    // measured against a frame the client never sent.
+    private void SendInputEchoes()
+    {
+        foreach ((ITransportConnection conn, Session session) in _sessions)
+            if (session.Joined && session.HasInputFrame)
+                conn.Send(NetMessages.WriteInputEcho(session.LastInputFrame, _simulation.Tick),
+                    ESendType.Unreliable);
     }
 
     public void Broadcast(byte[] payload, ESendType sendType)

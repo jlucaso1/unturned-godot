@@ -23,6 +23,12 @@ public interface ITransportConnection
 {
     // Stable within a server run; used for logs. Identity comparisons use the object reference.
     int Id { get; }
+
+    // What this one link has cost, split by message type. Per connection rather than only per server
+    // because "the server is sending 12 MB/s" and "this player is being sent 12 MB/s" are different
+    // findings with different fixes, and only the second one names the payload to look at.
+    NetTraffic Traffic { get; }
+
     void Send(byte[] payload, ESendType sendType);
     void Close();
 }
@@ -43,6 +49,10 @@ public readonly struct ServerTransportEvent
 
 public interface IServerTransport
 {
+    // Every connection's traffic, rolled up. The children report THROUGH this rather than the server
+    // scanning them, so reading it costs nothing however many players are on.
+    NetTraffic Traffic { get; }
+
     bool TryReceive(out ServerTransportEvent evt);
     void Update(double now); // drives retransmissions and timeouts; no-op for loopback
     void Close();
@@ -51,6 +61,7 @@ public interface IServerTransport
 public interface IClientTransport
 {
     bool IsConnected { get; }
+    NetTraffic Traffic { get; }
     void Send(byte[] payload, ESendType sendType);
     bool TryReceive(out byte[] payload);
     void Update(double now);
@@ -64,12 +75,26 @@ public sealed class CompositeServerTransport : IServerTransport
 {
     private readonly List<IServerTransport> _transports;
 
-    public CompositeServerTransport(params IServerTransport[] transports) =>
+    // The listen server's own total, which is the sum of the loopback the host plays over and the UDP
+    // listener the LAN joins through. Each child reports up into it, so "what is this server sending"
+    // is one number whether the session is solo, listen or dedicated.
+    public NetTraffic Traffic { get; } = new();
+
+    public CompositeServerTransport(params IServerTransport[] transports)
+    {
         _transports = new List<IServerTransport>(transports);
+        foreach (IServerTransport transport in _transports)
+            transport.Traffic.Parent = Traffic;
+    }
 
     // Attaches another listener to the LIVE server — how "open to LAN" works: the always-on
     // singleplayer loopback server simply gains a UDP transport, no restart, no second code path.
-    public void Add(IServerTransport transport) => _transports.Add(transport);
+    public void Add(IServerTransport transport)
+    {
+        ArgumentNullException.ThrowIfNull(transport);
+        transport.Traffic.Parent = Traffic;
+        _transports.Add(transport);
+    }
 
     // Round-robin rather than always restarting at the first child. NetServer drains a bounded number of
     // events per Update, so a child that stays backlogged would otherwise consume every slot on every
@@ -96,6 +121,7 @@ public sealed class CompositeServerTransport : IServerTransport
     {
         foreach (IServerTransport transport in _transports)
             transport.Update(now);
+        Traffic.Update(now); // after the children, so this window closes over bytes they have just counted
     }
 
     public void Close()

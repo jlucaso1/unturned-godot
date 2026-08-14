@@ -24,6 +24,7 @@ public class ServerTickPacingTests
     {
         public readonly List<byte[]> Sent = new();
         public int Id => 1;
+        public NetTraffic Traffic { get; } = new();
         public void Send(byte[] payload, ESendType sendType) => Sent.Add(payload);
         public void Close() { }
 
@@ -40,6 +41,7 @@ public class ServerTickPacingTests
         public void Message(FakeConnection c, byte[] payload) =>
             Events.Enqueue(new ServerTransportEvent(ETransportEvent.Message, c, payload));
 
+        public NetTraffic Traffic { get; } = new();
         public bool TryReceive(out ServerTransportEvent evt) => Events.TryDequeue(out evt);
         public void Update(double now) { }
         public void Close() { }

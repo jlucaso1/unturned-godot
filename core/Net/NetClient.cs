@@ -143,6 +143,30 @@ public sealed class NetClient
     private readonly string _level;
     private double _lastHello = double.NegativeInfinity;
     private double _lastStateAt;
+    private double _now;
+
+    // When each of the last few input frames was sent, so an echo can be turned into a round trip. A
+    // ring rather than a dictionary: inputs go out at 12.5 Hz and the echo for one comes back within a
+    // tick or two of it, so two seconds of history is generous and nothing has to be evicted by hand.
+    private readonly (uint Frame, double SentAt)[] _sentFrames = new (uint, double)[32];
+    private int _sentAt;
+
+    // How much of a new reading is taken. Round trips jitter hard — one datagram queued behind a burst
+    // is not a slower link — and a ping that jumps with every sample is unreadable and useless as an
+    // input to an adaptive interpolation delay. An eighth settles in about a second at this cadence.
+    private const double RttSmoothing = 0.125;
+
+    // The smoothed round trip, in seconds; NaN until an echo has come back. Named for what it is rather
+    // than "ping", because half of it is the number an interpolation delay wants and the distinction
+    // matters once something starts consuming it.
+    public double RoundTripSeconds { get; private set; } = double.NaN;
+
+    // The reading a person wants to see. NaN before the first echo, which a UI should print as "--"
+    // rather than as zero: no measurement and a zero-latency link are not the same statement.
+    public double PingMilliseconds => RoundTripSeconds * 1000.0;
+
+    // Everything this client's link has cost, split by message type. See NetServer.Traffic.
+    public NetTraffic Traffic => _transport.Traffic;
 
     // levelName is the map folder this client actually built. The server admits us only onto that
     // world; see NetMessages.LevelsMatch.
@@ -153,11 +177,21 @@ public sealed class NetClient
         _level = levelName;
     }
 
-    public void SendInput(in InputCommand input) =>
+    public void SendInput(in InputCommand input) => SendInput(input, _now);
+
+    // `now` is when this frame left, which is what the round trip is measured from. The overload above
+    // falls back to the clock the last Update handed us — a fraction of a frame stale, which is noise
+    // against a round trip, and it keeps every existing caller working unchanged.
+    public void SendInput(in InputCommand input, double now)
+    {
+        _sentFrames[_sentAt] = (input.Frame, now);
+        _sentAt = (_sentAt + 1) % _sentFrames.Length;
         _transport.Send(NetMessages.WriteInput(input), ESendType.Unreliable);
+    }
 
     public void Update(double now)
     {
+        _now = now;
         _transport.Update(now); // give the transport the clock BEFORE any reliable send
 
         // A rejection is an answer, not a hiccup: retrying a Hello the server has already refused only
@@ -184,6 +218,12 @@ public sealed class NetClient
             _remotes.Clear();
             Array.Clear(_leftAtVersion);
             _lastHello = double.NegativeInfinity;
+            // The round trip goes with the session. Frame numbers start again on the next join, so a
+            // stale ring entry could be matched by an echo for a different frame that happens to reuse
+            // the number, reporting a round trip of however long the outage lasted.
+            Array.Clear(_sentFrames);
+            _sentAt = 0;
+            RoundTripSeconds = double.NaN;
             // Everything else keyed on ids this server handed out has to start over too, for the same
             // reason the roster versions do — a restarted host numbers its zombies from zero again, and a
             // subscriber holding the old session's ids would judge the new session's by them.
@@ -356,6 +396,42 @@ public sealed class NetClient
                         gesturing.PushGesture(gesture.Tick, gesture.Gesture);
                     break;
                 }
+            case ENetMessage.InputEcho:
+                {
+                    if (!MalformedPacket.TryDecode(payload, ReadInputEcho, out var echo))
+                    {
+                        MalformedPacketsDropped++;
+                        break;
+                    }
+
+                    ObserveRoundTrip(echo.Frame, now);
+                    break;
+                }
+        }
+    }
+
+    // Turns one echo into a round trip. The server repeats the same frame number until a newer input
+    // reaches it, so most echoes are for a frame already measured — matching against the ring and taking
+    // the FIRST arrival for each frame is what keeps a repeat from reporting a round trip inflated by
+    // however long the server sat on it. A frame that has already rolled out of the ring is simply not
+    // measurable and is dropped.
+    private void ObserveRoundTrip(uint frame, double now)
+    {
+        for (int i = 0; i < _sentFrames.Length; i++)
+        {
+            if (_sentFrames[i].Frame != frame || _sentFrames[i].SentAt <= 0)
+                continue;
+            double sample = now - _sentFrames[i].SentAt;
+            // Spent, so the repeats behind it find nothing. Zeroing the timestamp rather than the frame
+            // number keeps frame 0 — a real frame number a session opens on — from matching every empty
+            // slot in the ring.
+            _sentFrames[i].SentAt = 0;
+            if (sample < 0)
+                return; // a clock that went backwards is not a measurement
+            RoundTripSeconds = double.IsNaN(RoundTripSeconds)
+                ? sample
+                : (RoundTripSeconds * (1 - RttSmoothing)) + (sample * RttSmoothing);
+            return;
         }
     }
 
@@ -374,6 +450,8 @@ public sealed class NetClient
         NetMessages.ReadPlayerLeft;
     private static readonly Func<byte[], (uint Tick, List<PlayerSnapshotState> States)> ReadStateUpdate =
         NetMessages.ReadStateUpdate;
+    private static readonly Func<byte[], (uint Frame, uint Tick)> ReadInputEcho =
+        NetMessages.ReadInputEcho;
 
     // The newest server tick heard, from any message that carries one. State updates are unreliable and
     // unordered, so newest-wins rather than last-wins; wrap-safe like every other sequence comparison.

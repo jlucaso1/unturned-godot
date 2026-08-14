@@ -21,6 +21,7 @@ public class ServerResourceLimitsTests
         private static int NextId;
         private readonly int _id = ++NextId;
         public int Id => _id;
+        public NetTraffic Traffic { get; } = new();
         public void Send(byte[] payload, ESendType sendType) { }
         public void Close() { }
     }
@@ -35,6 +36,7 @@ public class ServerResourceLimitsTests
         public void Message(FakeConnection c, byte[] payload) =>
             Events.Enqueue(new ServerTransportEvent(ETransportEvent.Message, c, payload));
 
+        public NetTraffic Traffic { get; } = new();
         public bool TryReceive(out ServerTransportEvent evt) => Events.TryDequeue(out evt);
         public void Update(double now) { }
         public void Close() { }
