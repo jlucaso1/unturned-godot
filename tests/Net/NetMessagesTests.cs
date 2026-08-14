@@ -118,7 +118,11 @@ public class NetMessagesTests
         };
         byte[] p = NetMessages.WriteWelcome(9, 1234, 77, players);
 
-        (byte id, uint tick, uint rosterVersion, List<PlayerListing> read) = NetMessages.ReadWelcome(p);
+        (byte id, uint tick, uint rosterVersion, byte chunkIndex, byte chunkCount,
+            List<PlayerListing> read) = NetMessages.ReadWelcome(p);
+        // A roster small enough for one datagram still says so: chunk 0 of 1.
+        Assert.Equal(0, chunkIndex);
+        Assert.Equal(1, chunkCount);
         Assert.Equal(9, id);
         Assert.Equal(1234u, tick);
         Assert.Equal(77u, rosterVersion); // which membership events this roster already reflects

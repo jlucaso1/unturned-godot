@@ -96,9 +96,18 @@ public sealed class NetClient
     private readonly Dictionary<byte, RemotePlayer> _remotes = new();
 
     // Scratch for reconciling a Welcome's roster against the remotes we hold; reused so a rejoin storm
-    // does not allocate a set and a list per message.
+    // does not allocate a set and a list per message. Across chunks of one roster it accumulates, so it
+    // is cleared when a new roster version starts rather than on every message.
     private readonly HashSet<byte> _rosterIds = new();
     private readonly List<byte> _departed = new();
+
+    // Which chunks of the roster currently being assembled have arrived. A player id is a byte and a
+    // roster is at most 254 entries, so the chunk count can never exceed the entry count — 254 slots is
+    // an upper bound the protocol cannot exceed, and the table never grows.
+    private readonly bool[] _assemblingChunks = new bool[byte.MaxValue];
+    private bool _assembling;
+    private uint _assemblingVersion;
+    private int _assemblingSeen;
 
     // The newest roster version at which each id was seen to LEAVE. Player ids are bytes, so the whole
     // tombstone table is 256 entries and never grows: a roster older than an id's departure may not put
@@ -224,6 +233,13 @@ public sealed class NetClient
             Array.Clear(_sentFrames);
             _sentAt = 0;
             RoundTripSeconds = double.NaN;
+            // A half-assembled roster belongs to the session that ended; the next host numbers its
+            // versions from zero again, so keeping it would let a stale partial complete against a new
+            // roster that happens to reuse the version.
+            _assembling = false;
+            _assemblingSeen = 0;
+            Array.Clear(_assemblingChunks);
+            _rosterIds.Clear();
             // Everything else keyed on ids this server handed out has to start over too, for the same
             // reason the roster versions do — a restarted host numbers its zombies from zero again, and a
             // subscriber holding the old session's ids would judge the new session's by them.
@@ -256,19 +272,43 @@ public sealed class NetClient
                         break;
                     }
 
-                    (byte id, uint welcomeTick, uint rosterVersion, List<PlayerListing> players) = welcome;
+                    (byte id, uint welcomeTick, uint rosterVersion, byte chunkIndex, byte chunkCount,
+                        List<PlayerListing> players) = welcome;
                     PlayerId = id;
                     Joined = true;
                     _lastStateAt = now;
 
-                    // The roster is COMPLETE — "everyone already here" as of rosterVersion — so it
-                    // replaces what we hold rather than adding to it. A second Welcome is ordinary (an
-                    // unadmitted client re-Hellos every couple of seconds, and a joined session that
-                    // Hellos again is answered with a fresh roster), and UDP may hand it to us after the
-                    // PlayerLeft it predates: merging left that player standing there forever, unseeable
-                    // and unshootable. Players still listed keep the remote we already have, so a
-                    // re-Welcome does not restart anyone's interpolation mid-session.
-                    _rosterIds.Clear();
+                    // A roster now arrives in as many datagrams as it takes, so the "replace what we
+                    // hold" rule below applies to the ASSEMBLED roster and not to each piece: read
+                    // chunk-wise, chunk 2 is a complete roster that happens to omit everyone in chunk 1,
+                    // and acting on it would delete them.
+                    //
+                    // Assembly is keyed on the roster version, which is the only identity a roster has.
+                    // A chunk of an older version is stale by definition and is dropped; the first chunk
+                    // of a newer one starts a fresh assembly, abandoning whatever partial set was in
+                    // progress — which is right, because that older roster is now superseded whether or
+                    // not its remaining chunks ever arrive. Reliable delivery retransmits but does not
+                    // order, so chunks of one version may arrive in any order and a duplicate may arrive
+                    // at any time; both are handled by accumulating into a set and counting distinct
+                    // indices rather than trusting arrival order.
+                    if (_assembling && unchecked((int)(rosterVersion - _assemblingVersion)) < 0)
+                        break; // a chunk of a roster older than the one we are building
+                    if (!_assembling || rosterVersion != _assemblingVersion)
+                    {
+                        _assembling = true;
+                        _assemblingVersion = rosterVersion;
+                        _assemblingSeen = 0;
+                        Array.Clear(_assemblingChunks);
+                        _rosterIds.Clear();
+                    }
+
+                    // The roster is COMPLETE — "everyone already here" as of rosterVersion — so once
+                    // assembled it replaces what we hold rather than adding to it. A second Welcome is
+                    // ordinary (an unadmitted client re-Hellos every couple of seconds, and a joined
+                    // session that Hellos again is answered with a fresh roster), and UDP may hand it to
+                    // us after the PlayerLeft it predates: merging left that player standing there
+                    // forever, unseeable and unshootable. Players still listed keep the remote we
+                    // already have, so a re-Welcome does not restart anyone's interpolation mid-session.
                     foreach (PlayerListing p in players)
                     {
                         if (p.PlayerId == PlayerId)
@@ -280,6 +320,17 @@ public sealed class NetClient
                             _remotes[p.PlayerId] = SpawnRemote(p, now, rosterVersion, welcomeTick);
                     }
 
+                    // Counted per distinct index, so a retransmitted chunk cannot complete the roster on
+                    // its own — which would prune everyone in the chunk that has not arrived yet.
+                    if (chunkIndex < _assemblingChunks.Length && !_assemblingChunks[chunkIndex])
+                    {
+                        _assemblingChunks[chunkIndex] = true;
+                        _assemblingSeen++;
+                    }
+                    if (_assemblingSeen < chunkCount)
+                        break; // still missing a piece: the roster is not yet evidence of anyone's absence
+
+                    _assembling = false;
                     if (_remotes.Count > _rosterIds.Count)
                     {
                         _departed.Clear();
@@ -441,8 +492,8 @@ public sealed class NetClient
         Func<byte[], (byte PlayerId, uint Tick, UnturnedGodot.Player.EPlayerGesture Gesture)>
             ReadPlayerGesture = NetMessages.ReadPlayerGesture;
     private static readonly
-        Func<byte[], (byte PlayerId, uint Tick, uint RosterVersion, List<PlayerListing> Players)> ReadWelcome =
-            NetMessages.ReadWelcome;
+        Func<byte[], (byte PlayerId, uint Tick, uint RosterVersion, byte ChunkIndex, byte ChunkCount,
+            List<PlayerListing> Players)> ReadWelcome = NetMessages.ReadWelcome;
     private static readonly Func<byte[], (uint RosterVersion, uint Tick, PlayerListing Player)>
         ReadPlayerJoined = NetMessages.ReadPlayerJoined;
     private static readonly Func<byte[], JoinRejection> ReadReject = NetMessages.ReadReject;

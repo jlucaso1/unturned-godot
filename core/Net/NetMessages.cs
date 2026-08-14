@@ -399,33 +399,79 @@ public static class NetMessages
     // describes the newer world. The simulation tick cannot answer that: several membership events
     // happen inside ONE server frame (a joined client re-Hellos while a new player is admitted), so
     // they share a tick and the tie goes to whichever arrives last. A per-event counter has no ties.
-    public static byte[] WriteWelcome(byte playerId, uint tick, uint rosterVersion,
+    // type 1 + id 1 + tick 4 + rosterVersion 4 + chunk index 1 + chunk count 1 + listing count 1.
+    private const int WelcomeHeaderBytes = 13;
+
+    // The widest a listing can encode to: id 1 + a length-prefixed name (one prefix byte, since 32 is
+    // under the 7-bit-encoded single-byte limit) + position 12 + pitch 1 + yaw 1 + stance 1.
+    private const int MaxListingBytes = 1 + 1 + MaxNameBytes + 12 + 3;
+
+    // How many roster entries one datagram carries. Sized against the WIDEST listing rather than the
+    // average, because a chunk that fitted on a server of short names and fragmented on one of long
+    // names would be the worst kind of intermittent.
+    public static readonly int MaxListingsPerDatagram =
+        Math.Min(NetChunks.Capacity(WelcomeHeaderBytes, MaxListingBytes), byte.MaxValue);
+
+    // The roster, in MTU-sized pieces — the same discipline SendRegion already applied to zombies.
+    //
+    // A full 254-player roster used to be one reliable datagram of about 12.5 KB. That is nine IP
+    // fragments which must ALL arrive, retransmitted whole every ResendInterval until acked, so on a
+    // link with any loss at all a busy server's Welcome could simply never complete — and each retry was
+    // another 12.5 KB burst aimed at the client already struggling to receive it.
+    //
+    // "Chunk k of n" rides in the header because the client REPLACES its roster rather than merging
+    // (see NetClient): without it, chunk 2 would be read as a complete roster and delete everyone named
+    // in chunk 1. The index also lets the reassembly survive reordering, which reliable delivery permits
+    // — it retransmits, it does not order.
+    public static List<byte[]> WriteWelcomeChunks(byte playerId, uint tick, uint rosterVersion,
         IReadOnlyList<PlayerListing> players)
     {
+        ArgumentNullException.ThrowIfNull(players);
+        int chunkCount = Math.Max(1,
+            (players.Count + MaxListingsPerDatagram - 1) / MaxListingsPerDatagram);
+        int index = 0;
+        return NetChunks.Split(players, MaxListingsPerDatagram,
+            chunk => WriteWelcome(playerId, tick, rosterVersion, chunk, (byte)index++, (byte)chunkCount));
+    }
+
+    // One chunk. The default index/count describe a single-chunk roster, which is what every caller
+    // outside the split above means and what the overwhelming majority of real rosters are.
+    public static byte[] WriteWelcome(byte playerId, uint tick, uint rosterVersion,
+        IReadOnlyList<PlayerListing> players, byte chunkIndex = 0, byte chunkCount = 1)
+    {
+        ArgumentNullException.ThrowIfNull(players);
+        if (players.Count > MaxListingsPerDatagram)
+            throw new ArgumentOutOfRangeException(nameof(players),
+                $"a Welcome datagram carries at most {MaxListingsPerDatagram} listings, not "
+                + $"{players.Count}; use WriteWelcomeChunks, which splits.");
         using var ms = new MemoryStream();
         using var w = new BinaryWriter(ms);
         w.Write((byte)ENetMessage.Welcome);
         w.Write(playerId);
         w.Write(tick);
         w.Write(rosterVersion);
+        w.Write(chunkIndex);
+        w.Write(chunkCount);
         w.Write((byte)players.Count);
         foreach (PlayerListing p in players)
             WriteListing(w, p);
         return ms.ToArray();
     }
 
-    public static (byte PlayerId, uint Tick, uint RosterVersion, List<PlayerListing> Players) ReadWelcome(
-        byte[] payload)
+    public static (byte PlayerId, uint Tick, uint RosterVersion, byte ChunkIndex, byte ChunkCount,
+        List<PlayerListing> Players) ReadWelcome(byte[] payload)
     {
         using BinaryReader r = Reader(payload);
         byte id = r.ReadByte();
         uint tick = r.ReadUInt32();
         uint rosterVersion = r.ReadUInt32();
+        byte chunkIndex = r.ReadByte();
+        byte chunkCount = r.ReadByte();
         int count = r.ReadByte();
         var players = new List<PlayerListing>(count);
         for (int i = 0; i < count; i++)
             players.Add(ReadListing(r));
-        return (id, tick, rosterVersion, players);
+        return (id, tick, rosterVersion, chunkIndex, chunkCount, players);
     }
 
     // `tick` is the simulation tick this player was admitted on. It travels with the roster entry because
@@ -561,17 +607,42 @@ public static class NetMessages
     }
 
     private const int SnapshotBytes = 16; // id 1 + position 12 + pitch 1 + yaw 1 + stance/flags 1
+    private const int StateUpdateHeaderBytes = 6; // type 1 + tick 4 + count 1
+
+    // How many players fit in one datagram. At the transport's own 254-player ceiling the old unbounded
+    // form wrote 4 KB, which is three IP fragments that must ALL arrive — and losing a fragment loses
+    // the whole snapshot, so the stream's effective loss rate rose superlinearly with population.
+    //
+    // Capped at what the one-byte count header can express as well as at the budget, so the two ceilings
+    // cannot part company if a snapshot ever gets smaller.
+    public static readonly int MaxSnapshotsPerDatagram =
+        Math.Min(NetChunks.Capacity(StateUpdateHeaderBytes, SnapshotBytes), byte.MaxValue);
+
+    // The form the server sends: as many datagrams as the roster takes, none of them fragmented. Each
+    // carries the same tick, so a client reassembles nothing — the snapshots are independent records and
+    // a lost chunk costs the players in it for one tick rather than costing everybody the whole frame.
+    public static List<byte[]> WriteStateUpdates(uint tick, IReadOnlyList<PlayerSnapshotState> states) =>
+        NetChunks.Split(states, MaxSnapshotsPerDatagram, chunk => WriteStateUpdate(tick, chunk));
 
     // Rebuilt every server tick for every client, so it writes straight into an exact-sized array
     // (identical little-endian bytes) instead of growing a MemoryStream through a BinaryWriter —
     // and iterates by index, since foreach over the IReadOnlyList interface boxes an enumerator.
+    //
+    // One datagram's worth. Handed more than fits, it throws rather than writing a fragmented payload:
+    // the whole point of the split above is that nothing downstream has to remember to do it, and a
+    // writer that quietly produced 4 KB when asked would leave that guarantee resting on convention.
     public static byte[] WriteStateUpdate(uint tick, IReadOnlyList<PlayerSnapshotState> states)
     {
-        var payload = new byte[6 + (states.Count * SnapshotBytes)];
+        ArgumentNullException.ThrowIfNull(states);
+        if (states.Count > MaxSnapshotsPerDatagram)
+            throw new ArgumentOutOfRangeException(nameof(states),
+                $"a StateUpdate datagram carries at most {MaxSnapshotsPerDatagram} players, not "
+                + $"{states.Count}; use WriteStateUpdates, which splits.");
+        var payload = new byte[StateUpdateHeaderBytes + (states.Count * SnapshotBytes)];
         payload[0] = (byte)ENetMessage.StateUpdate;
         BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(1), tick);
         payload[5] = (byte)states.Count;
-        int o = 6;
+        int o = StateUpdateHeaderBytes;
         for (int i = 0; i < states.Count; i++)
         {
             PlayerSnapshotState s = states[i];
@@ -653,7 +724,11 @@ public static class NetMessages
     private static void WriteListing(BinaryWriter w, PlayerListing p)
     {
         w.Write(p.PlayerId);
-        w.Write(p.Name);
+        // Clamped at the point the bytes are produced, not only where the server stores a name. What
+        // makes MaxListingBytes — and so the chunk size above — TRUE is that no listing can encode
+        // wider than it, and a listing assembled anywhere other than an admission would otherwise be
+        // free to blow the chunk past the budget it was measured for.
+        w.Write(ClampName(p.Name));
         w.Write(p.Position.X);
         w.Write(p.Position.Y);
         w.Write(p.Position.Z);

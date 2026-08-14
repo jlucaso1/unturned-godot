@@ -174,7 +174,8 @@ public sealed class NetServer
             _nextTick += ServerSimulation.TickRate;
             List<PlayerSnapshotState> states = _simulation.Step(stepAt);
             if (states.Count > 0)
-                Broadcast(NetMessages.WriteStateUpdate(_simulation.Tick, states), ESendType.Unreliable);
+                foreach (byte[] chunk in NetMessages.WriteStateUpdates(_simulation.Tick, states))
+                    Broadcast(chunk, ESendType.Unreliable);
             // Everyone but the player who threw it: the owner started its own animation on the frame the
             // button went down, and playing this too would restart the swing a round-trip later.
             foreach (PlayerGestureEvent gesture in _simulation.Gestures)
@@ -278,10 +279,11 @@ public sealed class NetServer
                         foreach (Session other in _sessions.Values)
                             if (other.Joined && other != session)
                                 roster.Add(Listing(other, _simulation.GetState(other.PlayerId)));
-                        connection.Send(
-                            NetMessages.WriteWelcome(session.PlayerId, _simulation.Tick, _rosterVersion,
-                                roster),
-                            ESendType.Reliable);
+                        foreach (byte[] chunk in NetMessages.WriteWelcomeChunks(session.PlayerId,
+                            _simulation.Tick, _rosterVersion, roster))
+                        {
+                            connection.Send(chunk, ESendType.Reliable);
+                        }
                         OnPlayerAdmitted?.Invoke(session.PlayerId, connection);
                     }
                     break;
@@ -349,9 +351,13 @@ public sealed class NetServer
         // own Welcome carries the version BEFORE the bump, the PlayerJoined everyone else receives
         // carries the version after. Anyone holding the older roster can then tell that this join is
         // newer than it, rather than deleting a player who has only just arrived.
-        connection.Send(
-            NetMessages.WriteWelcome(session.PlayerId, _simulation.Tick, _rosterVersion, existing),
-            ESendType.Reliable);
+        // Chunked: a full roster is nine IP fragments as one datagram, retransmitted whole every
+        // quarter second until acked. See NetMessages.WriteWelcomeChunks.
+        foreach (byte[] chunk in NetMessages.WriteWelcomeChunks(session.PlayerId, _simulation.Tick,
+            _rosterVersion, existing))
+        {
+            connection.Send(chunk, ESendType.Reliable);
+        }
 
         _rosterVersion++;
         byte[] joined = NetMessages.WritePlayerJoined(_rosterVersion, _simulation.Tick,

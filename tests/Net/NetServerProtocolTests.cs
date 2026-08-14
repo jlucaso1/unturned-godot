@@ -86,8 +86,9 @@ public class NetServerProtocolTests
         Assert.Equal(2, server.PlayerCount); // no duplicate admit
         var welcomes = conn.Sent.Where(m => NetMessages.TypeOf(m.Payload) == ENetMessage.Welcome).ToList();
         Assert.Equal(2, welcomes.Count); // the re-Hello got the roster again
-        (byte firstId, _, _, _) = NetMessages.ReadWelcome(welcomes[0].Payload);
-        (byte secondId, _, _, List<PlayerListing> roster) = NetMessages.ReadWelcome(welcomes[1].Payload);
+        (byte firstId, _, _, _, _, _) = NetMessages.ReadWelcome(welcomes[0].Payload);
+        (byte secondId, _, _, _, _, List<PlayerListing> roster) =
+            NetMessages.ReadWelcome(welcomes[1].Payload);
         Assert.Equal(firstId, secondId);              // same identity, not a new player
         Assert.Equal("B", Assert.Single(roster).Name); // and the roster lists everyone else
     }
@@ -127,7 +128,8 @@ public class NetServerProtocolTests
         transport.Message(joiner, NetMessages.WriteHello("A", Level));
         server.Update(0);
 
-        (byte _, uint _, uint _, List<PlayerListing> listed) = NetMessages.ReadWelcome(joiner.Sent[0].Payload);
+        (byte _, uint _, uint _, byte _, byte _, List<PlayerListing> listed) =
+            NetMessages.ReadWelcome(joiner.Sent[0].Payload);
         Assert.Empty(listed);      // the pending session isn't listed
         Assert.Empty(pending.Sent); // and gets no PlayerJoined broadcast
     }

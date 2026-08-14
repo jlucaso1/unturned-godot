@@ -149,13 +149,14 @@ public sealed class ZombieHost
             List<ZombieSnapshotState> states = _awakeByBound[bound];
             if (states.Count == 0)
                 continue;
-            byte[]? payload = null;
+            List<byte[]>? payload = null;
             foreach ((byte player, ITransportConnection connection) in _connections)
             {
                 if (_playerBounds[player] != bound)
                     continue;
-                payload ??= ZombieNetMessages.WriteZombieStates(tick, states);
-                connection.Send(payload, ESendType.Unreliable);
+                payload ??= ZombieNetMessages.WriteZombieStateChunks(tick, states);
+                foreach (byte[] chunk in payload)
+                    connection.Send(chunk, ESendType.Unreliable);
             }
         }
     }
@@ -171,13 +172,14 @@ public sealed class ZombieHost
         {
             if (kills.Count == 0)
                 continue;
-            byte[]? payload = null;
+            List<byte[]>? payload = null;
             foreach ((byte player, ITransportConnection connection) in _connections)
             {
                 if (_playerBounds.GetValueOrDefault(player, LevelNavigationData.NoBound) != bound)
                     continue;
-                payload ??= ZombieNetMessages.WriteZombieKilled(bound, kills);
-                connection.Send(payload, ESendType.Reliable);
+                payload ??= ZombieNetMessages.WriteZombieKilledChunks(bound, kills);
+                foreach (byte[] chunk in payload)
+                    connection.Send(chunk, ESendType.Reliable);
             }
             kills.Clear();
         }
@@ -193,13 +195,14 @@ public sealed class ZombieHost
         {
             if (stuns.Count == 0)
                 continue;
-            byte[]? payload = null;
+            List<byte[]>? payload = null;
             foreach ((byte player, ITransportConnection connection) in _connections)
             {
                 if (_playerBounds.GetValueOrDefault(player, LevelNavigationData.NoBound) != bound)
                     continue;
-                payload ??= ZombieNetMessages.WriteZombieStunned(bound, stuns);
-                connection.Send(payload, ESendType.Reliable);
+                payload ??= ZombieNetMessages.WriteZombieStunnedChunks(bound, stuns);
+                foreach (byte[] chunk in payload)
+                    connection.Send(chunk, ESendType.Reliable);
             }
             stuns.Clear();
         }
