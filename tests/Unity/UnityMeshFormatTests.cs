@@ -89,13 +89,74 @@ public class UnityMeshFormatTests
     }
 
     [Fact]
-    public void UInt32Format_UsesDefaultComponentRead()
+    public void SNorm8_Positions()
     {
-        // Format 10 (UInt32, 4 bytes) exercises the fallback read-as-float path.
+        // Signed values divide by 127, and -128 clamps to -1 rather than reading below it.
+        var vd = new byte[3];
+        vd[0] = unchecked((byte)127); vd[1] = unchecked((byte)-64); vd[2] = unchecked((byte)-128);
+        UnityMesh m = UnityMesh.Read(Mesh(3, vd, 1, Indices(0, 0, 0)));
+        Assert.Equal(1f, m.Vertices[0].X, 3);
+        Assert.Equal(-64f / 127f, m.Vertices[0].Y, 3);
+        Assert.Equal(-1f, m.Vertices[0].Z, 3);
+    }
+
+    [Fact]
+    public void UNorm16_Positions()
+    {
+        var vd = new byte[6];
+        BitConverter.GetBytes((ushort)65535).CopyTo(vd, 0);
+        BitConverter.GetBytes((ushort)32768).CopyTo(vd, 2);
+        BitConverter.GetBytes((ushort)0).CopyTo(vd, 4);
+        UnityMesh m = UnityMesh.Read(Mesh(4, vd, 1, Indices(0, 0, 0)));
+        Assert.Equal(1f, m.Vertices[0].X, 4);
+        Assert.Equal(32768f / 65535f, m.Vertices[0].Y, 4);
+        Assert.Equal(0f, m.Vertices[0].Z, 4);
+    }
+
+    [Fact]
+    public void SNorm16_Positions()
+    {
+        var vd = new byte[6];
+        BitConverter.GetBytes((short)32767).CopyTo(vd, 0);
+        BitConverter.GetBytes((short)-16384).CopyTo(vd, 2);
+        BitConverter.GetBytes((short)-32768).CopyTo(vd, 4);
+        UnityMesh m = UnityMesh.Read(Mesh(5, vd, 1, Indices(0, 0, 0)));
+        Assert.Equal(1f, m.Vertices[0].X, 4);
+        Assert.Equal(-16384f / 32767f, m.Vertices[0].Y, 4);
+        Assert.Equal(-1f, m.Vertices[0].Z, 4); // clamped, not -1.00003
+    }
+
+    [Theory]
+    [InlineData(6)]  // UInt8
+    [InlineData(8)]  // UInt16
+    [InlineData(10)] // UInt32
+    public void IntegerFormatOnThePositionChannel_MakesTheMeshUnusable(int format)
+    {
+        // These formats used to fall through to a 4-byte read-as-float, which decoded at the right stride
+        // and so produced a mesh that looked fine and was scrambled. A position channel that is not a
+        // float format now reads as absent, which is what Usable is for.
         byte[] vd = new byte[12];
         Buffer.BlockCopy(new[] { 4f, 5f, 6f }, 0, vd, 0, 12);
-        UnityMesh m = UnityMesh.Read(Mesh(10, vd, 1, Indices(0, 0, 0)));
-        Assert.Equal(new Godot.Vector3(4f, 5f, 6f), m.Vertices[0]);
+
+        UnityMesh m = UnityMesh.Read(Mesh(format, vd, 1, Indices(0, 0, 0)));
+
+        Assert.Empty(m.Vertices);
+        Assert.False(m.Usable);
+    }
+
+    [Fact]
+    public void UnknownVertexFormat_MakesTheMeshUnusableRatherThanThrowing()
+    {
+        // Format 12 is past the end of Unity's VertexFormat enum; sizing it indexed FormatSize out of
+        // bounds, which faulted the whole bundle rather than the single mesh that named it.
+        var mesh = Mesh(0, new byte[12], 1, Indices(0, 0, 0));
+        ((Dictionary<string, object>)((List<object>)((Dictionary<string, object>)
+            mesh["m_VertexData"])["m_Channels"])[0])["format"] = 12;
+
+        UnityMesh m = UnityMesh.Read(mesh);
+
+        Assert.False(m.Usable);
+        Assert.Empty(m.Vertices);
     }
 
     [Fact]
@@ -182,6 +243,88 @@ public class UnityMeshFormatTests
         UnityMesh m = UnityMesh.Read(mesh);
         Assert.Single(m.Submeshes);
         Assert.Empty(m.Submeshes[0]); // slot kept aligned with materials
+    }
+
+    // Submesh ranges and index values, both of which used to be taken on trust.
+    //
+    // The buffer overrun threw out of BitConverter and was caught at the bundle level, which turned every
+    // object in that bundle into a box. The out-of-range index is the worse one and is silent: it fits the
+    // index buffer, so nothing rejected it, and it went into the cache through MeshCache.Write and on to
+    // ImporterMesh.AddSurface on the main thread on every warm load for the life of that entry.
+
+    [Theory]
+    [InlineData(6u, 3u)]   // firstByte past the end of a 6-byte buffer
+    [InlineData(0u, 9u)]   // indexCount claims more indices than the buffer holds
+    [InlineData(4u, 3u)]   // starts inside the buffer and runs off the end
+    public void SubmeshRangeOutsideTheIndexBuffer_DropsThatSubmesh(uint firstByte, uint indexCount)
+    {
+        var mesh = Mesh(0, MakeVerts(3), 3, Indices(0, 1, 2));
+        var sm = (Dictionary<string, object>)((List<object>)mesh["m_SubMeshes"])[0];
+        sm["firstByte"] = firstByte;
+        sm["indexCount"] = indexCount;
+
+        UnityMesh m = UnityMesh.Read(mesh);
+
+        Assert.Empty(Assert.Single(m.Submeshes)); // slot kept, aligned with the material palette
+        Assert.False(m.Usable);
+    }
+
+    [Fact]
+    public void SubmeshIndexPastTheVertexCount_DropsThatSubmesh()
+    {
+        // Three vertices, but the index buffer names vertex 7. This fits the buffer, so only a check
+        // against the vertex array catches it.
+        var mesh = Mesh(0, MakeVerts(3), 3, Indices(0, 1, 7));
+
+        UnityMesh m = UnityMesh.Read(mesh);
+
+        Assert.Empty(Assert.Single(m.Submeshes));
+        Assert.Empty(m.Indices);
+        Assert.False(m.Usable);
+    }
+
+    [Fact]
+    public void OneBadSubmesh_DoesNotTakeTheGoodOneWithIt()
+    {
+        var mesh = Mesh(0, MakeVerts(4), 4, Array.Empty<byte>());
+        mesh["m_IndexBuffer"] = Indices(0, 1, 2, 1, 2, 9); // second submesh names a vertex that is not there
+        mesh["m_SubMeshes"] = new List<object>
+        {
+            new Dictionary<string, object> { ["firstByte"] = 0u, ["indexCount"] = 3u, ["topology"] = 0 },
+            new Dictionary<string, object> { ["firstByte"] = 6u, ["indexCount"] = 3u, ["topology"] = 0 },
+        };
+
+        UnityMesh m = UnityMesh.Read(mesh);
+
+        Assert.Equal(new[] { 0, 1, 2 }, m.Submeshes[0]);
+        Assert.Empty(m.Submeshes[1]);
+        Assert.Equal(new[] { 0, 1, 2 }, m.Indices); // the flattened buffer carries only what survived
+        Assert.True(m.Usable);
+    }
+
+    [Fact]
+    public void BaseVertex_MovesTheIndexWindow()
+    {
+        // Unity keeps 16-bit indices on a mesh with more vertices than they can address and moves the
+        // window with baseVertex instead; the GPU adds it to every index at draw time. Ignoring it read
+        // the wrong vertices — silently, since the indices are in range either way.
+        var mesh = Mesh(0, MakeVerts(6), 6, Indices(0, 1, 2));
+        ((Dictionary<string, object>)((List<object>)mesh["m_SubMeshes"])[0])["baseVertex"] = 3u;
+
+        UnityMesh m = UnityMesh.Read(mesh);
+
+        Assert.Equal(new[] { 3, 4, 5 }, m.Submeshes[0]);
+    }
+
+    [Fact]
+    public void BaseVertexPastTheVertexCount_DropsThatSubmesh()
+    {
+        var mesh = Mesh(0, MakeVerts(3), 3, Indices(0, 1, 2));
+        ((Dictionary<string, object>)((List<object>)mesh["m_SubMeshes"])[0])["baseVertex"] = 2u;
+
+        UnityMesh m = UnityMesh.Read(mesh);
+
+        Assert.Empty(Assert.Single(m.Submeshes)); // 2 + 2 = 4, past the last vertex
     }
 
     [Fact]
