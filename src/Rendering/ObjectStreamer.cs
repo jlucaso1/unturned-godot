@@ -97,6 +97,33 @@ public partial class ObjectStreamer : Node
     private Task _streamTask = Task.CompletedTask;
     private readonly CancellationTokenSource _loadCancellation =
         CancellationTokenSource.CreateLinkedTokenSource(AppShutdown.Token);
+    // The linked token, taken once. CancellationTokenSource.Token throws ObjectDisposedException after
+    // Dispose, and a straggling worker can still be reading it when the map's node leaves the tree; a
+    // token taken up front keeps answering IsCancellationRequested for as long as anyone holds it.
+    private readonly CancellationToken _loadToken;
+
+    private bool _loadCancellationReleased;
+
+    public ObjectStreamer() => _loadToken = _loadCancellation.Token;
+
+    // A linked source REGISTERS a callback on the static AppShutdown source, and only Dispose removes it
+    // — cancelling does not. Left undisposed, every map load leaves a dead registration on a static that
+    // lives for the whole process, plus the linked source hanging off it. FoliageStreamingRenderer
+    // already disposes both its lifetime source and its per-decode linked ones in _ExitTree; the streamer
+    // had no _ExitTree at all.
+    public override void _ExitTree() => ReleaseLoadCancellation();
+
+    // Disposal and cancellation are both idempotent here, and they arrive in either order: BackToMenu
+    // cancels a live streamer and then frees it, while a quit tears the tree down without cancelling
+    // anything. CancellationTokenSource.Cancel and .Token BOTH throw once the source is disposed, which
+    // is why the flag exists and why _loadToken is taken up front.
+    private void ReleaseLoadCancellation()
+    {
+        if (_loadCancellationReleased)
+            return;
+        _loadCancellationReleased = true;
+        _loadCancellation.Dispose();
+    }
 
     // The cold load runs the bundle decode ahead of Begin(), so these two say what has landed: the decode
     // signalling its mesh phase, and the streamer being in the tree with the world around it.
@@ -168,7 +195,7 @@ public partial class ObjectStreamer : Node
             bool decodeWillSettleIt = false;
             try
             {
-                _loadCancellation.Token.ThrowIfCancellationRequested();
+                _loadToken.ThrowIfCancellationRequested();
                 decodeWillSettleIt = Prepare(unturnedPath, level);
             }
             finally
@@ -188,13 +215,22 @@ public partial class ObjectStreamer : Node
     // Wait for preparation and the decode it may launch before another map is allowed to start loading.
     public async Task CancelAsync()
     {
-        _loadCancellation.Cancel();
+        if (!_loadCancellationReleased)
+            _loadCancellation.Cancel();
+        // Stopped before the awaits below yield frames, not after: _Process is what drains the ready
+        // queue into the live materials and what starts the re-dedup pass, and an abandoned load must
+        // not do either while the tree around it is being freed.
+        SetProcess(false);
         await ObserveStopped(_prepTask);
         await ObserveStopped(_streamTask);
         await ObserveStopped(_coldBuildTask);
         await ObserveStopped(_rededupTask);
         _layerTextures.TrySetResult(_layersProduced);
-        _completion.TrySetCanceled(_loadCancellation.Token);
+        _completion.TrySetCanceled(_loadToken);
+        // Every task that could still take the token has been observed, so the linked registration on the
+        // static AppShutdown source can go. _ExitTree covers the normal end of a map; this covers the
+        // failed load, whose streamer never joined the tree and so never gets one.
+        ReleaseLoadCancellation();
     }
 
     private static async Task ObserveStopped(Task task)
@@ -612,7 +648,7 @@ public partial class ObjectStreamer : Node
         // The load's own token, not just the renderer's lifetime one: that node cannot leave the tree
         // until CancelAsync has finished waiting for this task, so without it a cancelled load would sit
         // through the whole remaining warm pass before the menu came back.
-        await foliage.PrewarmAsync(_loadCancellation.Token);
+        await foliage.PrewarmAsync(_loadToken);
     }
 
     private void StartStreaming()
@@ -636,7 +672,7 @@ public partial class ObjectStreamer : Node
         // Registered so quitting mid-decode waits for the pass to reach its next checkpoint instead of
         // tearing the tree down underneath it.
         _streamStarted = true;
-        CancellationToken cancellation = _loadCancellation.Token;
+        CancellationToken cancellation = _loadToken;
         _streamTask = AppShutdown.Track(Task.Run(() =>
         {
             try
@@ -905,7 +941,7 @@ public partial class ObjectStreamer : Node
                 return;
             }
 
-            CancellationToken cancellation = _loadCancellation.Token;
+            CancellationToken cancellation = _loadToken;
             Dictionary<string, string> resolved = await Task.Run(
                 () => TextureIdentity.ResolveAll(cacheDir, provisional, cancellation), cancellation);
 

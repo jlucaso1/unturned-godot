@@ -506,7 +506,9 @@ public class PhysicsBodyOrderTests
             // frames as the texture apply it was staged behind.
             Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(streamer,
                 @"await PrewarmFoliageAsync\(\);").Count);
-            Assert.Contains("await foliage.PrewarmAsync(_loadCancellation.Token);", streamer);
+            // _loadToken, not _loadCancellation.Token: the source is disposed when the streamer leaves
+            // the tree, and reading .Token off a disposed source throws.
+            Assert.Contains("await foliage.PrewarmAsync(_loadToken);", streamer);
             // _sceneBuilt is what releases _Process to apply textures. Setting it before the warm pass
             // would let the two spend their separate per-frame budgets in the same frames, which is the
             // staging the pass yields to preserve.
@@ -789,6 +791,36 @@ public class PhysicsBodyOrderTests
         Assert.Contains("MaterialAliasPlan.Canonical(keys, registry.MaterialIdentities)", table);
         Assert.Contains("surface.Mesh.SurfaceSetMaterial(surface.Index, target)", table);
         Assert.Contains("registry.RegisterAlias(surface.TextureKey, target)", table);
+    }
+
+    // A linked CancellationTokenSource registers a callback on the source it links to, and only Dispose
+    // removes it. The streamer links to AppShutdown's static source, which lives for the whole process,
+    // so a streamer that never disposes leaves one dead registration per map load — the leak
+    // FoliageStreamingRenderer already avoids for its own lifetime and per-decode sources.
+    [Fact]
+    public void TheStreamerDisposesTheSourceItLinkedToAppShutdown()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "Rendering", "ObjectStreamer.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path).Replace("\r\n", "\n");
+        Assert.Contains("CreateLinkedTokenSource(AppShutdown.Token)", source);
+        Assert.Contains("_loadCancellation.Dispose()", source);
+        // Both exits release it: the node leaving the tree, and a load cancelled before it ever joined
+        // one. Once each — Cancel() and .Token both throw on a disposed source.
+        Assert.Contains("public override void _ExitTree() => ReleaseLoadCancellation();", source);
+        Assert.Contains("if (!_loadCancellationReleased)\n            _loadCancellation.Cancel();", source);
+        // Which is why the token is taken once, up front, rather than off the source at each use.
+        Assert.Contains("public ObjectStreamer() => _loadToken = _loadCancellation.Token;", source);
+
+        // Inside CancelAsync: _Process is stopped BEFORE the awaits yield frames — it is what drains the
+        // ready queue and starts the re-dedup pass — and the source is released only after every task
+        // that could still take the token has been observed.
+        string cancel = source[source.IndexOf("public async Task CancelAsync()", StringComparison.Ordinal)..];
+        int stop = cancel.IndexOf("SetProcess(false);", StringComparison.Ordinal);
+        int lastAwait = cancel.IndexOf("await ObserveStopped(_rededupTask);", StringComparison.Ordinal);
+        int released = cancel.IndexOf("ReleaseLoadCancellation();", StringComparison.Ordinal);
+        Assert.True(stop >= 0 && lastAwait > stop && released > lastAwait);
     }
 
     [Fact]
