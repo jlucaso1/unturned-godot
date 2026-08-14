@@ -151,3 +151,85 @@ public static class LightingCycle
     public static float MoonPhaseYawDegrees(int phase)
         => (phase - FullMoonPhase) * 60f;
 }
+
+// LightingManager's gameplay clock: where the cycle stands, which moon is up, and the isCycled latch
+// that advances the phase at each new night (LightingManager.updateLighting, LightingManager.cs:513-575).
+//
+// Engine-free and separate from the sky because BOTH hosts owe their zombies a real night. The windowed
+// session drives its sun and skybox from this same clock, and a dedicated server draws nothing at all
+// yet still runs updateLighting — ZombieRegion.isHyper reads LightingManager.isFullMoon on the server,
+// and the volatiles' night-only roll reads isNighttime there too. Before this existed the dedicated path
+// had no clock, so it was permanently midday with no moon.
+public sealed class DayNightClock
+{
+    // LevelLighting.bias: the fraction of the cycle that is daytime.
+    public float Bias { get; }
+
+    private float _time;
+    private bool _cycled;
+
+    // 0..1 through the cycle. Assigning wraps into range and re-derives the latch the way
+    // ReceiveInitialLightingState does — "isCycled = day > LevelLighting.bias" (LightingManager.cs:386),
+    // WITHOUT advancing the phase, because a clock that is jumped (a console command, a pinned
+    // screenshot time, a repro dump being restored) has not lived through a dusk.
+    public float TimeOfDay
+    {
+        get => _time;
+        set
+        {
+            _time = Wrap(value);
+            Sync();
+        }
+    }
+
+    // LevelLighting.moon, 0..MOON_CYCLES-1; 2 is the full moon.
+    public int MoonPhase { get; private set; }
+
+    // "isCycled = day > LevelLighting.bias", as a latch rather than a comparison: updateLighting only
+    // acts on the EDGE, which is what makes the phase advance once per night instead of every frame.
+    public bool IsCycled => _cycled;
+
+    public bool IsDaytime => LightingCycle.IsDaytime(_time, Bias);
+
+    public bool IsNighttime => !IsDaytime;
+
+    // "isFullMoon = isCycled && LevelLighting.moon == 2" (LightingManager.cs:387).
+    public bool IsFullMoon => _cycled && MoonPhase == LightingCycle.FullMoonPhase;
+
+    public DayNightClock(float bias, float timeOfDay, int moonPhase)
+    {
+        Bias = bias;
+        _time = Wrap(timeOfDay);
+        MoonPhase = WrapPhase(moonPhase);
+        // Deliberately NOT synced here. onLevelLoaded sets `isCycled = false` and lets the first
+        // updateLighting latch it (LightingManager.cs:884-889), which is what makes a server started at
+        // night advance the moon on its very first frame rather than inheriting the saved phase.
+    }
+
+    // Re-derives the latch from the current time without touching the phase.
+    public void Sync() => _cycled = LightingCycle.IsCycled(_time, Bias);
+
+    public void SetMoonPhase(int phase) => MoonPhase = WrapPhase(phase);
+
+    // One frame of updateLighting: move the clock, then run the dusk/dawn edge. `speed` is this port's
+    // DAY_SPEED multiplier; the game's cycle length is fixed at an hour per day.
+    public void Advance(float seconds, float speed = 1f)
+    {
+        _time = Wrap(_time + (seconds * speed / LightingCycle.DefaultCycleSeconds));
+        bool cycled = LightingCycle.IsCycled(_time, Bias);
+        if (cycled == _cycled)
+            return;
+        // The `day > bias` edge advances the phase: "if (moon < MOON_CYCLES - 1) moon++ else moon = 0",
+        // written as the modulo it is. The dawn edge only drops the latch, which is what turns the full
+        // moon back off (IsFullMoon reads the latch).
+        _cycled = cycled;
+        if (cycled)
+            MoonPhase = (MoonPhase + 1) % LightingCycle.MoonPhaseCount;
+    }
+
+    // PosMod rather than a remainder: the cycle runs past 1 every day and a repro dump or a console can
+    // hand it a negative, and both have to land inside 0..1 rather than at -0.25.
+    private static float Wrap(float value) => Mathf.PosMod(value, 1f);
+
+    private static int WrapPhase(int phase) => Mathf.PosMod(phase, LightingCycle.MoonPhaseCount);
+}

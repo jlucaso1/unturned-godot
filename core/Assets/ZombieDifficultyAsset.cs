@@ -8,6 +8,17 @@ using UnturnedGodot.Zombies;
 
 namespace UnturnedGodot.Assets;
 
+// SDG.Unturned.EZombieDifficultyAssetPrioritization (LevelAsset.cs:10-23), the map's own answer to
+// "which difficulty asset wins when the navigation bound and the zombie table each name one".
+public enum EZombieDifficultyAssetPrioritization
+{
+    // "Default. Per-navmesh difficulty asset takes priority over per-table/type difficulty asset."
+    NavmeshOverridesTable = 0,
+
+    // "Per-table/type difficulty asset takes priority over per-navmesh difficulty asset."
+    TableOverridesNavmesh = 1,
+}
+
 // Mirrors SDG.Unturned.ZombieDifficultyAsset: the per-speciality spawn WEIGHTS a map attaches to a
 // navigation bound or to a zombie table, plus the stun thresholds and the horde-beacon permission.
 //
@@ -212,4 +223,74 @@ public sealed class ZombieDifficultyBank
     private static bool TryParse(DatDictionary parsed,
         [MaybeNullWhen(false)] out ZombieDifficultyAsset asset) =>
         ZombieDifficultyAsset.TryParse(parsed, out asset);
+}
+
+// The one field of SDG.Unturned.LevelAsset the zombie roll needs. `Level.getAsset()` is a whole asset
+// with weather, music and terrain colours in it; the roll reads exactly one key of it
+// (ZombieManager.cs:919), so this resolves that key rather than porting the asset.
+//
+// A map names its LevelAsset by GUID in its own Config.json ("Asset": { "GUID": ... }), and an unset or
+// unresolvable reference is AssetReference<LevelAsset>.invalid — the game falls back to
+// LevelAsset.defaultLevel, which does not set the key either. Both roads therefore end at
+// NavmeshOverridesTable, which is also the ParseEnum default.
+public static class LevelDifficultyPrioritization
+{
+    public const string Key = "ZombieDifficultyAssetPrioritization";
+
+    // Where every level asset the game ships lives, and where the editor writes a map's own:
+    // <bundle>/Assets/Levels. Bounded on purpose — the alternative is scanning the whole Assets tree
+    // (thousands of files in the core bundle) to answer a question no shipped map even asks.
+    public const string LevelsSubdirectory = "Levels";
+
+    // "p.data.ParseEnum(..., NavmeshOverridesTable)" — case-insensitive, and anything that does not
+    // parse keeps the default. An unrecognised value therefore behaves as navmesh-first, which is also
+    // what the switch's `default:` arm does with it.
+    public static EZombieDifficultyAssetPrioritization Read(DatDictionary root) =>
+        root.TryGetDictionary("Asset", out DatDictionary? asset)
+        && asset.TryGetString(Key, out string? text)
+        && Enum.TryParse(text, ignoreCase: true, out EZombieDifficultyAssetPrioritization parsed)
+            ? parsed
+            : EZombieDifficultyAssetPrioritization.NavmeshOverridesTable;
+
+    // The map's declared prioritization: read its Config.json for the LevelAsset GUID, then find that
+    // asset in the installed content. Guid.Empty (no Asset key) short-circuits — there is nothing to
+    // find, and scanning for it would cost a directory walk per level load.
+    public static EZombieDifficultyAssetPrioritization ForMap(string mapDirectory,
+        IEnumerable<ContentSource> sources) =>
+        ForLevelAsset(Data.LevelConfigData.Load(mapDirectory).Asset, sources);
+
+    public static EZombieDifficultyAssetPrioritization ForLevelAsset(Guid levelAsset,
+        IEnumerable<ContentSource> sources)
+    {
+        if (levelAsset == Guid.Empty)
+            return EZombieDifficultyAssetPrioritization.NavmeshOverridesTable;
+        foreach (ContentSource source in sources)
+            if (FindInDirectory(Path.Combine(source.AssetsDir, LevelsSubdirectory), levelAsset)
+                is { } prioritization)
+                return prioritization;
+        return EZombieDifficultyAssetPrioritization.NavmeshOverridesTable;
+    }
+
+    // Null means "this directory does not hold that asset", which is different from "it holds it and it
+    // asks for the default" — only the first may go on searching the remaining sources.
+    public static EZombieDifficultyAssetPrioritization? FindInDirectory(string root, Guid levelAsset)
+    {
+        if (levelAsset == Guid.Empty || !Directory.Exists(root))
+            return null;
+        try
+        {
+            foreach (string file in Directory.EnumerateFiles(root, "*.asset", SearchOption.AllDirectories))
+            {
+                DatDictionary parsed;
+                try { parsed = DatParser.Parse(TextFile.ReadAllText(file)); }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }
+                if (parsed.TryGetDictionary("Metadata", out DatDictionary? meta)
+                    && meta.TryGetGuid("GUID", out Guid guid)
+                    && guid == levelAsset)
+                    return Read(parsed);
+            }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        return null;
+    }
 }

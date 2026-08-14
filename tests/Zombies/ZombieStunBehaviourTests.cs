@@ -172,6 +172,148 @@ public class ZombieStunBehaviourTests
         Assert.True(zombie.IsStunned);
     }
 
+    // ---- the difficulty asset's own thresholds ---------------------------------------------------
+
+    private static readonly global::System.Guid DifficultyGuid =
+        global::System.Guid.Parse("646b4cdcc9c547b0a24528f8acccc8e8");
+
+    private static UnturnedGodot.Assets.ZombieDifficultyBank Bank(string body)
+    {
+        var bank = new UnturnedGodot.Assets.ZombieDifficultyBank();
+        Assert.True(UnturnedGodot.Assets.ZombieDifficultyAsset.TryParse(
+            UnturnedGodot.Dat.DatParser.Parse(
+                "Metadata\n{\n\tGUID " + DifficultyGuid.ToString("N")
+                + "\n\tType SDG.Unturned.ZombieDifficultyAsset\n}\nAsset\n{\n" + body + "}\n"),
+            out UnturnedGodot.Assets.ZombieDifficultyAsset? asset));
+        bank.AddIfAbsent(asset);
+        return bank;
+    }
+
+    // The asset hangs off the navigation bound by default, and off the zombie TABLE when the bound is
+    // told to name none — the two halves of GetDifficultyInBoundForTable.
+    private static ZombieSystem BrainWithDifficulty(string body, bool onBound = true)
+    {
+        var system = new ZombieSystem(
+            new[]
+            {
+                new ZombieTable
+                {
+                    Name = "Civilian",
+                    Health = 100,
+                    Damage = 10,
+                    DifficultyGuid = onBound ? default : DifficultyGuid,
+                },
+            },
+            new List<NavBound>
+            {
+                new()
+                {
+                    Center = Vector3.Zero,
+                    Size = new Vector3(400, 300, 400),
+                    DifficultyGuid = onBound ? DifficultyGuid : default,
+                },
+            },
+            FlatGround);
+        system.Difficulties = Bank(body);
+        return system;
+    }
+
+    // getStunDamageThreshold reads Normal_Stun_Threshold / Mega_Stun_Threshold off the zombie's cached
+    // difficulty asset. Both were parsed and never consumed, so the hard-coded 20/150 always won and any
+    // map customising the stagger was simply ignored.
+    [Fact]
+    public void ADifficultyAssetRaisesTheNormalStunThreshold()
+    {
+        ZombieSystem system = BrainWithDifficulty("\tNormal_Stun_Threshold 50\n");
+        ZombieInstance zombie = Plant(system);
+
+        system.Damage(zombie, 30, byte.MaxValue, NoPlayers);
+        Assert.False(zombie.IsStunned);
+
+        system.Damage(zombie, 51, byte.MaxValue, NoPlayers);
+        Assert.True(zombie.IsStunned);
+    }
+
+    // And lowering it makes an otherwise harmless hit stagger.
+    [Fact]
+    public void ADifficultyAssetLowersTheNormalStunThreshold()
+    {
+        ZombieSystem system = BrainWithDifficulty("\tNormal_Stun_Threshold 5\n");
+        ZombieInstance zombie = Plant(system);
+
+        system.Damage(zombie, 6, byte.MaxValue, NoPlayers);
+        Assert.True(zombie.IsStunned);
+    }
+
+    // "if (threshold < 1) threshold = -1" — an asset that sets neither leaves the built-ins alone.
+    [Fact]
+    public void AnAssetThatSetsNoThresholdKeepsTheBuiltIns()
+    {
+        ZombieSystem system = BrainWithDifficulty("\tCrawler_Chance 0.2\n");
+        ZombieInstance zombie = Plant(system);
+
+        system.Damage(zombie, 20, byte.MaxValue, NoPlayers);
+        Assert.False(zombie.IsStunned); // strictly greater than 20
+        system.Damage(zombie, 21, byte.MaxValue, NoPlayers);
+        Assert.True(zombie.IsStunned);
+    }
+
+    // The mega branch, and the fact that a BOSS takes it: Zombie.isMega counts the bosses, so a boss
+    // shrugs off the mega threshold rather than the normal one.
+    [Fact]
+    public void TheMegaThresholdCoversTheBossesToo()
+    {
+        ZombieSystem plain = Brain();
+        ZombieInstance boss = Plant(plain, speciality: EZombieSpeciality.BossFire);
+        boss.Health = boss.MaxHealth = 12000; // a boss's own health, so 200 is not a killing blow
+        plain.Damage(boss, 100, byte.MaxValue, NoPlayers); // over 20, under 150
+        Assert.False(boss.IsStunned);
+        plain.Damage(boss, 200, byte.MaxValue, NoPlayers);
+        Assert.True(boss.IsStunned);
+
+        ZombieSystem custom = BrainWithDifficulty("\tMega_Stun_Threshold 40\n");
+        ZombieInstance customBoss = Plant(custom, speciality: EZombieSpeciality.BossFire);
+        custom.Damage(customBoss, 41, byte.MaxValue, NoPlayers);
+        Assert.True(customBoss.IsStunned);
+    }
+
+    // The lookup is Zombie.updateDifficulty's, which passes forSpawnOverrides FALSE — so a table asset
+    // that declines to override the spawn chance still sets this zombie's stagger.
+    [Fact]
+    public void ATableAssetDecliningToOverrideSpawnChanceStillSetsTheThreshold()
+    {
+        ZombieSystem system = BrainWithDifficulty(
+            "\tOverrides_Spawn_Chance False\n\tNormal_Stun_Threshold 5\n", onBound: false);
+        ZombieInstance zombie = Plant(system);
+
+        system.Damage(zombie, 6, byte.MaxValue, NoPlayers);
+        Assert.True(zombie.IsStunned);
+    }
+
+    // With no bank at all the built-ins stand, which is every shipped map — and the lookup must not
+    // reach for a table index the zombie's Type does not have.
+    [Fact]
+    public void WithNoDifficultyBankTheBuiltInsStand()
+    {
+        ZombieSystem system = Brain();
+        ZombieInstance zombie = Plant(system);
+        zombie.Type = 9; // past the end of the tables list
+
+        system.Damage(zombie, 21, byte.MaxValue, NoPlayers);
+        Assert.True(zombie.IsStunned);
+    }
+
+    [Fact]
+    public void AZombieWhoseTypeIsPastTheTablesKeepsTheBuiltIns()
+    {
+        ZombieSystem system = BrainWithDifficulty("\tNormal_Stun_Threshold 500\n");
+        ZombieInstance zombie = Plant(system);
+        zombie.Type = 9;
+
+        system.Damage(zombie, 21, byte.MaxValue, NoPlayers);
+        Assert.True(zombie.IsStunned);
+    }
+
     // A crawler's reel has to come from the crawler set even when the roll goes through the simulation's
     // own RNG — the speciality is read off the instance, not passed in.
     [Fact]

@@ -45,17 +45,27 @@ public partial class DedicatedServer : Node
             out IReadOnlySet<System.Guid> selectedGuids,
             out UnturnedGodot.Damage.DamageableWorld damageable, navigationField));
 
+        // LightingManager runs on a dedicated server too — it draws nothing, but isNighttime and
+        // isFullMoon are GAMEPLAY (the night-only Dying Light volatiles, and the hyper population a full
+        // moon makes). This path used to omit both, so the same map that spawned volatiles on a listen
+        // server at dusk spawned none here, and a full-moon session was never hyper. The clock starts
+        // where the map was saved and advances with the tick, exactly as the windowed session's does.
+        node._clock = ServerClock(level);
+
         // The map's own ZombieDifficultyAssets, so its bounds and tables roll their own speciality
-        // weights rather than the mode config's. A dedicated server runs no lighting node, so the time
-        // of day stays at its defaults — daytime, whose only effect on the roll is that the two Dying
-        // Light volatiles are left out of the table.
+        // weights rather than the mode config's — plus the operator's Config.json, which decides the
+        // population density, the fallback weights and the swing damage.
+        System.Collections.Generic.IReadOnlyList<UnturnedGodot.Assets.ContentSource> sources =
+            UnturnedGodot.Assets.ContentSource.Discover(unturnedPath);
         UnturnedGodot.Zombies.ZombieSystem? zombies = UnturnedGodot.Zombies.ZombieWorld.Load(
             level.Path, ground,
             UnturnedGodot.Repro.ReproRandom.ForSession(OS.GetEnvironment("ZOMBIE_SEED"), out _),
-            difficulties: UnturnedGodot.Assets.ZombieDifficultyBank.ScanContentSources(
-                UnturnedGodot.Assets.ContentSource.Discover(unturnedPath)),
-            clothing: UnturnedGodot.Assets.ClothingArmorDatabase.ScanContentSources(
-                UnturnedGodot.Assets.ContentSource.Discover(unturnedPath)));
+            difficulties: UnturnedGodot.Assets.ZombieDifficultyBank.ScanContentSources(sources),
+            mode: NetworkManager.ServerModeConfig(unturnedPath),
+            isNighttime: node._clock?.IsNighttime ?? false,
+            isFullMoon: node._clock?.IsFullMoon ?? false,
+            clothing: UnturnedGodot.Assets.ClothingArmorDatabase.ScanContentSources(sources),
+            prioritization: UnturnedGodot.Assets.LevelDifficultyPrioritization.ForMap(level.Path, sources));
         UnturnedGodot.Zombies.ZombieHost? zombieHost = null;
         if (zombies != null)
         {
@@ -75,6 +85,7 @@ public partial class DedicatedServer : Node
             }
             else
                 navigationField.Release();
+            node._zombies = zombies;
             var host = new UnturnedGodot.Zombies.ZombieHost(zombies, node._server);
             zombieHost = host;
 
@@ -105,11 +116,41 @@ public partial class DedicatedServer : Node
         return node;
     }
 
+    // The map's day/night cycle, read from its own Lighting.dat. Null when the map ships none, which is
+    // the same static-midday answer DayNightController gives on that map: daytime, no moon.
+    //
+    // DAY_SPEED is honoured here as well as in the windowed session, because a soak run that has to
+    // reach a full moon cannot wait for real hours of cycle time.
+    private static DayNightClock? ServerClock(LevelInfo level)
+    {
+        LevelLighting? lighting = LevelLighting.Load(
+            System.IO.Path.Combine(level.Path, "Environment", "Lighting.dat"));
+        return lighting == null
+            ? null
+            : new DayNightClock(lighting.Bias, lighting.TimeOfDay, lighting.MoonPhase);
+    }
+
+    private DayNightClock? _clock;
+    private UnturnedGodot.Zombies.ZombieSystem? _zombies;
+    private readonly float _daySpeed =
+        OS.GetEnvironment("DAY_SPEED") is { Length: > 0 } speed ? speed.ToFloat() : 1f;
+
     private double _lastStatus;
 
     public override void _PhysicsProcess(double delta)
     {
         StartNavigationReconciliation();
+        // updateLighting's frame, then the population's hyper state off it. Assigning an unchanged value
+        // costs one comparison; the population is only walked when the moon actually turns over.
+        if (_clock != null)
+        {
+            _clock.Advance((float)delta, _daySpeed);
+            if (_zombies != null)
+            {
+                _zombies.IsFullMoon = _clock.IsFullMoon;
+                _zombies.IsNighttime = _clock.IsNighttime;
+            }
+        }
         _server.Update(NetworkManager.Now);
         if (NetworkManager.Now - _lastStatus >= 10.0)
         {

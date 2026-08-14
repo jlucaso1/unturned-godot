@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using Godot;
 using UnturnedGodot.Assets;
+using UnturnedGodot.Config;
 using UnturnedGodot.Dat;
 using UnturnedGodot.Data;
 using UnturnedGodot.Tests.Helpers;
@@ -120,6 +121,61 @@ public class VehicleSpawnPlanTests
             Spread(200), Assets(), new SpawnTableDatabase(), ELevelSize.Insane, new Random(1));
 
         Assert.Equal(64, placed.Count);
+    }
+
+    // "VehicleManager.SumNaturalVehicleCount() < Provider.modeConfigData.Vehicles.Min_Natural_Vehicles":
+    // the floor is the server's, not a constant. NaturalVehicleCount already took the config; nothing
+    // could reach it, because neither Load nor Build carried one and Build called it without an argument.
+    [Fact]
+    public void Build_TakesTheFloorFromTheModeConfig()
+    {
+        ModeConfigData busy = ModeConfigData.Normal with
+        {
+            Vehicles = ModeConfigData.Normal.Vehicles with { MinNaturalVehicles = 40 },
+        };
+        Assert.Equal(40, VehicleSpawnPlan.NaturalVehicleCount(ELevelSize.Tiny, busy));
+        // The size still wins when it is the larger of the two — Math.Max, not a replacement.
+        Assert.Equal(64, VehicleSpawnPlan.NaturalVehicleCount(ELevelSize.Insane, busy));
+
+        List<PlacedObject> placed = VehicleSpawnPlan.Build(new[] { Table(0, (1f, new ushort[] { 40 })) },
+            Spread(200), Assets(), new SpawnTableDatabase(), ELevelSize.Tiny, new Random(1), busy);
+
+        Assert.Equal(40, placed.Count);
+        // ...and without the config it is the ported NORMAL floor, exactly as before.
+        Assert.Equal(16, VehicleSpawnPlan.Build(new[] { Table(0, (1f, new ushort[] { 40 })) },
+            Spread(200), Assets(), new SpawnTableDatabase(), ELevelSize.Tiny, new Random(1)).Count);
+    }
+
+    // And the config survives the whole Load path, which is where it used to be dropped.
+    [Fact]
+    public void Load_CarriesTheModeConfigThroughToTheFloor()
+    {
+        using var dir = new TempDir();
+        string map = Directory.CreateDirectory(Path.Combine(dir.Path, "Maps", "Test", "Spawns")).FullName;
+        File.WriteAllBytes(Path.Combine(map, "Vehicles.dat"), LegacyVehiclesDat());
+        Directory.CreateDirectory(Path.Combine(dir.Path, "Bundles", "Objects"));
+
+        var level = new LevelInfo(Path.Combine(dir.Path, "Maps", "Test"));
+        IReadOnlyList<ContentSource> sources = ContentSource.Discover(dir.Path);
+
+        // A map with no Size file reads as Medium, whose ceiling is the same 16 the NORMAL floor is.
+        Assert.Equal(16, VehicleSpawnPlan.Load(level, sources, Assets()).Count);
+        Assert.Equal(24, VehicleSpawnPlan.Load(level, sources, Assets(), ModeConfigData.Normal with
+        {
+            Vehicles = ModeConfigData.Normal.Vehicles with { MinNaturalVehicles = 24 },
+        }).Count);
+    }
+
+    // Thirty spawnpoints, all far enough apart to be used, rolled from the map's own legacy tier ladder.
+    private static byte[] LegacyVehiclesDat()
+    {
+        var w = new RiverBytes().Byte(4).Byte(1);
+        w.Byte(255).Byte(255).Byte(255).Str("Civilian").UInt16(0);
+        w.Byte(1).Str("Tier").Single(1f).Byte(1).UInt16(40);
+        w.UInt16(30);
+        for (int i = 0; i < 30; i++)
+            w.Byte(0).Vector3(new Vector3(i * 500f, 0f, 0f)).Byte(0);
+        return w.ToArray();
     }
 
     [Fact]

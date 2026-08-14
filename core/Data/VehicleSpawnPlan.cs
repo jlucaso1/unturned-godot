@@ -47,14 +47,18 @@ public static class VehicleSpawnPlan
     // Each map still gets its own answer, because it brings its own spawnpoints and tables.
     private const int DeterministicSeed = 0x5645_4831; // "VEH1"
 
+    // `mode` is the server's own Provider.modeConfigData. It travels the whole way down to
+    // NaturalVehicleCount because that is the only thing that reads it, and it was reachable from
+    // nowhere: both public entry points hard-coded the NORMAL default, so a server config raising
+    // Min_Natural_Vehicles changed nothing at all.
     public static List<PlacedObject> Load(LevelInfo level, IReadOnlyList<ContentSource> sources,
-        ObjectAssetDatabase assets) =>
-        Load(level, sources, assets, new Random(DeterministicSeed));
+        ObjectAssetDatabase assets, ModeConfigData? mode = null) =>
+        Load(level, sources, assets, new Random(DeterministicSeed), mode);
 
     // Everything a map's vehicles need, read from the map and the installed content: the spawnpoints and
     // tables from Spawns/Vehicles.dat, and — only for tables that defer to one — the spawn table assets.
     public static List<PlacedObject> Load(LevelInfo level, IReadOnlyList<ContentSource> sources,
-        ObjectAssetDatabase assets, Random random)
+        ObjectAssetDatabase assets, Random random, ModeConfigData? mode = null)
     {
         (List<VehicleTable> tables, List<VehicleSpawnpointData> spawnpoints) =
             LevelVehicles.Load(Path.Combine(level.Path, "Spawns", "Vehicles.dat"));
@@ -67,7 +71,7 @@ public static class VehicleSpawnPlan
                 foreach (SpawnTableAsset table in SpawnTableDatabase.ScanDirectory(TablesDir(source)).All)
                     spawnTables.AddIfAbsent(table);
 
-        return Build(tables, spawnpoints, assets, spawnTables, LevelSize.Read(level.Path), random);
+        return Build(tables, spawnpoints, assets, spawnTables, LevelSize.Read(level.Path), random, mode);
     }
 
     // Every table on every shipped map that sets a TableId resolves within the vehicle subtree, so that is
@@ -89,7 +93,7 @@ public static class VehicleSpawnPlan
 
     public static List<PlacedObject> Build(IReadOnlyList<VehicleTable> tables,
         IReadOnlyList<VehicleSpawnpointData> spawnpoints, ObjectAssetDatabase assets,
-        SpawnTableDatabase spawnTables, ELevelSize size, Random random)
+        SpawnTableDatabase spawnTables, ELevelSize size, Random random, ModeConfigData? mode = null)
     {
         var placed = new List<PlacedObject>();
         if (tables.Count == 0 || spawnpoints.Count == 0)
@@ -99,7 +103,7 @@ public static class VehicleSpawnPlan
         // considers it, so a spawnpoint rejected for being crowded is not offered again.
         var candidates = new List<VehicleSpawnpointData>(spawnpoints);
         var taken = new List<Vector3>();
-        int remaining = NaturalVehicleCount(size);
+        int remaining = NaturalVehicleCount(size, mode);
 
         while (remaining > 0 && candidates.Count > 0)
         {

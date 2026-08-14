@@ -117,6 +117,36 @@ public class ZombiesViewTests : TestClass
             "the view rejoined and drew nothing, so it is still refusing the old session's ids");
     }
 
+    // "Boss zombies are considered mega as well" (Zombie.isMega), and it is isMega that Zombie.tellAlive
+    // keys the model scale on. The server already sizes a boss's capsule and doubles its attack reach off
+    // that same classification, so drawing one at normal size left an invisible metre of reach around a
+    // body the player can see is small — the mismatch this test exists to prevent.
+    [Test]
+    public async Task ABossIsDrawnAtMegaSize()
+    {
+        using var boss = new Harness(TestScene, withZombies: true,
+            speciality: EZombieSpeciality.BossFire);
+        await boss.Draw();
+
+        Assert.True(boss.View.GetChildCount() > 0, "no zombie avatars were built");
+        foreach (Node child in boss.View.GetChildren())
+            AssertScaleNear(child, ZombieBody.MegaModelScale);
+
+        using var ordinary = new Harness(TestScene, withZombies: true);
+        await ordinary.Draw();
+        foreach (Node child in ordinary.View.GetChildren())
+            AssertScaleNear(child, ZombieBody.ModelScale);
+    }
+
+    // The scale is jittered per zombie (Random.Range around the authored value), so it is asserted as a
+    // band rather than an equality — the band is what tells the two looks apart.
+    private static void AssertScaleNear(Node avatar, float scale)
+    {
+        var root = (Node3D)avatar;
+        Assert.True(Mathf.Abs(root.Scale.X - scale) <= ZombieBody.ModelScaleJitter + 0.001f,
+            $"{root.Name} was drawn at {root.Scale.X}, not around {scale}");
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
 
     private sealed class Harness : IDisposable
@@ -132,8 +162,10 @@ public class ZombiesViewTests : TestClass
 
         public Vector3 LocalPosition { get; set; }
 
-        public Harness(Node testScene, string unturnedPath = "", bool withZombies = false)
+        public Harness(Node testScene, string unturnedPath = "", bool withZombies = false,
+            EZombieSpeciality speciality = EZombieSpeciality.Normal)
         {
+            _speciality = speciality;
             _testScene = testScene;
             _server = new NetServer(_transport,
                 new ServerSimulation(new HeightfieldMoveSolver(FlatGround)), new Vector3(0f, 10f, 0f), "PEI");
@@ -161,9 +193,15 @@ public class ZombiesViewTests : TestClass
             for (int i = 0; i < 8; i++)
                 spawns.Add(new ZombieSpawnpointData(0, new Vector3(i * 2f, 0f, i * 2f)));
             zombies.Spawn(spawns, new Random(1));
+            // Set before the host exists, so what the client is told is what the roll would have given
+            // it — the speciality rides the ZombieList, and Spawn is where the view reads it.
+            foreach (ZombieInstance zombie in zombies.Zombies)
+                zombie.Speciality = _speciality;
 
             Host = new ZombieHost(zombies, _server);
         }
+
+        private readonly EZombieSpeciality _speciality;
 
         // Held only so it outlives the constructor: it drives itself off the server's tick seams, and a
         // host nothing referenced would be collected out from under the session it is replicating.

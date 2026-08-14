@@ -56,36 +56,53 @@ public partial class DayNightController : Node
     public Godot.Environment WorldEnvironment => _env;
     private StandardMaterial3D? _water; // sea plane material, tinted with the blended SEA color
     private float _azimuth = DefaultAzimuth;
-    private float _time;
+
+    // LightingManager's gameplay clock — the cycle position, the moon phase and the isCycled latch. It
+    // lives in core because a dedicated server has no sky node and still owes its zombies a real night;
+    // this controller is the same clock with a sun and a skybox hung off it. Null only while a map ships
+    // no Lighting.dat, which is the static-midday fallback below.
+    private DayNightClock? _clock;
+
+    // Where the static fallback's clock stands. Apply() bypasses the blend entirely on that branch, so
+    // this is only what TimeOfDay reports — but it has to be a DAYTIME value, because the fallback draws
+    // a midday sky and the gameplay predicates read off the same number.
+    private const float MiddayFallbackTime = 0.25f;
+
+    private float CycleTime => _clock?.TimeOfDay ?? MiddayFallbackTime;
 
     // Where the cycle currently stands, 0..1. Captured into a bug-repro dump, because lighting is part
     // of what a session looked like, and restored when one is loaded — "it only happens at night" is a
     // real bug report. Setting it wraps into range and lets the next _Process apply the keyframes.
     public float TimeOfDay
     {
-        get => _time;
-        set => _time = Mathf.PosMod(value, 1f);
+        get => CycleTime;
+        set
+        {
+            if (_clock != null)
+                _clock.TimeOfDay = value;
+        }
     }
     private float _speed = 1f;
     private bool _frozen;
-    private int _moonPhase;
-    private bool _moonCycled; // this night's phase advance already happened (LightingManager.isCycled)
 
     // LightingManager's gameplay predicates. This controller has tracked everything they need all along
     // — the cycle position, the map's bias, the moon phase — and nothing outside the sky read any of
     // it. The zombie spawner takes IsNighttime (the Dying Light volatiles are night-only) and
     // IsFullMoon (a full moon makes every zombie hyper: more reach, half again the damage).
-    public int MoonPhase => _moonPhase;
+    public int MoonPhase => _clock?.MoonPhase ?? 0;
 
-    public bool IsDaytime => _lighting != null && LightingCycle.IsDaytime(_time, _lighting.Bias);
+    // With no Lighting.dat there is no cycle, and Apply() below draws PEI's midday keyframe forever. So
+    // the predicate has to answer DAYTIME rather than fall through to false: reading "not daytime" off a
+    // missing file made IsNighttime true under a visibly midday sky, which rolled the night-only Dying
+    // Light volatiles into a workshop map's population — and those exist to explode at dawn.
+    public bool IsDaytime => _clock?.IsDaytime ?? true;
 
     public bool IsNighttime => !IsDaytime;
 
-    // "isFullMoon = isCycled && LevelLighting.moon == 2". This reads _moonCycled — the latch the phase
-    // advance in _Process already maintains — rather than recomputing the comparison, because that is
-    // the same latch LightingManager uses: a night whose phase has not advanced yet cannot report a
-    // full moon early.
-    public bool IsFullMoon => _moonCycled && _moonPhase == LightingCycle.FullMoonPhase;
+    // "isFullMoon = isCycled && LevelLighting.moon == 2", off the same latch the phase advance
+    // maintains: a night whose phase has not advanced yet cannot report a full moon early. Never on the
+    // fallback, which is permanently midday.
+    public bool IsFullMoon => _clock?.IsFullMoon ?? false;
 
     public static DayNightController Build(LevelLighting? lighting, StandardMaterial3D? waterMaterial,
         SkyboxAssets? skyAssets = null)
@@ -141,12 +158,15 @@ public partial class DayNightController : Node
         controller.AddChild(new WorldEnvironment { Environment = controller._env, Name = "WorldEnvironment" });
 
         controller._azimuth = lighting?.Azimuth ?? DefaultAzimuth;
-        controller._time = lighting?.TimeOfDay ?? 0.25f;
-        controller._moonPhase = lighting?.MoonPhase ?? 0;
+        // No Lighting.dat, no clock: Apply() draws the static midday keyframe and the gameplay
+        // predicates read that fallback rather than a cycle nobody is running.
+        controller._clock = lighting == null
+            ? null
+            : new DayNightClock(lighting.Bias, lighting.TimeOfDay, lighting.MoonPhase);
 
         if (OS.GetEnvironment("TIME_OF_DAY") is { Length: > 0 } fixedTime)
         {
-            controller._time = Mathf.PosMod(fixedTime.ToFloat(), 1f);
+            controller.TimeOfDay = fixedTime.ToFloat();
             controller._frozen = true;
         }
 
@@ -157,9 +177,16 @@ public partial class DayNightController : Node
         if (Engine.IsEditorHint())
             controller._frozen = true;
         if (OS.GetEnvironment("MOON_PHASE") is { Length: > 0 } phase)
-            controller._moonPhase = Mathf.PosMod(phase.ToInt(), LightingCycle.MoonPhaseCount);
+            controller._clock?.SetMoonPhase(phase.ToInt());
         if (OS.GetEnvironment("DAY_SPEED") is { Length: > 0 } speed)
             controller._speed = speed.ToFloat();
+        // A frozen clock never runs the dusk edge, so its isCycled latch has to be derived from where it
+        // was pinned — ReceiveInitialLightingState's "isCycled = day > LevelLighting.bias"
+        // (LightingManager.cs:386), which is the same thing a client does with a time it was handed
+        // rather than lived through. Without it TIME_OF_DAY=0.8 MOON_PHASE=2 reported no full moon in a
+        // visibly moonlit frame.
+        if (controller._frozen)
+            controller._clock?.Sync();
 
         controller.Apply();
         return controller;
@@ -175,42 +202,30 @@ public partial class DayNightController : Node
 
     public override void _Process(double delta)
     {
-        if (_frozen || _lighting == null)
+        if (_frozen || _clock == null)
             return;
-        _time = Mathf.PosMod(_time + ((float)delta * _speed / LightingCycle.DefaultCycleSeconds), 1f);
+        // One frame of LightingManager.updateLighting: move the clock and run the dusk/dawn edge, which
+        // is what advances the moon phase once per night (wrapping at MOON_CYCLES; full moon is 2).
+        _clock.Advance((float)delta, _speed);
 
-        // LightingManager advances the moon phase once at each new night (wrapping at MOON_CYCLES), so
-        // every night shows the next slice of the moon; full moon is phase 2.
-        if (_time >= _lighting.Bias)
-        {
-            if (!_moonCycled)
-            {
-                _moonCycled = true;
-                _moonPhase = (_moonPhase + 1) % LightingCycle.MoonPhaseCount;
-            }
-        }
-        else
-        {
-            _moonCycled = false;
-        }
-
-        float sinceApplied = Mathf.Abs(Mathf.PosMod(_time - _appliedTime + 0.5f, 1f) - 0.5f); // circular
+        float sinceApplied = Mathf.Abs(Mathf.PosMod(CycleTime - _appliedTime + 0.5f, 1f) - 0.5f); // circular
         if (float.IsNaN(_appliedTime) || sinceApplied >= ApplyStep)
             Apply();
     }
 
     private void Apply()
     {
-        _appliedTime = _time;
+        _appliedTime = CycleTime;
         LightingKeyframe k;
         float pitch;
         float starsCutoff;
         if (_lighting != null)
         {
+            float time = CycleTime;
             float transition = LightingCycle.Transition(_lighting.Bias, _lighting.Fade);
-            (LightingTime from, LightingTime to, float alpha) = LightingCycle.Blend(_time, _lighting.Bias, transition);
-            k = LightingCycle.Evaluate(_lighting.Times, _time, _lighting.Bias, _lighting.Fade);
-            pitch = LightingCycle.SunPitchDegrees(_time, _lighting.Bias);
+            (LightingTime from, LightingTime to, float alpha) = LightingCycle.Blend(time, _lighting.Bias, transition);
+            k = LightingCycle.Evaluate(_lighting.Times, time, _lighting.Bias, _lighting.Fade);
+            pitch = LightingCycle.SunPitchDegrees(time, _lighting.Bias);
             starsCutoff = LightingCycle.StarsCutoff(from, to, alpha);
         }
         else
@@ -237,7 +252,7 @@ public partial class DayNightController : Node
         // and its phase light is the MoonLightDirection_N child: sunRotation * localY(yaw), with the yaw
         // negated by the Z-mirror like every rotation here.
         Vector3 sunForward = -_sun.Basis.Z;
-        float moonYaw = Mathf.DegToRad(-LightingCycle.MoonPhaseYawDegrees(_moonPhase));
+        float moonYaw = Mathf.DegToRad(-LightingCycle.MoonPhaseYawDegrees(MoonPhase));
         Vector3 moonLightForward = _sun.Basis * new Basis(Vector3.Up, moonYaw) * new Vector3(0, 0, -1);
         _sky.SetShaderParameter("sky_color", k.SkyTop);
         _sky.SetShaderParameter("equator_color", k.SkyHorizon);
