@@ -70,7 +70,16 @@ public sealed class ServerQuery
         if (now - _lastRequest >= RetryInterval)
         {
             _lastRequest = now;
-            _transport.Send(NetMessages.WriteServerInfoRequest(), ESendType.Reliable);
+            // UNRELIABLE, and the RetryInterval above is why nothing is lost by it.
+            //
+            // Sent reliably, this was the one message that made a server allocate on behalf of a
+            // stranger: the frame is retained and retransmitted until acked, and the server had to hold
+            // a Connection and a ReliableChannel just to ack it — so the cheapest thing anyone can send
+            // was also the thing that took one of 256 connection slots for fifteen seconds. Answering it
+            // connectionlessly means there is nothing on the far end to ack, and the reliability
+            // belonged to the asker all along: this loop already re-asks every second until it is
+            // answered or times out, which is what a query does.
+            _transport.Send(NetMessages.WriteServerInfoRequest(), ESendType.Unreliable);
         }
 
         // The reliable channel exhausted its retries: nobody is on the other end of this socket.

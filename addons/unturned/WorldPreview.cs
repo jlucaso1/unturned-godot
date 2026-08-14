@@ -38,6 +38,14 @@ public static class WorldPreview
     private sealed record CachePlan(List<ContentExtraction.BundlePlan> Bundles,
         Dictionary<string, TerrainLayerPlan.BundleWants> TerrainLayers, int Needed);
 
+    // Restrictions on, substitutions OFF, for every path in this file. Level.cs:282 gates holiday
+    // redirects on `isEditor == false`, so the editor shows a map's authored objects rather than the
+    // seasonal ones it would swap in at runtime — and both halves here have to agree about that or they
+    // fight: the dock's "Warm cache" would extract December's variants while the preview asked for the
+    // originals and drew them as fallback boxes. Named once rather than spelled at each call site,
+    // because the two disagreeing is the whole failure mode.
+    private static HolidayPolicy EditorHolidays => HolidayPolicy.FromClock();
+
     // How much of a map's cache is already on disk. Mesh and texture misses are separate because textures
     // can be incomplete while every mesh GUID is ready, and they have different editor consequences.
     public static (int MissingMeshes, int MissingTextures, int MissingTerrainLayers, int Needed) CacheState(
@@ -68,7 +76,7 @@ public static class WorldPreview
         // permanently missing on Russia: an NPC ships no prefab, so nothing can ever extract one.
         // The blob's header alone is read for the foliage GUIDs; nothing here draws an instance.
         LevelContent content = LevelContentPlan.Resolve(sources, new LevelInfo(mapPath), assets,
-            LevelFoliageChunks.ReadAssetGuids(Path.Combine(mapPath, "Foliage.blob")));
+            LevelFoliageChunks.ReadAssetGuids(Path.Combine(mapPath, "Foliage.blob")), EditorHolidays);
 
         Dictionary<string, TerrainLayerPlan.BundleWants> terrainLayers = MissingTerrainLayers(mapPath, sources);
         var bundlesOwingLayers = new HashSet<string>(terrainLayers.Keys, StringComparer.Ordinal);
@@ -274,7 +282,8 @@ public static class WorldPreview
             ?? LevelFoliageChunks.ReadAssetGuids(blobPath);
 
         // The vehicle roll inside is seeded, so the preview shows the same vehicles a session would.
-        return new Placements(LevelContentPlan.Resolve(sources, level, db, foliageGuids), foliage);
+        return new Placements(
+            LevelContentPlan.Resolve(sources, level, db, foliageGuids, EditorHolidays), foliage);
     }
 
     private static async System.Threading.Tasks.Task BuildObjectsAsync(Node3D root, Placements placements,

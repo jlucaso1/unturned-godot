@@ -443,14 +443,20 @@ public partial class ObjectStreamer : Node
 
     private void LoadPlacements()
     {
-        // The two reads LevelContentPlan needs before it can resolve anything, and the bundle decode
-        // cannot start until both are in: the asset database (thousands of .dat files) and the foliage
-        // blob. Running them together is what lets the decode start sooner. The placements themselves are
-        // read inside Resolve, because the order they are then folded together in is the part that used to
-        // drift between the four copies of this — see LevelContentPlan.
+        // Three independent reads, and the bundle decode cannot start until all of them are in: the
+        // placements (a hundred thousand of them on a workshop map), the asset database (thousands of
+        // .dat files) and the foliage. Running them together is what lets the decode start after the
+        // SLOWEST of the three rather than after their sum.
+        //
+        // Trees stay in their own list until the asset database is in: a pre-GUID one is placed by an id
+        // from the RESOURCE namespace, and only the database can turn that into a GUID without confusing
+        // it with the identically-numbered object. That fold, and everything after it, is
+        // LevelContentPlan's — this decides only when to read, never what to do with what it read.
+        var placements = default(LevelContentPlan.LevelPlacements);
+        Task placementFiles = Task.Run(() => placements = LevelContentPlan.ReadPlacements(_level));
+
         Task assets = Task.Run(() => _db = ContentExtraction.ScanAssets(_sources));
 
-        IReadOnlyList<Guid>? foliageGuids = null;
         Task foliage = Task.Run(() =>
         {
             string blobPath = Path.Combine(_level.Path, "Foliage.blob");
@@ -478,12 +484,17 @@ public partial class ObjectStreamer : Node
             {
                 _foliage = LevelFoliageChunks.Load(blobPath, FoliageBuilder.RuntimeChunkTiles);
             }
-            foliageGuids = _foliageIndex?.AssetGuids ?? _foliage?.AssetGuids;
+            IReadOnlyList<Guid>? foliageGuids = _foliageIndex?.AssetGuids ?? _foliage?.AssetGuids;
+            // Still on this task: resolving those GUIDs to assets walks every source's Assets tree, and
+            // it depends on neither the placements nor the asset database, so it belongs beside them
+            // rather than after them.
+            _foliageAssets = LevelContentPlan.ResolveFoliage(_sources, foliageGuids);
         });
 
-        Task.WaitAll(assets, foliage);
+        Task.WaitAll(placementFiles, assets, foliage);
 
-        LevelContent content = LevelContentPlan.Resolve(_sources, _level, _db, foliageGuids);
+        LevelContent content = LevelContentPlan.Resolve(_sources, _level, _db, placements,
+            _foliageAssets, HolidayPolicy.ForMap(_level.Path));
         _objects = content.Objects;
         _vehicles = content.Vehicles;
         _npcs = content.Npcs;

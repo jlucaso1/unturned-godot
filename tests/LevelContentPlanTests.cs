@@ -329,7 +329,7 @@ public class LevelContentPlanTests
 
         LevelContent content = LevelContentPlan.Resolve(sources,
             new LevelInfo(Path.Combine(dir.Path, "Maps", "Nope")),
-            ContentExtraction.ScanAssets(sources), foliageGuids: null);
+            ContentExtraction.ScanAssets(sources), foliageGuids: null, HolidayPolicy.None);
 
         Assert.Empty(content.Objects);
         Assert.Empty(content.Vehicles);
@@ -365,24 +365,29 @@ public class LevelContentPlanTests
     }
 
     [Fact]
-    public void TheHolidayDefaultsToTheMapsOwnAnswer()
+    public void ReadingThePlacementsSeparatelyResolvesToTheSameThing()
     {
-        // Every real caller wants the map's, and the parameter exists so a test can pin it. Passing null
-        // has to reach HolidayPolicy.ForMap rather than silently meaning "no holiday" — a build that
-        // quietly opted out of the calendar would place a different list from its neighbour, and the
-        // placement list is what DamageableWorld indexes into.
+        // The overload that does the independent reads itself is a convenience for a caller with nothing
+        // to overlap; the streamer runs the same pieces on its own tasks. The two must not be able to
+        // disagree, or the cold path and the warm path build different worlds.
         var house = Guid.NewGuid();
+        var pine = Guid.NewGuid();
         using var install = new Install();
-        install.Object("House", house, 12).Objects((At(1), 0, house));
+        install.Object("House", house, 12).Resource("Pine", pine, 5)
+            .Objects((At(1), 0, house)).Trees((At(2), pine));
         IReadOnlyList<ContentSource> sources = install.Sources;
         ObjectAssetDatabase db = ContentExtraction.ScanAssets(sources);
 
-        LevelContent defaulted = LevelContentPlan.Resolve(sources, install.Level, db, null);
-        LevelContent forMap = LevelContentPlan.Resolve(sources, install.Level, db, null,
-            HolidayPolicy.ForMap(install.MapPath));
+        LevelContent inline = LevelContentPlan.Resolve(sources, install.Level, db, null,
+            HolidayPolicy.None);
+        LevelContent staged = LevelContentPlan.Resolve(sources, install.Level, db,
+            LevelContentPlan.ReadPlacements(install.Level),
+            LevelContentPlan.ResolveFoliage(sources, null), HolidayPolicy.None);
 
-        Assert.Equal(forMap.NeededGuids, defaulted.NeededGuids);
-        Assert.Equal(forMap.Objects.Count, defaulted.Objects.Count);
+        Assert.Equal(inline.NeededGuids, staged.NeededGuids);
+        Assert.Equal(inline.Objects.ConvertAll(o => o.Guid), staged.Objects.ConvertAll(o => o.Guid));
+        Assert.Equal(inline.Vehicles.Count, staged.Vehicles.Count);
+        Assert.Equal(inline.LegacyResolved, staged.LegacyResolved);
     }
 
     // --- Rules this unification must not quietly drop --------------------------------------------------

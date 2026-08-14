@@ -63,7 +63,10 @@ public static class WorldBuilder
         // handful back in — the server builds no body for them, since they are rigidbodies in Unturned —
         // which costs one cold-cache pass over a few more prefabs and leaves the two worlds resolving the
         // same map from the same sequence.
-        LevelContent content = LevelContentPlan.Resolve(sources, level, db, foliageGuids: null);
+        // The map's own calendar, redirects included: this is a running session's authority, not the
+        // editor, so it builds the world the clients are going to be standing in.
+        LevelContent content = LevelContentPlan.Resolve(sources, level, db, foliageGuids: null,
+            HolidayPolicy.ForMap(level.Path));
         List<PlacedObject> objects = content.Objects;
         if (content.LegacyResolved > 0)
             Log.Print($"[server] Legacy placements resolved by id: {content.LegacyResolved}");
@@ -282,8 +285,10 @@ public static class WorldBuilder
         IReadOnlyList<Guid>? foliageGuids = foliageIndex?.AssetGuids ?? foliageData?.AssetGuids;
 
         // Everything the map places, in the one order that resolves it correctly. See LevelContentPlan.
+        // The map's own calendar, redirects included — this is a session, not the editor.
         ObjectAssetDatabase db = dbTask.Result;
-        LevelContent content = LevelContentPlan.Resolve(sources, level, db, foliageGuids);
+        LevelContent content = LevelContentPlan.Resolve(sources, level, db, foliageGuids,
+            HolidayPolicy.ForMap(level.Path));
         List<PlacedObject> objects = content.Objects;
         List<PlacedObject> vehicles = content.Vehicles;
         List<PlacedObject> npcs = content.Npcs;

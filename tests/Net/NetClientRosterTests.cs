@@ -21,6 +21,7 @@ public class NetClientRosterTests
     {
         private readonly Queue<byte[]> _inbox = new();
         public bool IsConnected => true;
+        public NetTraffic Traffic { get; } = new();
         public void Deliver(byte[] payload) => _inbox.Enqueue(payload);
         public void Send(byte[] payload, ESendType sendType) { }
         public bool TryReceive(out byte[] payload) => _inbox.TryDequeue(out payload!);

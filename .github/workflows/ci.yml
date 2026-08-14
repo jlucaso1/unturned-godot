@@ -71,8 +71,33 @@ jobs:
       - name: Build the editor add-on
         run: dotnet build unturned-godot.csproj -c Debug -warnaserror
 
+      # Split three ways so a failure names itself, and so the one part of this suite that can flake can
+      # be re-run on its own instead of re-running 2 600 tests to find out.
+      #
+      # Nothing is run twice: the filters partition the suite. The first step is everything
+      # deterministic and in-memory, which is the overwhelming majority and finishes in seconds.
       - name: Test
-        run: dotnet test tests/UnturnedGodot.Tests.csproj -c Release --no-build
+        run: >
+          dotnet test tests/UnturnedGodot.Tests.csproj -c Release --no-build
+          --filter "Category!=RealSockets&Category!=Soak"
+
+      # The netcode soak, as its own step so it is VISIBLE that it ran. It drives eight clients over a
+      # lossy, duplicating, reordering transport for 2 000 ticks and is deterministic from its seed, so
+      # it belongs here in the hermetic matrix rather than in a nightly — but a gate nobody can see run
+      # is how scripts/check-menu-popup-errors.sh spent its whole life skipping.
+      - name: Netcode soak over a lossy, reordering transport
+        run: >
+          dotnet test tests/UnturnedGodot.Tests.csproj -c Release --no-build
+          --filter "Category=Soak"
+
+      # The two files that bind real localhost UDP ports and sleep on datagram scheduling. Green and
+      # fast today; on a loaded runner they are the first things here that will flake, and separating
+      # them is what makes "the network tests flaked" a diagnosis rather than a whole-suite re-run.
+      # See tests/Helpers/TestCategories.cs.
+      - name: Transport tests over real sockets
+        run: >
+          dotnet test tests/UnturnedGodot.Tests.csproj -c Release --no-build
+          --filter "Category=RealSockets"
 
       - name: Enforce core coverage above 95%
         if: runner.os == 'Linux'
@@ -121,13 +146,24 @@ jobs:
       - name: Run the runtime suite
         run: ./scripts/run-godot-tests.sh
 
-      # Reports, deliberately without a floor yet. src/ is being brought under measurement file by file,
-      # and a percentage gate would fight that: opting a large uncovered file in drops the rate before the
-      # tests for it land, so the gate would punish exactly the move it exists to encourage. It becomes a
-      # gate once src/ is fully opted in — at which point the second number it prints is zero and the
-      # first one is the whole story.
-      - name: Report src/ coverage
-        run: ./scripts/check-src-coverage.sh --files
+      # Reported AND ratcheted.
+      #
+      # The reasoning for not putting a percentage floor here is sound and still stands: src/ was being
+      # brought under measurement file by file, and a fixed bar punishes exactly that move, because
+      # opting a large uncovered file in drops the rate before its tests land. The cost was that src/
+      # could regress by any amount and nothing said so.
+      #
+      # A ratchet keeps the reasoning and closes the hole. It compares against
+      # scripts/src-coverage-reference.json and fails only on a drop of more than 1.5 points, so
+      # covering more of src/ raises the bar on the next --record while opting a big file in stays
+      # possible — as a reviewable edit to the reference rather than an argument with a gate. The
+      # opted-out line count is ratcheted downward-only, which is what stops the headline number from
+      # being improved by hiding files behind [ExcludeFromCodeCoverage].
+      #
+      # Worth noting against the note this replaces: src/ is ALREADY fully opted in — the run reports
+      # "opted out of measurement: none" — so the condition that comment set for gating has been met.
+      - name: Report and ratchet src/ coverage
+        run: ./scripts/check-src-coverage.sh --files --ratchet
 
   format:
     name: format

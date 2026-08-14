@@ -15,6 +15,7 @@ public class NetServerProtocolTests
     {
         public readonly List<(byte[] Payload, ESendType SendType)> Sent = new();
         public int Id => 99;
+        public NetTraffic Traffic { get; } = new();
         public void Send(byte[] payload, ESendType sendType) => Sent.Add((payload, sendType));
         public void Close() { }
     }
@@ -34,6 +35,8 @@ public class NetServerProtocolTests
         public void Disconnect(FakeConnection c) =>
             Events.Enqueue(new ServerTransportEvent(ETransportEvent.Disconnected, c, Array.Empty<byte>()));
 
+        public NetTraffic Traffic { get; } = new();
+        public System.Func<byte[], byte[]?>? AnswerConnectionless { get; set; }
         public bool TryReceive(out ServerTransportEvent evt) => Events.TryDequeue(out evt);
         public void Update(double now) => UpdateCalls++;
         public void Close() => Closed = true;
@@ -84,8 +87,12 @@ public class NetServerProtocolTests
         Assert.Equal(2, server.PlayerCount); // no duplicate admit
         var welcomes = conn.Sent.Where(m => NetMessages.TypeOf(m.Payload) == ENetMessage.Welcome).ToList();
         Assert.Equal(2, welcomes.Count); // the re-Hello got the roster again
-        (byte firstId, _, _, _) = NetMessages.ReadWelcome(welcomes[0].Payload);
-        (byte secondId, _, _, List<PlayerListing> roster) = NetMessages.ReadWelcome(welcomes[1].Payload);
+        (byte firstId, uint firstToken, _, _, _, _, _) = NetMessages.ReadWelcome(welcomes[0].Payload);
+        (byte secondId, uint secondToken, _, _, _, _, List<PlayerListing> roster) =
+            NetMessages.ReadWelcome(welcomes[1].Payload);
+        // The session survived the re-Hello, so its token did too — a client that lost state and
+        // re-introduced itself must not be handed a token its in-flight Input frames do not carry.
+        Assert.Equal(firstToken, secondToken);
         Assert.Equal(firstId, secondId);              // same identity, not a new player
         Assert.Equal("B", Assert.Single(roster).Name); // and the roster lists everyone else
     }
@@ -125,7 +132,8 @@ public class NetServerProtocolTests
         transport.Message(joiner, NetMessages.WriteHello("A", Level));
         server.Update(0);
 
-        (byte _, uint _, uint _, List<PlayerListing> listed) = NetMessages.ReadWelcome(joiner.Sent[0].Payload);
+        (byte _, uint _, uint _, uint _, byte _, byte _, List<PlayerListing> listed) =
+            NetMessages.ReadWelcome(joiner.Sent[0].Payload);
         Assert.Empty(listed);      // the pending session isn't listed
         Assert.Empty(pending.Sent); // and gets no PlayerJoined broadcast
     }

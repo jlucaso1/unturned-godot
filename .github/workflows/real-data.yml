@@ -329,6 +329,12 @@ jobs:
       - name: Check the structural metrics
         env:
           UNTURNED_PATH: ${{ github.workspace }}/build/game-data
+          # Pinned to "no holiday", because the counts below it are placement counts and the holiday
+          # gating is real: Halloween would add 31 objects, Christmas 336, and June turns on a
+          # PRIDE_MONTH asset. Without the pin the recorded baseline is only true for the ~46 weeks a
+          # year nothing is running, and this job would go red on October 20th having found nothing
+          # wrong -- which is how a gate teaches people to ignore it. Recorded with the same pin.
+          UG_HOLIDAY: None
         run: ./scripts/check-structural-metrics.sh
 
       # The runtime suite's other half. Most of what src/ does is decode the game's own bundle formats,
@@ -358,6 +364,18 @@ jobs:
     name: src/ coverage with real content
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # OFF THE PULL REQUEST PATH.
+    #
+    # This job gates nothing — it is continue-on-error at both the job and the step level, and says so
+    # at length below. It also costs up to 45 minutes and pulls the game content, and it ran on every
+    # pull request beside three jobs that DO gate. Against a 16-second hermetic suite, essentially all
+    # of that wall time was content and engine setup for a number with no floor under it.
+    #
+    # A weekly run and a button is the right cadence for a figure that is tracked rather than enforced.
+    # What actually protects src/ on a pull request is the ratchet in ci.yml's runtime job, which
+    # measures the same thing hermetically, in a job that was already running, and fails when the
+    # number drops (see scripts/check-src-coverage.sh --ratchet).
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     # Non-gating all the way up, not just on the report step. The preamble below used to be shared with
     # the structural work, so a Steam flake or a failed Godot install took down a job that was gating
     # something; split out, the same failure would redden the workflow over a job that gates nothing.

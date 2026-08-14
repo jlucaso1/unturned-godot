@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using Godot;
@@ -24,7 +25,19 @@ public sealed class NavBound
 
 public static class LevelNavigationData
 {
+    // "Nowhere": a point outside every bound. It is a real byte value, so it also names a legal INDEX,
+    // and the two must never be the same thing — region 255 aliasing with "no region" would put a
+    // player standing in the 256th bound into the same bucket as one standing off the map, and would
+    // index ZombieHost's per-bound array out of range.
     public const byte NoBound = byte.MaxValue;
+
+    // How many bounds a level may have, therefore: indices 0 through 254.
+    //
+    // Bounds.dat counts its entries in a byte, so a file cannot express more than 255 and the collision
+    // is out of reach through Load today. That is a property of the file format rather than of this
+    // code, and it is exactly the kind that a workshop map, a new format version or a synthesised level
+    // stops guaranteeing without anything here noticing.
+    public const int MaxBounds = NoBound;
 
     public static List<NavBound> Load(string environmentDir)
     {
@@ -38,7 +51,7 @@ public static class LevelNavigationData
             if (version > 0)
             {
                 byte count = river.ReadByte();
-                for (int i = 0; i < count; i++)
+                for (int i = 0; i < count && bounds.Count < MaxBounds; i++)
                 {
                     Vector3 center = river.ReadSingleVector3();
                     // The file stores Unity coordinates; containment runs against Godot positions,
@@ -76,9 +89,15 @@ public static class LevelNavigationData
     }
 
     // LevelNavigation.tryGetBounds: the first bound whose XZ footprint contains the point.
+    //
+    // Never scans past MaxBounds, so the index it returns can never BE NoBound. Load truncates to the
+    // same ceiling, but this takes any list — the repro harness, a test, a future loader — and the one
+    // thing that must hold everywhere is that "the region you are in" and "you are in no region" are
+    // different answers.
     public static byte TryGetBound(IReadOnlyList<NavBound> bounds, Vector3 point)
     {
-        for (int i = 0; i < bounds.Count; i++)
+        int scan = Math.Min(bounds.Count, MaxBounds);
+        for (int i = 0; i < scan; i++)
             if (bounds[i].ContainsXZ(point))
                 return (byte)i;
         return NoBound;

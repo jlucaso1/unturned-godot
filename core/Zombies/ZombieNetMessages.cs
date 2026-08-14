@@ -47,23 +47,55 @@ public static class ZombieClientMotion
 
 public static class ZombieNetMessages
 {
-    // Reliable datagrams are not fragmented, so the full population ships in MTU-sized chunks.
-    public const int ListChunkSize = 50;
-
     private const int ListingBytes = 23;  // id 2 + look bytes 8 + position 12 + yaw 1
     private const int SnapshotBytes = 16; // id 2 + position 12 + yaw 1 + state 1
+    private const int KilledBytes = 14;   // id 2 + the killing blow's shove 12
+    private const int StunnedBytes = 3;   // id 2 + clip 1
+    private const int RegionHeaderBytes = 3; // type 1 + bound 1 + count 1
+    private const int StatesHeaderBytes = 6; // type 1 + tick 4 + count 1
+
+    // Two ceilings, and a payload has to respect the LOWER of them.
+    //
+    // The MTU budget is usually the tighter one — sixteen bytes a snapshot means a region's worth is
+    // three IP fragments, all of which have to arrive. But every one of these payloads counts its
+    // records in a single byte, and where the records are small enough the byte runs out first: three
+    // bytes a stagger fits 399 of them inside the budget and the 400th would wrap the header to 144.
+    // Taking the minimum is what keeps both true without either being stated twice.
+    private static int PerDatagram(int headerBytes, int itemBytes) =>
+        Math.Min(NetChunks.Capacity(headerBytes, itemBytes), byte.MaxValue);
+
+    // Reliable datagrams are not fragmented, so the full population ships in MTU-sized chunks. Derived
+    // from the budget rather than written down: the hand-picked 50 was right for a 23-byte listing and
+    // would have quietly stopped being right the first time a look byte was added to one.
+    public static readonly int ListChunkSize = PerDatagram(RegionHeaderBytes, ListingBytes);
+
+    // A region holds up to 255 zombies (NavBound.MaxZombies is a byte), and at 16 bytes a snapshot that
+    // is 4 KB on the unreliable stream that carries the whole map's motion.
+    public static readonly int MaxStatesPerDatagram = PerDatagram(StatesHeaderBytes, SnapshotBytes);
+
+    public static readonly int MaxKilledPerDatagram = PerDatagram(RegionHeaderBytes, KilledBytes);
+
+    public static readonly int MaxStunnedPerDatagram = PerDatagram(RegionHeaderBytes, StunnedBytes);
 
     // These payloads are rebuilt every server tick, so they are written straight into an exact-sized
     // array (same little-endian bytes a BinaryWriter produced) instead of growing a MemoryStream.
     // A list carries ONE region's zombies (SendZombies ships per region, to one connection): the bound
     // rides in the header so the client can group avatars by region and drop them on region change.
+    public static List<byte[]> WriteZombieLists(byte bound, IReadOnlyList<ZombieListing> listings) =>
+        NetChunks.Split(listings, ListChunkSize, chunk => WriteZombieList(bound, chunk));
+
     public static byte[] WriteZombieList(byte bound, IReadOnlyList<ZombieListing> chunk)
     {
-        var payload = new byte[3 + (chunk.Count * ListingBytes)];
+        ArgumentNullException.ThrowIfNull(chunk);
+        if (chunk.Count > ListChunkSize)
+            throw new ArgumentOutOfRangeException(nameof(chunk),
+                $"a ZombieList datagram carries at most {ListChunkSize} listings, not {chunk.Count}; "
+                + "use WriteZombieLists, which splits.");
+        var payload = new byte[RegionHeaderBytes + (chunk.Count * ListingBytes)];
         payload[0] = (byte)ENetMessage.ZombieList;
         payload[1] = bound;
         payload[2] = (byte)chunk.Count;
-        int o = 3;
+        int o = RegionHeaderBytes;
         for (int i = 0; i < chunk.Count; i++)
         {
             ZombieListing z = chunk[i];
@@ -111,13 +143,27 @@ public static class ZombieNetMessages
         return (bound, chunk);
     }
 
+    public static List<byte[]> WriteZombieStateChunks(uint tick,
+        IReadOnlyList<ZombieSnapshotState> states) =>
+        NetChunks.Split(states, MaxStatesPerDatagram, chunk => WriteZombieStates(tick, chunk));
+
+    // Threw nothing and truncated silently at 256: `payload[5] = (byte)states.Count` wrapped, so a
+    // 256-zombie tick advertised zero states and the reader believed it — every one of those zombies
+    // frozen on the client with nothing to say why. Its two siblings below have always thrown on
+    // exactly this, and the asymmetry was the kind that survives the refactor that makes it reachable.
+    // The MTU bound below now fires long before the byte one could, but both are stated.
     public static byte[] WriteZombieStates(uint tick, IReadOnlyList<ZombieSnapshotState> states)
     {
-        var payload = new byte[6 + (states.Count * SnapshotBytes)];
+        ArgumentNullException.ThrowIfNull(states);
+        if (states.Count > MaxStatesPerDatagram)
+            throw new ArgumentOutOfRangeException(nameof(states),
+                $"a ZombieStates datagram carries at most {MaxStatesPerDatagram} zombies, not "
+                + $"{states.Count}; use WriteZombieStateChunks, which splits.");
+        var payload = new byte[StatesHeaderBytes + (states.Count * SnapshotBytes)];
         payload[0] = (byte)ENetMessage.ZombieStates;
         BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(1), tick);
         payload[5] = (byte)states.Count;
-        int o = 6;
+        int o = StatesHeaderBytes;
         for (int i = 0; i < states.Count; i++)
         {
             ZombieSnapshotState s = states[i];
@@ -180,25 +226,29 @@ public static class ZombieNetMessages
 
     // Each corpse with the shove its killing blow gave it. One list of PAIRS rather than two collections
     // that a caller has to keep in step: a mismatch there would throw a body with another body's blow.
+    public static List<byte[]> WriteZombieKilledChunks(byte bound,
+        IReadOnlyList<(ushort Id, Vector3 Ragdoll)> kills) =>
+        NetChunks.Split(kills, MaxKilledPerDatagram, chunk => WriteZombieKilled(bound, chunk));
+
     public static byte[] WriteZombieKilled(byte bound, IReadOnlyList<(ushort Id, Vector3 Ragdoll)> kills)
     {
         ArgumentNullException.ThrowIfNull(kills);
         // The count header is one byte, and a silent truncation here would be the worst possible
         // failure: a payload advertising zero ids that the reader believes, leaving every one of those
-        // corpses standing forever. A region cannot hold more than 255 zombies, so this can only fire
-        // on a caller that has already gone wrong somewhere else.
-        if (kills.Count > byte.MaxValue)
+        // corpses standing forever. The MTU bound is the tighter of the two and fires first — fourteen
+        // bytes a corpse means a region-clearing blast would otherwise have been three IP fragments on
+        // a message whose whole job is to be delivered.
+        if (kills.Count > MaxKilledPerDatagram)
             throw new ArgumentOutOfRangeException(nameof(kills),
-                $"a ZombieKilled payload carries at most {byte.MaxValue} ids, not {kills.Count}");
-        // id (2) + the shove (3 x 4).
-        const int PerZombie = 2 + (3 * 4);
-        var payload = new byte[3 + (kills.Count * PerZombie)];
+                $"a ZombieKilled datagram carries at most {MaxKilledPerDatagram} ids, not {kills.Count}; "
+                + "use WriteZombieKilledChunks, which splits.");
+        var payload = new byte[RegionHeaderBytes + (kills.Count * KilledBytes)];
         payload[0] = (byte)ENetMessage.ZombieKilled;
         payload[1] = bound;
         payload[2] = (byte)kills.Count;
         for (int i = 0; i < kills.Count; i++)
         {
-            Span<byte> entry = payload.AsSpan(3 + (i * PerZombie));
+            Span<byte> entry = payload.AsSpan(RegionHeaderBytes + (i * KilledBytes));
             BinaryPrimitives.WriteUInt16LittleEndian(entry, kills[i].Id);
             BinaryPrimitives.WriteSingleLittleEndian(entry[2..], kills[i].Ragdoll.X);
             BinaryPrimitives.WriteSingleLittleEndian(entry[6..], kills[i].Ragdoll.Y);
@@ -230,21 +280,31 @@ public static class ZombieNetMessages
     // server while the client keeps walking it, and nothing later says otherwise. Unlike a kill, though,
     // a stun is not final — the next state snapshot will move the zombie again — so this is bounded by
     // the same one-byte count and addressed to the same region.
+    public static List<byte[]> WriteZombieStunnedChunks(byte bound,
+        IReadOnlyList<(ushort Id, byte Clip)> stuns) =>
+        NetChunks.Split(stuns, MaxStunnedPerDatagram, chunk => WriteZombieStunned(bound, chunk));
+
+    // Three bytes a zombie, so a full 255-strong region fits one datagram with room to spare and this
+    // bound never fires in practice. Written through the same rule anyway: what makes the invariant
+    // testable — "no writer can emit past the budget, for any legal input" — is that every writer is
+    // subject to it, not that most of them happen not to need it.
     public static byte[] WriteZombieStunned(byte bound, IReadOnlyList<(ushort Id, byte Clip)> stuns)
     {
         ArgumentNullException.ThrowIfNull(stuns);
-        if (stuns.Count > byte.MaxValue)
+        if (stuns.Count > MaxStunnedPerDatagram)
             throw new ArgumentOutOfRangeException(nameof(stuns),
-                $"a ZombieStunned payload carries at most {byte.MaxValue} zombies, not {stuns.Count}");
+                $"a ZombieStunned datagram carries at most {MaxStunnedPerDatagram} zombies, not "
+                + $"{stuns.Count}; use WriteZombieStunnedChunks, which splits.");
 
-        var payload = new byte[3 + (stuns.Count * 3)];
+        var payload = new byte[RegionHeaderBytes + (stuns.Count * StunnedBytes)];
         payload[0] = (byte)ENetMessage.ZombieStunned;
         payload[1] = bound;
         payload[2] = (byte)stuns.Count;
         for (int i = 0; i < stuns.Count; i++)
         {
-            BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(3 + (i * 3)), stuns[i].Id);
-            payload[5 + (i * 3)] = stuns[i].Clip;
+            BinaryPrimitives.WriteUInt16LittleEndian(
+                payload.AsSpan(RegionHeaderBytes + (i * StunnedBytes)), stuns[i].Id);
+            payload[RegionHeaderBytes + 2 + (i * StunnedBytes)] = stuns[i].Clip;
         }
 
         return payload;
