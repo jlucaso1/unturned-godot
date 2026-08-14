@@ -96,9 +96,18 @@ public sealed class NetClient
     private readonly Dictionary<byte, RemotePlayer> _remotes = new();
 
     // Scratch for reconciling a Welcome's roster against the remotes we hold; reused so a rejoin storm
-    // does not allocate a set and a list per message.
+    // does not allocate a set and a list per message. Across chunks of one roster it accumulates, so it
+    // is cleared when a new roster version starts rather than on every message.
     private readonly HashSet<byte> _rosterIds = new();
     private readonly List<byte> _departed = new();
+
+    // Which chunks of the roster currently being assembled have arrived. A player id is a byte and a
+    // roster is at most 254 entries, so the chunk count can never exceed the entry count — 254 slots is
+    // an upper bound the protocol cannot exceed, and the table never grows.
+    private readonly bool[] _assemblingChunks = new bool[byte.MaxValue];
+    private bool _assembling;
+    private uint _assemblingVersion;
+    private int _assemblingSeen;
 
     // The newest roster version at which each id was seen to LEAVE. Player ids are bytes, so the whole
     // tombstone table is 256 entries and never grows: a roster older than an id's departure may not put
@@ -131,6 +140,18 @@ public sealed class NetClient
 
     public bool Joined { get; private set; }
     public PlayerSnapshotState LocalServerState { get; private set; }
+
+    // Where the server says we really are, after refusing a position we claimed.
+    //
+    // Raised as an event as well as held, because the controller has to ACT on it — a correction the
+    // renderer merely stores is exactly the state LocalServerState was in: replicated, exposed, and read
+    // by nothing but a log line. The server's position is what decides punch damage, zombie aggro and
+    // stealth radius, so a divergence nobody closes is a player whose fists miss what is in front of
+    // them with nothing on screen to say why.
+    public Action<Vector3>? OnPositionCorrected;
+    public bool HasCorrection { get; private set; }
+    public Vector3 Correction { get; private set; }
+    public uint CorrectionTick { get; private set; }
     public IReadOnlyDictionary<byte, RemotePlayer> Remotes => _remotes;
 
     // Self-healing join: while not admitted, the Hello re-sends on this cadence (covers "connected
@@ -143,6 +164,34 @@ public sealed class NetClient
     private readonly string _level;
     private double _lastHello = double.NegativeInfinity;
     private double _lastStateAt;
+    private double _now;
+
+    // When each of the last few input frames was sent, so an echo can be turned into a round trip. A
+    // ring rather than a dictionary: inputs go out at 12.5 Hz and the echo for one comes back within a
+    // tick or two of it, so two seconds of history is generous and nothing has to be evicted by hand.
+    private readonly (uint Frame, double SentAt)[] _sentFrames = new (uint, double)[32];
+    private int _sentAt;
+
+    // The four bytes this session was admitted under, repeated on every Input so a stranger who guessed
+    // our endpoint cannot send frames as us. See NetMessages.WriteWelcome.
+    private uint _sessionToken;
+
+    // How much of a new reading is taken. Round trips jitter hard — one datagram queued behind a burst
+    // is not a slower link — and a ping that jumps with every sample is unreadable and useless as an
+    // input to an adaptive interpolation delay. An eighth settles in about a second at this cadence.
+    private const double RttSmoothing = 0.125;
+
+    // The smoothed round trip, in seconds; NaN until an echo has come back. Named for what it is rather
+    // than "ping", because half of it is the number an interpolation delay wants and the distinction
+    // matters once something starts consuming it.
+    public double RoundTripSeconds { get; private set; } = double.NaN;
+
+    // The reading a person wants to see. NaN before the first echo, which a UI should print as "--"
+    // rather than as zero: no measurement and a zero-latency link are not the same statement.
+    public double PingMilliseconds => RoundTripSeconds * 1000.0;
+
+    // Everything this client's link has cost, split by message type. See NetServer.Traffic.
+    public NetTraffic Traffic => _transport.Traffic;
 
     // levelName is the map folder this client actually built. The server admits us only onto that
     // world; see NetMessages.LevelsMatch.
@@ -153,11 +202,23 @@ public sealed class NetClient
         _level = levelName;
     }
 
-    public void SendInput(in InputCommand input) =>
-        _transport.Send(NetMessages.WriteInput(input), ESendType.Unreliable);
+    public void SendInput(in InputCommand input) => SendInput(input, _now);
+
+    // `now` is when this frame left, which is what the round trip is measured from. The overload above
+    // falls back to the clock the last Update handed us — a fraction of a frame stale, which is noise
+    // against a round trip, and it keeps every existing caller working unchanged.
+    public void SendInput(in InputCommand input, double now)
+    {
+        _sentFrames[_sentAt] = (input.Frame, now);
+        _sentAt = (_sentAt + 1) % _sentFrames.Length;
+        // The token the Welcome handed us. Before it is known this is zero, which the server refuses —
+        // correctly, since a frame sent before admission names no session anyway.
+        _transport.Send(NetMessages.WriteInput(input, _sessionToken), ESendType.Unreliable);
+    }
 
     public void Update(double now)
     {
+        _now = now;
         _transport.Update(now); // give the transport the clock BEFORE any reliable send
 
         // A rejection is an answer, not a hiccup: retrying a Hello the server has already refused only
@@ -184,6 +245,25 @@ public sealed class NetClient
             _remotes.Clear();
             Array.Clear(_leftAtVersion);
             _lastHello = double.NegativeInfinity;
+            // The round trip goes with the session. Frame numbers start again on the next join, so a
+            // stale ring entry could be matched by an echo for a different frame that happens to reuse
+            // the number, reporting a round trip of however long the outage lasted.
+            Array.Clear(_sentFrames);
+            _sentAt = 0;
+            RoundTripSeconds = double.NaN;
+            // A half-assembled roster belongs to the session that ended; the next host numbers its
+            // versions from zero again, so keeping it would let a stale partial complete against a new
+            // roster that happens to reuse the version.
+            _assembling = false;
+            _assemblingSeen = 0;
+            Array.Clear(_assemblingChunks);
+            _rosterIds.Clear();
+            // Corrections are dated in the old host's tick space, and a restarted one counts from zero.
+            HasCorrection = false;
+            CorrectionTick = 0;
+            // And the token belongs to the session that ended. Zero until the next Welcome mints one,
+            // which is exactly the state a client that has never been admitted is in.
+            _sessionToken = 0;
             // Everything else keyed on ids this server handed out has to start over too, for the same
             // reason the roster versions do — a restarted host numbers its zombies from zero again, and a
             // subscriber holding the old session's ids would judge the new session's by them.
@@ -216,19 +296,47 @@ public sealed class NetClient
                         break;
                     }
 
-                    (byte id, uint welcomeTick, uint rosterVersion, List<PlayerListing> players) = welcome;
+                    (byte id, uint sessionToken, uint welcomeTick, uint rosterVersion, byte chunkIndex,
+                        byte chunkCount, List<PlayerListing> players) = welcome;
                     PlayerId = id;
+                    // Every chunk carries it, and a re-admission mints a new one, so taking it from
+                    // whichever chunk arrives keeps the client on the current token rather than the one
+                    // its first datagram happened to carry.
+                    _sessionToken = sessionToken;
                     Joined = true;
                     _lastStateAt = now;
 
-                    // The roster is COMPLETE — "everyone already here" as of rosterVersion — so it
-                    // replaces what we hold rather than adding to it. A second Welcome is ordinary (an
-                    // unadmitted client re-Hellos every couple of seconds, and a joined session that
-                    // Hellos again is answered with a fresh roster), and UDP may hand it to us after the
-                    // PlayerLeft it predates: merging left that player standing there forever, unseeable
-                    // and unshootable. Players still listed keep the remote we already have, so a
-                    // re-Welcome does not restart anyone's interpolation mid-session.
-                    _rosterIds.Clear();
+                    // A roster now arrives in as many datagrams as it takes, so the "replace what we
+                    // hold" rule below applies to the ASSEMBLED roster and not to each piece: read
+                    // chunk-wise, chunk 2 is a complete roster that happens to omit everyone in chunk 1,
+                    // and acting on it would delete them.
+                    //
+                    // Assembly is keyed on the roster version, which is the only identity a roster has.
+                    // A chunk of an older version is stale by definition and is dropped; the first chunk
+                    // of a newer one starts a fresh assembly, abandoning whatever partial set was in
+                    // progress — which is right, because that older roster is now superseded whether or
+                    // not its remaining chunks ever arrive. Reliable delivery retransmits but does not
+                    // order, so chunks of one version may arrive in any order and a duplicate may arrive
+                    // at any time; both are handled by accumulating into a set and counting distinct
+                    // indices rather than trusting arrival order.
+                    if (_assembling && unchecked((int)(rosterVersion - _assemblingVersion)) < 0)
+                        break; // a chunk of a roster older than the one we are building
+                    if (!_assembling || rosterVersion != _assemblingVersion)
+                    {
+                        _assembling = true;
+                        _assemblingVersion = rosterVersion;
+                        _assemblingSeen = 0;
+                        Array.Clear(_assemblingChunks);
+                        _rosterIds.Clear();
+                    }
+
+                    // The roster is COMPLETE — "everyone already here" as of rosterVersion — so once
+                    // assembled it replaces what we hold rather than adding to it. A second Welcome is
+                    // ordinary (an unadmitted client re-Hellos every couple of seconds, and a joined
+                    // session that Hellos again is answered with a fresh roster), and UDP may hand it to
+                    // us after the PlayerLeft it predates: merging left that player standing there
+                    // forever, unseeable and unshootable. Players still listed keep the remote we
+                    // already have, so a re-Welcome does not restart anyone's interpolation mid-session.
                     foreach (PlayerListing p in players)
                     {
                         if (p.PlayerId == PlayerId)
@@ -240,6 +348,17 @@ public sealed class NetClient
                             _remotes[p.PlayerId] = SpawnRemote(p, now, rosterVersion, welcomeTick);
                     }
 
+                    // Counted per distinct index, so a retransmitted chunk cannot complete the roster on
+                    // its own — which would prune everyone in the chunk that has not arrived yet.
+                    if (chunkIndex < _assemblingChunks.Length && !_assemblingChunks[chunkIndex])
+                    {
+                        _assemblingChunks[chunkIndex] = true;
+                        _assemblingSeen++;
+                    }
+                    if (_assemblingSeen < chunkCount)
+                        break; // still missing a piece: the roster is not yet evidence of anyone's absence
+
+                    _assembling = false;
                     if (_remotes.Count > _rosterIds.Count)
                     {
                         _departed.Clear();
@@ -356,6 +475,61 @@ public sealed class NetClient
                         gesturing.PushGesture(gesture.Tick, gesture.Gesture);
                     break;
                 }
+            case ENetMessage.PositionCorrection:
+                {
+                    if (!MalformedPacket.TryDecode(payload, ReadPositionCorrection, out var correction))
+                    {
+                        MalformedPacketsDropped++;
+                        break;
+                    }
+
+                    // Newest wins, wrap-safe. These are unreliable and unordered, so an older correction
+                    // can arrive behind a newer one, and snapping to it would put the player back
+                    // somewhere the server has already moved them past.
+                    if (HasCorrection && unchecked((int)(correction.Tick - CorrectionTick)) <= 0)
+                        break;
+                    HasCorrection = true;
+                    CorrectionTick = correction.Tick;
+                    Correction = correction.Position;
+                    OnPositionCorrected?.Invoke(correction.Position);
+                    break;
+                }
+            case ENetMessage.InputEcho:
+                {
+                    if (!MalformedPacket.TryDecode(payload, ReadInputEcho, out var echo))
+                    {
+                        MalformedPacketsDropped++;
+                        break;
+                    }
+
+                    ObserveRoundTrip(echo.Frame, now);
+                    break;
+                }
+        }
+    }
+
+    // Turns one echo into a round trip. The server repeats the same frame number until a newer input
+    // reaches it, so most echoes are for a frame already measured — matching against the ring and taking
+    // the FIRST arrival for each frame is what keeps a repeat from reporting a round trip inflated by
+    // however long the server sat on it. A frame that has already rolled out of the ring is simply not
+    // measurable and is dropped.
+    private void ObserveRoundTrip(uint frame, double now)
+    {
+        for (int i = 0; i < _sentFrames.Length; i++)
+        {
+            if (_sentFrames[i].Frame != frame || _sentFrames[i].SentAt <= 0)
+                continue;
+            double sample = now - _sentFrames[i].SentAt;
+            // Spent, so the repeats behind it find nothing. Zeroing the timestamp rather than the frame
+            // number keeps frame 0 — a real frame number a session opens on — from matching every empty
+            // slot in the ring.
+            _sentFrames[i].SentAt = 0;
+            if (sample < 0)
+                return; // a clock that went backwards is not a measurement
+            RoundTripSeconds = double.IsNaN(RoundTripSeconds)
+                ? sample
+                : (RoundTripSeconds * (1 - RttSmoothing)) + (sample * RttSmoothing);
+            return;
         }
     }
 
@@ -365,8 +539,8 @@ public sealed class NetClient
         Func<byte[], (byte PlayerId, uint Tick, UnturnedGodot.Player.EPlayerGesture Gesture)>
             ReadPlayerGesture = NetMessages.ReadPlayerGesture;
     private static readonly
-        Func<byte[], (byte PlayerId, uint Tick, uint RosterVersion, List<PlayerListing> Players)> ReadWelcome =
-            NetMessages.ReadWelcome;
+        Func<byte[], (byte PlayerId, uint SessionToken, uint Tick, uint RosterVersion, byte ChunkIndex,
+            byte ChunkCount, List<PlayerListing> Players)> ReadWelcome = NetMessages.ReadWelcome;
     private static readonly Func<byte[], (uint RosterVersion, uint Tick, PlayerListing Player)>
         ReadPlayerJoined = NetMessages.ReadPlayerJoined;
     private static readonly Func<byte[], JoinRejection> ReadReject = NetMessages.ReadReject;
@@ -374,6 +548,10 @@ public sealed class NetClient
         NetMessages.ReadPlayerLeft;
     private static readonly Func<byte[], (uint Tick, List<PlayerSnapshotState> States)> ReadStateUpdate =
         NetMessages.ReadStateUpdate;
+    private static readonly Func<byte[], (uint Frame, uint Tick)> ReadInputEcho =
+        NetMessages.ReadInputEcho;
+    private static readonly Func<byte[], (uint Tick, Vector3 Position)> ReadPositionCorrection =
+        NetMessages.ReadPositionCorrection;
 
     // The newest server tick heard, from any message that carries one. State updates are unreliable and
     // unordered, so newest-wins rather than last-wins; wrap-safe like every other sequence comparison.

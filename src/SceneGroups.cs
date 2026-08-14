@@ -30,8 +30,12 @@ public static class SceneGroups
     public const string RemotePlayers = "ug_remote_players";
     public const string Lighting = "ug_lighting";
     public const string PauseMenu = "ug_pause_menu";
-    // The session owner. Tier 3 reads the pathfinder's retained state through it, and it cannot be
-    // handed the node instead: the report is started by the object streamer, from a coroutine on Main,
-    // long after the session came up.
+
+    // The session owner (NetworkManager). Tier 3 reads the pathfinder's retained state through it, and
+    // the console's read-only `net` namespace and the F3 HUD read what the netcode is costing. Neither
+    // can be handed the node instead: the benchmark report is started by the object streamer, from a
+    // coroutine on Main, long after the session came up, and the console outlives the world entirely —
+    // the session is built with each map and freed with it, so a captured reference would be pointing
+    // at a freed node by the second one.
     public const string Network = "ug_network";
 }

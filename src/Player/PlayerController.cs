@@ -62,8 +62,74 @@ public partial class PlayerController : CharacterBody3D
     private Vector3 AimForward() =>
         UnturnedGodot.Damage.PunchAim.Forward(RotationDegrees.Y, _pitch);
 
-    // Multiplayer session, when hosting or joined: the controller forwards inputs at the 12.5 Hz cadence.
-    public UnturnedGodot.Net.NetClient? Net { get; set; }
+    // Multiplayer session, when hosting or joined: the controller forwards inputs at the 12.5 Hz cadence,
+    // and takes the server's word back when it refuses one of them.
+    public UnturnedGodot.Net.NetClient? Net
+    {
+        get => _net;
+        set
+        {
+            if (_net != null)
+                _net.OnPositionCorrected -= AcceptCorrection;
+            _net = value;
+            if (_net != null)
+                _net.OnPositionCorrected += AcceptCorrection;
+        }
+    }
+
+    private UnturnedGodot.Net.NetClient? _net;
+
+    // Where the server says we are, when it has refused where we said we were. Null when the two agree,
+    // which is almost always.
+    //
+    // This closes the one place the "authoritative server" claim was not true of movement. The server
+    // validates every claimed position against a speed budget and, when it refused one, simply kept the
+    // old position and said nothing — while this controller kept walking. The two then stayed apart, and
+    // it is the SERVER's position that decides punch damage, zombie aggro and stealth radius, so an
+    // honest desync (a stalled host, a step its heightfield solver disagrees with) read to the player as
+    // "my punches miss things standing next to me", with nothing on screen and no counter to point at.
+    private Vector3? _correction;
+
+    // Past this, the divergence is teleported away rather than walked back. Dragging several metres
+    // through whatever is in between looks worse than a jump, and takes long enough that the server
+    // refuses every claim made on the way.
+    private const float CorrectionSnapDistance = 1.5f;
+
+    // How much of the remaining error is taken per second below that distance. A metre closes in about a
+    // fifth of a second — fast enough that the next 12.5 Hz claim is already inside the budget, slow
+    // enough that the sub-centimetre disagreements of a busy frame are not a visible twitch.
+    private const float CorrectionBlendPerSecond = 12f;
+
+    // Below this the two agree well enough to stop. Chasing the last millimetre would leave a correction
+    // pending forever and re-enter the blend on every frame for nothing.
+    private const float CorrectionSettled = 0.01f;
+
+    private void AcceptCorrection(Vector3 position) => _correction = position;
+
+    // Applied before this frame's movement, so the step that follows starts from where the server has us
+    // rather than from where it already disagreed. Velocity is cleared on a snap: whatever momentum
+    // carried us somewhere the server refused is not momentum it accepted either.
+    private void ApplyServerCorrection(float dt)
+    {
+        if (_correction is not { } target)
+            return;
+
+        Vector3 error = target - GlobalPosition;
+        float distance = error.Length();
+        if (distance <= CorrectionSettled)
+        {
+            _correction = null;
+            return;
+        }
+        if (distance > CorrectionSnapDistance)
+        {
+            GlobalPosition = target;
+            Velocity = Vector3.Zero;
+            _correction = null;
+            return;
+        }
+        GlobalPosition += error * Mathf.Min(1f, CorrectionBlendPerSecond * dt);
+    }
 
     // The camera this controller drives, for screen-space passes that must render in front of it.
     public Camera3D Camera => _camera;
@@ -262,6 +328,10 @@ public partial class PlayerController : CharacterBody3D
     {
         long benchmarkStarted = Benchmark.RuntimeCounters.Start();
         float dt = (float)delta;
+
+        // Before anything else this frame: if the server refused where we said we were, start from where
+        // it says we are instead of compounding the disagreement for another step.
+        ApplyServerCorrection(dt);
 
         // Mouse released = a menu owns the input (PauseMenu): freeze movement keys; physics still runs.
         bool inputCaptured = InputCaptured;

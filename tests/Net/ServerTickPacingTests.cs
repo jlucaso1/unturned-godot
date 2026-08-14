@@ -24,10 +24,17 @@ public class ServerTickPacingTests
     {
         public readonly List<byte[]> Sent = new();
         public int Id => 1;
+        public NetTraffic Traffic { get; } = new();
         public void Send(byte[] payload, ESendType sendType) => Sent.Add(payload);
         public void Close() { }
 
         public int Count(ENetMessage type) => Sent.Count(p => NetMessages.TypeOf(p) == type);
+
+        // The token this connection was admitted under, read back off its own Welcome. An Input that
+        // does not carry it is refused before it is decoded, which is the point of it.
+        public uint SessionToken() =>
+            NetMessages.ReadWelcome(Sent.First(p => NetMessages.TypeOf(p) == ENetMessage.Welcome))
+                .SessionToken;
     }
 
     private sealed class FakeServerTransport : IServerTransport
@@ -40,6 +47,8 @@ public class ServerTickPacingTests
         public void Message(FakeConnection c, byte[] payload) =>
             Events.Enqueue(new ServerTransportEvent(ETransportEvent.Message, c, payload));
 
+        public NetTraffic Traffic { get; } = new();
+        public System.Func<byte[], byte[]?>? AnswerConnectionless { get; set; }
         public bool TryReceive(out ServerTransportEvent evt) => Events.TryDequeue(out evt);
         public void Update(double now) { }
         public void Close() { }
@@ -54,6 +63,12 @@ public class ServerTickPacingTests
     }
 
     // A server with one joined player, its clock anchored at `now`.
+    //
+    // These tests count TICKS rather than state-update datagrams. They used to count datagrams, which
+    // was the same number back when every tick broadcast every player unconditionally. It is not any
+    // more: the snapshot stream skips players whose quantized state is byte-identical to what their
+    // region was last told, so a motionless player produces one datagram and then silence — which is
+    // the point of the filter, and would make these read as "the loop stopped ticking".
     private static (NetServer Server, FakeConnection Player) Joined(double now)
     {
         var transport = new FakeServerTransport();
@@ -72,8 +87,11 @@ public class ServerTickPacingTests
     {
         (NetServer server, FakeConnection player) = Joined(1000.0);
 
+        uint before = server.Tick;
         server.Update(1060.0); // 60 s gone: 750 ticks' worth of "missed" time
 
+        Assert.True(server.Tick - before <= NetServer.MaxCatchUpTicks,
+            $"ran {server.Tick - before} ticks in one Update");
         Assert.True(player.Count(ENetMessage.StateUpdate) <= NetServer.MaxCatchUpTicks,
             $"broadcast {player.Count(ENetMessage.StateUpdate)} state updates in one Update");
     }
@@ -86,10 +104,11 @@ public class ServerTickPacingTests
         (NetServer server, FakeConnection player) = Joined(1000.0);
         server.Update(1060.0);
         player.Sent.Clear();
+        uint before = server.Tick;
 
         server.Update(1060.0 + ServerSimulation.TickRate);
 
-        Assert.Equal(1, player.Count(ENetMessage.StateUpdate));
+        Assert.Equal(1u, server.Tick - before);
     }
 
     // The catch-up itself stays: a few ticks of ordinary jitter are still made up, or the simulation
@@ -98,16 +117,18 @@ public class ServerTickPacingTests
     public void OrdinaryJitter_IsStillCaughtUp()
     {
         (NetServer server, FakeConnection player) = Joined(1000.0);
+        uint before = server.Tick;
 
         server.Update(1000.0 + (ServerSimulation.TickRate * 3)); // three ticks late
 
-        Assert.Equal(3, player.Count(ENetMessage.StateUpdate));
+        Assert.Equal(3u, server.Tick - before);
     }
 
     [Fact]
     public void SteadyPacing_TicksExactlyOncePerTickRate()
     {
         (NetServer server, FakeConnection player) = Joined(1000.0);
+        uint before = server.Tick;
 
         double now = 1000.0;
         for (int i = 0; i < 10; i++)
@@ -116,7 +137,7 @@ public class ServerTickPacingTests
             server.Update(now);
         }
 
-        Assert.Equal(10, player.Count(ENetMessage.StateUpdate));
+        Assert.Equal(10u, server.Tick - before);
     }
 
     // Catch-up steps are separate instants, not the same one repeated. The trusted-position budget is
@@ -134,10 +155,14 @@ public class ServerTickPacingTests
         transport.Connect(conn);
 
         const double start = 1000.0;
+        // Admitted first, because an Input has to carry the session token the Welcome mints — the
+        // server checks it before decoding anything else about the frame.
         transport.Message(conn, NetMessages.WriteHello("A", Level));
+        server.Update(start - ServerSimulation.TickRate);
+        uint token = conn.SessionToken();
         transport.Message(conn, NetMessages.WriteInput(new InputCommand(0, 0, 0, false, false, 0, 90,
-            EPlayerStance.Stand, Vector3.Zero)));
-        server.Update(start); // admitted, baseline claim accepted
+            EPlayerStance.Stand, Vector3.Zero), token));
+        server.Update(start); // baseline claim accepted
 
         // Four claims — the whole jitter buffer. The first spends nearly the entire stall allowance;
         // each of the rest asks for another tick's worth on top, which is only affordable if every step
@@ -147,7 +172,7 @@ public class ServerTickPacingTests
         {
             float metres = tickBudget * (3.9f + (0.95f * (frame - 1)));
             transport.Message(conn, NetMessages.WriteInput(new InputCommand(frame, 0, -1, false, true, 0, 90,
-                EPlayerStance.Sprint, new Vector3(0, 0, -metres))));
+                EPlayerStance.Sprint, new Vector3(0, 0, -metres)), token));
         }
 
         double elapsed = ServerSimulation.TickRate * (NetServer.MaxCatchUpTicks - 1);
@@ -176,8 +201,10 @@ public class ServerTickPacingTests
 
         const double start = 1000.0;
         transport.Message(conn, NetMessages.WriteHello("A", Level));
+        server.Update(start - ServerSimulation.TickRate); // admitted, so the session token exists
+        uint token = conn.SessionToken();
         transport.Message(conn, NetMessages.WriteInput(new InputCommand(0, 0, 0, false, false, 0, 90,
-            EPlayerStance.Stand, Vector3.Zero)));
+            EPlayerStance.Stand, Vector3.Zero), token));
         server.Update(start);
 
         // Five seconds of host stall. The client sprinted straight through it; what reaches the server
@@ -187,7 +214,7 @@ public class ServerTickPacingTests
         {
             float seconds = (float)stall - ((ServerSimulation.MaxQueuedInputs - frame) * ServerSimulation.TickRate);
             transport.Message(conn, NetMessages.WriteInput(new InputCommand(frame, 0, -1, false, true, 0, 90,
-                EPlayerStance.Sprint, new Vector3(0, 0, -PlayerConfig.SpeedSprint * seconds))));
+                EPlayerStance.Sprint, new Vector3(0, 0, -PlayerConfig.SpeedSprint * seconds)), token));
         }
 
         server.Update(start + stall);

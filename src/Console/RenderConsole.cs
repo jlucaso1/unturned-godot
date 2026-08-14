@@ -298,6 +298,24 @@ public static class RenderConsole
             + "BEFORE the change — put perf on its own line. 'fps' is the last SECOND averaged, so it and "
             + "'frame' describe different windows and lag each other while something is changing.",
             "perf", arguments => Snapshot(host, arguments));
+        // The `net` namespace, and the one part of this console that is not about the renderer.
+        //
+        // Everything else here is a switch: it changes what is submitted to the renderer and nothing
+        // else, deliberately never touching the server. This does not break that rule, it observes it —
+        // `net.stats` READS what the session has already done and cannot move a byte of it. That is the
+        // same standing `perf` has, and it is what makes the netcode measurable from the same prompt as
+        // the frame time, with the same HUD in view.
+        //
+        // Read-only is the whole design and not an oversight: a console that could retune a live server
+        // would be a second, undocumented configuration path into the authoritative simulation, and
+        // nothing about measurement needs one.
+        console.Add("net.stats", "What the netcode is costing right now: bytes and datagrams per "
+            + "second in each direction, split by message type, plus the round trip and the six drop "
+            + "counters (malformed payloads, oversized datagrams, refused connections, refused reliable "
+            + "sends, refused trusted positions). READ-ONLY, like `perf`: nothing in this namespace "
+            + "sends, drops or retunes anything. Rates are the last CLOSED one-second window, so a "
+            + "reading taken immediately after a change still describes the second before it.",
+            "net.stats", arguments => NetStats(host, arguments));
         console.Add("copy", "Put the whole scrollback on the clipboard as plain text — the transcript a "
             + "bug report wants. Ctrl+C copies just what you have selected, when something is.",
             "copy", arguments => Copy(host, arguments));
@@ -572,6 +590,21 @@ public static class RenderConsole
         yield return ConsoleLine.Reply(string.Format(CultureInfo.InvariantCulture,
             "{0:0.00} ms {1}   {2:0.00} ms physics{3}   {4:0.00} ms navigation   {5:0.0} MB vram",
             idleMs, idleLabel, physicsMs, physicsSteps, navigationMs, vramMb));
+    }
+
+    // Resolved through the group on every call, like every binding here: the session is built with the
+    // world and freed with it. What it prints is decided in core/Net/NetReport, so the wording is under
+    // test without a window; this half only finds the session.
+    private static IEnumerable<ConsoleLine> NetStats(Func<Node?> host, IReadOnlyList<string> arguments)
+    {
+        if (Located(host, SceneGroups.Network) is not NetworkManager network)
+        {
+            yield return ConsoleLine.Notice("There is no session in this scene: nothing is hosting, "
+                + "joining or running singleplayer.");
+            yield break;
+        }
+        foreach (string line in UnturnedGodot.Net.NetReport.Stats(network.Server, network.Client))
+            yield return ConsoleLine.Reply(line);
     }
 
     private static IEnumerable<ConsoleLine> Copy(Func<Node?> host, IReadOnlyList<string> arguments)

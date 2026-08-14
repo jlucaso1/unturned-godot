@@ -283,17 +283,49 @@ public class ZombieKillReplicationTests
     public void ReportKilledRejectsNull() =>
         Assert.Throws<ArgumentNullException>(() => new Harness().Host.ReportKilled(null!));
 
-    // The count header is one byte wide, so a caller handing over more ids than it can express has to
-    // be refused rather than silently writing a payload that claims to carry none.
+    // Two ceilings sit on this payload, and the tighter one now decides.
+    //
+    // The count header is one byte, so 256 ids were always refused. But fourteen bytes a corpse means
+    // 255 of them is 3.5 KB — three IP fragments on a message whose entire job is to be delivered, and
+    // losing any one of them leaves those corpses standing forever. The MTU budget therefore refuses
+    // long before the header does, and a caller with a whole region to announce splits instead.
     [Fact]
-    public void WriteRefusesMoreIdsThanTheCountFieldHolds()
+    public void WriteRefusesMoreIdsThanOneDatagramCarries()
     {
-        var tooMany = new ushort[byte.MaxValue + 1];
+        var tooMany = new ushort[ZombieNetMessages.MaxKilledPerDatagram + 1];
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             ZombieNetMessages.WriteZombieKilled(0, tooMany));
-        // One fewer is exactly the ceiling, and writes.
-        Assert.Equal(byte.MaxValue,
-            ZombieNetMessages.ReadZombieKilled(
-                ZombieNetMessages.WriteZombieKilled(0, new ushort[byte.MaxValue])).Ids.Count);
+        // One fewer is exactly the ceiling, and writes — inside the budget, by construction.
+        byte[] full = ZombieNetMessages.WriteZombieKilled(
+            0, new ushort[ZombieNetMessages.MaxKilledPerDatagram]);
+        Assert.Equal(ZombieNetMessages.MaxKilledPerDatagram,
+            ZombieNetMessages.ReadZombieKilled(full).Ids.Count);
+        Assert.True(full.Length <= NetChunks.MaxPayloadBytes);
+    }
+
+    // A whole region dying at once is legal — a blast, a despawn sweep — and has to reach the client.
+    // The chunked form is what makes that a handful of unfragmented datagrams instead of one the
+    // network layer splits and the first lost fragment destroys.
+    [Fact]
+    public void TheChunkedFormCarriesAWholeRegionWithoutFragmenting()
+    {
+        var kills = new List<(ushort, Vector3)>();
+        for (int i = 0; i < byte.MaxValue; i++)
+            kills.Add(((ushort)i, Vector3.Zero));
+
+        List<byte[]> chunks = ZombieNetMessages.WriteZombieKilledChunks(4, kills);
+
+        var seen = new List<ushort>();
+        foreach (byte[] chunk in chunks)
+        {
+            Assert.True(chunk.Length <= NetChunks.MaxPayloadBytes);
+            (byte bound, List<ushort> ids, List<Vector3> _) = ZombieNetMessages.ReadZombieKilled(chunk);
+            Assert.Equal(4, bound); // every chunk still names its own region
+            seen.AddRange(ids);
+        }
+
+        Assert.Equal(byte.MaxValue, seen.Count);
+        for (int i = 0; i < byte.MaxValue; i++)
+            Assert.Equal((ushort)i, seen[i]); // and in order, with nothing dropped between chunks
     }
 }

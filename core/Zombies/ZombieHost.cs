@@ -44,6 +44,11 @@ public sealed class ZombieHost
         // stun at all. Wiring it to the host that already owns the zombie wire is what makes that
         // impossible to forget.
         system.Stunned += ReportStunned;
+        // The nav bounds are the only division of the map either side has, and this host already
+        // computes one per player per tick for its own replication. Handing the same function to the
+        // server lets the PLAYER snapshot stream be filtered by region too — it was the last broadcast
+        // still going to every connection regardless of distance. See NetServer.RegionOf.
+        server.RegionOf = system.BoundOf;
         server.OnTick += Tick;
         // A (re)admitted player starts from scratch: the self-healing rejoin implies the client lost
         // state (and dropped its avatars), so clearing our tracking makes the next tick resend the
@@ -146,13 +151,14 @@ public sealed class ZombieHost
             List<ZombieSnapshotState> states = _awakeByBound[bound];
             if (states.Count == 0)
                 continue;
-            byte[]? payload = null;
+            List<byte[]>? payload = null;
             foreach ((byte player, ITransportConnection connection) in _connections)
             {
                 if (_playerBounds[player] != bound)
                     continue;
-                payload ??= ZombieNetMessages.WriteZombieStates(tick, states);
-                connection.Send(payload, ESendType.Unreliable);
+                payload ??= ZombieNetMessages.WriteZombieStateChunks(tick, states);
+                foreach (byte[] chunk in payload)
+                    connection.Send(chunk, ESendType.Unreliable);
             }
         }
     }
@@ -168,13 +174,14 @@ public sealed class ZombieHost
         {
             if (kills.Count == 0)
                 continue;
-            byte[]? payload = null;
+            List<byte[]>? payload = null;
             foreach ((byte player, ITransportConnection connection) in _connections)
             {
                 if (_playerBounds.GetValueOrDefault(player, LevelNavigationData.NoBound) != bound)
                     continue;
-                payload ??= ZombieNetMessages.WriteZombieKilled(bound, kills);
-                connection.Send(payload, ESendType.Reliable);
+                payload ??= ZombieNetMessages.WriteZombieKilledChunks(bound, kills);
+                foreach (byte[] chunk in payload)
+                    connection.Send(chunk, ESendType.Reliable);
             }
             kills.Clear();
         }
@@ -190,13 +197,14 @@ public sealed class ZombieHost
         {
             if (stuns.Count == 0)
                 continue;
-            byte[]? payload = null;
+            List<byte[]>? payload = null;
             foreach ((byte player, ITransportConnection connection) in _connections)
             {
                 if (_playerBounds.GetValueOrDefault(player, LevelNavigationData.NoBound) != bound)
                     continue;
-                payload ??= ZombieNetMessages.WriteZombieStunned(bound, stuns);
-                connection.Send(payload, ESendType.Reliable);
+                payload ??= ZombieNetMessages.WriteZombieStunnedChunks(bound, stuns);
+                foreach (byte[] chunk in payload)
+                    connection.Send(chunk, ESendType.Reliable);
             }
             stuns.Clear();
         }
