@@ -197,6 +197,52 @@ public class BundleTexturesTests
         Assert.NotEmpty(extracted["assets/test/big.png"].Pixels);
     }
 
+    // A stream node that sits in a subfolder of the bundle. A texture names its stream by the path Unity
+    // wrote — "archive:/CAB-x/sub/CAB-x.resS" — while the bundle's node table keys it by its own path, so
+    // the two only meet on the last segment. Both readers have to match on that, and a bundle laid out
+    // this way is the case where matching on the whole string silently finds nothing.
+    [Fact]
+    public void AStreamNodeInASubfolderIsStillMatched()
+    {
+        var builder = new AssetFileBuilder { StreamName = "sub/CAB-test.resS" };
+        builder.AddStreamedTexture("assets/test/big.png", "big", 16, 16, Pixels(37, 256));
+        using var dir = new TempDir();
+        string bundle = dir.Write("test.masterbundle", builder.BuildBundle());
+
+        Assert.NotEmpty(BundleTextures.ExtractStreamed(bundle, new[] { "assets/test/big.png" })
+            ["assets/test/big.png"].Pixels);
+    }
+
+    [Fact]
+    public void TheWholeBlobReaderAlsoMatchesAStreamNodeInASubfolder()
+    {
+        var builder = new AssetFileBuilder { StreamName = "sub/CAB-test.resS" };
+        builder.AddStreamedTexture("assets/test/big.png", "big", 16, 16, Pixels(41, 256));
+        using var dir = new TempDir();
+        string bundle = dir.Write("plain.masterbundle", builder.BuildBundle(singleLzmaBlock: false));
+
+        Assert.NotEmpty(BundleTextures.ExtractAll(bundle, new[] { "assets/test/big.png" })
+            ["assets/test/big.png"].Pixels);
+    }
+
+    // ...and a texture whose stream node the bundle simply does not carry resolves to nothing rather than
+    // to whichever node happened to be there.
+    [Fact]
+    public void ATextureNamingAStreamNodeTheBundleLacksIsDropped()
+    {
+        var builder = new AssetFileBuilder();
+        builder.AddStreamedTexture("assets/test/big.png", "big", 16, 16, Pixels(43, 256));
+        using var dir = new TempDir();
+        // Built without the stream entry: the SerializedFile still names it, so the texture is located
+        // and then found to have no bytes anywhere.
+        var fs = new UnityFsBuilder();
+        fs.Add("CAB-test", builder.BuildSerializedFile());
+        fs.Add("CAB-other.resource", new byte[] { 1, 2, 3, 4 });
+        string bundle = dir.Write("plain.masterbundle", fs.Build());
+
+        Assert.Empty(BundleTextures.ExtractAll(bundle, new[] { "assets/test/big.png" }));
+    }
+
     // Asking for nothing costs nothing: neither reader may open the file at all, which is what lets a
     // caller plan unconditionally and pass an empty set when the cache is already complete.
     [Fact]
