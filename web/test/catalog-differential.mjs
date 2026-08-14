@@ -146,6 +146,28 @@ const CONFIG = [
         label: "surrogate-with-ground",
         files: { "Config.json": '{"Category":"\\ud800","Use_Legacy_Ground":false}' },
     },
+    // Capitalisation. The game deserializes this file with Newtonsoft, which resolves a property name
+    // ordinally first and OrdinalIgnoreCase after — so every spelling below loads in Unturned exactly as
+    // the canonical one does, and a case-sensitive reader would call each of these maps legacy and mark
+    // it unsupported.
+    { label: "ground-lower", files: { "Config.json": '{"use_legacy_ground":false}' } },
+    { label: "ground-upper", files: { "Config.json": '{"USE_LEGACY_GROUND":false}' } },
+    { label: "ground-mixed", files: { "Config.json": '{"uSe_LeGaCy_GrOuNd":false}' } },
+    { label: "category-lower", files: { "Config.json": '{"category":"Curated","use_legacy_ground":false}' } },
+    // The key matches and the VALUE is still one the reader refuses: a varied casing does not smuggle
+    // JavaScript truthiness past the true/false-literals rule, so the default stands on both sides.
+    { label: "ground-lower-string", files: { "Config.json": '{"use_legacy_ground":"false"}' } },
+    // One field, twice, in two casings. Newtonsoft assigns the member once per property it reads, so the
+    // LAST occurrence is what the map ends up with — whichever way round they are written.
+    {
+        label: "ground-twice-cased",
+        files: { "Config.json": '{"Use_Legacy_Ground":true,"use_legacy_ground":false}' },
+    },
+    {
+        label: "ground-twice-cased-reversed",
+        files: { "Config.json": '{"use_legacy_ground":false,"USE_LEGACY_GROUND":true}' },
+    },
+    { label: "category-twice-cased", files: { "Config.json": '{"Category":"First","CATEGORY":"Second"}' } },
 ];
 
 // What the scripted collisions below are written against.

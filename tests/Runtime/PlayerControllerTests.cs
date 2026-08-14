@@ -418,6 +418,149 @@ public class PlayerControllerTests : TestClass
             "the click never reached the server as a swing");
     }
 
+    // A swing thrown inside a safezone that forbids weapons never happens. PlayerEquipment has had the
+    // gate since the safezone volumes were parsed, and nothing reached it: the controller built its
+    // HandState out of the stance alone, so `isSafe` was false everywhere and the fist swung in every
+    // town on the map.
+    //
+    // Observed on the WIRE, like the menu case above: without a session there is nothing that tells a
+    // click correctly refused from one latched and thrown.
+    [Test]
+    public async Task NoPunchInsideASafezoneThatForbidsWeapons() =>
+        Assert.Equal(0, await SwingsInSafezone(noWeapons: true));
+
+    // And the same volume with weapons allowed is not a gate at all — the flag is the rule, not the
+    // zone. A controller that refused every safezone would be just as wrong.
+    [Test]
+    public async Task ASafezoneThatAllowsWeaponsDoesNotStopThePunch() =>
+        Assert.True(await SwingsInSafezone(noWeapons: false) > 0,
+            "a safezone that allows weapons swallowed the swing");
+
+    private async Task<int> SwingsInSafezone(bool noWeapons)
+    {
+        var nodes = new LevelNodeSet();
+        // Centred on the spawn, so the player is standing in it. The radius is the file's own 0..1
+        // slider and zero is already a 16-metre sphere, which is the ordinary safezone shape; isHeight
+        // would make it the paintball box instead.
+        nodes.Safezones.Add(new SafezoneNode(Vector3.Zero, 0f, isHeight: false, noWeapons,
+            noBuildables: false));
+
+        using var world = new PlayerWorld(TestScene, nodes: nodes);
+        await world.Land();
+        using var session = new Loopback();
+        world.Player.Net = session.Client;
+
+        for (int i = 0; i < 40 && !session.Client.Joined; i++)
+        {
+            session.Pump();
+            await world.Run(1);
+        }
+
+        Assert.True(session.Client.Joined, "the loopback session never admitted the player");
+
+        world.Click();
+        // Accumulated rather than read at the end: the server's gesture list is refilled by every step,
+        // so it holds the swings of THAT tick alone and is empty again on the next one.
+        int swings = 0;
+        for (int i = 0; i < 60; i++)
+        {
+            session.Pump();
+            swings += session.Swings;
+            await world.Run(1);
+        }
+
+        return swings;
+    }
+
+    // The map's own Max_Walkable_Slope reaches the body that has to obey it. Every consumer used to read
+    // the 59-degree constant, so a map asking for anything else was ignored — and this is the seam the
+    // resolved value arrives through.
+    [Test]
+    public async Task TheMapsWalkableSlopeReachesTheBody()
+    {
+        using var world = new PlayerWorld(TestScene, maxWalkableSlopeDegrees: 40f);
+        await world.Settle();
+
+        Assert.Equal(Mathf.DegToRad(40f), world.Player.FloorMaxAngle, 4);
+    }
+
+    // A controller told nothing about the map keeps the game's own default, which is what a map that
+    // leaves Max_Walkable_Slope at its -1 sentinel resolves to.
+    [Test]
+    public async Task WithNoMapConfigTheDefaultSlopeStands()
+    {
+        using var world = new PlayerWorld(TestScene);
+        await world.Settle();
+
+        Assert.Equal(Mathf.DegToRad(PlayerConfig.MaxWalkableSlopeDegrees),
+            world.Player.FloorMaxAngle, 4);
+        Assert.Equal(PlayerConfig.MaxWalkableSlopeDegrees,
+            PlayerConfig.ResolveMaxWalkableSlope(LevelConfigData.Default.MaxWalkableSlope));
+    }
+
+    // --- ice ------------------------------------------------------------------------------------------
+    //
+    // The one shipped surface that declares Character_Friction_Mode Custom. Half the deceleration and
+    // 1.2x the max speed, resolved here as a constant rather than off the install: what is being tested
+    // is that the CONTROLLER consults the surface at all, not that Ice.asset says what it says (which
+    // tests/Player/GroundFrictionTests.cs asserts against the real file).
+    private static readonly UnturnedGodot.Assets.CharacterFrictionProperties Ice =
+        new(UnturnedGodot.Assets.EPhysicsMaterialCharacterFrictionMode.Custom, 1f, 0.5f, 1.2f);
+
+    // Ice ramps up instead of snapping to walking speed, so the first quarter-second of a walk covers
+    // less ground than it does on concrete.
+    [Test]
+    public async Task IceAcceleratesRatherThanSnappingToSpeed()
+    {
+        float onConcrete = await WalkedIn(15, friction: null);
+        float onIce = await WalkedIn(15, friction: _ => Ice);
+
+        Assert.True(onIce < onConcrete * 0.75f,
+            $"ice covered {onIce} m against concrete's {onConcrete} m, which is not a ramp");
+    }
+
+    // ...and it keeps the velocity after the key comes up, which is the whole of what sliding IS. The
+    // grounded body is otherwise allowed to skip collision integration entirely on an idle tick — true
+    // of every surface that responds immediately, and the one thing that would freeze a slide dead.
+    [Test]
+    public async Task IceKeepsSlidingAfterTheKeyComesUp()
+    {
+        using var world = new PlayerWorld(TestScene, friction: _ => Ice);
+        await world.Land();
+
+        world.Hold(PlayerSettings.Default.Forward);
+        await world.Run(60);
+        world.Release(PlayerSettings.Default.Forward);
+        await world.Run(2); // the release has to be seen before the distance is measured
+
+        Vector3 released = world.Player.Position;
+        await world.Run(20);
+
+        Assert.True(world.Player.Position.DistanceTo(released) > 0.5f,
+            $"the slide stopped dead at the key: {released} -> {world.Player.Position}");
+        // And it does stop, rather than sliding for ever: the deceleration is floored at the desired
+        // speed, so the velocity reaches exactly zero.
+        await world.Run(400);
+        Vector3 rested = world.Player.Position;
+        await world.Run(20);
+        Assert.True(world.Player.Position.DistanceTo(rested) < 0.01f,
+            $"the slide never came to rest: {rested} -> {world.Player.Position}");
+    }
+
+    private async Task<float> WalkedIn(int frames,
+        Func<Vector3, UnturnedGodot.Assets.CharacterFrictionProperties>? friction)
+    {
+        using var world = new PlayerWorld(TestScene, friction: friction);
+        await world.Land();
+        Vector3 start = world.Player.Position;
+
+        world.Hold(PlayerSettings.Default.Forward);
+        await world.Run(frames);
+        world.Release(PlayerSettings.Default.Forward);
+
+        return world.Player.Position.DistanceTo(start);
+    }
+
     // --- helpers -------------------------------------------------------------------------------------
 
     private static InputEventMouseMotion Motion(Vector2 relative) => new() { Relative = relative };
@@ -485,7 +628,9 @@ public class PlayerControllerTests : TestClass
         public PlayerController Player { get; }
 
         public PlayerWorld(Node testScene, Vector3? spawn = null, bool thirdPerson = false,
-            EPlayerStance stance = EPlayerStance.Stand)
+            EPlayerStance stance = EPlayerStance.Stand, LevelNodeSet? nodes = null,
+            float? maxWalkableSlopeDegrees = null,
+            Func<Vector3, UnturnedGodot.Assets.CharacterFrictionProperties>? friction = null)
         {
             _testScene = testScene;
             _sandbox = new PhysicsSandbox(testScene);
@@ -495,6 +640,11 @@ public class PlayerControllerTests : TestClass
             Player = new PlayerController
             {
                 Name = "Player",
+                // The map's own data, which a session reads off the level and a test states outright:
+                // the safezone volumes the hands obey, and the slope limit the body stands by.
+                Nodes = nodes,
+                MaxWalkableSlopeDegrees = maxWalkableSlopeDegrees ?? PlayerConfig.MaxWalkableSlopeDegrees,
+                SurfaceFriction = friction,
                 // Half a metre up rather than exactly on the floor, and it matters. A body placed at the
                 // surface never integrates — an idle grounded player deliberately skips collision — so it
                 // stays EXACTLY on it, and the standing-headroom query, whose capsule starts at the

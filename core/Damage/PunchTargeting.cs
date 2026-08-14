@@ -68,8 +68,11 @@ public static class PunchTargeting
             if (blocked != null && blocked(origin, point))
                 continue;
             nearest = distance;
+            // The surface is the ZOMBIE's, not a constant: a radioactive one answers Alien_Dynamic
+            // whatever its colliders say, and that is what picks the impact effect and the decal the
+            // swing leaves. See SurfaceFor.
             hit = new PunchHit(EPunchTargetKind.Zombie, zombie.Id, limb, point, distance, normal,
-                ZombieSurface);
+                SurfaceFor(zombie.Speciality));
         }
         return hit.Exists;
     }
@@ -79,8 +82,9 @@ public static class PunchTargeting
     // the bone collider, which on every zombie prefab is Flesh.
     //
     // The original has a second case: a RADIOACTIVE zombie answers "Alien_Dynamic" whatever its colliders
-    // say (Zombie.cs:255, `isRadioactive ? AlienDynamicRef : FleshDynamicRef`). EZombieSpeciality now
-    // carries the kinds that are radioactive, so SurfaceFor is that branch rather than a note about it.
+    // say (Zombie.cs:255, `isRadioactive ? AlienDynamicRef : FleshDynamicRef`). EZombieSpeciality carries
+    // the kinds that are radioactive, so SurfaceFor is that branch rather than a note about it — and the
+    // raycast above asks it per zombie, which is the only place a hit learns what it landed on.
     public const string ZombieSurface = "Flesh";
     public const string RadioactiveZombieSurface = "Alien_Dynamic";
 

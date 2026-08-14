@@ -65,6 +65,40 @@ public static class GroundFriction
         return ClampMagnitude(currentAlongFloor + (acceleration * deltaTime), maxSpeed);
     }
 
+    // What the port pushes a grounded body down by on an instant surface instead of the game's own
+    // floor snap.
+    //
+    // PlayerMovement follows its CharacterController.Move with a SphereCast that lowers the body onto
+    // whatever it is standing over (PlayerMovement.cs:1370-1400). Godot's MoveAndSlide has floor
+    // snapping of its own and no such cast, so the port keeps the small downward push it has always
+    // had: it is what holds the capsule against the floor across a step edge, and it replaces a Y the
+    // instant branch would otherwise have set to the ramp's own downhill glide.
+    //
+    // The CUSTOM branch does NOT get it — see GroundedStep.
+    public const float FloorStickSpeed = -2f;
+
+    // The whole grounded velocity step as a caller applies it: the branch above, what happens to Y, and
+    // the jump that overrides it (PlayerMovement.cs:1308-1315 — `if (inputJump) { ... velocity.y = JUMP
+    // ... }`, immediately after the friction block and before pendingLaunchVelocity is added).
+    //
+    // The Y is the whole reason this exists rather than the caller assembling it. On a custom-friction
+    // surface Apply returns a velocity in the FLOOR's plane, Y included and deliberately unclamped —
+    // "note we do not clamp Y component here so that we can slide off jumps" — so a body sliding down an
+    // icy slope follows it, and one sliding up a ramp carries that velocity off the top. Copying X and Z
+    // out and overwriting Y with the floor stick threw exactly that away, leaving ice on sloped geometry
+    // behaving like ice on a flat plane. The instant branch keeps the stick, because there the game's own
+    // Y is a downhill glide the port's floor snapping already covers.
+    public static Vector3 GroundedStep(Vector3 velocity, Vector3 desiredWalkVelocity, Vector3 groundNormal,
+        float speed, CharacterFrictionProperties friction, float deltaTime, bool jump)
+    {
+        Vector3 result = Apply(velocity, desiredWalkVelocity, groundNormal, speed, friction, deltaTime);
+        if (IsInstant(friction))
+            result.Y = FloorStickSpeed;
+        if (jump)
+            result.Y = PlayerConfig.JumpSpeed;
+        return result;
+    }
+
     // Whether a surface needs the ramp at all, so a caller can keep its existing instant path untouched
     // for the overwhelming majority of surfaces that do not.
     public static bool IsInstant(CharacterFrictionProperties friction) =>

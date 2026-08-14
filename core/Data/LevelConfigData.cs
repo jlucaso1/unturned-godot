@@ -69,7 +69,9 @@ public sealed class LevelConfigData
     public float BlimpAltitude { get; init; } = 150f;
 
     // -1 is the constructor default and the sentinel LevelInfo turns into 59 degrees; kept raw here so
-    // the resolved value stays one rule in PlayerConfig rather than two copies of the sentinel.
+    // the resolved value stays one rule in PlayerConfig rather than two copies of the sentinel. That
+    // rule is Player.PlayerConfig.ResolveMaxWalkableSlope, and it is what every consumer of this number
+    // goes through — the number itself is only what the file said.
     public float MaxWalkableSlope { get; init; } = -1f;
 
     public float PreventBuildingNearSpawnpointRadius { get; init; } = 16f;
@@ -156,15 +158,46 @@ public sealed class LevelConfigData
     // accepted too because that is the other spelling the game's converter takes.
     private static Guid ReadAssetGuid(JsonElement root)
     {
-        if (!root.TryGetProperty("Asset", out JsonElement asset))
+        if (!Property(root, "Asset", out JsonElement asset))
             return Guid.Empty;
         JsonElement value = asset;
         if (asset.ValueKind == JsonValueKind.Object)
         {
-            if (!asset.TryGetProperty("GUID", out value))
+            if (!Property(asset, "GUID", out value))
                 return Guid.Empty;
         }
         return Guid.TryParse(Text(value), out Guid guid) ? guid : Guid.Empty;
+    }
+
+    // One property of the config object, matched the way Newtonsoft matches one.
+    //
+    // The game hands Config.json to JsonConvert.DeserializeObject<LevelInfoConfigData> (Level.cs:944),
+    // and Newtonsoft resolves each JSON property against the class through
+    // JsonPropertyCollection.GetClosestMatchProperty: an ORDINAL match first, and an
+    // OrdinalIgnoreCase one when that finds nothing. So a workshop config spelling
+    // `use_legacy_ground`, or `Max_Walkable_Slope` as `MAX_WALKABLE_SLOPE`, loads in Unturned exactly
+    // as the canonical spelling does. JsonElement.TryGetProperty is case-sensitive and read those as
+    // absent — which for Use_Legacy_Ground meant falling back to true and marking a perfectly loadable
+    // Landscape map unsupported.
+    //
+    // The LAST match wins, whatever its case, because Newtonsoft assigns the member once per JSON
+    // property it reads: a document naming the same field twice ends up holding the second value. That
+    // also settles duplicates of one spelling, where TryGetProperty returned the first.
+    //
+    // Deliberately not TryGetProperty for the exact spelling first: that would return the earlier of a
+    // pair like {"X": 1, "x": 2} and the game keeps 2.
+    private static bool Property(JsonElement element, string key, out JsonElement value)
+    {
+        value = default;
+        bool found = false;
+        foreach (JsonProperty property in element.EnumerateObject())
+        {
+            if (!string.Equals(property.Name, key, StringComparison.OrdinalIgnoreCase))
+                continue;
+            value = property.Value;
+            found = true;
+        }
+        return found;
     }
 
     // A string value, or null when it is not a string or cannot be decoded.
@@ -193,7 +226,7 @@ public sealed class LevelConfigData
     }
 
     private static bool Bool(JsonElement root, string key, bool fallback) =>
-        root.TryGetProperty(key, out JsonElement value)
+        Property(root, key, out JsonElement value)
             ? value.ValueKind switch
             {
                 JsonValueKind.True => true,
@@ -203,14 +236,14 @@ public sealed class LevelConfigData
             : fallback;
 
     private static int Int(JsonElement root, string key, int fallback) =>
-        root.TryGetProperty(key, out JsonElement value)
+        Property(root, key, out JsonElement value)
         && value.ValueKind == JsonValueKind.Number
         && value.TryGetInt32(out int parsed)
             ? parsed
             : fallback;
 
     private static float Float(JsonElement root, string key, float fallback) =>
-        root.TryGetProperty(key, out JsonElement value)
+        Property(root, key, out JsonElement value)
         && value.ValueKind == JsonValueKind.Number
         && value.TryGetSingle(out float parsed)
             ? parsed
@@ -225,12 +258,12 @@ public sealed class LevelConfigData
     // a perfectly good Use_Legacy_Ground, and failing the config wholesale would silently demote it to
     // legacy terrain — i.e. mark a loadable map unsupported over a bad character in an unrelated field.
     private static string? String(JsonElement root, string key) =>
-        root.TryGetProperty(key, out JsonElement value) ? Text(value) : null;
+        Property(root, key, out JsonElement value) ? Text(value) : null;
 
     // Newtonsoft's StringEnumConverter is case-insensitive and also accepts the numeric value.
     private static ELevelWeatherOverride Weather(JsonElement root)
     {
-        if (!root.TryGetProperty("Weather_Override", out JsonElement value))
+        if (!Property(root, "Weather_Override", out JsonElement value))
             return ELevelWeatherOverride.None;
         if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out int numeric))
             return Enum.IsDefined(typeof(ELevelWeatherOverride), numeric)

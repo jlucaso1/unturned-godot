@@ -193,18 +193,41 @@ async function readConfig(fs, mapPath) {
     };
 }
 
+// One property of the config object, matched the way Newtonsoft matches one — LevelConfigData.Property,
+// and the reasoning is written out there. The short version: the game deserializes Config.json with
+// Newtonsoft, which resolves each JSON property ordinally first and then OrdinalIgnoreCase, so
+// `use_legacy_ground` loads exactly as `Use_Legacy_Ground` does. The LAST match wins, whatever its case,
+// because Newtonsoft assigns the member once per property it reads.
+//
+// Folded with the same invariant upcase the folder-name slots use rather than toLowerCase, for the same
+// reason: that is the fold .NET's OrdinalIgnoreCase performs, and the two disagree.
+//
+// One shape this cannot express: a config repeating ONE spelling and also carrying another casing of it.
+// JSON.parse collapses the duplicate onto the first occurrence's position, so the order the two casings
+// were written in is already lost by the time this runs. The desktop, reading the document itself, takes
+// the later. Nothing in the corpus depends on it because nothing could make the two agree.
+function property(root, key) {
+    const wanted = ordinalIgnoreCaseKey(key);
+    let found;
+    for (const name of Object.keys(root)) {
+        if (ordinalIgnoreCaseKey(name) === wanted) found = root[name];
+    }
+    return found;
+}
+
 function readBool(root, key, fallback) {
-    const value = root[key];
+    const value = property(root, key);
     return typeof value === "boolean" ? value : fallback;
 }
 
 function readCategory(root) {
-    if (typeof root.Category !== "string") return null;
+    const category = property(root, "Category");
+    if (typeof category !== "string") return null;
     // JsonElement.GetString() refuses a value holding an unpaired surrogate — `\uD800` with no low
     // half — where JSON.parse hands it back happily. The desktop therefore has no category for such
     // a config, so neither does this. LevelConfigData catches that per STRING, so it costs the
     // category and nothing else — Use_Legacy_Ground above still reads.
-    return hasUnpairedSurrogate(root.Category) ? null : root.Category;
+    return hasUnpairedSurrogate(category) ? null : category;
 }
 
 // A string that cannot be encoded as UTF-8, because a surrogate is missing its partner.

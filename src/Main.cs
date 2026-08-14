@@ -360,7 +360,11 @@ public partial class Main : Node3D
         {
             CollisionLayer = CollisionLayers.Player,
             CollisionMask = CollisionLayers.CharacterMask,
-            FloorMaxAngle = Mathf.DegToRad(Player.PlayerConfig.MaxWalkableSlopeDegrees),
+            // The map's own slope limit, like the real controller: a probe answering "can the player get
+            // over that sill" on a body that slides at a different angle than the player does is
+            // answering about a different body.
+            FloorMaxAngle = Mathf.DegToRad(Player.PlayerConfig.ResolveMaxWalkableSlope(
+                new LevelInfo(MapCatalog.ResolvePath(_unturnedPath, _mapName)).Config.MaxWalkableSlope)),
             FloorSnapLength = 0.5f,
             FloorStopOnSlope = true,
             Position = start,
@@ -890,6 +894,19 @@ public partial class Main : Node3D
         // Set after that call, which is what builds it: the friction reads the same material tables the
         // footsteps do, so ice both sounds like ice and is slipped on.
         player.SurfaceFriction = _surfaceFriction;
+        // What the MAP says about standing and swinging, both read from the map's own files rather than
+        // assumed: its safezones, which are what stop a fist swinging inside one (PlayerEquipment's
+        // noWeapons gate), and Max_Walkable_Slope, which is the steepest floor a body may stand on.
+        //
+        // Nodes.dat is read a second time here — NodesBuilder already read it for the place labels — and
+        // that is the cheaper of the two options: the file is a few kilobytes, the label pass is a
+        // subsystem that may be skipped or fail, and the player must not depend on whether it ran.
+        //
+        // Both are set BEFORE the controller joins the tree: it reads the slope in _Ready.
+        player.Nodes = LevelNodes.Load(
+            System.IO.Path.Combine(EnvironmentDir(unturnedPath, _mapName), "Nodes.dat"));
+        player.MaxWalkableSlopeDegrees = PlayerConfig.ResolveMaxWalkableSlope(
+            new LevelInfo(MapCatalog.ResolvePath(unturnedPath, _mapName)).Config.MaxWalkableSlope);
         AddChild(player);
 
         // The crosshair, and the local raycast behind its hit marks. Both come from BuildMovementAudio's

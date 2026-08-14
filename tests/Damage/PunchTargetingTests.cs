@@ -215,6 +215,46 @@ public class PunchTargetingTests
         Assert.True(PunchTargeting.IsWithinServerRange(Eyes, hit.Point));
     }
 
+    // The surface a zombie hit reports, which is what picks the impact effect and the decal. Read off
+    // the zombie's own speciality rather than fixed at Flesh: "isRadioactive ? AlienDynamicRef :
+    // FleshDynamicRef" (Zombie.cs:255). An ACID zombie is the case that actually occurs on PEI, and it
+    // spent this whole port cracking like meat.
+    [Theory]
+    [InlineData(EZombieSpeciality.Normal, PunchTargeting.ZombieSurface)]
+    [InlineData(EZombieSpeciality.Crawler, PunchTargeting.ZombieSurface)]
+    [InlineData(EZombieSpeciality.Acid, PunchTargeting.RadioactiveZombieSurface)]
+    [InlineData(EZombieSpeciality.BossNuclear, PunchTargeting.RadioactiveZombieSurface)]
+    [InlineData(EZombieSpeciality.BossAll, PunchTargeting.RadioactiveZombieSurface)]
+    [InlineData(EZombieSpeciality.BossBuakFinal, PunchTargeting.RadioactiveZombieSurface)]
+    public void AZombieHitReportsItsOwnSurface(EZombieSpeciality speciality, string expected)
+    {
+        ZombieInstance zombie = Zombie(7, new Vector3(0, 0, -1.5f));
+        zombie.Speciality = speciality;
+        var zombies = new List<ZombieInstance> { zombie };
+
+        // Both entry points: the bare cast, and the whole resolve a swing goes through.
+        Assert.True(PunchTargeting.RaycastZombies(zombies, Eyes, Forward, PunchDamageData.Reach,
+            out PunchHit direct));
+        Assert.Equal(expected, direct.Surface);
+        Assert.Equal(expected,
+            PunchTargeting.Resolve(Eyes, Forward, PunchDamageData.Reach, zombies).Surface);
+    }
+
+    // ...including when the ray met a wall first and the zombie is what actually stopped it: the surface
+    // has to follow the thing struck rather than the last one the world reported.
+    [Fact]
+    public void ARadioactiveZombieInFrontOfAWallStillReportsAlien()
+    {
+        ZombieInstance zombie = Zombie(7, new Vector3(0, 0, -0.6f));
+        zombie.Speciality = EZombieSpeciality.Acid;
+
+        PunchHit hit = PunchTargeting.Resolve(Eyes, Forward, PunchDamageData.Reach,
+            new List<ZombieInstance> { zombie }, world: null, WallAt(1.5f, default, "Concrete_Static"));
+
+        Assert.Equal(EPunchTargetKind.Zombie, hit.Kind);
+        Assert.Equal(PunchTargeting.RadioactiveZombieSurface, hit.Surface);
+    }
+
     [Fact]
     public void NoneIsNotAHit()
     {
