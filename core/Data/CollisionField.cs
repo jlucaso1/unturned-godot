@@ -160,6 +160,17 @@ public sealed class CollisionField
             if (tile.MaxY < bottomY || tile.MinY > topY)
                 continue;
             SampleHeightfield(in tile, x, z, out float y, out float diagonal);
+            // A no-collision sample — TerrainHoleCollision marks the corners of a terrain hole with NaN —
+            // makes the cell around it something this code cannot answer for. Part of that cell is
+            // genuinely gone and part is carried by the repair patch beside the heightfield, and which is
+            // which depends on a triangulation the engine owns, so the column goes to the server rather
+            // than being guessed at. Without this the NaN would fall through every comparison below as
+            // false and the probe would report a hit at no height at all.
+            if (float.IsNaN(y))
+            {
+                state.Doubt = true;
+                continue;
+            }
             if (y < bottomY || y > topY)
             {
                 // Out of range settles only the height that was sampled, and on a twisted cell that is
