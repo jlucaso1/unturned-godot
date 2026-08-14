@@ -90,11 +90,18 @@ public static class RoadsBuilder
 
             if (!byMaterial.TryGetValue(key, out (Material material, float inverseRepeat) shared))
             {
-                // NOT YET CONSUMED: the asset's own TexturePath. An asset road takes its geometry and
-                // its tiling from the asset, and its IMAGE from the legacy Roads.unity3d entry that the
-                // `mat` index names — so a migrated map comes out the right shape with, potentially, the
-                // wrong surface on it. Said plainly here because the rest of this function now does read
-                // the asset, and a reader could reasonably assume that includes the texture.
+                // NOT YET CONSUMED: the asset's own TexturePath. An asset road takes its geometry from
+                // the asset, and its IMAGE from the legacy Roads.unity3d entry that the `mat` index
+                // names — so a migrated map comes out the right shape with, potentially, the wrong
+                // surface on it. Said plainly here because the rest of this function now does read the
+                // asset, and a reader could reasonably assume that includes the texture.
+                //
+                // Tiling follows the image rather than the asset alone, which is a third answer and not
+                // a detail of the second: the repeat below is the asset's only when SharedMaterial binds
+                // a legacy texture. Where it cannot — no entry for `mat`, or an entry that failed to
+                // decode — it hands back the procedural shader, TexturedSize has no aspect to report,
+                // and the road falls to FallbackRepeat. That road is then neither the asset's tiling nor
+                // the legacy table's; it is the shader's own, and no authored number reaches it.
                 //
                 // The gap is a different subsystem rather than a missing line. RoadAsset names its
                 // texture as a path inside the core masterbundle ("Roads/PEI_Trail.png"), not as a file
@@ -112,6 +119,11 @@ public static class RoadsBuilder
                     // legacy table's height divisor. Applied to whatever texture is actually bound, so
                     // the UVs match the image on the surface — which is what keeps this right while the
                     // image is still the legacy one.
+                    //
+                    // The else is the untextured road, and FallbackRepeat rather than the asset's
+                    // distance is deliberate: InverseTextureRepeatDistance is defined against an image's
+                    // aspect ratio, and there is no image. Feeding it a guessed aspect would put an
+                    // authored-looking number on a surface the author never saw.
                     shared.inverseRepeat = TexturedSize(shared.material) is var (w, h) && w > 0
                         ? asset.InverseTextureRepeatDistance(w, h)
                         : 1f / FallbackRepeat;
