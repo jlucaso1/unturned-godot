@@ -1329,6 +1329,67 @@ public class PhysicsBodyOrderTests
         Assert.Contains("TerrainLayerCache.Read(guid, bundlePath)", File.ReadAllText(layersPath));
     }
 
+    // Two phases, and the split is the whole point: TerrainLayers.Load is pure parsing and file IO, so
+    // the interactive terrain build runs it on the thread pool, and Realise is the half that turns the
+    // pixels into ImageTextures — a RenderingServer operation, main thread only, exactly as
+    // ModelLibrary.Realise, TerrainBuilder.FinishTile and TextureRegistry.Apply all are.
+    //
+    // Load used to build them itself, so a normal interactive load created eight to thirty ImageTextures
+    // on a worker while the main thread was tweening the loading screen and finishing later tiles.
+    [Fact]
+    public void TerrainLayerTexturesAreBuiltOnTheMainThreadAndNotInsideTheWorkerResolve()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "World", "TerrainLayers.cs")) is not { } layersPath
+            || FindRepositoryFile(Path.Combine("src", "World", "WorldBuilder.cs")) is not { } builderPath)
+            return;
+
+        string layers = File.ReadAllText(layersPath).Replace("\r\n", "\n");
+        string builder = File.ReadAllText(builderPath).Replace("\r\n", "\n");
+
+        // Every GPU resource this file creates is inside Realise, which is declared before Load.
+        int realise = layers.IndexOf("public int Realise()", StringComparison.Ordinal);
+        int load = layers.IndexOf("public static TerrainLayers Load(", StringComparison.Ordinal);
+        Assert.True(realise >= 0 && load > realise);
+        foreach (string creation in new[] { "ModelLibrary.BuildTexture(", "ImageTexture.CreateFromImage(" })
+            foreach (int at in Occurrences(layers, creation))
+                Assert.True(at < load,
+                    $"{creation} appears at {at}, past the start of the worker-side Load at {load}");
+
+        // And the build realises it back on the main thread, after the Task.Run that resolved it.
+        int offloaded = builder.IndexOf("await System.Threading.Tasks.Task.Run(() => LoadLayers(",
+            StringComparison.Ordinal);
+        int realised = builder.IndexOf("layers.Realise()", StringComparison.Ordinal);
+        Assert.True(offloaded >= 0 && realised > offloaded);
+    }
+
+    // One implementation, not two twins held equal by a comment. The pair used to differ only in a
+    // Task.Run wrapper and an 8 ms yield budget while claiming "semantics match the sync variant
+    // exactly" — and the claim had already rotted, which is how the layer resolve above ended up
+    // creating GPU resources on a worker in one of them and on the main thread in the other.
+    [Fact]
+    public void TheTwoTerrainBuildEntryPointsShareOneImplementation()
+    {
+        if (FindRepositoryFile(Path.Combine("src", "World", "WorldBuilder.cs")) is not { } path)
+            return;
+
+        string source = File.ReadAllText(path).Replace("\r\n", "\n");
+        Assert.Contains("Func<System.Threading.Tasks.Task>? yieldEvery", source);
+        // One Parallel.For over the tiles, one FinishTile loop, one HeightmapTile.Read.
+        Assert.Single(Occurrences(source, "TerrainBuilder.BuildTileMesh("));
+        Assert.Single(Occurrences(source, "TerrainBuilder.FinishTile("));
+        Assert.Single(Occurrences(source, "HeightmapTile.Read("));
+        Assert.DoesNotContain("Semantics match the sync variant exactly", source);
+    }
+
+    private static IEnumerable<int> Occurrences(string haystack, string needle)
+    {
+        for (int at = haystack.IndexOf(needle, StringComparison.Ordinal); at >= 0;
+             at = haystack.IndexOf(needle, at + needle.Length, StringComparison.Ordinal))
+        {
+            yield return at;
+        }
+    }
+
     [Fact]
     public void MeshesAreGroupedBeforeParallelPreparation()
     {
