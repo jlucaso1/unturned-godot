@@ -81,6 +81,15 @@ public sealed class ZombieInstance
     public float LeaveDelay;          // Zombie.leave: stand still this long, then walk to LeaveTo
     public Vector3 LeaveTo;
     public bool RepathGranted;        // this tick's path-query token (granted round-robin)
+
+    // The behaviour state ZombieHost last replicated for this body. It lives here rather than in a
+    // dictionary on the host because it is one byte with exactly this zombie's lifetime, and the host
+    // reads it once per zombie per tick over the WHOLE LEVEL's population — including the hundreds
+    // standing idle in regions no player is anywhere near. That was a hash lookup each, ~12,500 a
+    // second on a map like PEI, to learn a byte that was already sitting beside the state it is
+    // compared against. Replication state, so it is deliberately not part of a repro dump: a replay
+    // restores the simulation and the host resends the regions from scratch.
+    public EZombieState LastSentState;
     public readonly List<Vector3> PathPoints = new(); // the Seeker's current route over the navmesh
     public int CurrentWaypointIndex;  // LegacyAIPathNoRedist.currentWaypointIndex
     public bool TargetReached;        // LegacyAIPathNoRedist.targetReached
@@ -454,9 +463,16 @@ public sealed partial class ZombieSystem
         // so fixed simulation order cannot let one permanently blocked zombie starve the rest.
         _collisionDetourGranted = null;
         float oldestBlocked = BlockedRouteTimeout - MathF.Max(0f, dt);
-        for (int i = 0; i < _zombies.Count; i++)
+        // Last tick's path-query tokens are cleared in the same sweep. They used to have a pass of
+        // their own further down, and nothing between the two touches the flag — Detect changes aggro
+        // and state, never a token — so this is one traversal of the level's population instead of two.
+        // Each was trivial per element and the level's whole population long: on a map with the default
+        // 64 zombies per region across PEI's 19, four full sweeps ran before a single body was moved.
+        int count = _zombies.Count;
+        for (int i = 0; i < count; i++)
         {
             ZombieInstance candidate = _zombies[i];
+            candidate.RepathGranted = false;
             if (candidate.PathPoints.Count == 0
                 || candidate.State is not (EZombieState.Chase or EZombieState.Attack or EZombieState.Return)
                 || candidate.BlockedRouteTime + 1e-6f < oldestBlocked)
@@ -487,17 +503,20 @@ public sealed partial class ZombieSystem
         // due, then run Behave in FIXED order. (Rotating Behave itself shared the budget but also
         // reordered movement and the order-dependent zombie-zombie collision — the whole simulation
         // changed with the rotation. Only the tokens rotate now.)
-        int count = _zombies.Count;
-        for (int i = 0; i < count; i++)
-            _zombies[i].RepathGranted = false;
         if (count > 0 && _pathReadyThisTick)
         {
             _repathCursor %= count;
             int granted = 0;
             int nextCursor = _repathCursor;
+            // Walked with a wrapping index rather than a modulo per element. The sequence is identical
+            // — it starts at the cursor and wraps once — and it is the level's whole population long,
+            // so the division was being paid for every idle body on the map to reach the few hunters.
+            int at = _repathCursor;
             for (int i = 0; i < count && granted < MaxRepathsPerTick; i++)
             {
-                ZombieInstance z = _zombies[(_repathCursor + i) % count];
+                ZombieInstance z = _zombies[at];
+                if (++at == count)
+                    at = 0;
                 // A staggered body will not run Move this tick, so a token spent on it is a token the
                 // hunters behind it in the queue do not get — and the budget is what keeps a blocked
                 // horde from stalling the tick.
@@ -507,7 +526,7 @@ public sealed partial class ZombieSystem
                 {
                     z.RepathGranted = true;
                     granted++;
-                    nextCursor = (_repathCursor + i + 1) % count; // the queue resumes after the last grant
+                    nextCursor = at; // the queue resumes after the last grant
                 }
             }
             if (granted > 0)
