@@ -71,6 +71,22 @@ public partial class DayNightController : Node
     private int _moonPhase;
     private bool _moonCycled; // this night's phase advance already happened (LightingManager.isCycled)
 
+    // LightingManager's gameplay predicates. This controller has tracked everything they need all along
+    // — the cycle position, the map's bias, the moon phase — and nothing outside the sky read any of
+    // it. The zombie spawner takes IsNighttime (the Dying Light volatiles are night-only) and
+    // IsFullMoon (a full moon makes every zombie hyper: more reach, half again the damage).
+    public int MoonPhase => _moonPhase;
+
+    public bool IsDaytime => _lighting != null && LightingCycle.IsDaytime(_time, _lighting.Bias);
+
+    public bool IsNighttime => !IsDaytime;
+
+    // "isFullMoon = isCycled && LevelLighting.moon == 2". This reads _moonCycled — the latch the phase
+    // advance in _Process already maintains — rather than recomputing the comparison, because that is
+    // the same latch LightingManager uses: a night whose phase has not advanced yet cannot report a
+    // full moon early.
+    public bool IsFullMoon => _moonCycled && _moonPhase == LightingCycle.FullMoonPhase;
+
     public static DayNightController Build(LevelLighting? lighting, StandardMaterial3D? waterMaterial,
         SkyboxAssets? skyAssets = null)
     {

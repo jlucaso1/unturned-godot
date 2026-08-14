@@ -106,15 +106,32 @@ public partial class NetworkManager : Node
 
     // Brings the level's zombie population up on the hosted server (no-op for pure clients): the
     // ZombieHost hooks the NetServer extension seams, so solo, LAN and dedicated all share it.
-    public void HostZombies(string levelDir)
+    //
+    // `unturnedPath` is the install the map's content sources come from, so the map's own
+    // ZombieDifficultyAssets can be scanned; `dayNight` supplies LightingManager's time of day, which
+    // the speciality roll reads. Both are optional, and skipping them yields the mode config's own
+    // weights — which is exactly what a map naming no difficulty asset gets anyway, PEI included.
+    public void HostZombies(string levelDir, string? unturnedPath = null,
+        DayNightController? dayNight = null)
     {
         if (_server == null)
             return;
         // A generator whose whole state is one integer, so a bug-repro dump can carry the sequence the
         // session was on rather than re-rolling from scratch (Repro.ReproRandom). ZOMBIE_SEED pins it.
         var random = Repro.ReproRandom.ForSession(OS.GetEnvironment("ZOMBIE_SEED"), out ulong seed);
-        UnturnedGodot.Zombies.ZombieSystem? zombies =
-            UnturnedGodot.Zombies.ZombieWorld.Load(levelDir, _ground, random);
+        UnturnedGodot.Zombies.ZombieSystem? zombies = UnturnedGodot.Zombies.ZombieWorld.Load(
+            levelDir, _ground, random,
+            difficulties: unturnedPath is { Length: > 0 }
+                ? UnturnedGodot.Assets.ZombieDifficultyBank.ScanContentSources(
+                    UnturnedGodot.Assets.ContentSource.Discover(unturnedPath))
+                : null,
+            mode: null, // nothing writes a server Config.json yet, so this is the ported NORMAL block
+            isNighttime: dayNight?.IsNighttime ?? false,
+            isFullMoon: dayNight?.IsFullMoon ?? false,
+            clothing: unturnedPath is { Length: > 0 }
+                ? UnturnedGodot.Assets.ClothingArmorDatabase.ScanContentSources(
+                    UnturnedGodot.Assets.ContentSource.Discover(unturnedPath))
+                : null);
         if (zombies == null)
         {
             Log.PushWarning("[zombies] level ships no zombie data; skipping");

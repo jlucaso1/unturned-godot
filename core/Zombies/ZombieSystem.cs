@@ -332,6 +332,10 @@ public sealed partial class ZombieSystem
     // what time it is; everything else in the table is time-independent.
     public bool IsNighttime { get; set; }
 
+    // The clothing armor lookup getZombieArmor's last hop needs. Null (or empty) leaves every limb bare,
+    // which is what the whole damage path did before anything read ItemClothingAsset.
+    public ClothingArmorDatabase? Clothing { get; set; }
+
     // LightingManager.isFullMoon — `isCycled && LevelLighting.moon == 2`, i.e. the map's own MoonPhase
     // combined with the cycle having crossed dusk (LightingCycle.IsFullMoon computes it). The map has
     // carried that phase all along and nothing in here read it.

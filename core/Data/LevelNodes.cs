@@ -222,57 +222,57 @@ public static class LevelNodes
                     break;
 
                 case Safezone:
-                {
-                    float radius = river.ReadSingle();
-                    bool isHeight = version > 1 && river.ReadBoolean();
-                    bool noWeapons = false, noBuildables = false;
-                    if (version > 4)
                     {
-                        noWeapons = river.ReadBoolean();
-                        noBuildables = river.ReadBoolean();
+                        float radius = river.ReadSingle();
+                        bool isHeight = version > 1 && river.ReadBoolean();
+                        bool noWeapons = false, noBuildables = false;
+                        if (version > 4)
+                        {
+                            noWeapons = river.ReadBoolean();
+                            noBuildables = river.ReadBoolean();
+                        }
+                        result.Safezones.Add(
+                            new SafezoneNode(godot, radius, isHeight, noWeapons, noBuildables));
+                        break;
                     }
-                    result.Safezones.Add(
-                        new SafezoneNode(godot, radius, isHeight, noWeapons, noBuildables));
-                    break;
-                }
 
                 case Purchase:
-                {
-                    float radius = river.ReadSingle();
-                    ushort id = river.ReadUInt16();
-                    uint cost = river.ReadUInt32();
-                    result.Purchases.Add(new PurchaseNode(godot, radius, id, cost));
-                    break;
-                }
+                    {
+                        float radius = river.ReadSingle();
+                        ushort id = river.ReadUInt16();
+                        uint cost = river.ReadUInt32();
+                        result.Purchases.Add(new PurchaseNode(godot, radius, id, cost));
+                        break;
+                    }
 
                 case Arena:
                     result.Arenas.Add(new ArenaNode(godot, river.ReadSingle()));
                     break;
 
                 case Deadzone:
-                {
-                    float radius = river.ReadSingle();
-                    var kind = version > 6 ? (EDeadzoneType)river.ReadByte() : EDeadzoneType.Default;
-                    result.Deadzones.Add(new DeadzoneNode(godot, radius, kind));
-                    break;
-                }
+                    {
+                        float radius = river.ReadSingle();
+                        var kind = version > 6 ? (EDeadzoneType)river.ReadByte() : EDeadzoneType.Default;
+                        result.Deadzones.Add(new DeadzoneNode(godot, radius, kind));
+                        break;
+                    }
 
                 case Airdrop:
                     result.Airdrops.Add(new AirdropNode(godot, river.ReadUInt16()));
                     break;
 
                 case Effect:
-                {
-                    byte shape = version > 2 ? river.ReadByte() : (byte)0;
-                    float radius = river.ReadSingle();
-                    Vector3 bounds = version > 2 ? river.ReadSingleVector3() : Vector3.Zero;
-                    ushort effectId = river.ReadUInt16();
-                    bool noWater = river.ReadBoolean();
-                    bool noLighting = version > 3 && river.ReadBoolean();
-                    result.Effects.Add(
-                        new EffectNode(godot, shape, radius, bounds, effectId, noWater, noLighting));
-                    break;
-                }
+                    {
+                        byte shape = version > 2 ? river.ReadByte() : (byte)0;
+                        float radius = river.ReadSingle();
+                        Vector3 bounds = version > 2 ? river.ReadSingleVector3() : Vector3.Zero;
+                        ushort effectId = river.ReadUInt16();
+                        bool noWater = river.ReadBoolean();
+                        bool noLighting = version > 3 && river.ReadBoolean();
+                        result.Effects.Add(
+                            new EffectNode(godot, shape, radius, bounds, effectId, noWater, noLighting));
+                        break;
+                    }
 
                 default:
                     return result; // unknown type: its length is unknown, so we can't advance safely

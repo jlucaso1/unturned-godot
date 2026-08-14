@@ -146,8 +146,17 @@ public sealed class PunchDamageHost
         if (zombie == null)
             return new PunchResult(playerId, hit, 0, Destroyed: false);
 
-        ushort amount = PunchDamageResolver.Zombie(hit.Limb, direction, ZombieHitbox.ForwardOf(zombie));
-        bool killed = _zombies!.Damage(zombie, amount, playerId, _views);
+        // DamageTool.damageZombie:747 — "parameters.times *= getZombieArmor(parameters.limb,
+        // parameters.zombie)". The zombie rolled its clothing at spawn and already replicates it; this
+        // is the hop from those slot indices to the ItemClothingAsset armor that was missing, which is
+        // why every limb used to be bare.
+        float armor = ZombieArmor.For(hit.Limb,
+            zombie.Type < _zombies!.Tables.Count ? _zombies.Tables[zombie.Type] : null,
+            zombie.Shirt, zombie.Pants, zombie.Hat, zombie.Gear, _zombies.Clothing);
+
+        ushort amount = PunchDamageResolver.Zombie(hit.Limb, direction, ZombieHitbox.ForwardOf(zombie),
+            armor: armor);
+        bool killed = _zombies.Damage(zombie, amount, playerId, _views);
         if (killed)
         {
             // DamageTool.damageZombie builds this from the swing and the damage before it calls

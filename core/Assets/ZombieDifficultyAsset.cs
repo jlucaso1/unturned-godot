@@ -158,6 +158,16 @@ public sealed class ZombieDifficultyBank
     public ZombieDifficultyAsset? Find(Guid guid) =>
         guid != Guid.Empty && _byGuid.TryGetValue(guid, out ZombieDifficultyAsset? asset) ? asset : null;
 
+    // The difficulty assets of every content source. A workshop map ships its own, and scanning the
+    // game's alone would send its bounds to the mode config instead.
+    public static ZombieDifficultyBank ScanContentSources(IEnumerable<ContentSource> sources)
+    {
+        var roots = new List<string>();
+        foreach (ContentSource source in sources)
+            roots.Add(Path.Combine(source.AssetsDir, "Zombie_Difficulty"));
+        return ScanDirectories(roots);
+    }
+
     // First claimant wins, and the roots arrive with the game's own first — the same rule the physics
     // material bank and the object database follow, so a workshop asset reusing an official GUID cannot
     // take over an official map's difficulty.

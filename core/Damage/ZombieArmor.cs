@@ -41,14 +41,14 @@ public static class ZombieArmor
             // what it rolled is a VEST ("asset.type == EItemType.VEST"), because the slot can hold a
             // backpack or a mask just as well.
             case ELimb.Spine:
-            {
-                float armor = 1f;
-                if (Item(table, Gear, gear) is { } gearId && clothing.IsVest(gearId))
-                    armor *= clothing.ArmorFor(gearId);
-                if (Item(table, Shirt, shirt) is { } shirtId)
-                    armor *= clothing.ArmorFor(shirtId);
-                return armor;
-            }
+                {
+                    float armor = 1f;
+                    if (Item(table, Gear, gear) is { } gearId && clothing.IsVest(gearId))
+                        armor *= clothing.ArmorFor(gearId);
+                    if (Item(table, Shirt, shirt) is { } shirtId)
+                        armor *= clothing.ArmorFor(shirtId);
+                    return armor;
+                }
 
             // The skull takes the HAT.
             case ELimb.Skull:

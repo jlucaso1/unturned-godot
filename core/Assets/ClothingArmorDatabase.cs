@@ -54,6 +54,20 @@ public sealed class ClothingArmorDatabase
 
     internal void Add(ClothingArmor clothing) => _byId.TryAdd(clothing.Id, clothing);
 
+    // The clothing of every content source. A workshop map ships its own items, and a zombie table on
+    // that map names them by the same legacy ids.
+    //
+    // Bundles/Items, NOT Bundles/Items/Clothing: the game keeps clothing in per-kind folders (Shirts,
+    // Pants, Hats, Vests, Masks, Glasses, Backpacks) plus per-update folders that mix kinds, so the
+    // whole Items tree is walked and the Type key decides what is clothing.
+    public static ClothingArmorDatabase ScanContentSources(IEnumerable<ContentSource> sources)
+    {
+        var roots = new List<string>();
+        foreach (ContentSource source in sources)
+            roots.Add(Path.Combine(source.Root, "Items"));
+        return ScanDirectories(roots);
+    }
+
     // First claimant wins, roots arriving with the game's own first — the same precedence the object
     // database and the physics material bank use, so a workshop item cannot displace an official id.
     public static ClothingArmorDatabase ScanDirectories(IEnumerable<string> roots)

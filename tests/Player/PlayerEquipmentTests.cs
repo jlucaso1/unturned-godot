@@ -79,6 +79,49 @@ public class PlayerEquipmentTests
             EAttackInputFlags.None, new HandState { Stance = EPlayerStance.Stand, IsBusy = true }));
     }
 
+    private static HandState InSafezone(bool noWeapons) => new()
+    {
+        Stance = EPlayerStance.Stand,
+        IsSafe = true,
+        Safezone = new UnturnedGodot.Data.SafezoneNode(
+            Godot.Vector3.Zero, 10f, isHeight: true, noWeapons, noBuildables: false),
+    };
+
+    // "if (player.movement.isSafe) { if (asset == null) { if (isSafeInfo == null || noWeapons)
+    // return; // no punching } }" — with nothing equipped, which is always the case here, a safezone
+    // that forbids weapons forbids the fist too. The safezones themselves come from LevelNodes now,
+    // which parsed and discarded them until this change.
+    [Fact]
+    public void Simulate_NoPunchInASafezoneThatForbidsWeapons()
+    {
+        var equipment = new PlayerEquipment();
+
+        Assert.Equal(EPlayerGesture.None, equipment.Simulate(1, EAttackInputFlags.Start,
+            EAttackInputFlags.None, InSafezone(noWeapons: true)));
+        // Refused, not merely delayed: leaving the zone on the next tick swings immediately.
+        Assert.Equal(EPlayerGesture.PunchLeft, Punch(equipment, 2));
+    }
+
+    [Fact]
+    public void Simulate_PunchesInASafezoneThatAllowsWeapons() =>
+        Assert.Equal(EPlayerGesture.PunchLeft, new PlayerEquipment().Simulate(
+            1, EAttackInputFlags.Start, EAttackInputFlags.None, InSafezone(noWeapons: false)));
+
+    // "isSafeInfo == null || noWeapons" — a safezone whose details cannot be resolved is treated as the
+    // STRICTEST case, not the most permissive.
+    [Fact]
+    public void Simulate_SafeWithNoResolvedZone_ForbidsThePunch() =>
+        Assert.Equal(EPlayerGesture.None, new PlayerEquipment().Simulate(
+            1, EAttackInputFlags.Start, EAttackInputFlags.None,
+            new HandState { Stance = EPlayerStance.Stand, IsSafe = true }));
+
+    // A zone the player is standing OUTSIDE of gates nothing, even when it forbids weapons.
+    [Fact]
+    public void Simulate_NotSafe_IgnoresTheZoneEntirely() =>
+        Assert.Equal(EPlayerGesture.PunchLeft, new PlayerEquipment().Simulate(
+            1, EAttackInputFlags.Start, EAttackInputFlags.None,
+            InSafezone(noWeapons: true) with { IsSafe = false }));
+
     [Fact]
     public void Simulate_SwingsOnTheFirstTickOfASession()
     {

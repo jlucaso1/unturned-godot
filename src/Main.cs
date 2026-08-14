@@ -926,7 +926,10 @@ public partial class Main : Node3D
         else
         {
             network.StartSingleplayer(playerName);
-            network.HostZombies(MapCatalog.ResolvePath(unturnedPath, _mapName));
+            // The install and the lighting go with it: the first supplies the map's own
+            // ZombieDifficultyAssets, the second LightingManager's time of day. The speciality roll
+            // reads both.
+            network.HostZombies(MapCatalog.ResolvePath(unturnedPath, _mapName), unturnedPath, _dayNight);
         }
 
         // OPEN_LAN=1 opens the UDP listener immediately; OPEN_LAN_AFTER=seconds opens it mid-game — the

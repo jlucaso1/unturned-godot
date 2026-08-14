@@ -45,9 +45,17 @@ public partial class DedicatedServer : Node
             out IReadOnlySet<System.Guid> selectedGuids,
             out UnturnedGodot.Damage.DamageableWorld damageable, navigationField));
 
+        // The map's own ZombieDifficultyAssets, so its bounds and tables roll their own speciality
+        // weights rather than the mode config's. A dedicated server runs no lighting node, so the time
+        // of day stays at its defaults — daytime, whose only effect on the roll is that the two Dying
+        // Light volatiles are left out of the table.
         UnturnedGodot.Zombies.ZombieSystem? zombies = UnturnedGodot.Zombies.ZombieWorld.Load(
             level.Path, ground,
-            UnturnedGodot.Repro.ReproRandom.ForSession(OS.GetEnvironment("ZOMBIE_SEED"), out _));
+            UnturnedGodot.Repro.ReproRandom.ForSession(OS.GetEnvironment("ZOMBIE_SEED"), out _),
+            difficulties: UnturnedGodot.Assets.ZombieDifficultyBank.ScanContentSources(
+                UnturnedGodot.Assets.ContentSource.Discover(unturnedPath)),
+            clothing: UnturnedGodot.Assets.ClothingArmorDatabase.ScanContentSources(
+                UnturnedGodot.Assets.ContentSource.Discover(unturnedPath)));
         UnturnedGodot.Zombies.ZombieHost? zombieHost = null;
         if (zombies != null)
         {
