@@ -181,6 +181,7 @@ public sealed class NetServer
             foreach (PlayerGestureEvent gesture in _simulation.Gestures)
                 BroadcastExcept(gesture.PlayerId,
                     NetMessages.WritePlayerGesture(gesture.PlayerId, _simulation.Tick, gesture.Gesture), ESendType.Reliable);
+            SendCorrections();
             SendInputEchoes();
             OnTick?.Invoke(_simulation.Tick);
             caughtUp++;
@@ -379,6 +380,31 @@ public sealed class NetServer
         _playerIds.Return(session.PlayerId, now);
         _rosterVersion++;
         Broadcast(NetMessages.WritePlayerLeft(_rosterVersion, session.PlayerId), ESendType.Reliable);
+    }
+
+    // Tells a player where the server actually has them, when their claim was refused.
+    //
+    // Addressed to the owner alone: everyone else already learns the authoritative position from the
+    // state stream, and it is the owner who is somewhere the server disagrees with. Unreliable, because
+    // a lost correction is superseded by the next tick's — the condition persists as long as the two
+    // disagree, so retransmitting a stale position would be worse than dropping it.
+    //
+    // Usually zero per tick. A correction only exists when the speed budget refused a claim, which on an
+    // honest client means a genuine desync — a stalled host, a step the heightfield solver disagreed
+    // with — and those are the moments this exists for.
+    private void SendCorrections()
+    {
+        if (_simulation.Corrections.Count == 0)
+            return;
+        foreach ((ITransportConnection conn, Session session) in _sessions)
+        {
+            if (!session.Joined)
+                continue;
+            foreach (PlayerPositionCorrection correction in _simulation.Corrections)
+                if (correction.PlayerId == session.PlayerId)
+                    conn.Send(NetMessages.WritePositionCorrection(_simulation.Tick, correction.Position),
+                        ESendType.Unreliable);
+        }
     }
 
     // One nine-byte probe per joined client per tick, addressed rather than broadcast because the number

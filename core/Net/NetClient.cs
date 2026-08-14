@@ -140,6 +140,18 @@ public sealed class NetClient
 
     public bool Joined { get; private set; }
     public PlayerSnapshotState LocalServerState { get; private set; }
+
+    // Where the server says we really are, after refusing a position we claimed.
+    //
+    // Raised as an event as well as held, because the controller has to ACT on it — a correction the
+    // renderer merely stores is exactly the state LocalServerState was in: replicated, exposed, and read
+    // by nothing but a log line. The server's position is what decides punch damage, zombie aggro and
+    // stealth radius, so a divergence nobody closes is a player whose fists miss what is in front of
+    // them with nothing on screen to say why.
+    public Action<Vector3>? OnPositionCorrected;
+    public bool HasCorrection { get; private set; }
+    public Vector3 Correction { get; private set; }
+    public uint CorrectionTick { get; private set; }
     public IReadOnlyDictionary<byte, RemotePlayer> Remotes => _remotes;
 
     // Self-healing join: while not admitted, the Hello re-sends on this cadence (covers "connected
@@ -240,6 +252,9 @@ public sealed class NetClient
             _assemblingSeen = 0;
             Array.Clear(_assemblingChunks);
             _rosterIds.Clear();
+            // Corrections are dated in the old host's tick space, and a restarted one counts from zero.
+            HasCorrection = false;
+            CorrectionTick = 0;
             // Everything else keyed on ids this server handed out has to start over too, for the same
             // reason the roster versions do — a restarted host numbers its zombies from zero again, and a
             // subscriber holding the old session's ids would judge the new session's by them.
@@ -447,6 +462,25 @@ public sealed class NetClient
                         gesturing.PushGesture(gesture.Tick, gesture.Gesture);
                     break;
                 }
+            case ENetMessage.PositionCorrection:
+                {
+                    if (!MalformedPacket.TryDecode(payload, ReadPositionCorrection, out var correction))
+                    {
+                        MalformedPacketsDropped++;
+                        break;
+                    }
+
+                    // Newest wins, wrap-safe. These are unreliable and unordered, so an older correction
+                    // can arrive behind a newer one, and snapping to it would put the player back
+                    // somewhere the server has already moved them past.
+                    if (HasCorrection && unchecked((int)(correction.Tick - CorrectionTick)) <= 0)
+                        break;
+                    HasCorrection = true;
+                    CorrectionTick = correction.Tick;
+                    Correction = correction.Position;
+                    OnPositionCorrected?.Invoke(correction.Position);
+                    break;
+                }
             case ENetMessage.InputEcho:
                 {
                     if (!MalformedPacket.TryDecode(payload, ReadInputEcho, out var echo))
@@ -503,6 +537,8 @@ public sealed class NetClient
         NetMessages.ReadStateUpdate;
     private static readonly Func<byte[], (uint Frame, uint Tick)> ReadInputEcho =
         NetMessages.ReadInputEcho;
+    private static readonly Func<byte[], (uint Tick, Vector3 Position)> ReadPositionCorrection =
+        NetMessages.ReadPositionCorrection;
 
     // The newest server tick heard, from any message that carries one. State updates are unreliable and
     // unordered, so newest-wins rather than last-wins; wrap-safe like every other sequence comparison.

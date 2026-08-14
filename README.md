@@ -26,7 +26,7 @@ and checked byte-for-byte against the game's own data, using
 | **Audio** | Footsteps/landings resolved through the terrain splat like `PhysicsTool.GetTerrainMaterialName`, clips extracted from the master bundle's FSB5 banks |
 | **Zombies** | Spawn tables, navigation bounds and the pre-baked navmeshes; detection, hunting and the `Zombie.cs` animation set |
 | **Vehicles** | The map's own `Spawns/Vehicles.dat` rolled through its spawn tables and redirectors, as many as the level's size allows, each drawn from its real `Vehicle.prefab`. Parked scenery for now: no driving, physics or damage |
-| **Multiplayer** | Authoritative server + snapshot-interpolated clients over UDP; singleplayer is the same stack over loopback. Listen server, dedicated server and join-by-address all work |
+| **Multiplayer** | Authoritative server + snapshot-interpolated clients over UDP; singleplayer is the same stack over loopback. Listen server, dedicated server and join-by-address all work. Movement is client-simulated and server-validated, Unturned's own `forceTrustClient` shape: the client resolves collision against the full world and the server checks each claimed position against a speed budget, correcting the player back when it refuses one. `net.stats` and the `F3` HUD say what the wire is costing |
 
 Goal order is **parity first, then performance**, and a performance HUD (`F3`) is on hand so the numbers stay
 in view.
@@ -165,6 +165,7 @@ can actually do.
 | sun | `sun.enabled`, `sun.shadows.enabled`, `sun.shadows.distance`, `sun.shadows.cascades` (1/2/4 — each split is another pass over its slice of the casters), `sun.shadows.blend` (cross-fade the cascade seam; on costs a second shadow lookup in the band) |
 | environment | `env.sky.enabled`, `env.fog.enabled`, `env.volumetric.enabled`, `env.ssao.enabled`, `env.ssil.enabled`, `env.glow.enabled` |
 | renderer | `r.scale`, `r.msaa`, `r.taa.enabled`, `r.occlusion.enabled`, `r.lod.threshold`, `r.shadow.atlas` (positional), `r.shadow.directional` (the sun's shadow map edge — cleared and written every frame, so it is memory bandwidth first), `r.shadow.filter` (taps per shadowed pixel), `r.debug` (overdraw/wireframe), `r.vsync.enabled`, `r.fps.max` |
+| net | `net.stats` — bytes and datagrams per second in each direction, split by message type, plus the round trip and the six drop counters. **Read-only**, the same standing `perf` has: it observes what the session already did and cannot move a byte of it |
 | commands | `help`, `list`, `find <text>`, `reset <name\|all>`, `perf`, `copy`, `clear`, `quit` |
 
 `help` and `list` are the authority — the table above is a map, not a manual. `find shadow` answers "what

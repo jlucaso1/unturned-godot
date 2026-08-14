@@ -34,6 +34,9 @@ public struct PlayerMoveState
     public bool Moving; // input-derived (keys held), NOT position-derived: drives remote walk/idle animation
 }
 
+// One player told where the server actually has them, after refusing where they said they were.
+public readonly record struct PlayerPositionCorrection(byte PlayerId, Vector3 Position);
+
 // A swing waiting for the tick that announces it, with the aim of the frame that threw it. See
 // PlayerGestureEvent for why the angles travel with it rather than being read off the tick.
 internal readonly record struct PendingGesture(EPlayerGesture Gesture, byte Yaw, byte Pitch,
@@ -220,6 +223,16 @@ public sealed class ServerSimulation
     // free of the transport, exactly as the snapshot list already is.
     public IReadOnlyList<PlayerGestureEvent> Gestures => _gestures;
     private readonly List<PlayerGestureEvent> _gestures = new();
+
+    // The players whose trusted position this tick REFUSED, with the position the server is holding
+    // them at instead. Refilled by every Step, exactly like Gestures, and for the same reason: the
+    // simulation stays free of the transport and its owner does the addressing.
+    //
+    // This is what makes "authoritative server" true of movement. Before it, a refused claim produced
+    // nothing at all — the server quietly kept the old position, the client never read its own
+    // authoritative state, and the two stayed apart for the rest of the session.
+    public IReadOnlyList<PlayerPositionCorrection> Corrections => _corrections;
+    private readonly List<PlayerPositionCorrection> _corrections = new();
 
     // Trusted positions refused for not being finite. Non-zero means a client sent NaN or an infinity —
     // a physics glitch on its end, or a deliberate attempt to wedge its own slot.
@@ -428,6 +441,7 @@ public sealed class ServerSimulation
         _clock = now;
         Tick++;
         _gestures.Clear();
+        _corrections.Clear();
         var states = new List<PlayerSnapshotState>(_players.Count);
         foreach ((byte id, Entry entry) in _players)
         {
@@ -453,9 +467,14 @@ public sealed class ServerSimulation
             bool restoredMoving = entry.State.Moving;
 
             if (input.HasPosition)
-                ApplyTrustedPosition(entry, input);
+            {
+                if (!ApplyTrustedPosition(entry, input))
+                    _corrections.Add(new PlayerPositionCorrection(id, entry.State.Position));
+            }
             else
+            {
                 entry.State = _solver.Step(entry.State, input, TickRate);
+            }
             if (holdRestoredMovement)
                 entry.State.Moving = restoredMoving;
 
@@ -474,24 +493,39 @@ public sealed class ServerSimulation
         return states;
     }
 
+    // How much slack the budgets carry over the exact speed, for tick jitter and the step-up a client's
+    // own collision resolve performs inside one frame.
+    private const float BudgetSlack = 1.5f;
+
+    // Displacement below this is standing still: floats, not quantized angles, so the only noise here is
+    // the client's own solver settling. One centimetre, the same threshold ZombieClientMotion uses to
+    // decide whether a body is moving at all.
+    private const float MovingEpsilon = 0.01f;
+
     // Unturned's forceTrustClient shape: the client resolved collision against the full world (objects,
     // buildings) that the heightfield solver can't. The first claim is the baseline; each later claim must
-    // fit a speed budget scaled by the time since the last ACCEPTED one, so packet loss widens the window
-    // instead of poisoning every subsequent frame, while a genuine teleport still rubber-bands.
-    private void ApplyTrustedPosition(Entry entry, in InputCommand input)
+    // fit a speed budget scaled by the time since the last claim we JUDGED, so packet loss widens the
+    // window instead of poisoning every subsequent frame.
+    //
+    // Returns false when the claim was refused, so the caller can tell the client where it really is.
+    // Refusing used to be the whole of the server's answer — it kept the old position and sent nothing —
+    // and the client never read its own authoritative state, so the two simply diverged in silence. It is
+    // the SERVER's position that decides punch damage, zombie aggro and stealth radius, so that silence
+    // read to a player as "my punches miss things next to me", with nothing on screen and no counter.
+    private bool ApplyTrustedPosition(Entry entry, in InputCommand input)
     {
         entry.State.Yaw = NetAngles.DequantizeYaw(input.Yaw);
         entry.State.Pitch = NetAngles.DequantizePitch(input.Pitch);
-        entry.State.Stance = input.Stance;
-        entry.State.Moving = input.InputX != 0 || input.InputY != 0;
         entry.State.Grounded = input.Grounded; // the owner's real IsOnFloor (trusted like the position)
 
         if (!entry.HasVerifiedPosition)
         {
             entry.State.Position = input.Position;
+            entry.State.Stance = input.Stance;
+            entry.State.Moving = input.InputX != 0 || input.InputY != 0;
             entry.HasVerifiedPosition = true;
             entry.LastAcceptedAt = _clock;
-            return;
+            return true;
         }
 
         // Never less than one tick (a claim in the same instant still gets a tick's worth of slack) and
@@ -504,13 +538,82 @@ public sealed class ServerSimulation
         float horizontal = new Vector2(delta.X, delta.Z).Length();
         // Horizontal motion is bounded by sprint, while vertical motion independently allows terminal
         // fall speed. Combining them into one 107 m/s scalar budget let a client move ~12.8 m sideways in
-        // one 80 ms tick. The 1.5x allowance absorbs tick jitter/step-up without granting that loophole.
-        float horizontalBudget = PlayerConfig.SpeedSprint * elapsed * 1.5f;
-        float verticalBudget = -PlayerConfig.TerminalVelocity * elapsed * 1.5f;
-        if (horizontal <= horizontalBudget && MathF.Abs(delta.Y) <= verticalBudget)
+        // one 80 ms tick.
+        float horizontalBudget = PlayerConfig.SpeedSprint * elapsed * BudgetSlack;
+
+        // UP and DOWN are different budgets, and conflating them was flight.
+        //
+        // The old test was MathF.Abs(delta.Y) <= terminal-fall-speed, which applies the budget for
+        // FALLING to movement in the opposite direction: a client could climb at 1.5x terminal velocity,
+        // about 150 m/s, for as long as it liked — accepted by the server and replicated to everyone.
+        // Nothing in the game rises faster than a jump (7 m/s, and it decelerates immediately), so that
+        // is the ceiling going up; falling keeps terminal velocity, which is what falling does.
+        float verticalBudget = delta.Y >= 0
+            ? PlayerConfig.JumpSpeed * elapsed * BudgetSlack
+            : -PlayerConfig.TerminalVelocity * elapsed * BudgetSlack;
+
+        if (horizontal > horizontalBudget || MathF.Abs(delta.Y) > verticalBudget)
         {
-            entry.State.Position = input.Position;
+            // Refused — and the clock moves anyway. It used to stay put, so `elapsed` grew for as long
+            // as a client kept claiming impossible positions, widening the budget until a wildly wrong
+            // one was eventually ACCEPTED: the divergence healed by adopting the client's answer instead
+            // of correcting it, and waiting was all a client had to do. Starvation still widens the
+            // window, because that is a claim we never heard; a refusal is one we heard and judged.
             entry.LastAcceptedAt = _clock;
+            // Movement is derived from what the server accepted, and it accepted nothing.
+            entry.State.Moving = false;
+            return false;
         }
+
+        entry.State.Position = input.Position;
+        entry.LastAcceptedAt = _clock;
+
+        // Stance and movement come from the accepted DISPLACEMENT first, and from the input flags only
+        // where the two agree.
+        //
+        // Both were taken from the flags verbatim, and both decide how far away a player is noticed
+        // (ZombieDetection.RadiusFor). A client sending `Prone, InputX = InputY = 0` while its positions
+        // walked at sprint speed was granted prone's 3 m stealth radius and a standing animation, for a
+        // player crossing open ground at 7 m/s. What the server can check is the distance it just
+        // accepted, and the distance is the thing that cannot be lied about — it is the same number the
+        // budget above was measured against.
+        bool displaced = horizontal > MovingEpsilon;
+        // Either side may say "moving", and only that direction is worth defending: claiming to move
+        // while standing still makes a player LOUDER, and a walk animation for someone pushing into a
+        // wall is what the original does. Claiming stillness while moving is the exploit, and the
+        // displacement overrules it.
+        entry.State.Moving = displaced || input.InputX != 0 || input.InputY != 0;
+        entry.State.Stance = StanceFor(input.Stance, horizontal / elapsed);
+        return true;
     }
+
+    // The claimed stance, or the quietest one the measured speed can actually support — whichever is
+    // LOUDER. A player really can be prone and still; they cannot be prone at 7 m/s.
+    //
+    // The slack is the same one the budgets carry, so only a claim the displacement clearly contradicts
+    // is overruled. A climber is left alone: climbing is vertical, so its horizontal speed is ~0 and the
+    // floor never rises above what was claimed.
+    private static EPlayerStance StanceFor(EPlayerStance claimed, float speed)
+    {
+        EPlayerStance floor = speed switch
+        {
+            > PlayerConfig.SpeedStand * BudgetSlack => EPlayerStance.Sprint,
+            > PlayerConfig.SpeedCrouch * BudgetSlack => EPlayerStance.Stand,
+            > PlayerConfig.SpeedProne * BudgetSlack => EPlayerStance.Crouch,
+            _ => claimed,
+        };
+        return Loudness(floor) > Loudness(claimed) ? floor : claimed;
+    }
+
+    // How noticeable a stance is, in the order ZombieDetection ranks them: sprint 20 m, stand 12,
+    // crouch and climb 6, prone 3. Ordering by this rather than by the enum, whose numbering is the
+    // game's own and runs the other way.
+    private static int Loudness(EPlayerStance stance) => stance switch
+    {
+        EPlayerStance.Sprint => 4,
+        EPlayerStance.Stand => 3,
+        EPlayerStance.Crouch or EPlayerStance.Climb => 2,
+        EPlayerStance.Prone => 1,
+        _ => 0,
+    };
 }
