@@ -42,7 +42,7 @@ public static class AppShutdown
     // after it — and IsShuttingDown is read by both guarded log channels, by Track's callers and by every
     // worker loop, so those tests are all silently running against a different set of behaviours. Nothing
     // could exercise "quit, then carry on" at all.
-    private static CancellationTokenSource _source = new();
+    private static CancellationTokenSource Source = new();
 
     // The background work a quit has to wait for. Held weakly in the sense that finished tasks are
     // dropped on the next inspection; the set never grows past the handful of load-time tasks.
@@ -50,9 +50,9 @@ public static class AppShutdown
 
     // True once the game has begun leaving. Background work checks this at loop boundaries and returns;
     // anything that talks to the engine from a worker must check it before doing so.
-    public static bool IsShuttingDown => _source.IsCancellationRequested;
+    public static bool IsShuttingDown => Source.IsCancellationRequested;
 
-    public static CancellationToken Token => _source.Token;
+    public static CancellationToken Token => Source.Token;
 
     // Puts the module back to how it starts, for a test that needs to leave and then keep testing.
     //
@@ -68,12 +68,12 @@ public static class AppShutdown
     // Every door out of a loaded world cancels the token and then ends the process, so a test that used
     // one would end the suite. Signalling on its own is the part the guards actually read — and paired
     // with ResetForTests below, it is what lets a test watch a worker fall silent and then carry on.
-    internal static void SignalForTests() => _source.Cancel();
+    internal static void SignalForTests() => Source.Cancel();
 
     internal static void ResetForTests()
     {
-        CancellationTokenSource previous = _source;
-        _source = new CancellationTokenSource();
+        CancellationTokenSource previous = Source;
+        Source = new CancellationTokenSource();
         previous.Dispose();
         lock (Background)
         {
@@ -156,7 +156,7 @@ public static class AppShutdown
 
         if (IsShuttingDown)
             return;
-        _source.Cancel();
+        Source.Cancel();
 
         int running = StillRunning();
         if (running == 0)
@@ -212,7 +212,7 @@ public static class AppShutdown
         if (exitCode != 0 && ExitCode == 0)
             ExitCode = exitCode;
 
-        _source.Cancel();
+        Source.Cancel();
         Leave(tree);
     }
 

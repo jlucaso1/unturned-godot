@@ -44,19 +44,19 @@ public static class HostLog
         public void Error(string message) { }
     }
 
-    private static IHostLog _sink = SilentLog.Instance;
+    private static IHostLog Installed = SilentLog.Instance;
 
     // The installed sink. Null restores silence rather than throwing: a load-time job must not fail on the
     // way it reports, and a caller clearing the sink means "stop talking", not "crash".
     public static IHostLog Sink
     {
-        get => _sink;
-        set => _sink = value ?? SilentLog.Instance;
+        get => Installed;
+        set => Installed = value ?? SilentLog.Instance;
     }
 
-    public static void Print(string message) => _sink.Print(message);
+    public static void Print(string message) => Installed.Print(message);
 
-    public static void Warn(string message) => _sink.Warn(message);
+    public static void Warn(string message) => Installed.Warn(message);
 
-    public static void Error(string message) => _sink.Error(message);
+    public static void Error(string message) => Installed.Error(message);
 }
