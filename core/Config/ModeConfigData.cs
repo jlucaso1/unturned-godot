@@ -171,6 +171,33 @@ public sealed record ModeConfigData
         return Parse(text, mode);
     }
 
+    // Where that file lives. ServerSavedata.transformPath is "<directory>/<serverID><path>"
+    // (ServerSavedata.cs:36-39), so the legacy config Provider.loadGameplayConfig reads
+    // (Provider.cs:2192) is "<install>/Servers/<id>/Config.json".
+    //
+    // ServerSavedata has a second `directory`: for a NON-dedicated host it is "Worlds", and
+    // Provider.serverID is then "Singleplayer_" + the selected character (Provider.cs:2054). This port
+    // deliberately does not read that one. It is the retail client's own save folder, written by the
+    // real game and by whatever mods that install has run, and this port's local session shares nothing
+    // else in it — no character, no level state, no inventory. Inheriting only its gameplay dials would
+    // let an unrelated value in somebody's save silently change what this port spawns and renders, from
+    // a file they have no reason to connect to it. An operator who does mean that file names it with
+    // the host's server id.
+    //
+    // Nothing here ever WRITES it either: a port reading the operator's config is one thing, a port
+    // creating files inside a Steam install is another.
+    public static string ServerConfigPath(string installRoot, string serverId) =>
+        Path.Combine(installRoot, "Servers", serverId, "Config.json");
+
+    // The mode config a host runs under, resolved from that folder. A host with no install path, no
+    // savedata folder or no Config.json in it gets the mode's ported defaults, which is both what the
+    // game does and what this port did before anything read the file at all.
+    public static ModeConfigData ForServer(string? installRoot, string serverId,
+        EGameMode mode = EGameMode.Normal) =>
+        string.IsNullOrEmpty(installRoot)
+            ? For(mode)
+            : Load(ServerConfigPath(installRoot, serverId), mode);
+
     public static ModeConfigData Parse(string json, EGameMode mode = EGameMode.Normal)
     {
         ModeConfigData defaults = For(mode);

@@ -320,3 +320,132 @@ public class ZombieDifficultyTests
         Assert.NotNull(bank.Find(bound.DifficultyGuid));
     }
 }
+
+// The map's LevelAsset declaration (EZombieDifficultyAssetPrioritization). It decides which of the two
+// difficulty assets — the navigation bound's or the zombie table's — wins the lookup, and the port used
+// to apply the default ordering unconditionally.
+public class LevelDifficultyPrioritizationTests
+{
+    private const string LevelAssetGuid = "d258342682aa44f89b08de0b47797c4e";
+
+    private static string LevelAsset(string guid, string? prioritization) => $$"""
+    Metadata
+    {
+    	GUID {{guid}}
+    	Type SDG.Unturned.LevelAsset, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null
+    }
+    Asset
+    {
+    	Should_Animate_Background_Image true
+    {{(prioritization == null ? "" : "\tZombieDifficultyAssetPrioritization " + prioritization)}}
+    }
+    """;
+
+    private static EZombieDifficultyAssetPrioritization Read(string text) =>
+        LevelDifficultyPrioritization.Read(DatParser.Parse(text));
+
+    // "ParseEnum(key, NavmeshOverridesTable)" — case-insensitive, defaulting when absent or unparseable.
+    [Theory]
+    [InlineData("TableOverridesNavmesh", EZombieDifficultyAssetPrioritization.TableOverridesNavmesh)]
+    [InlineData("tableoverridesnavmesh", EZombieDifficultyAssetPrioritization.TableOverridesNavmesh)]
+    [InlineData("NavmeshOverridesTable", EZombieDifficultyAssetPrioritization.NavmeshOverridesTable)]
+    [InlineData("nonsense", EZombieDifficultyAssetPrioritization.NavmeshOverridesTable)]
+    public void Read_ParsesTheKeyCaseInsensitively(string value,
+        EZombieDifficultyAssetPrioritization expected) =>
+        Assert.Equal(expected, Read(LevelAsset(LevelAssetGuid, value)));
+
+    [Fact]
+    public void Read_DefaultsWhenTheKeyOrTheAssetBlockIsMissing()
+    {
+        Assert.Equal(EZombieDifficultyAssetPrioritization.NavmeshOverridesTable,
+            Read(LevelAsset(LevelAssetGuid, null)));
+        // No Asset block at all — a record this port would not otherwise recognise.
+        Assert.Equal(EZombieDifficultyAssetPrioritization.NavmeshOverridesTable,
+            Read("Metadata\n{\n\tGUID " + LevelAssetGuid + "\n}\n"));
+    }
+
+    [Fact]
+    public void FindInDirectory_MatchesOnTheAssetsOwnGuid()
+    {
+        using var dir = new TempDir();
+        dir.Write(Path.Combine("Levels", "Other.asset"),
+            LevelAsset("11111111111111111111111111111111", "TableOverridesNavmesh"));
+        dir.Write(Path.Combine("Levels", "Map.asset"),
+            LevelAsset(LevelAssetGuid, "TableOverridesNavmesh"));
+
+        Assert.Equal(EZombieDifficultyAssetPrioritization.TableOverridesNavmesh,
+            LevelDifficultyPrioritization.FindInDirectory(
+                Path.Combine(dir.Path, "Levels"), Guid.Parse(LevelAssetGuid)));
+
+        // Null, not the default: "this directory does not hold that asset" is what lets the search go on
+        // to the next content source instead of stopping at the first one that misses.
+        Assert.Null(LevelDifficultyPrioritization.FindInDirectory(
+            Path.Combine(dir.Path, "Levels"), Guid.Parse("22222222222222222222222222222222")));
+        Assert.Null(LevelDifficultyPrioritization.FindInDirectory(
+            Path.Combine(dir.Path, "Absent"), Guid.Parse(LevelAssetGuid)));
+        Assert.Null(LevelDifficultyPrioritization.FindInDirectory(
+            Path.Combine(dir.Path, "Levels"), Guid.Empty));
+    }
+
+    // An unreadable .asset is skipped rather than taking the whole lookup down with it. It is the only
+    // file in the folder on purpose: enumeration order is the filesystem's, so a second asset that
+    // matched could return before this one was ever opened.
+    [Fact]
+    public void FindInDirectory_SkipsWhatItCannotRead()
+    {
+        if (!PosixPermissions.AreEnforced)
+            return;
+
+        using var dir = new TempDir();
+        string unreadable = dir.Write(Path.Combine("Levels", "Locked.asset"),
+            LevelAsset(LevelAssetGuid, "TableOverridesNavmesh"));
+        File.SetUnixFileMode(unreadable, UnixFileMode.None);
+        try
+        {
+            Assert.Null(LevelDifficultyPrioritization.FindInDirectory(
+                Path.Combine(dir.Path, "Levels"), Guid.Parse(LevelAssetGuid)));
+        }
+        finally
+        {
+            File.SetUnixFileMode(unreadable, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+    }
+
+    // Every source searched and nothing found: the map names a LevelAsset this install does not ship, so
+    // the game's own AssetReference.Find would miss too and the default ordering stands.
+    [Fact]
+    public void ForLevelAsset_FallsBackWhenNoSourceHasIt() =>
+        Assert.Equal(EZombieDifficultyAssetPrioritization.NavmeshOverridesTable,
+            LevelDifficultyPrioritization.ForLevelAsset(
+                Guid.Parse("33333333333333333333333333333333"), Array.Empty<ContentSource>()));
+
+    // A map whose Config.json names no LevelAsset at all reads the default without a directory walk —
+    // and a map directory that does not exist takes the same road rather than throwing.
+    [Fact]
+    public void ForMap_WithNoConfigTakesTheDefault()
+    {
+        using var dir = new TempDir();
+        Assert.Equal(EZombieDifficultyAssetPrioritization.NavmeshOverridesTable,
+            LevelDifficultyPrioritization.ForMap(dir.Path, Array.Empty<ContentSource>()));
+    }
+
+    // An unset "Asset" in the map's Config.json is AssetReference<LevelAsset>.invalid, and the game then
+    // falls back to a default level that does not set the key either — so both roads end at the default,
+    // and the empty GUID short-circuits before any directory is walked.
+    [Fact]
+    public void ForLevelAsset_WithNoReferenceDoesNotSearchAtAll() =>
+        Assert.Equal(EZombieDifficultyAssetPrioritization.NavmeshOverridesTable,
+            LevelDifficultyPrioritization.ForLevelAsset(Guid.Empty, Array.Empty<ContentSource>()));
+
+    // The real thing, end to end: PEI's Config.json names a LevelAsset, that asset is in the install, and
+    // it does not set the key — so PEI runs on the default ordering. Recorded because it is the reason
+    // this fix changes nothing on any shipped map.
+    [RealDataFact(Map = "PEI")]
+    public void RealPei_NamesALevelAssetThatTakesTheDefaultOrdering()
+    {
+        Assert.Equal(Guid.Parse(LevelAssetGuid),
+            UnturnedGodot.Data.LevelConfigData.Load(GameData.Map("PEI")!).Asset);
+        Assert.Equal(EZombieDifficultyAssetPrioritization.NavmeshOverridesTable,
+            LevelDifficultyPrioritization.ForMap(GameData.Map("PEI")!, GameData.CoreSources()));
+    }
+}

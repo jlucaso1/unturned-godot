@@ -232,9 +232,10 @@ public partial class ZombiesView : Node3D
     }
 
     // Zombie.PlayOneShot: volume 0.5, linear rolloff to 32 m, pitch by speciality (megas growl low).
+    // Zombie.GetRandomPitch keys on isMega, which counts the bosses (Zombie.cs:3331-3336).
     private void PlayVoice(ZombieAvatar avatar, string group)
     {
-        (float minPitch, float maxPitch) = avatar.Speciality == EZombieSpeciality.Mega
+        (float minPitch, float maxPitch) = avatar.Speciality.IsMega()
             ? (0.5f, 0.7f)
             : (0.9f, 1.1f);
         _audio?.Play(group, avatar.KnownPosition + Vector3.Up, volumeScale: 0.5f, maxDistance: 32f,
@@ -436,7 +437,11 @@ public partial class ZombiesView : Node3D
 
     private ZombieAvatar Spawn(in ZombieListing listing)
     {
-        bool isMega = listing.Speciality == EZombieSpeciality.Mega;
+        // "Boss zombies are considered mega as well" (Zombie.isMega, Zombie.cs:390), and it is isMega
+        // that Zombie.tellAlive keys the model scale on (Zombie.cs:1600-1618). The server already sizes a
+        // boss's capsule and attack reach off the same classification, so testing only for MEGA here drew
+        // a normal-sized body around a mega-sized hitbox — an invisible metre of reach either side of it.
+        bool isMega = listing.Speciality.IsMega();
         Node3D? template = Template(isMega);
         Node3D body = CharacterModel.Clone(template) ?? Placeholder();
 
@@ -583,7 +588,7 @@ public partial class ZombiesView : Node3D
             // a standing zombie has a 20% chance to groan while a moving one always roars.
             if (nearby && now >= avatar.NextGroan)
             {
-                avatar.NextGroan = now + (avatar.Speciality == EZombieSpeciality.Mega
+                avatar.NextGroan = now + (avatar.Speciality.IsMega()
                     ? _rng.RandfRange(2f, 4f)
                     : _rng.RandfRange(4f, 8f));
                 bool moving = avatar.State is EZombieState.Chase or EZombieState.Return;

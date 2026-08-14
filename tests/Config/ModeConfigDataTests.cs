@@ -283,4 +283,42 @@ public class ModeConfigDataTests
         string path = dir.Write("Config.json", ServerConfig);
         Assert.Equal(0.4f, ModeConfigData.Load(path).Zombies.SpawnChance);
     }
+
+    // ServerSavedata.transformPath: "<directory>/<serverID><path>", with `directory` = "Servers".
+    [Fact]
+    public void ServerConfigPath_FollowsServerSavedatasLayout() =>
+        Assert.Equal(Path.Combine("/install", "Servers", "unturned", "Config.json"),
+            ModeConfigData.ServerConfigPath("/install", "unturned"));
+
+    // The whole point of the loader existing: a host that names an install picks the operator's file up,
+    // and the section it reads is the mode the host is running.
+    [Fact]
+    public void ForServer_ReadsTheServersOwnConfig()
+    {
+        using var dir = new TempDir();
+        dir.Write(Path.Combine("Servers", "unturned", "Config.json"), ServerConfig);
+
+        Assert.Equal(0.4f, ModeConfigData.ForServer(dir.Path, "unturned").Zombies.SpawnChance);
+        Assert.Equal(0.9f,
+            ModeConfigData.ForServer(dir.Path, "unturned", EGameMode.Hard).Zombies.SpawnChance);
+        // A server id nobody wrote a config for is simply unconfigured.
+        Assert.Equal(ModeConfigData.Normal, ModeConfigData.ForServer(dir.Path, "other"));
+    }
+
+    [Fact]
+    public void ForServer_WithNoInstallPathYieldsTheModeDefaults()
+    {
+        Assert.Equal(ModeConfigData.Normal, ModeConfigData.ForServer(null, "unturned"));
+        Assert.Equal(ModeConfigData.For(EGameMode.Hard),
+            ModeConfigData.ForServer("", "unturned", EGameMode.Hard));
+    }
+
+    // An install with no savedata folder at all is the ordinary case (nobody has configured anything),
+    // and it must not differ from a fresh NORMAL server.
+    [Fact]
+    public void ForServer_WithNoConfigFileYieldsTheModeDefaults()
+    {
+        using var dir = new TempDir();
+        Assert.Equal(ModeConfigData.Normal, ModeConfigData.ForServer(dir.Path, "unturned"));
+    }
 }

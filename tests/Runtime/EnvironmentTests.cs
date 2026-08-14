@@ -258,6 +258,69 @@ public class EnvironmentTests : TestClass
         cycle.QueueFree();
     }
 
+    // ...and it runs as DAYTIME. Apply() draws the static midday keyframe on that branch, so the gameplay
+    // predicates have to agree with it: reading "not daytime" off a missing file made IsNighttime true
+    // under a visibly midday sky, and IsNighttime is what rolls the night-only Dying Light volatiles into
+    // a workshop map's zombie population — the ones that exist to explode at dawn.
+    [Test]
+    public void ACycleWithNoLightingDataIsMidday()
+    {
+        DayNightController cycle = DayNightController.Build(lighting: null, waterMaterial: null);
+
+        Assert.True(cycle.IsDaytime);
+        Assert.False(cycle.IsNighttime);
+        Assert.False(cycle.IsFullMoon);
+        // And its clock is pinned rather than drifting: nothing advances it and nothing can set it.
+        cycle.TimeOfDay = 0.9f;
+        Assert.True(cycle.IsDaytime);
+
+        cycle.Free();
+    }
+
+    // The gameplay predicates on a real cycle. The synthetic map's bias is 0.1 and its saved time 0.32,
+    // so it starts at night — but NOT yet cycled, exactly as onLevelLoaded leaves a fresh server, so the
+    // moon has not advanced off the saved phase and no full moon is reported before a frame has run.
+    [Test]
+    public async Task TheGameplayPredicatesFollowTheMapsOwnCycle()
+    {
+        DayNightController cycle = DayNightController.Build(Lighting(), waterMaterial: null);
+        TestScene.AddChild(cycle);
+
+        Assert.True(cycle.IsNighttime);
+        Assert.Equal(3, cycle.MoonPhase);
+        Assert.False(cycle.IsFullMoon);
+
+        // A frame runs the dusk edge: the phase steps 3 -> 4, and the latch is now set.
+        await NextFrame();
+        Assert.Equal(4, cycle.MoonPhase);
+
+        // Daytime is the other side of the bias.
+        cycle.TimeOfDay = 0.05f;
+        Assert.True(cycle.IsDaytime);
+        Assert.False(cycle.IsFullMoon);
+
+        cycle.QueueFree();
+    }
+
+    // A pinned clock (TIME_OF_DAY) never runs an edge of its own, so its latch is derived from where it
+    // was pinned — ReceiveInitialLightingState's rule. Without it a moonlit screenshot reported no moon.
+    [Test]
+    public async Task APinnedNightWithTheFullPhaseReportsAFullMoon()
+    {
+        DayNightController cycle = await WithEnvironment("TIME_OF_DAY", "0.8", async () =>
+            await WithEnvironment("MOON_PHASE", LightingCycle.FullMoonPhase.ToString(), () =>
+            {
+                DayNightController built = DayNightController.Build(Lighting(), waterMaterial: null);
+                return Task.FromResult(built);
+            }));
+
+        Assert.True(cycle.IsNighttime);
+        Assert.Equal(LightingCycle.FullMoonPhase, cycle.MoonPhase);
+        Assert.True(cycle.IsFullMoon);
+
+        cycle.Free();
+    }
+
     // --- sun shafts ----------------------------------------------------------------------------------
 
     // Off by default, exactly like the game (GraphicsSettingsData.SunShaftsQuality = OFF). Worth pinning

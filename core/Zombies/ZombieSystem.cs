@@ -224,8 +224,12 @@ public sealed class ZombieInstance
     // hyperAgro in here at spawn, so a hyper-agro bound hit 50% harder in broad daylight while a full
     // moon did nothing at all.
     //
-    // Stamped at spawn like everything else the instance carries. Beacons do not exist here, so a full
-    // moon is the whole of it.
+    // NOT stamped at spawn: `isHyper` is a live property in the original, and LightingManager broadcasts
+    // onMoonUpdated -> ZombieRegion.onHyperUpdated whenever the moon changes (ZombieRegion.cs:311-315).
+    // Stamping it meant a session that started in daylight kept a non-hyper population through every
+    // full moon that followed — and since nothing here respawns a zombie, that was every full moon ever.
+    // ZombieSystem.IsFullMoon's setter re-stamps this across the whole population on the edge, so the
+    // per-zombie read stays a field. Beacons do not exist here, so a full moon is the whole of it.
     public bool IsHyper;
 
     // Zombie.GetVerticalAttackRange: hyper zombies reach 3.5 m, everyone else 2.1, megas x1.5.
@@ -340,18 +344,26 @@ public delegate void ZombieCostSink(EZombieCost cost, long elapsedTicks);
 // required, matching the game's own fallback movement model.
 public sealed partial class ZombieSystem
 {
-    // ZombiesConfigData NORMAL difficulty. The speciality chances that used to sit beside this are gone:
-    // they are per-bound and per-table DATA now (see GenerateSpeciality), because the map's own
-    // difficulty assets override them and PEI ships two that do.
-    public const float SpawnChance = 0.25f;
-
-    // Provider.modeConfigData: the fallback weights, used for any bound whose difficulty asset is absent
-    // or does not set Overrides_Spawn_Chance. Defaults to the ported NORMAL block.
+    // Provider.modeConfigData: the population density, the fallback speciality weights (used for any
+    // bound whose difficulty asset is absent or does not set Overrides_Spawn_Chance) and the damage
+    // multiplier. Defaults to the ported NORMAL block.
+    //
+    // The 0.25 spawn chance that used to be a const here has gone the same way the speciality chances
+    // did: generateZombies reads Provider.modeConfigData.Zombies.Spawn_Chance (ZombieManager.cs:1180),
+    // so it is per-MODE data — EASY thins the population to 20% of the map's spawnpoints and HARD swells
+    // it to 30% — and ZombiesConfig's own default is where the ported NORMAL number now lives.
     public ModeConfigData ModeConfig { get; set; } = ModeConfigData.Normal;
 
     // The map's difficulty assets, by GUID. Null until a host scans Bundles/Assets; with nothing
     // resolvable every bound falls back to ModeConfig above, which is what the game does too.
     public ZombieDifficultyBank? Difficulties { get; set; }
+
+    // "Level.getAsset()?.ZombieDifficultyAssetPrioritization ?? NavmeshOverridesTable"
+    // (ZombieManager.cs:919): the map's LevelAsset picks which of the two difficulty assets wins. No
+    // shipped map sets it, so this is the default for all of them — but a workshop map that does had its
+    // declaration silently ignored, and the ordering decides every speciality distribution on it.
+    public EZombieDifficultyAssetPrioritization DifficultyPrioritization { get; set; }
+        = EZombieDifficultyAssetPrioritization.NavmeshOverridesTable;
 
     // LightingManager.isNighttime at the moment of the roll. The two Dying Light volatiles are only
     // added to the table at night ("otherwise they explode immediately"), so the roll has to be told
@@ -369,7 +381,34 @@ public sealed partial class ZombieSystem
     // A full moon makes every zombie HYPER: 3.5 m of vertical reach instead of 2.1, and half again the
     // swing damage. It also selects Respawn_Night_Time and Full_Moon_Experience_Multiplier, neither of
     // which has a path here yet (nothing respawns a zombie, nothing awards experience).
-    public bool IsFullMoon { get; set; }
+    //
+    // Settable DURING a session, not just before Spawn. LightingManager.isFullMoon is itself a property
+    // whose setter broadcasts onMoonUpdated on the edge (LightingManager.cs:330-341), which ZombieRegion
+    // turns into onHyperUpdated (ZombieRegion.cs:311-315) — so the population learns about the moon it
+    // was not spawned under. Same shape here: assigning re-stamps every live zombie's IsHyper, and an
+    // assignment that changes nothing costs one comparison, which is what lets a host push this from the
+    // tick without walking the level's whole population 12.5 times a second.
+    public bool IsFullMoon
+    {
+        get => _isFullMoon;
+        set
+        {
+            if (value == _isFullMoon)
+                return;
+            _isFullMoon = value;
+            for (int i = 0; i < _zombies.Count; i++)
+                _zombies[i].IsHyper = HyperFor(_zombies[i].Speciality);
+        }
+    }
+
+    private bool _isFullMoon;
+
+    // Zombie.isHyper (Zombie.cs:381) minus the beacon term: the region's full moon, with BOSS_ALL and
+    // BOSS_BUAK_FINAL excluded.
+    private bool HyperFor(EZombieSpeciality speciality) =>
+        _isFullMoon
+        && speciality != EZombieSpeciality.BossAll
+        && speciality != EZombieSpeciality.BossBuakFinal;
 
     // LegacyAIPathNoRedist (decompiled from the game assembly) with the values
     // CreateMovementComponentForZombie assigns.
@@ -508,29 +547,57 @@ public sealed partial class ZombieSystem
             if (!_bounds[b].SpawnZombies)
                 continue;
             List<ZombieSpawnpointData> pool = perBound[b];
-            int max = Math.Min(_bounds[b].MaxZombies, (int)MathF.Ceiling(pool.Count * SpawnChance));
-            for (int n = 0; n < max && pool.Count > 0; n++)
+            // "Mathf.CeilToInt(levelSpawnpoints.Count * Provider.modeConfigData.Zombies.Spawn_Chance)",
+            // capped by the flag's own maxZombies (ZombieManager.cs:1179-1182). The chance is the MODE's,
+            // not a constant: a server running EASY has a fifth of its spawnpoints occupied and one
+            // running HARD three tenths.
+            int max = Math.Min(_bounds[b].MaxZombies,
+                (int)MathF.Ceiling(pool.Count * ModeConfig.Zombies.SpawnChance));
+            // "regionMaxBossZombies >= 0 && speciality.IsBoss() && region.aliveBossZombieCount >=
+            // regionMaxBossZombies" (ZombieManager.cs:1211): negative means uncapped. Counted from the
+            // bound's CURRENT population rather than from zero, because Spawn is additive.
+            int maxBosses = _bounds[b].MaxBossZombies;
+            int bosses = 0;
+            if (maxBosses >= 0)
+                foreach (ZombieInstance existing in _byBound[b])
+                    if (existing.Speciality.IsBoss())
+                        bosses++;
+            // The original's loop counts ZOMBIES PLACED, not spawnpoints drawn — a rejected boss
+            // `continue`s, so its spawnpoint is spent but the region still has room. Written as a while
+            // for the same reason.
+            int spawned = 0;
+            while (spawned < max && pool.Count > 0)
             {
                 int pick = random.Next(pool.Count);
                 ZombieSpawnpointData spawn = pool[pick];
                 pool.RemoveAt(pick);
-                ZombieInstance zombie = Create(nextId++, (byte)b, spawn, random);
+                ZombieTable table = _tables[spawn.Type];
+                // ZombieManager.generateZombies (ZombieManager.cs:1197-1208): a mega table is a mega
+                // outright and is never rolled; everything else goes through the weighted table. (The
+                // original also gates that on Level.info.type == SURVIVAL, which every map here is.)
+                //
+                // Rolled BEFORE the boss cap is tested, exactly as the original does, so a rejected boss
+                // still consumes its speciality draw — the cap must not move the rest of the sequence.
+                EZombieSpeciality speciality = table.IsMega
+                    ? EZombieSpeciality.Mega
+                    : GenerateSpeciality((byte)b, table, random);
+                if (speciality.IsBoss())
+                {
+                    if (maxBosses >= 0 && bosses >= maxBosses)
+                        continue; // "Reached max boss zombie limit."
+                    bosses++;
+                }
+                ZombieInstance zombie = Create(nextId++, (byte)b, spawn, table, speciality, random);
                 _zombies.Add(zombie);
                 _byBound[b].Add(zombie);
+                spawned++;
             }
         }
     }
 
-    private ZombieInstance Create(ushort id, byte bound, ZombieSpawnpointData spawn, Random random)
+    private ZombieInstance Create(ushort id, byte bound, ZombieSpawnpointData spawn, ZombieTable table,
+        EZombieSpeciality speciality, Random random)
     {
-        ZombieTable table = _tables[spawn.Type];
-        // ZombieManager.generateZombies (ZombieManager.cs:1197-1208): a mega table is a mega outright and
-        // is never rolled; everything else goes through the weighted table. (The original also gates that
-        // on Level.info.type == SURVIVAL, which every map this port loads is.)
-        EZombieSpeciality speciality = table.IsMega
-            ? EZombieSpeciality.Mega
-            : GenerateSpeciality(bound, table, random);
-
         Vector3 position = spawn.Point;
         if (_ground(position.X, position.Z, out float y))
             position.Y = y;
@@ -545,10 +612,7 @@ public sealed partial class ZombieSystem
             Bound = bound,
             Type = spawn.Type,
             Speciality = speciality,
-            // Zombie.isHyper's two exclusions: BOSS_ALL and BOSS_BUAK_FINAL are never hyper.
-            IsHyper = IsFullMoon
-                && speciality != EZombieSpeciality.BossAll
-                && speciality != EZombieSpeciality.BossBuakFinal,
+            IsHyper = HyperFor(speciality),
             Shirt = RollSlot(table, 0, random),
             Pants = RollSlot(table, 1, random),
             Hat = RollSlot(table, 2, random),
@@ -561,22 +625,33 @@ public sealed partial class ZombieSystem
         };
     }
 
-    // ZombieManager.GetDifficultyInBoundForTable (ZombieManager.cs:915-946) with the default
-    // prioritization, NavmeshOverridesTable: the navigation bound's asset wins, and the table's is the
-    // fallback when the bound names none or the one it names does not set Overrides_Spawn_Chance.
+    // ZombieManager.GetDifficultyInBoundForTable (ZombieManager.cs:915-946), both orderings.
     //
-    // `forSpawnOverrides` is always true here — the speciality roll is this port's only caller — so the
-    // Overrides_Spawn_Chance test is folded in rather than carried as a parameter.
-    internal ZombieDifficultyAsset? DifficultyFor(byte bound, ZombieTable table)
+    // The winner is asked for first and the loser is the fallback, but only when the winner is absent OR
+    // — for a spawn roll — declines to override the spawn chance. `forSpawnOverrides` is the original's
+    // own parameter and this port needs both settings of it: the speciality roll passes true
+    // (ZombieManager.cs:1046), while the zombie's cached difficulty, which is what the stun thresholds
+    // read, passes false (Zombie.updateDifficulty, Zombie.cs:1692). Folding it in as always-true made an
+    // asset that customises Normal_Stun_Threshold without overriding the spawn chance invisible to the
+    // stagger maths.
+    internal ZombieDifficultyAsset? DifficultyFor(byte bound, ZombieTable table, bool forSpawnOverrides)
     {
-        if (Difficulties == null)
+        // Read once: the property is settable, and the two lookups below must not be able to see
+        // different banks (or a null) if a host swaps one mid-session.
+        ZombieDifficultyBank? bank = Difficulties;
+        if (bank == null)
             return null;
 
-        ZombieDifficultyAsset? result = bound < _bounds.Count
-            ? Difficulties.Find(_bounds[bound].DifficultyGuid)
+        ZombieDifficultyAsset? BoundAsset() => bound < _bounds.Count
+            ? bank.Find(_bounds[bound].DifficultyGuid)
             : null;
-        if (result == null || !result.OverridesSpawnChance)
-            result = Difficulties.Find(table.DifficultyGuid);
+        ZombieDifficultyAsset? TableAsset() => bank.Find(table.DifficultyGuid);
+
+        bool tableFirst =
+            DifficultyPrioritization == EZombieDifficultyAssetPrioritization.TableOverridesNavmesh;
+        ZombieDifficultyAsset? result = tableFirst ? TableAsset() : BoundAsset();
+        if (result == null || (forSpawnOverrides && !result.OverridesSpawnChance))
+            result = tableFirst ? BoundAsset() : TableAsset();
         return result;
     }
 
@@ -589,7 +664,7 @@ public sealed partial class ZombieSystem
     // military bounds a 15% crawler where the map itself asks for 20%.
     internal EZombieSpeciality GenerateSpeciality(byte bound, ZombieTable table, Random random)
     {
-        ZombieDifficultyAsset? asset = DifficultyFor(bound, table);
+        ZombieDifficultyAsset? asset = DifficultyFor(bound, table, forSpawnOverrides: true);
         ZombieSpecialityWeights weights = asset != null && asset.OverridesSpawnChance
             ? asset.Weights(IsNighttime)
             : ModeWeights();
@@ -904,13 +979,38 @@ public sealed partial class ZombieSystem
 
         // Zombie.askDamage stuns only on the branch where the zombie SURVIVED — a killing blow has no
         // stagger to play, because the body is being replaced by a ragdoll.
-        if (ZombieStun.ShouldStun(amount, zombie.Speciality == EZombieSpeciality.Mega, CanStun,
-                OnlyCriticalStuns, stunOverride))
+        //
+        // Both arguments key on Zombie.isMega, which counts bosses: getStunDamageThreshold takes the
+        // MEGA branch for a boss (Zombie.cs:893), so a boss shrugs off 150 rather than 20, and it reads
+        // that branch's threshold off the zombie's cached difficulty asset.
+        bool isMega = zombie.Speciality.IsMega();
+        if (ZombieStun.ShouldStun(amount, isMega, CanStun, OnlyCriticalStuns, stunOverride,
+                StunThresholdFor(zombie, isMega)))
             Stun(zombie);
 
         if (instigator != byte.MaxValue && TryGetPlayer(players, instigator, out ZombiePlayerView attacker))
             Alert(zombie, attacker, players);
         return false;
+    }
+
+    // Zombie.getStunDamageThreshold's override, off this zombie's own difficulty asset: the mega branch
+    // reads Mega_Stun_Threshold and everyone else Normal_Stun_Threshold, with -1 meaning "unset" and
+    // falling back to the built-in 150/20 (ZombieStun.ThresholdFor applies that rule).
+    //
+    // Resolved per hit rather than cached on the instance, the way Zombie.updateDifficulty caches it: a
+    // hit is a rare event (a punch, not a tick), two dictionary lookups are nothing beside it, and a
+    // cached asset would have to be re-derived after every repro restore and every bound reassignment.
+    private int StunThresholdFor(ZombieInstance zombie, bool isMega)
+    {
+        if (Difficulties == null || zombie.Type >= _tables.Count)
+            return -1;
+        // forSpawnOverrides: false — the stun threshold is not a spawn override, so an asset that
+        // declines to override the spawn chance still gets to set the stagger (Zombie.cs:1692).
+        ZombieDifficultyAsset? difficulty =
+            DifficultyFor(zombie.Bound, _tables[zombie.Type], forSpawnOverrides: false);
+        if (difficulty == null)
+            return -1;
+        return isMega ? difficulty.MegaStunThreshold : difficulty.NormalStunThreshold;
     }
 
     // Zombie.stun: the body stops where it stands, drops the swing it was in the middle of, and plays one
