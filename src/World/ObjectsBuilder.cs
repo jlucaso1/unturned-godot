@@ -980,6 +980,9 @@ public static class ObjectsBuilder
         if (ObjectChunkMetres > 0f && items.Count > 1)
         {
             var cells = new Dictionary<(int X, int Z), List<(Transform3D transform, Color color)>>();
+            // ObjectBatchPartition.AnchorOf, inline: these placements carry a colour alongside the
+            // transform, and copying them into a bare List<Transform3D> to reuse it would allocate a
+            // second copy of every missing placement — tens of thousands of them on a cold-cache map.
             Vector3 anchor = items[0].transform.Origin;
             foreach ((Transform3D transform, Color _) in items)
                 anchor = anchor.Min(transform.Origin);

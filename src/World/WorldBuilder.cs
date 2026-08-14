@@ -297,6 +297,10 @@ public static class WorldBuilder
         IReadOnlyDictionary<Guid, FoliageAsset.Owned> foliageAssets = content.FoliageAssets;
         HashSet<Guid> neededGuids = content.NeededGuids;
 
+        // The NPCs are counted back in: they left `objects` to be built differently, not to stop being
+        // placements. This no longer breaks the total out into "incl. N trees" — the trees are folded in
+        // by LevelContentPlan and are placements like any other by the time it returns, and the one thing
+        // that line was ever used for (a map rendering bare) is answered better by the render count below.
         Log.Print($"[unturned-godot] Placed objects: {objects.Count + npcs.Count}");
         Log.Print($"[unturned-godot] Vehicles: {vehicles.Count} spawned");
         if (content.LegacyResolved > 0)
