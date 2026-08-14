@@ -64,6 +64,97 @@ public class CompressedMeshTests
         };
     }
 
+    // The three-vertex mesh above with a skin over it. Unity does not store four weights per vertex: the
+    // weights are a flat run of 5-bit values that sum to 31 across a vertex's influences and stop as soon
+    // as they reach it, so the runs below describe one vertex bound to a single bone, one to two, and one
+    // to four — whose fourth weight is the remainder and is never written out, though its bone id is.
+    private static Dictionary<string, object> SkinnedMesh(uint[] weights, uint[] boneIndices)
+    {
+        Dictionary<string, object> mesh = Mesh(uvInfo: 0);
+        mesh["m_Weights"] = UInts(5, weights);
+        mesh["m_BoneIndices"] = UInts(8, boneIndices);
+        return mesh;
+    }
+
+    private static readonly uint[] ThreeVertexWeights = { 31, 20, 11, 10, 10, 5 };
+    private static readonly uint[] ThreeVertexBones = { 2, 0, 1, 3, 4, 5, 6 };
+
+    [Fact]
+    public void Read_UnpacksSkinWeightsAndBoneIndices()
+    {
+        // This is the run the README's first-person arms are waiting on: the Viewmodel rig keeps its skin
+        // weights here, so without it that mesh imports as an unposable bind-pose shell.
+        CompressedMesh mesh = CompressedMesh.Read(SkinnedMesh(ThreeVertexWeights, ThreeVertexBones));
+
+        Assert.Equal(new[]
+        {
+            1f, 0f, 0f, 0f,                             // one bone: the run stops at a full 31
+            20f / 31f, 11f / 31f, 0f, 0f,               // two bones, adding up to 31
+            10f / 31f, 10f / 31f, 5f / 31f, 6f / 31f,   // three written, the fourth is the remainder
+        }, mesh.BoneWeights);
+
+        Assert.Equal(new[] { 2, 0, 0, 0, 0, 1, 0, 0, 3, 4, 5, 6 }, mesh.BoneIndices);
+    }
+
+    [Fact]
+    public void Read_SkinWeightsSumToOnePerVertex()
+    {
+        CompressedMesh mesh = CompressedMesh.Read(SkinnedMesh(ThreeVertexWeights, ThreeVertexBones));
+
+        for (int v = 0; v < mesh.Vertices.Length; v++)
+        {
+            float sum = 0f;
+            for (int i = 0; i < 4; i++)
+                sum += mesh.BoneWeights[(v * 4) + i];
+            Assert.Equal(1f, sum, 5);
+        }
+    }
+
+    [Fact]
+    public void Read_WithoutASkin_HasNoBoneData()
+    {
+        CompressedMesh mesh = CompressedMesh.Read(Mesh(uvInfo: 0));
+
+        Assert.Empty(mesh.BoneWeights);
+        Assert.Empty(mesh.BoneIndices);
+    }
+
+    [Fact]
+    public void Read_SkinThatStopsShortOfTheVertices_IsDroppedWhole()
+    {
+        // Only the first two vertices are covered. A partial skin is worse than none: a weightless vertex
+        // under a skeleton collapses onto the model's origin, which reads as a modelling error rather
+        // than as a truncated read.
+        CompressedMesh mesh = CompressedMesh.Read(
+            SkinnedMesh(new uint[] { 31, 31 }, new uint[] { 1, 2 }));
+
+        Assert.Empty(mesh.BoneWeights);
+        Assert.Empty(mesh.BoneIndices);
+    }
+
+    [Fact]
+    public void Read_SkinWithTooFewBoneIndices_IsDroppedWhole()
+    {
+        // The two runs disagree: three vertices' worth of weights, one bone id.
+        CompressedMesh mesh = CompressedMesh.Read(
+            SkinnedMesh(ThreeVertexWeights, new uint[] { 2 }));
+
+        Assert.Empty(mesh.BoneWeights);
+        Assert.Empty(mesh.BoneIndices);
+    }
+
+    [Fact]
+    public void Read_SkinWithoutTheFourthBoneId_IsDroppedWhole()
+    {
+        // The remainder branch needs one more bone id than the weights it read; this run stops one short
+        // of it, which is the only way into that branch's own truncation check.
+        CompressedMesh mesh = CompressedMesh.Read(
+            SkinnedMesh(new uint[] { 31, 31, 10, 10, 5 }, new uint[] { 1, 2, 3, 4, 5 }));
+
+        Assert.Empty(mesh.BoneWeights);
+        Assert.Empty(mesh.BoneIndices);
+    }
+
     [Fact]
     public void Read_RebuildsVerticesTrianglesAndUnitNormals()
     {
@@ -111,14 +202,16 @@ public class CompressedMeshTests
     }
 
     [Fact]
-    public void Read_ChannelTable_SkipsAbsentChannels()
+    public void Read_WithoutUv0_HasNoUvsRatherThanBorrowingUv1()
     {
-        // Nothing on channel 0; channel 1 exists with two components, so it is the one to sample.
+        // Nothing on channel 0; channel 1 exists with two components. UV1 is a lightmap channel whose
+        // coordinates address an atlas rather than the albedo, so handing it back as UV0 textured the
+        // mesh through the wrong mapping. A mesh with no UV0 has no albedo coordinates, and says so.
         const uint uv1Only = (4u | 1u) << 4;
+
         CompressedMesh mesh = CompressedMesh.Read(Mesh(uv1Only));
 
-        Assert.Equal(3, mesh.Uvs.Length);
-        Assert.Equal(0f, mesh.Uvs[0].X, 3);
+        Assert.Empty(mesh.Uvs);
     }
 
     [Fact]

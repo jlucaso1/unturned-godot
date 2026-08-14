@@ -253,4 +253,111 @@ public class ObjectAssetTests
         Assert.Equal(0f, large.DecalX);
         Assert.Equal(0f, large.DecalY);
     }
+
+    // --- Holidays (ObjectAsset.cs:1225 / :1238, ResourceAsset.cs:508 / :521) ---
+
+    private static ObjectAsset Parse(string body) =>
+        ObjectAsset.TryParse(DatParser.Parse($"GUID {Guid.NewGuid():N}\nType Large\n{body}"), null,
+            out ObjectAsset? a)
+            ? a
+            : throw new InvalidOperationException("asset fixture did not parse");
+
+    [Theory]
+    // The three spellings that actually appear across every .dat the game ships: 106 CHRISTMAS,
+    // 7 HALLOWEEN, 1 PRIDE_MONTH.
+    [InlineData("CHRISTMAS", (int)ENPCHoliday.Christmas)]
+    [InlineData("HALLOWEEN", (int)ENPCHoliday.Halloween)]
+    [InlineData("PRIDE_MONTH", (int)ENPCHoliday.PrideMonth)]
+    [InlineData("christmas", (int)ENPCHoliday.Christmas)]
+    public void HolidayRestriction_ParsesTheEnumSpelling(string value, int expected) =>
+        Assert.Equal((ENPCHoliday)expected, Parse($"Holiday_Restriction {value}\n").HolidayRestriction);
+
+    [Fact]
+    public void HolidayRestriction_DefaultsToNoneAndSurvivesAMalformedValue()
+    {
+        // Unturned's Enum.Parse would throw here; taking the whole asset scan down over one mod's typo
+        // would cost the map its entire object database, so an unreadable value is simply no restriction.
+        Assert.Equal(ENPCHoliday.None, Parse("").HolidayRestriction);
+        Assert.Equal(ENPCHoliday.None, Parse("Holiday_Restriction Easter\n").HolidayRestriction);
+        Assert.Equal(ENPCHoliday.None, Parse("Holiday_Restriction NONE\n").HolidayRestriction);
+    }
+
+    [Fact]
+    public void GetHolidayRedirect_AnswersOnlyForTheHolidayItNames()
+    {
+        var xmas = Guid.NewGuid();
+        var hw = Guid.NewGuid();
+        ObjectAsset asset = Parse($"Christmas_Redirect {xmas:N}\nHalloween_Redirect {hw:N}\n");
+
+        Assert.Equal(xmas, asset.GetHolidayRedirect(ENPCHoliday.Christmas));
+        Assert.Equal(hw, asset.GetHolidayRedirect(ENPCHoliday.Halloween));
+        // Every other holiday returns AssetReference.invalid, i.e. no substitution at all.
+        Assert.Equal(Guid.Empty, asset.GetHolidayRedirect(ENPCHoliday.PrideMonth));
+        Assert.Equal(Guid.Empty, asset.GetHolidayRedirect(ENPCHoliday.None));
+        Assert.Equal(Guid.Empty, Parse("").GetHolidayRedirect(ENPCHoliday.Christmas));
+    }
+
+    // --- Where a resource stands and how it is jittered (ResourceAsset.cs:424 onwards) ---
+
+    [Fact]
+    public void VerticalOffset_DefaultsToMinusThreeQuarters()
+    {
+        Assert.Equal(-0.75f, Parse("").VerticalOffset);
+        // The two mushrooms, which are the reason the field is read rather than assumed.
+        Assert.Equal(0.1f, Parse("Vertical_Offset 0.1\n").VerticalOffset);
+    }
+
+    [Fact]
+    public void RandomUniformScale_LegacyScaleWinsOverTheModernPair()
+    {
+        // "The old in-game transform scale was 1.1f + asset.scale + (seed * asset.scale)" over a seed in
+        // [-1, 1], which is the range 1.1 .. 1.1 + 2*Scale written out. 37 tree assets still use it, and
+        // an asset writing both must read the legacy one -- the game never falls through to the pair.
+        ObjectAsset legacy = Parse("Scale 0.1\nRandomUniformScale_Min 5\nRandomUniformScale_Max 9\n");
+        Assert.Equal(1.1f, legacy.MinRandomUniformScale, 5);
+        Assert.Equal(1.3f, legacy.MaxRandomUniformScale, 5);
+
+        ObjectAsset modern = Parse("RandomUniformScale_Min 1\nRandomUniformScale_Max 1.55\n");
+        Assert.Equal(1f, modern.MinRandomUniformScale);
+        Assert.Equal(1.55f, modern.MaxRandomUniformScale);
+
+        // Both default to 1.1, so an asset naming neither is not scaled to nothing.
+        Assert.Equal(1.1f, Parse("").MinRandomUniformScale);
+        Assert.Equal(1.1f, Parse("").MaxRandomUniformScale);
+    }
+
+    [Fact]
+    public void RandomAngleDeviation_DefaultsToFiveDegreesEitherWay()
+    {
+        Assert.Equal(-5f, Parse("").MinRandomAngleDeviation);
+        Assert.Equal(5f, Parse("").MaxRandomAngleDeviation);
+
+        ObjectAsset tilted = Parse("RandomAngleDeviation_Min -20\nRandomAngleDeviation_Max 3\n");
+        Assert.Equal(-20f, tilted.MinRandomAngleDeviation);
+        Assert.Equal(3f, tilted.MaxRandomAngleDeviation);
+    }
+
+    [Fact]
+    public void GetLegacyRotationAndScale_IsTheSineOfTheTreesOwnXAndZ()
+    {
+        // Not random despite the field names: a server and a client that never exchange a tree's
+        // transform still have to draw the same forest, so the "seed" is a function of the position.
+        ObjectAsset asset = Parse("RandomUniformScale_Min 1\nRandomUniformScale_Max 3\n");
+        var point = new Godot.Vector3(13f, 999f, 27f);
+
+        asset.GetLegacyRotationAndScale(point, out Godot.Vector3 euler, out Godot.Vector3 scale);
+
+        float seed = MathF.Sin(((13f + 4096f) * 32f) + ((27f + 4096f) * 32f));
+        float weight = (seed + 1f) * 0.5f;
+        Assert.Equal(seed * 360f, euler.Y, 3);
+        Assert.Equal(-5f + (10f * weight), euler.X, 5);
+        Assert.Equal(0f, euler.Z);
+        Assert.Equal(1f + (2f * weight), scale.X, 5);
+        Assert.Equal(scale.X, scale.Y);
+        Assert.Equal(scale.X, scale.Z);
+
+        // Y is not part of the seed, so two trees on the same spot at different heights agree.
+        asset.GetLegacyRotationAndScale(new Godot.Vector3(13f, -50f, 27f), out Godot.Vector3 e2, out _);
+        Assert.Equal(euler, e2);
+    }
 }

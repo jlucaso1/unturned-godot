@@ -10,7 +10,7 @@ public class LevelLightingTests
 {
     // Builds a synthetic Lighting.dat so the parser is exercised without the game installed. Colors are
     // encoded as (keyframe, colorIndex, colorIndex*2) so every value is distinguishable when asserted.
-    private static byte[] Build(byte version, bool withKeyframes = true)
+    private static byte[] Build(byte version, bool withKeyframes = true, float? fog = null)
     {
         using var ms = new MemoryStream();
         using (var w = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: true))
@@ -29,12 +29,12 @@ public class LevelLightingTests
             if (version >= 11) { w.Write(3f); w.Write(4f); } // snow freq/dur
             if (withKeyframes && version > 9)
                 for (int k = 0; k < 4; k++)
-                    WriteKeyframe(w, k);
+                    WriteKeyframe(w, k, fog);
         }
         return ms.ToArray();
     }
 
-    private static void WriteKeyframe(BinaryWriter w, int k)
+    private static void WriteKeyframe(BinaryWriter w, int k, float? fog = null)
     {
         for (int i = 0; i < 12; i++) // 12 ELightingColor entries, RGB bytes
         {
@@ -43,7 +43,7 @@ public class LevelLightingTests
             w.Write((byte)(i * 2));
         }
         w.Write(0.5f + k);         // intensity
-        w.Write(0.1f * k);         // fog
+        w.Write(fog ?? (0.1f * k)); // fog
         w.Write(0.2f * k);         // clouds
         w.Write(0.75f - 0.25f * k); // shadows (kept to exact binary fractions)
         w.Write(0.25f);            // rays
@@ -118,6 +118,28 @@ public class LevelLightingTests
         // A version-5 header parses, then the obsolete keyframe encoding (<= 9) is rejected.
         Assert.Throws<System.NotSupportedException>(
             () => LevelLighting.Parse(new MemoryStream(Build(5, withKeyframes: false))));
+    }
+
+    [Fact]
+    public void Parse_ClampsFogOnAFileWrittenBeforeDistanceFog()
+    {
+        // LevelLighting.cs:1546, "Switched from height fog to distance fog, so we reduce the intensity on
+        // all maps": a pre-12 file's fog scalar meant height fog and reads far too thick as distance fog.
+        // Every keyframe is capped, not just the one the renderer happens to sample.
+        LevelLighting legacy = LevelLighting.Parse(new MemoryStream(Build(11, fog: 1f)));
+
+        Assert.All(legacy.Times, t => Assert.Equal(0.33f, t.FogDensity));
+        // Under the cap it is left exactly alone -- this is a ceiling, not a rescale.
+        Assert.All(LevelLighting.Parse(new MemoryStream(Build(11, fog: 0.2f))).Times,
+            t => Assert.Equal(0.2f, t.FogDensity));
+    }
+
+    [Fact]
+    public void Parse_LeavesFogAloneFromVersion12()
+    {
+        // Where the format changed. Every official map is 12, which is why nothing shipped moves.
+        Assert.All(LevelLighting.Parse(new MemoryStream(Build(12, fog: 1f))).Times,
+            t => Assert.Equal(1f, t.FogDensity));
     }
 
     [Fact]

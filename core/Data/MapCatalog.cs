@@ -225,24 +225,53 @@ public static class MapCatalog
     // Config.json's Category ("Official", "Curated", ...). Unknown or malformed config is not fatal.
     private static string? ReadCategory(string mapDirectory)
     {
+        string? category = null;
+        ReadConfig(mapDirectory, root =>
+        {
+            if (root.TryGetProperty("Category", out JsonElement value) && value.ValueKind == JsonValueKind.String)
+                category = value.GetString();
+        });
+        return category;
+    }
+
+    // Config.json's Allow_Holiday_Redirects (LevelInfo.cs:81, "If true, certain objects redirect to load
+    // others in-game"). One of the three things Level.cs:282 requires before a Christmas_Redirect or a
+    // Halloween_Redirect is followed, so a map that does not say true never has its trees and props
+    // substituted no matter what the calendar says. PEI ships it as true.
+    //
+    // False is the right default rather than a cautious one: Unturned deserializes Config.json onto a
+    // fresh LevelConfigData whose bool fields start false, so a map whose config omits the key — or that
+    // has no config at all — opts out in the game too. Only the maps that ask get substitutions.
+    public static bool ReadAllowHolidayRedirects(string mapDirectory)
+    {
+        bool allow = false;
+        ReadConfig(mapDirectory, root =>
+        {
+            if (root.TryGetProperty("Allow_Holiday_Redirects", out JsonElement value))
+                allow = value.ValueKind == JsonValueKind.True;
+        });
+        return allow;
+    }
+
+    // The one place Config.json is opened, so every field reads it under the same failure rules: a map
+    // whose config is missing or malformed still loads, with `read` simply never called.
+    private static void ReadConfig(string mapDirectory, Action<JsonElement> read)
+    {
         string? text = TryReadAllText(Path.Combine(mapDirectory, "Config.json"));
         if (text == null)
-            return null;
+            return;
 
         try
         {
             using JsonDocument document = JsonDocument.Parse(text,
                 new JsonDocumentOptions { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip });
-            if (document.RootElement.ValueKind == JsonValueKind.Object
-                && document.RootElement.TryGetProperty("Category", out JsonElement category)
-                && category.ValueKind == JsonValueKind.String)
-            {
-                return category.GetString();
-            }
+            if (document.RootElement.ValueKind == JsonValueKind.Object)
+                read(document.RootElement);
         }
         catch (JsonException)
         {
-            // A map we cannot read the config of still loads; the category is cosmetic.
+            // A map we cannot read the config of still loads; the category is cosmetic, and a holiday
+            // substitution left unapplied keeps the map's own authored objects.
         }
         catch (InvalidOperationException)
         {
@@ -251,8 +280,6 @@ public static class MapCatalog
             // throw lands here rather than above -- and without this catch it left ReadCategory, left
             // Read, and left Scan, so one hand-edited workshop config took the whole map list down.
         }
-
-        return null;
     }
 
     // Tile count and the edge of the square the tiles span, in metres.

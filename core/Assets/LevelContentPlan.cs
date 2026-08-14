@@ -60,17 +60,27 @@ public static class LevelContentPlan
     // `foliageGuids` is what the map's Foliage.blob scatters, read by the caller — through the residency
     // index, the chunked loader or the header alone, which is a streaming decision and not this one's.
     // Null means "this build wants no foliage", and is not the same as an empty list.
+    //
+    // `holidays` defaults to the map's own answer: the clock, plus whether its Config.json allows
+    // substitutions. It is a parameter only so a test can pin it — every real caller wants the map's,
+    // and a caller passing a DIFFERENT one is the bug this consolidation exists to prevent. Two builds
+    // of the same map disagreeing about the date do not merely draw different things: the placement list
+    // is what DamageableWorld indexes into, so the indices shift with it.
     public static LevelContent Resolve(IReadOnlyList<ContentSource> sources, LevelInfo level,
-        ObjectAssetDatabase db, IReadOnlyList<Guid>? foliageGuids)
+        ObjectAssetDatabase db, IReadOnlyList<Guid>? foliageGuids, HolidayPolicy? holidays = null)
     {
+        HolidayPolicy holiday = holidays ?? HolidayPolicy.ForMap(level.Path);
+
         List<PlacedObject> objects = LevelObjects.Load(level.ObjectsDat);
         List<PlacedTree> trees = LevelTrees.Load(TreesDat(level));
 
         // A pre-GUID map names its objects and trees by legacy id; everything below is keyed on GUIDs, so
         // those placements borrow theirs from the database first — and the trees become placements here,
-        // resolved through the resource namespace rather than the object one.
-        int legacyResolved = LegacyPlacements.ResolveGuids(objects, db)
-            + LegacyPlacements.AppendTrees(trees, objects, db);
+        // resolved through the resource namespace rather than the object one. This is also where the
+        // holiday rules run: an asset carrying Holiday_Restriction does not exist outside its holiday, so
+        // both lists SHRINK here as well as being rewritten.
+        int legacyResolved = LegacyPlacements.ResolveGuids(objects, db, holiday)
+            + LegacyPlacements.AppendTrees(trees, objects, db, holiday);
 
         // A spawned vehicle is a GUID and a transform like any other placement, so its mesh joins the same
         // needed set, the same extraction plan and the same batching — only the scene root is its own.

@@ -50,6 +50,15 @@ public class LevelContentPlanTests
         public Install Object(string name, Guid guid, ushort id, string type = "Large") =>
             Asset("Objects", name, guid, id, type);
 
+        // An object that does not exist outside its holiday. LevelObject.updateConditions gates the
+        // GameObject and the renderers together, so it is not merely undrawn — it is not there.
+        public Install HolidayObject(string name, Guid guid, ushort id, string holiday)
+        {
+            _dir.Write(System.IO.Path.Combine("Bundles", "Objects", name, "Asset.dat"),
+                $"GUID {guid:N}\nType Large\nID {id}\nHoliday_Restriction {holiday}\n");
+            return this;
+        }
+
         public Install Resource(string name, Guid guid, ushort id) =>
             Asset("Trees", name, guid, id, "Resource");
 
@@ -127,11 +136,14 @@ public class LevelContentPlanTests
         public void Dispose() => _dir.Dispose();
     }
 
-    private static LevelContent Resolve(Install install, IReadOnlyList<Guid>? foliageGuids = null)
+    // Out of season unless a test says otherwise: the holiday rules DELETE placements, so leaving them on
+    // the wall clock would make every count here depend on the day the suite happens to run.
+    private static LevelContent Resolve(Install install, IReadOnlyList<Guid>? foliageGuids = null,
+        HolidayPolicy? holidays = null)
     {
         IReadOnlyList<ContentSource> sources = install.Sources;
         return LevelContentPlan.Resolve(sources, install.Level,
-            ContentExtraction.ScanAssets(sources), foliageGuids);
+            ContentExtraction.ScanAssets(sources), foliageGuids, holidays ?? HolidayPolicy.None);
     }
 
     private static Vector3 At(float x) => new(x, 0f, 0f);
@@ -308,6 +320,53 @@ public class LevelContentPlanTests
         Assert.Empty(content.Npcs);
         Assert.Empty(content.NeededGuids);
         Assert.Equal(0, content.LegacyResolved);
+    }
+
+    [Fact]
+    public void AHolidayObjectIsNotPlacedOutOfSeasonAndIsNotNeeded()
+    {
+        // The restriction gate runs inside the resolve, so a Christmas prop is gone from the placements
+        // AND from the needed set: nothing draws it, nothing collides with it, and no extraction chases
+        // its mesh. Before this was one function, a caller that forgot the holiday argument would still
+        // have got a list — just a different one from its neighbour's.
+        var wreath = Guid.NewGuid();
+        var house = Guid.NewGuid();
+        using var install = new Install();
+        install.HolidayObject("Wreath", wreath, 900, "Christmas").Object("House", house, 12)
+            .Objects((At(1), 0, house), (At(2), 0, wreath));
+
+        LevelContent summer = Resolve(install);
+
+        Assert.Equal(new[] { house }, summer.Objects.ConvertAll(o => o.Guid));
+        Assert.Equal(new HashSet<Guid> { house }, summer.NeededGuids);
+
+        // And in season it is placed like anything else.
+        LevelContent december = Resolve(install,
+            holidays: new HolidayPolicy(ENPCHoliday.Christmas, allowRedirects: false));
+
+        Assert.Equal(new HashSet<Guid> { house, wreath }, december.NeededGuids);
+        Assert.Equal(2, december.Objects.Count);
+    }
+
+    [Fact]
+    public void TheHolidayDefaultsToTheMapsOwnAnswer()
+    {
+        // Every real caller wants the map's, and the parameter exists so a test can pin it. Passing null
+        // has to reach HolidayPolicy.ForMap rather than silently meaning "no holiday" — a build that
+        // quietly opted out of the calendar would place a different list from its neighbour, and the
+        // placement list is what DamageableWorld indexes into.
+        var house = Guid.NewGuid();
+        using var install = new Install();
+        install.Object("House", house, 12).Objects((At(1), 0, house));
+        IReadOnlyList<ContentSource> sources = install.Sources;
+        ObjectAssetDatabase db = ContentExtraction.ScanAssets(sources);
+
+        LevelContent defaulted = LevelContentPlan.Resolve(sources, install.Level, db, null);
+        LevelContent forMap = LevelContentPlan.Resolve(sources, install.Level, db, null,
+            HolidayPolicy.ForMap(install.MapPath));
+
+        Assert.Equal(forMap.NeededGuids, defaulted.NeededGuids);
+        Assert.Equal(forMap.Objects.Count, defaulted.Objects.Count);
     }
 
     [Fact]

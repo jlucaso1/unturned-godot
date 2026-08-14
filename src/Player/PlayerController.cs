@@ -512,7 +512,8 @@ public partial class PlayerController : CharacterBody3D
         };
         _ladderLosRay.From = from;
         _ladderLosRay.To = capsuleCentre;
-        return GetWorld3D().DirectSpaceState.IntersectRay(_ladderLosRay).Count == 0;
+        using Godot.Collections.Dictionary hit = GetWorld3D().DirectSpaceState.IntersectRay(_ladderLosRay);
+        return hit.Count == 0;
     }
 
     private bool HasInteractMountClearance(Vector3 feet) =>
@@ -549,7 +550,13 @@ public partial class PlayerController : CharacterBody3D
         };
         _ladderRay.From = from;
         _ladderRay.To = from + (direction * range);
-        Godot.Collections.Dictionary hit = GetWorld3D().DirectSpaceState.IntersectRay(_ladderRay);
+        // Disposed here, not left to the collector. Every one of these queries returns a fresh native
+        // Variant dictionary behind a finalizable wrapper, and this one runs on every physics tick for
+        // the whole session — 60 finalizable wrappers a second, each surviving to the finalizer queue,
+        // is gen2 work rather than gen0. docs/PROFILING.md priced the same shape in navigation
+        // reconciliation at ~1.6 MB/s of RSS growth; TryResolve copies out what it needs, so the values
+        // and the answer are identical either way.
+        using Godot.Collections.Dictionary hit = GetWorld3D().DirectSpaceState.IntersectRay(_ladderRay);
         return LadderVolumes.TryResolve(hit, out LadderContact contact) ? contact : null;
     }
 
@@ -594,9 +601,17 @@ public partial class PlayerController : CharacterBody3D
     private bool IsCapsuleOccupied(Vector3 feet) => !HasCapsuleClearance(feet, PlayerConfig.HeightStand);
 
     // PlayerStance.hasHeightClearanceAtPosition, for a capsule of the given height standing at `feet`.
-    private bool HasCapsuleClearance(Vector3 feet, float height) =>
-        GetWorld3D().DirectSpaceState
-            .IntersectShape(LadderCapsuleQuery(feet, height), 1).Count == 0;
+    // The result is a native array like the ray dictionaries above, and nothing indexes into it, so
+    // releasing the array releases everything the query produced. It goes through the cast because
+    // Array<T> is a typed view over one Godot.Collections.Array and only the untyped one carries
+    // Dispose — the conversion hands back that same instance rather than a copy.
+    private bool HasCapsuleClearance(Vector3 feet, float height)
+    {
+        Godot.Collections.Array<Godot.Collections.Dictionary> overlaps =
+            GetWorld3D().DirectSpaceState.IntersectShape(LadderCapsuleQuery(feet, height), 1);
+        using var owned = (Godot.Collections.Array)overlaps;
+        return overlaps.Count == 0;
+    }
 
     // Runs the hands for one simulation tick and plays whatever they did. The owner acts on its own
     // decision immediately rather than waiting for the server to confirm it, exactly as PlayerEquipment
@@ -690,7 +705,10 @@ public partial class PlayerController : CharacterBody3D
         }
         _clearanceShape!.Height = targetHeight;
         _clearanceQuery.Transform = new Transform3D(Basis.Identity, GlobalPosition + (Vector3.Up * (targetHeight * 0.5f)));
-        return GetWorld3D().DirectSpaceState.IntersectShape(_clearanceQuery, 1).Count == 0;
+        Godot.Collections.Array<Godot.Collections.Dictionary> overlaps =
+            GetWorld3D().DirectSpaceState.IntersectShape(_clearanceQuery, 1);
+        using var owned = (Godot.Collections.Array)overlaps; // see HasCapsuleClearance for the cast
+        return overlaps.Count == 0;
     }
 
     private void UpdateCamera(float dt)
@@ -797,11 +815,15 @@ public partial class PlayerController : CharacterBody3D
         _cameraRay ??= new PhysicsRayQueryParameters3D { CollisionMask = CollisionMask, Exclude = SelfExclude };
         _cameraRay.From = origin;
         _cameraRay.To = target;
-        Godot.Collections.Dictionary hit = GetWorld3D().DirectSpaceState.IntersectRay(_cameraRay);
-        if (hit.Count > 0)
+        // Third person runs this every physics tick, so the wrapper is released here for the same reason
+        // ProbeLadder's is: unconditional, 60 Hz, for as long as the camera stays behind the shoulder.
+        using (Godot.Collections.Dictionary hit = GetWorld3D().DirectSpaceState.IntersectRay(_cameraRay))
         {
-            var point = (Vector3)hit["position"];
-            target = point + ((origin - point).Normalized() * PlayerConfig.CameraSweepRadius);
+            if (hit.Count > 0)
+            {
+                var point = (Vector3)hit["position"];
+                target = point + ((origin - point).Normalized() * PlayerConfig.CameraSweepRadius);
+            }
         }
         _camera.GlobalPosition = target;
     }

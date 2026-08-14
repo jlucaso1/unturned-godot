@@ -845,13 +845,18 @@ function dat() {
     const commaPairs = parseDatTopLevel('"Name", "Map", "Description", "Blurb"');
     equal("the comma-separated form too", commaPairs.get("Description"), "Blurb");
 
-    // Which token closed decides what happens to a following comma. After a quoted VALUE the tokenizer
-    // loop resumes and treats a comma as whitespace, detached or not; after a quoted KEY, ReadStringValue
-    // is entered directly and skips nothing, so only a tight comma is consumed.
-    // The contrast is asserted against the quoted-key case further down, which keeps its detached comma.
+    // Which token closed decides what happens to a following comma. ReadQuotedString consumes one comma
+    // TIGHT against the closing quote (DatTokenizer.cs:404-407) and nothing else does: the main loop has
+    // no comma case at all. So a DETACHED comma is not skipped — it is an ordinary character, and
+    // ReadDictionaryKey runs to the next whitespace, making the comma itself the key.
     const spacedAfterValue = parseDatTopLevel('Name "Map" , Description "Blurb"');
-    equal("a detached comma after a quoted value is skipped", spacedAfterValue.get("Name"), "Map");
-    equal("so the pair after it is still read", spacedAfterValue.get("Description"), "Blurb");
+    equal("a quoted value before a detached comma is still read", spacedAfterValue.get("Name"), "Map");
+    equal("the detached comma becomes a key of its own", spacedAfterValue.has(","), true);
+    equal("so the pair after it is that key's value", spacedAfterValue.get("Description"), undefined);
+    // Tight against the quote, the comma really is consumed, and the next pair is read as one.
+    const tightAfterValue = parseDatTopLevel('Name "Map", Description "Blurb"');
+    equal("a tight comma after a quoted value is consumed", tightAfterValue.get("Name"), "Map");
+    equal("so the pair after it is read", tightAfterValue.get("Description"), "Blurb");
     equal(
         "but an unquoted value still takes the whole line",
         parseDatTopLevel("Name Map Description Blurb").get("Name"),
@@ -888,14 +893,19 @@ function dat() {
     const inline = parseDatTopLevel(["Nested {", "    Name Leak", "}", "Description After"].join("\n"));
     equal("an inline brace is the key's value", inline.get("Nested"), "{");
     equal("so the following line stays top-level", inline.get("Name"), "Leak");
-    // ...and the unmatched close then ends the root dictionary, hiding everything after it.
-    equal("an unmatched close ends the document", inline.get("Description"), undefined);
+    // ...and the unmatched close does NOT end the root dictionary. DatParser.Parse's own loop switches
+    // on Key and Comment only, so a CloseDictionary falls through to `default:` and merely advances
+    // (DatParser.cs:41-65) — the root body has no closer to find and cannot end early.
+    equal("an unmatched close does not end the document", inline.get("Description"), "After");
 
-    // The two closers are not symmetric. ParseDictionaryBody returns only on CloseDict, so a stray ']'
-    // is skipped like any other token it did not expect and the metadata under it is still read.
+    // Neither closer ends the root: a stray ']' is skipped as a token nothing expected, and so is a
+    // stray '}'. The metadata under either is still read.
     const strayList = parseDatTopLevel("Name First\n]\nDescription After");
     equal("a stray ] does not end the document", strayList.get("Description"), "After");
     equal("and what came before it is kept", strayList.get("Name"), "First");
+    const strayDict = parseDatTopLevel("Name First\n}\nDescription After");
+    equal("a stray } does not end the document either", strayDict.get("Description"), "After");
+    equal("and what came before that is kept too", strayDict.get("Name"), "First");
 
     // A second quoted pair on the same line still opens its own multi-line run. Both halves of this were
     // already covered separately; their combination was what truncated the value at the newline.
@@ -903,8 +913,12 @@ function dat() {
     equal("a later quoted value can span a newline", pairThenMultiline.get("Description"), "First\nSecond");
     equal("without disturbing the pair before it", pairThenMultiline.get("Name"), "Map");
 
-    // A comma is whitespace between tokens, so it can lead a line as well as separate pairs.
-    equal("a leading comma is not part of the key", parseDatTopLevel(",Name Map").get("Name"), "Map");
+    // A comma is NOT whitespace between tokens. DatTokenizer's main loop has no case for one
+    // (DatTokenizer.cs:144-233); it is eaten only where it sits tight against a bracket or a closing
+    // quote. Leading a line it is an ordinary character, and the key runs to the next whitespace.
+    const leadingComma = parseDatTopLevel(",Name Map");
+    equal("a leading comma is part of the key", leadingComma.get(",Name"), "Map");
+    equal("so the bare name is not a key", leadingComma.get("Name"), undefined);
 
     // A '/' opens a comment only where a token starts. After a key ReadStringValue is entered directly,
     // so it belongs to the value; after a quoted value the tokenizer loop is back, so it is a comment.

@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Text;
 using UnturnedGodot.Tests.Helpers;
 using UnturnedGodot.Unity;
@@ -112,5 +113,32 @@ public class UnityBundleTests
             .Add("CAB-a", new byte[4])
             .Build();
         Assert.Throws<NotSupportedException>(() => UnityBundle.Read(bundle));
+    }
+
+    [Theory]
+    [InlineData(2147483648u)] // exactly 2 GiB: the first size that is negative as an int
+    [InlineData(4294967295u)]
+    public void BlockAtOrAboveTwoGiB_IsRefusedRatherThanTruncated(uint declared)
+    {
+        // Both block sizes are uint on the wire and int everywhere below. Truncating one wrapped it
+        // negative, which threw out of ReadBytes or sized the LZMA output buffer negative — an unrelated
+        // failure some distance from the header that caused it. The game's own masterbundle is a single
+        // ~1.4 GB block, 65% of the way to a size a workshop bundle can actually reach.
+        byte[] bundle = new UnityFsBuilder { DeclaredBlockUncompressedSize = declared }
+            .Add("CAB-a", new byte[8])
+            .Build();
+
+        InvalidDataException e = Assert.Throws<InvalidDataException>(() => UnityBundle.Read(bundle));
+        Assert.Contains("too large", e.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CompressedBlockSizeAtOrAboveTwoGiB_IsRefusedRatherThanTruncated()
+    {
+        byte[] bundle = new UnityFsBuilder { DeclaredBlockCompressedSize = 2147483648u }
+            .Add("CAB-a", new byte[8])
+            .Build();
+
+        Assert.Throws<InvalidDataException>(() => UnityBundle.Read(bundle));
     }
 }

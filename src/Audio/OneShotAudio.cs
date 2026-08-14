@@ -23,10 +23,20 @@ public partial class OneShotAudio : Node3D
     private AudioDefLibrary _library = null!;
     private int _nextVoice;
 
+    // Read once when the service is built rather than on every sound played. Play is not a rare call:
+    // zombie groans fire per zombie every 4-8 seconds for everything within 100 m, and footsteps land
+    // twice a second per walking body — so this was a marshalled OS.GetEnvironment returning a Godot
+    // String, converted to a managed one, on every one of them, to decide whether to log something that
+    // is switched off. The rest of the project reads its flags once and keeps them (TextureRegistry,
+    // ModelLibrary, FoliageBuilder). Kept on the instance rather than in a static initializer so the
+    // runtime test that covers the trace can still set the variable around Create.
+    private bool _debug;
+
     public static OneShotAudio Create(AudioDefLibrary library) => new()
     {
         Name = "OneShotAudio",
         _library = library,
+        _debug = EnvFlag.IsOn(OS.GetEnvironment("AUDIO_DEBUG"), whenUnset: false),
     };
 
     // Plays a random clip of the definition at a world position. volumeScale is the caller's gameplay
@@ -48,7 +58,7 @@ public partial class OneShotAudio : Node3D
         voice.PitchScale = Mathf.Lerp(minPitch ?? entry.Def.MinPitch, maxPitch ?? entry.Def.MaxPitch,
             (float)_random.NextDouble());
         voice.Play();
-        if (EnvFlag.IsOn(OS.GetEnvironment("AUDIO_DEBUG"), whenUnset: false))
+        if (_debug)
         {
             Camera3D? cam = GetViewport().GetCamera3D();
             float dist = cam != null ? cam.GlobalPosition.DistanceTo(position) : -1f;
@@ -64,10 +74,14 @@ public partial class OneShotAudio : Node3D
     {
         for (int i = 0; i < _voices.Count; i++)
         {
-            AudioStreamPlayer3D candidate = _voices[(_nextVoice + i) % _voices.Count];
+            // The slot IS the loop's own index — IndexOf searched the list for a voice it had just
+            // taken out of it, which for a pool of 24 is a reference scan that can only ever land back
+            // on `slot`. Same answer, without the walk.
+            int slot = (_nextVoice + i) % _voices.Count;
+            AudioStreamPlayer3D candidate = _voices[slot];
             if (!candidate.Playing)
             {
-                _nextVoice = (_voices.IndexOf(candidate) + 1) % Math.Max(1, _voices.Count);
+                _nextVoice = (slot + 1) % _voices.Count;
                 return candidate;
             }
         }
