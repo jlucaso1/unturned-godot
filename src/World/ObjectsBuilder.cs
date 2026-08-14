@@ -177,16 +177,19 @@ public static class ObjectsBuilder
                 EObjectType category = db.Resolve(guid, 0)?.Type ?? EObjectType.Unknown;
                 long trianglesPerInstance = TriangleCount(renderMesh);
                 long placementTriangles = trianglesPerInstance * transforms.Count;
+                PartitionSettings partition = SettingsFor(chunkMetres);
                 bool spread = chunkMetres > 0f && transforms.Count > 1
-                    && ExceedsCellSpan(transforms, chunkMetres);
+                    && ObjectBatchPartition.ExceedsCellSpan(transforms, chunkMetres);
                 bool sparseWide = ChunkSparseObjects && transforms.Count < MinChunkedInstances && spread
                     && placementTriangles >= SparseChunkMinTriangles;
                 if (chunkMetres > 0f && (transforms.Count >= MinChunkedInstances || sparseWide)
                     && placementTriangles >= ObjectChunkMinTriangles
-                    && (!ObjectChunkRequireSpread || spread))
+                    && partition.SpreadSatisfied(spread))
                 {
-                    chunkMetres = CellSizeFor(transforms, chunkMetres, trianglesPerInstance);
-                    Dictionary<(int X, int Z), List<Transform3D>> cells = Cells(transforms, chunkMetres);
+                    chunkMetres = ObjectBatchPartition.CellSizeFor(transforms, trianglesPerInstance,
+                        partition);
+                    Dictionary<(int X, int Z), List<Transform3D>> cells =
+                        ObjectBatchPartition.Cells(transforms, chunkMetres);
                     if (sparseWide)
                     {
                         sparseGroups++;
@@ -342,89 +345,12 @@ public static class ObjectsBuilder
         return triangles;
     }
 
-    // The grid is laid out from the group's own lowest corner, not from the world origin. Anchoring it
-    // at the origin makes the partition depend on where the map happens to sit relative to it: a group
-    // straddling the origin is cut along it however large the cells are, so it can never fall below four
-    // batches — and on a map centred there, that is most of them. Anchoring per group means the cell size
-    // alone decides how a group is cut, wherever it lies.
-    private static (int X, int Z) CellOf(Vector3 origin, Vector3 anchor, float cellSize) => (
-        Mathf.FloorToInt((origin.X - anchor.X) / cellSize),
-        Mathf.FloorToInt((origin.Z - anchor.Z) / cellSize));
-
-    private static Vector3 AnchorOf(List<Transform3D> transforms)
-    {
-        Vector3 anchor = transforms[0].Origin;
-        foreach (Transform3D transform in transforms)
-            anchor = anchor.Min(transform.Origin);
-        return anchor;
-    }
-
-    private static Dictionary<(int X, int Z), List<Transform3D>> Cells(
-        List<Transform3D> transforms, float cellSize)
-    {
-        Vector3 anchor = AnchorOf(transforms);
-        var cells = new Dictionary<(int X, int Z), List<Transform3D>>();
-        foreach (Transform3D transform in transforms)
-        {
-            (int X, int Z) cell = CellOf(transform.Origin, anchor, cellSize);
-            if (!cells.TryGetValue(cell, out List<Transform3D>? inCell))
-                cells[cell] = inCell = new List<Transform3D>();
-            inCell.Add(transform);
-        }
-        return cells;
-    }
-
-    private static int CellCount(List<Transform3D> transforms, float cellSize)
-    {
-        Vector3 anchor = AnchorOf(transforms);
-        var seen = new HashSet<(int X, int Z)>();
-        foreach (Transform3D transform in transforms)
-            seen.Add(CellOf(transform.Origin, anchor, cellSize));
-        return seen.Count;
-    }
-
-    // One cell size cannot suit every group. A split trades a draw call for the chance to reject
-    // geometry, so it pays in proportion to how much geometry lands in each cell it creates: cutting a
-    // group of heavy copies into cells sheds most of it at eye level, while cutting a group of tiny ones
-    // scatters near-empty batches across the map that reject almost nothing and are pure cost in any view
-    // that takes the whole map in at once. Both live in the same scene, and the count of cells a fixed
-    // size produces also grows with the map, so a single tuned number is either too fine for one map or
-    // too coarse for the other.
-    //
-    // Coarsen per group instead, from the configured size, until an average cell carries enough geometry
-    // to earn its draw call. Doubling keeps the grids nested, so the cell count falls monotonically and
-    // the walk always terminates — in the limit at the whole group in one cell, which is what a group too
-    // light to be worth splitting should be.
-    private static float CellSizeFor(List<Transform3D> transforms, float baseMetres,
-        long trianglesPerInstance)
-    {
-        if (MinCellTriangles <= 0 || trianglesPerInstance <= 0)
-            return baseMetres;
-        float metres = baseMetres;
-        while (metres < MaxCellMetres)
-        {
-            int cells = CellCount(transforms, metres);
-            if (cells <= 1 || trianglesPerInstance * transforms.Count / cells >= MinCellTriangles)
-                return metres;
-            metres *= 2f;
-        }
-        return metres;
-    }
-
-    private static bool ExceedsCellSpan(List<Transform3D> transforms, float cellSize)
-    {
-        float minX = transforms[0].Origin.X, maxX = minX;
-        float minZ = transforms[0].Origin.Z, maxZ = minZ;
-        foreach (Transform3D transform in transforms)
-        {
-            Vector3 p = transform.Origin;
-            minX = MathF.Min(minX, p.X); maxX = MathF.Max(maxX, p.X);
-            minZ = MathF.Min(minZ, p.Z); maxZ = MathF.Max(maxZ, p.Z);
-            if (maxX - minX > cellSize || maxZ - minZ > cellSize)
-                return true;
-        }
-        return false;
-    }
+    // The spatial policy itself lives in core/, where each of its properties can be asserted on its own
+    // rather than only through the structural-metrics gate. This is the same four numbers the env vars
+    // above configure, in the shape ObjectBatchPartition takes them; `baseMetres` is per group, because a
+    // group with an authored lower level is cut finer than one without (see the call site).
+    private static PartitionSettings SettingsFor(float baseMetres) =>
+        new(baseMetres, MinCellTriangles, MaxCellMetres, ObjectChunkRequireSpread);
 
     private static void PrintObjectCosts(Dictionary<Guid, List<Transform3D>> byMesh,
         IReadOnlyDictionary<Guid, ArrayMesh> meshLibrary, ObjectAssetDatabase db)
@@ -446,7 +372,7 @@ public static class ObjectsBuilder
             }
             costs.Add((guid, transforms.Count, surfaces, trianglesPerInstance * transforms.Count,
                 min.DistanceTo(max), transforms.Count > 1 && ObjectChunkMetres > 0f
-                    && ExceedsCellSpan(transforms, ObjectChunkMetres)));
+                    && ObjectBatchPartition.ExceedsCellSpan(transforms, ObjectChunkMetres)));
         }
         costs.Sort((a, b) => b.Triangles.CompareTo(a.Triangles));
         Log.Print("[object-profile] top full-detail placement costs:");
@@ -897,21 +823,6 @@ public static class ObjectsBuilder
         _ => Transform3D.Identity,
     };
 
-    // A batch's placement bounds: the centre its transforms are rebased around, and how far the furthest
-    // placement sits from that centre.
-    private readonly record struct BatchBounds(Vector3 Centre, float Radius);
-
-    private static BatchBounds BoundsOf(List<Transform3D> transforms)
-    {
-        Vector3 min = transforms[0].Origin, max = min;
-        foreach (Transform3D t in transforms)
-        {
-            min = new Vector3(Mathf.Min(min.X, t.Origin.X), Mathf.Min(min.Y, t.Origin.Y), Mathf.Min(min.Z, t.Origin.Z));
-            max = new Vector3(Mathf.Max(max.X, t.Origin.X), Mathf.Max(max.Y, t.Origin.Y), Mathf.Max(max.Z, t.Origin.Z));
-        }
-        return new BatchBounds((min + max) * 0.5f, (max - min).Length() * 0.5f);
-    }
-
     private static MultiMesh BuildMultiMesh(Mesh mesh, List<Transform3D> transforms, Vector3 centre)
     {
         var multimesh = new MultiMesh
@@ -973,21 +884,9 @@ public static class ObjectsBuilder
     private static readonly float LodChunkMetres = EnvFloat("UG_OBJECT_LOD_CHUNK_METRES", 1024f, 0f, 8192f);
     private static float LodFadeMargin => LodFade ? 8f : 0f;
 
-    // The screen size a placement covers is its mesh radius times the scale it was placed at, and the
-    // batch shares one visibility range, so the largest placement in the batch sets the distance: a
-    // 2x-scaled copy must keep its detail twice as far out or it visibly swaps down while the unscaled
-    // copies beside it do not.
-    private static float SwitchDistanceFor(Mesh mesh, List<Transform3D> transforms)
-    {
-        float radius = mesh.GetAabb().Size.Length() * 0.5f;
-        float maxScale = 0f;
-        foreach (Transform3D transform in transforms)
-        {
-            Vector3 scale = transform.Basis.Scale.Abs();
-            maxScale = Mathf.Max(maxScale, Mathf.Max(scale.X, Mathf.Max(scale.Y, scale.Z)));
-        }
-        return Mathf.Max(16f, radius * maxScale * LodSwitchRadii);
-    }
+    // The mesh's bounding radius — the one input to the switch distance that needs the resource itself.
+    // Measured here so ObjectBatchPartition.SwitchDistance stays engine-free.
+    private static float BoundingRadius(Mesh mesh) => mesh.GetAabb().Size.Length() * 0.5f;
 
     // One batch when the prefab has a single level, two sharing the same transforms when it has a lower
     // one: LOD-0 up to the switch distance, the lower level from there out. Godot's visibility range
@@ -1001,14 +900,15 @@ public static class ObjectsBuilder
     private static int AddLevels(Node3D root, MultiMeshRidRenderer? renderer, ArrayMesh mesh,
         ArrayMesh? lodMesh, List<Transform3D> transforms, EObjectType category, string? drawnGroup)
     {
-        BatchBounds bounds = BoundsOf(transforms);
+        BatchBounds bounds = ObjectBatchPartition.BoundsOf(transforms);
         if (lodMesh == null)
         {
             AddRenderBatch(root, renderer, BuildMultiMesh(mesh, transforms, bounds.Centre), bounds.Centre,
                 category, drawnGroup);
             return 1;
         }
-        float switchDistance = SwitchDistanceFor(mesh, transforms) + bounds.Radius;
+        float switchDistance = ObjectBatchPartition.SwitchDistance(BoundingRadius(mesh), transforms,
+            LodSwitchRadii) + bounds.Radius;
         AddRenderBatch(root, renderer, BuildMultiMesh(mesh, transforms, bounds.Centre), bounds.Centre,
             category, drawnGroup, visibilityEnd: switchDistance, visibilityMargin: LodFadeMargin);
         AddRenderBatch(root, renderer, BuildMultiMesh(lodMesh, transforms, bounds.Centre), bounds.Centre,
@@ -1068,7 +968,7 @@ public static class ObjectsBuilder
                 anchor = anchor.Min(transform.Origin);
             foreach ((Transform3D transform, Color color) in items)
             {
-                (int X, int Z) cell = CellOf(transform.Origin, anchor, ObjectChunkMetres);
+                (int X, int Z) cell = ObjectBatchPartition.CellOf(transform.Origin, anchor, ObjectChunkMetres);
                 if (!cells.TryGetValue(cell,
                     out List<(Transform3D transform, Color color)>? inCell))
                     cells[cell] = inCell = new List<(Transform3D, Color)>();
