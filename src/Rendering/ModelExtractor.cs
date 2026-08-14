@@ -60,7 +60,19 @@ public static class ModelExtractor
                 if (cached != null)
                     return cached;
             }
-            catch (IOException) { /* corrupt/locked cache -> regenerate */ }
+            // Wider than the IOException a truncated file raises, because a cache whose bytes are WRONG
+            // rather than merely short fails differently: ReadString over garbage raises FormatException
+            // (a bad 7-bit length) or a DecoderFallbackException, and a corrupt count reaches
+            // ArgumentOutOfRangeException. Every caller of this — SkyboxAssets.Load, which runs on the
+            // environment step of EVERY load, RagdollExtractor, CharacterModel.Open — read the old catch
+            // as "the cache is unusable", and one escaping it failed the whole load over a file this
+            // method is about to rewrite anyway.
+            catch (Exception e) when (e is IOException or InvalidDataException or ArgumentException
+                or FormatException or OverflowException or NotSupportedException)
+            {
+                Log.Print($"[extract] type-tree cache unreadable ({e.GetType().Name}); "
+                    + "decoding the bundle and rewriting it.");
+            }
         }
 
         byte[] raw = File.ReadAllBytes(bundlePath);
@@ -76,18 +88,27 @@ public static class ModelExtractor
     }
 
     // Best-effort: a write failure just means the next reader decodes the bundle again.
+    //
+    // Through a temporary and a rename, like every other cache file here. This one is read by a stamp
+    // check alone, so a direct write killed part-way — or overwritten by a second process sharing the
+    // same user:// — leaves a file whose magic and stamp still match while its body is another run's,
+    // which is precisely the corruption the reader above now has to survive.
     private static void WriteTypeTreeCache(string bundlePath,
         IReadOnlyDictionary<int, List<TypeTreeNode>> trees)
     {
+        string cachePath = ProjectSettings.GlobalizePath("user://type_trees.cache");
+        string temporary = cachePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
             var info = new FileInfo(bundlePath);
-            string cachePath = ProjectSettings.GlobalizePath("user://type_trees.cache");
             Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
-            using FileStream ws = File.Create(cachePath);
-            TypeTreeCache.Write(ws, trees, info.LastWriteTimeUtc.Ticks ^ info.Length);
+            WriteAtomically(cachePath, temporary,
+                ws => TypeTreeCache.Write(ws, trees, info.LastWriteTimeUtc.Ticks ^ info.Length));
         }
-        catch (IOException) { /* best-effort cache; a write failure isn't fatal */ }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            /* best-effort cache; a write failure isn't fatal */
+        }
     }
 
     // Decodes just the masterbundle's SerializedFile (meshes + metadata; not the .resS pixel stream), for
