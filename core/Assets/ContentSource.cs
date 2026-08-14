@@ -189,32 +189,24 @@ public sealed class ContentSource
     // (AssetsWorker.cs:305-371). MasterBundle.dat is excluded by name because it is the bundle
     // DECLARATION every candidate here has by construction — counting it would make the test vacuous
     // and turn a bundle with no content behind it into a source.
+    //
+    // Walked through SafeFileTree, NOT Directory.EnumerateFiles(..., AllDirectories). The difference is
+    // not stylistic: that overload aborts the whole lazy enumeration on the first directory it cannot
+    // list, so a single denied subtree anywhere under the item would have thrown before the readable
+    // assets beside it were ever reached — and the catch below would then have read "this item ships
+    // nothing" and dropped a perfectly good source. Measured: a root holding an unreadable child and a
+    // readable sibling throws UnauthorizedAccessException out of the first enumeration. SafeFileTree
+    // isolates the denied subtree and keeps its siblings, which is the behaviour every other optional
+    // content walk in this repository already has.
     private static bool HasAssetDefinition(string itemDirectory)
     {
-        try
+        foreach (string file in Data.SafeFileTree.EnumerateFiles(itemDirectory, "*.dat"))
         {
-            foreach (string file in Directory.EnumerateFiles(itemDirectory, "*.dat",
-                SearchOption.AllDirectories))
-            {
-                if (!Path.GetFileName(file).Equals(BundleConfigFileName,
-                    StringComparison.OrdinalIgnoreCase))
-                {
-                    return true;
-                }
-            }
-
-            foreach (string _ in Directory.EnumerateFiles(itemDirectory, "*.asset",
-                SearchOption.AllDirectories))
-            {
+            if (!Path.GetFileName(file).Equals(BundleConfigFileName, StringComparison.OrdinalIgnoreCase))
                 return true;
-            }
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
-        {
-            // An item we cannot read contributes nothing, rather than aborting the whole library scan.
         }
 
-        return false;
+        return Data.SafeFileTree.EnumerateFiles(itemDirectory, "*.asset").Count > 0;
     }
 
     // Materialized inside the try rather than handed back as a lazy sequence. .NET's enumerator opens the

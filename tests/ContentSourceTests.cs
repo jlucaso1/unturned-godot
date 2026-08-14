@@ -280,6 +280,44 @@ public class ContentSourceTests
         }
     }
 
+    // ...but ONE denied subtree must not hide the readable assets beside it.
+    //
+    // This is the case the test above cannot catch, because there everything the item ships is behind
+    // the lock and dropping it is right. Here the item has content the scan can read AND an unrelated
+    // directory it cannot list — a permission a mod author set, a partial download, a directory owned by
+    // another user. Directory.EnumerateFiles(..., AllDirectories) aborts its whole enumeration on the
+    // first such child, so the readable sibling is never reached and the item reads as shipping nothing:
+    // a source silently lost to a folder that had nothing to do with it. SafeFileTree isolates the denied
+    // subtree instead, which is what every other optional content walk in this repository does.
+    [Fact]
+    public void Discover_OneDeniedSubtreeDoesNotHideTheAssetsBesideIt()
+    {
+        if (!PosixPermissions.AreEnforced)
+            return;
+
+        using var dir = new TempDir();
+        string install = BuildLibrary(dir);
+        string item = Path.Combine("steamapps", "workshop", "content", "304930", "5008");
+        dir.Write(Path.Combine(item, "MasterBundle.dat"), ModConfig);
+        // Readable, and enough on its own to make this item a source.
+        dir.Write(Path.Combine(item, "Custom", "Hard.asset"),
+            "Metadata { GUID 3c8e5f2b0d4a56719283b4c5d6e7f8a9 }\n");
+        dir.Write(Path.Combine(item, "Private", "Secret", "notes.dat"), "nothing to see\n");
+        string locked = Path.Combine(dir.Path, item, "Private");
+        File.SetUnixFileMode(locked, UnixFileMode.None);
+
+        try
+        {
+            Assert.Single(ContentSource.Discover(install, UnturnedInstall.Platform.Linux),
+                source => !source.IsCore);
+        }
+        finally
+        {
+            File.SetUnixFileMode(locked,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
     [Fact]
     public void Owns_TracesAnAssetDirectoryBackToItsBundle()
     {
