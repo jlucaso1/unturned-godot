@@ -198,11 +198,21 @@ public class ImpactDecalExtractorTests
 
     // Per texture: one unwritable file must not cost the rest of them, and must not throw out through the
     // shared bundle pass this runs inside.
+    //
+    // The cache directory is unwritable because its PARENT IS A FILE, which is the one way to say that
+    // portably: Directory.CreateDirectory throws IOException on a path whose parent is not a directory on
+    // every platform, with no permission bits and no privileged-user escape involved. This used to point
+    // at /proc, which is a Linux fact — on Windows it resolved to a perfectly writable C:\proc, the write
+    // went through, and the assertion failed for a reason that had nothing to do with the extractor.
     [Fact]
     public void AnUnwritableCacheDirectoryIsSurvived()
     {
+        using var temp = new TempDir();
+        string blocker = Path.Combine(temp.Path, "not-a-directory");
+        File.WriteAllBytes(blocker, Array.Empty<byte>());
+
         ImpactDecalExtractor.Request request = RequestFor("/core.masterbundle",
-            Path.Combine("/proc", "unturned-godot-cannot-write-here"), "assets/test/blood.png");
+            Path.Combine(blocker, "unturned-godot-cannot-write-here"), "assets/test/blood.png");
 
         ImpactDecalExtractor.WriteTexture(request, "assets/test/blood.png",
             CachedTexture.Decoded(new CachedTexture(4, 2, 2, 1, Pixels(11, 16))));
