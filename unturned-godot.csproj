@@ -80,7 +80,7 @@
          non-Debug configuration leaves these out and the Debug build then fails to resolve them. That is
          the same wrinkle the editor add-on has (see DropEditorAddonWithoutEditorApi above); a plain
          `dotnet restore` resolves for Debug and brings both back. -->
-    <PackageReference Include="Chickensoft.GoDotTest" Version="2.0.43" Condition="'$(Configuration)' == 'Debug'" />
+    <PackageReference Include="Chickensoft.GoDotTest" Version="2.0.45" Condition="'$(Configuration)' == 'Debug'" />
     <PackageReference Include="xunit.assert" Version="2.9.3" Condition="'$(Configuration)' == 'Debug'" />
     <PackageReference Include="Fmod5Sharp" Version="3.1.0" />
     <!-- Fmod5Sharp -> IndexRange pins Microsoft.Bcl.Memory 9.0.0, which has a known high-severity
