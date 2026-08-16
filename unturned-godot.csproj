@@ -85,6 +85,6 @@
     <PackageReference Include="Fmod5Sharp" Version="3.1.0" />
     <!-- Fmod5Sharp -> IndexRange pins Microsoft.Bcl.Memory 9.0.0, which has a known high-severity
          vulnerability (GHSA-73j8-2gch-69rq); reference the patched version directly so NuGet lifts it. -->
-    <PackageReference Include="Microsoft.Bcl.Memory" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Bcl.Memory" Version="10.0.11" />
   </ItemGroup>
 </Project>
